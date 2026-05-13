@@ -1,0 +1,13 @@
+{
+  "name": "@r9700/backend-ollama",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/OllamaClient.ts",
+    "./types": "./src/types.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

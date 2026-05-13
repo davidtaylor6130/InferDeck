@@ -1,0 +1,37 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama-r9700": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama on R9700",
+      "options": {
+        "baseURL": "http://ai.homelab.com:11435/v1"
+      },
+      "models": {
+        "qwen3.6:35b-a3b-q4_K_M": {
+          "name": "Qwen3.6 35B A3B Q4"
+        },
+        "qwen3.6:27b-q4_K_M": {
+          "name": "Qwen3.6 27B Q4"
+        },
+        "gpt-oss:20b": {
+          "name": "GPT-OSS 20B"
+        },
+        "qwen3-coder:30b": {
+          "name": "Qwen3 Coder 30B"
+        },
+        "mistral-small3.2:24b": {
+          "name": "Mistral Small 3.2 24B"
+        },
+        "gemma4:26b": {
+          "name": "Gemma 4 26B"
+        },
+        "magistral:24b": {
+          "name": "Magistral 24B"
+        }
+      }
+    }
+  },
+  "model": "ollama-r9700/qwen3.6:35b-a3b-q4_K_M",
+  "small_model": "ollama-r9700/qwen3.6:27b-q4_K_M"
+}

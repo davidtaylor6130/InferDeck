@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<service>
+  <id>r9700-ai-gateway</id>
+  <name>r9700 AI Gateway</name>
+  <description>Production-ready local AI gateway for single-GPU machines</description>
+  <executable>node</executable>
+  <arguments>--import tsx apps/gateway-service/src/main.ts</arguments>
+  <log mode="roll"></log>
+  <workingdirectory>%BASE%\..</workingdirectory>
+  <onfailure action="restart" />
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+</service>

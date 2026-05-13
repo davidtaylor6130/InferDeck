@@ -1,0 +1,23 @@
+{
+  "name": "r9700-ai-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production-ready local AI gateway for single-GPU machines",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev:gateway": "pnpm --filter gateway-service dev",
+    "dev:dashboard": "pnpm --filter dashboard dev",
+    "test": "node_modules/.pnpm/node_modules/.bin/vitest run",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=9"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

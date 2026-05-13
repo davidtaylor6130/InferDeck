@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+pnpm-lock.yaml
+
+# Build outputs
+dist/
+build/
+.vite/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+data/*.sqlite
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/test-gateway.sqlite
+data/test-logs/
+
+# Logs
+data/logs/*
+!data/logs/.gitkeep
+
+# Job artifacts
+data/job-artifacts/*
+!data/job-artifacts/.gitkeep
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Config
+config/gateway.local.yaml
+
+# OS installer
+*.dmg
+*.exe
+*.pkg
+*.deb
+*.rpm
+*.example
+/.UAM
+/data

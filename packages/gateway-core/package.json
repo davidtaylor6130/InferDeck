@@ -1,0 +1,39 @@
+{
+  "name": "@r9700/gateway-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/Scheduler.js",
+  "types": "./dist/Scheduler.d.ts",
+  "files": ["dist/**/*"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@r9700/shared": "workspace:*",
+    "better-sqlite3": "^11.0.0"
+  },
+  "peerDependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "exports": {
+    "./Scheduler": {
+      "types": "./dist/Scheduler.d.ts",
+      "import": "./dist/Scheduler.js"
+    },
+    "./PolicyEngine": {
+      "types": "./dist/PolicyEngine.d.ts",
+      "import": "./dist/PolicyEngine.js"
+    },
+    "./ResourceLockManager": {
+      "types": "./dist/ResourceLockManager.d.ts",
+      "import": "./dist/ResourceLockManager.js"
+    },
+    "./QueueStore": {
+      "types": "./dist/QueueStore.d.ts",
+      "import": "./dist/QueueStore.js"
+    }
+  }
+}

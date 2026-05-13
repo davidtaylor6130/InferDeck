@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  --void-black: #050814;
+  --deck-navy: #0B1220;
+  --panel-slate: #111827;
+  --elevated-slate: #162033;
+  --card-highlight: #1B2540;
+  --border-slate: #27344D;
+  --text-primary: #F8FAFC;
+  --text-secondary: #94A3B8;
+  --text-muted: #64748B;
+  --infer-violet: #8B5CF6;
+  --ion-cyan: #22D3EE;
+  --queue-blue: #60A5FA;
+  --success-green: #22C55E;
+  --gpu-mint: #34D399;
+  --warning-amber: #F59E0B;
+  --gaming-orange: #FB923C;
+  --danger-rose: #F43F5E;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--void-black);
+  color: var(--text-primary);
+}
+
+#root {
+  width: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button, input, select {
+  font: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0B1220;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27344D;
+  border-radius: 999px;
+}
+
+.truncate-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deck-grid-bg {
+  background:
+    radial-gradient(circle at 15% 0%, rgba(139, 92, 246, 0.18), transparent 28rem),
+    radial-gradient(circle at 90% 5%, rgba(34, 211, 238, 0.12), transparent 24rem),
+    var(--void-black);
+}
