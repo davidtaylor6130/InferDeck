@@ -1,42 +1,65 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import type { GatewayConfig } from "../config/schema";
+import { join, isAbsolute } from "node:path";
+import { statSync } from "node:fs";
+import { scanGgufFiles } from "@r9700/backend-llama/utils";
+import { LlamaClient } from "@r9700/backend-llama";
+import type { LlamaModelInfo, LlamaHealthResponse } from "@r9700/backend-llama/types";
 
-export type OllamaServiceStatus = "starting" | "running" | "stopped" | "unhealthy" | "error";
+export interface LlamaConfig {
+  enabled: boolean;
+  baseUrl: string;
+  managed: boolean;
+  executable: string;
+  ggufDirectory: string;
+  model: string | null;
+  bindHost: string;
+  bindPort: number;
+  maxGpuLayers: number;
+  healthcheckIntervalMs: number;
+  restartOnFailure: boolean;
+}
 
-export interface OllamaServiceSnapshot {
-  id: "ollama";
-  name: "Ollama";
-  kind: "ollama";
-  status: OllamaServiceStatus;
+export type LlamaServiceStatus = "starting" | "running" | "stopped" | "unhealthy" | "error";
+
+export interface LlamaServiceSnapshot {
+  id: "llama-server";
+  name: "llama.cpp";
+  kind: "llama_cpp";
+  status: LlamaServiceStatus;
   pid: number | null;
   baseUrl: string;
   managed: boolean;
+  model: string | null;
   version: string | null;
   lastHealthcheckAt: string | null;
   lastError: string | null;
   updatedAt: string;
 }
 
-interface OllamaHealthResult {
+interface HealthResult {
   healthy: boolean;
   latencyMs: number | null;
   version: string | null;
   error: string | null;
 }
 
-export class OllamaProcessManager {
-  private readonly config: GatewayConfig["ollama"];
+export class LlamaServerProcessManager {
+  private readonly config: LlamaConfig;
+  private readonly client: LlamaClient;
   private child: ChildProcess | null = null;
-  private status: OllamaServiceStatus = "stopped";
+  private status: LlamaServiceStatus = "stopped";
   private managed = false;
   private version: string | null = null;
+  private currentModel: string | null = null;
   private lastHealthcheckAt: string | null = null;
   private lastError: string | null = null;
   private healthTimer: NodeJS.Timeout | null = null;
   private stopping = false;
 
-  constructor(config: GatewayConfig["ollama"]) {
+  constructor(config: LlamaConfig) {
     this.config = config;
+    this.client = new LlamaClient({ baseUrl: config.baseUrl, timeoutMs: 5000 });
+    this.currentModel = config.model;
   }
 
   get baseUrl(): string {
@@ -45,6 +68,10 @@ export class OllamaProcessManager {
 
   get isManaged(): boolean {
     return this.managed;
+  }
+
+  get activeModel(): string | null {
+    return this.currentModel;
   }
 
   async start(): Promise<void> {
@@ -62,26 +89,26 @@ export class OllamaProcessManager {
       return;
     }
 
-    if (!this.config.manageProcess) {
+    if (!this.config.managed) {
       this.status = "unhealthy";
       this.lastError = health.error;
       this.startHealthLoop();
       return;
     }
 
-    this.spawnProcess();
+    await this.spawnProcess();
     this.startHealthLoop();
   }
 
-  async restart(): Promise<OllamaServiceSnapshot> {
-    if (!this.config.manageProcess) {
+  async restart(): Promise<LlamaServiceSnapshot> {
+    if (!this.config.managed) {
       this.status = "unhealthy";
-      this.lastError = "Ollama is configured as an external service and cannot be restarted by the gateway.";
+      this.lastError = "llama.cpp is configured as an external service and cannot be restarted by the gateway.";
       return this.getSnapshot();
     }
 
     await this.stopChild();
-    this.spawnProcess();
+    await this.spawnProcess();
     return this.getSnapshot();
   }
 
@@ -95,33 +122,42 @@ export class OllamaProcessManager {
     this.status = "stopped";
   }
 
-  async checkHealth(): Promise<OllamaHealthResult> {
+  async loadModel(modelName: string): Promise<void> {
+    const models = scanGgufFiles(this.config.ggufDirectory);
+    const target = models.find((m) => m.name === modelName || m.path.endsWith(modelName));
+    if (!target) {
+      throw new Error(`Model "${modelName}" not found in ${this.config.ggufDirectory}`);
+    }
+
+    this.currentModel = target.name;
+    if (this.child) {
+      await this.stopChild();
+    }
+    await this.spawnProcess();
+  }
+
+  async unloadModel(): Promise<void> {
+    this.currentModel = null;
+    await this.stopChild();
+    this.status = "stopped";
+  }
+
+  listModels(): LlamaModelInfo[] {
+    return scanGgufFiles(this.config.ggufDirectory);
+  }
+
+  async checkHealth(): Promise<HealthResult> {
     const started = Date.now();
     try {
-      const tagsResponse = await this.fetchWithTimeout(`${this.baseUrl}/api/tags`);
-      if (!tagsResponse.ok) {
-        throw new Error(`Ollama /api/tags returned ${tagsResponse.status}`);
-      }
-
-      let version: string | null = null;
-      try {
-        const versionResponse = await this.fetchWithTimeout(`${this.baseUrl}/api/version`);
-        if (versionResponse.ok) {
-          const versionJson = await versionResponse.json() as { version?: string };
-          version = versionJson.version ?? null;
-        }
-      } catch {
-        // Version is useful but not required for health.
-      }
+      const healthData: LlamaHealthResponse = await this.client.health();
 
       this.status = "running";
-      this.version = version;
       this.lastError = null;
       this.lastHealthcheckAt = new Date().toISOString();
       return {
         healthy: true,
         latencyMs: Date.now() - started,
-        version,
+        version: healthData.model_info ? `llama.cpp (ctx: ${healthData.model_info.n_ctx ?? "?"})` : "llama.cpp",
         error: null,
       };
     } catch (err) {
@@ -138,15 +174,16 @@ export class OllamaProcessManager {
     }
   }
 
-  getSnapshot(): OllamaServiceSnapshot {
+  getSnapshot(): LlamaServiceSnapshot {
     return {
-      id: "ollama",
-      name: "Ollama",
-      kind: "ollama",
+      id: "llama-server",
+      name: "llama.cpp",
+      kind: "llama_cpp",
       status: this.status,
       pid: this.child?.pid ?? null,
       baseUrl: this.baseUrl,
       managed: this.managed,
+      model: this.currentModel,
       version: this.version,
       lastHealthcheckAt: this.lastHealthcheckAt,
       lastError: this.lastError,
@@ -154,21 +191,29 @@ export class OllamaProcessManager {
     };
   }
 
-  private spawnProcess(): void {
+  private async spawnProcess(): Promise<void> {
     if (this.child) return;
+
+    const modelPath = this.resolveModelPath();
+    if (!modelPath) {
+      this.status = "error";
+      this.lastError = `No GGUF model found in ${this.config.ggufDirectory}. Place a .gguf file or set backend.model in config.`;
+      return;
+    }
 
     this.status = "starting";
     this.managed = true;
     this.lastError = null;
 
-    const env = {
-      ...process.env,
-      OLLAMA_HOST: this.getOllamaHost(),
-    };
+    const args = [
+      "-m", modelPath,
+      "--host", this.config.bindHost,
+      "--port", String(this.config.bindPort),
+      "-ngl", String(this.config.maxGpuLayers),
+    ];
 
     try {
-      const child = spawn(this.config.executable, ["serve"], {
-        env,
+      const child = spawn(this.config.executable, args, {
         stdio: ["ignore", "pipe", "pipe"],
       });
       this.child = child;
@@ -195,13 +240,33 @@ export class OllamaProcessManager {
       if (this.stopping) return;
 
       this.status = "stopped";
-      this.lastError = `Ollama exited with ${signal ?? code ?? "unknown"}`;
-      if (this.config.restartOnFailure) {
+      this.lastError = `llama-server exited with ${signal ?? code ?? "unknown"}`;
+      if (this.config.restartOnFailure && this.currentModel) {
         setTimeout(() => {
-          if (!this.stopping && !this.child) this.spawnProcess();
+          if (!this.stopping && !this.child) void this.spawnProcess();
         }, 1000);
       }
     });
+  }
+
+  private resolveModelPath(): string | null {
+    if (this.currentModel) {
+      const candidate = isAbsolute(this.currentModel)
+        ? this.currentModel
+        : join(this.config.ggufDirectory, this.currentModel);
+      try {
+        if (statSync(candidate).isFile()) return candidate;
+      } catch {
+        // not found at exact path
+      }
+    }
+
+    const models = scanGgufFiles(this.config.ggufDirectory);
+    if (models.length === 0) return null;
+
+    const first = models[0];
+    this.currentModel = first.name;
+    return first.path;
   }
 
   private startHealthLoop(): void {
@@ -228,24 +293,5 @@ export class OllamaProcessManager {
       child.kill("SIGTERM");
     });
     this.child = null;
-  }
-
-  private getOllamaHost(): string {
-    try {
-      const url = new URL(this.baseUrl);
-      return `${url.hostname}:${url.port || (url.protocol === "https:" ? "443" : "80")}`;
-    } catch {
-      return "127.0.0.1:11434";
-    }
-  }
-
-  private async fetchWithTimeout(url: string): Promise<Response> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    try {
-      return await fetch(url, { signal: controller.signal });
-    } finally {
-      clearTimeout(timeout);
-    }
   }
 }

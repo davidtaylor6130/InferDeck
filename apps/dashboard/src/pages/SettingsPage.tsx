@@ -2,7 +2,7 @@ import React from 'react';
 import type { PageProps } from '../types';
 import { CopyButton } from '../components/CopyButton';
 import { SectionCard } from '../components/SectionCard';
-import { DASHBOARD_URL, GATEWAY_API, OLLAMA_BACKEND, OPENAI_API } from '../utils';
+import { DASHBOARD_URL, GATEWAY_API, LLAMA_BACKEND, OPENAI_API } from '../utils';
 
 export const SettingsPage: React.FC<PageProps> = ({ state, actions }) => (
   <div className="grid gap-5 xl:grid-cols-2">
@@ -10,7 +10,7 @@ export const SettingsPage: React.FC<PageProps> = ({ state, actions }) => (
       <Config label="Dashboard URL" value={DASHBOARD_URL} onCopied={actions.toast} />
       <Config label="Gateway API" value={GATEWAY_API} onCopied={actions.toast} />
       <Config label="OpenAI API" value={OPENAI_API} onCopied={actions.toast} />
-      <Config label="Real Ollama backend" value={OLLAMA_BACKEND} onCopied={actions.toast} />
+      <Config label="llama.cpp backend" value={LLAMA_BACKEND} onCopied={actions.toast} />
     </SectionCard>
     <SectionCard title="Scheduler Settings">
       <Config label="Mode" value={state.statusData?.mode?.mode || 'ai'} />

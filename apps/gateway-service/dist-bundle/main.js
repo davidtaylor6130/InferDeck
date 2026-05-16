@@ -12537,7 +12537,7 @@ var require_thread_stream = __commonJS({
     var { version } = require_package();
     var { EventEmitter } = require("events");
     var { Worker } = require("worker_threads");
-    var { join: join6 } = require("path");
+    var { join: join9 } = require("path");
     var { pathToFileURL } = require("url");
     var { wait } = require_wait();
     var {
@@ -12573,7 +12573,7 @@ var require_thread_stream = __commonJS({
     function createWorker(stream, opts) {
       const { filename, workerData } = opts;
       const bundlerOverrides = "__bundlerPathsOverrides" in globalThis ? globalThis.__bundlerPathsOverrides : {};
-      const toExecute = bundlerOverrides["thread-stream-worker"] || join6(__dirname, "lib", "worker.js");
+      const toExecute = bundlerOverrides["thread-stream-worker"] || join9(__dirname, "lib", "worker.js");
       const worker = new Worker(toExecute, {
         ...opts.workerOpts,
         trackUnmanagedFds: false,
@@ -12959,7 +12959,7 @@ var require_transport = __commonJS({
     "use strict";
     var { createRequire } = require("module");
     var getCallers = require_caller();
-    var { join: join6, isAbsolute, sep } = require("node:path");
+    var { join: join9, isAbsolute: isAbsolute3, sep } = require("node:path");
     var sleep = require_atomic_sleep();
     var onExit = require_on_exit_leak_free();
     var ThreadStream = require_thread_stream();
@@ -13022,7 +13022,7 @@ var require_transport = __commonJS({
         throw new Error("only one of target or targets can be specified");
       }
       if (targets) {
-        target = bundlerOverrides["pino-worker"] || join6(__dirname, "worker.js");
+        target = bundlerOverrides["pino-worker"] || join9(__dirname, "worker.js");
         options.targets = targets.filter((dest) => dest.target).map((dest) => {
           return {
             ...dest,
@@ -13040,7 +13040,7 @@ var require_transport = __commonJS({
           });
         });
       } else if (pipeline) {
-        target = bundlerOverrides["pino-worker"] || join6(__dirname, "worker.js");
+        target = bundlerOverrides["pino-worker"] || join9(__dirname, "worker.js");
         options.pipelines = [pipeline.map((dest) => {
           return {
             ...dest,
@@ -13058,11 +13058,11 @@ var require_transport = __commonJS({
       return buildStream(fixTarget(target), options, worker, sync);
       function fixTarget(origin) {
         origin = bundlerOverrides[origin] || origin;
-        if (isAbsolute(origin) || origin.indexOf("file://") === 0) {
+        if (isAbsolute3(origin) || origin.indexOf("file://") === 0) {
           return origin;
         }
         if (origin === "pino/file") {
-          return join6(__dirname, "..", "file.js");
+          return join9(__dirname, "..", "file.js");
         }
         let fixTarget2;
         for (const filePath of callers) {
@@ -14051,7 +14051,7 @@ var require_safe_stable_stringify = __commonJS({
               return circularValue;
             }
             let res = "";
-            let join6 = ",";
+            let join9 = ",";
             const originalIndentation = indentation;
             if (Array.isArray(value)) {
               if (value.length === 0) {
@@ -14065,7 +14065,7 @@ var require_safe_stable_stringify = __commonJS({
                 indentation += spacer;
                 res += `
 ${indentation}`;
-                join6 = `,
+                join9 = `,
 ${indentation}`;
               }
               const maximumValuesToStringify = Math.min(value.length, maximumBreadth);
@@ -14073,13 +14073,13 @@ ${indentation}`;
               for (; i < maximumValuesToStringify - 1; i++) {
                 const tmp2 = stringifyFnReplacer(String(i), value, stack, replacer, spacer, indentation);
                 res += tmp2 !== void 0 ? tmp2 : "null";
-                res += join6;
+                res += join9;
               }
               const tmp = stringifyFnReplacer(String(i), value, stack, replacer, spacer, indentation);
               res += tmp !== void 0 ? tmp : "null";
               if (value.length - 1 > maximumBreadth) {
                 const removedKeys = value.length - maximumBreadth - 1;
-                res += `${join6}"... ${getItemCount(removedKeys)} not stringified"`;
+                res += `${join9}"... ${getItemCount(removedKeys)} not stringified"`;
               }
               if (spacer !== "") {
                 res += `
@@ -14100,7 +14100,7 @@ ${originalIndentation}`;
             let separator = "";
             if (spacer !== "") {
               indentation += spacer;
-              join6 = `,
+              join9 = `,
 ${indentation}`;
               whitespace = " ";
             }
@@ -14114,13 +14114,13 @@ ${indentation}`;
               const tmp = stringifyFnReplacer(key2, value, stack, replacer, spacer, indentation);
               if (tmp !== void 0) {
                 res += `${separator}${strEscape(key2)}:${whitespace}${tmp}`;
-                separator = join6;
+                separator = join9;
               }
             }
             if (keyLength > maximumBreadth) {
               const removedKeys = keyLength - maximumBreadth;
               res += `${separator}"...":${whitespace}"${getItemCount(removedKeys)} not stringified"`;
-              separator = join6;
+              separator = join9;
             }
             if (spacer !== "" && separator.length > 1) {
               res = `
@@ -14161,7 +14161,7 @@ ${originalIndentation}`;
             }
             const originalIndentation = indentation;
             let res = "";
-            let join6 = ",";
+            let join9 = ",";
             if (Array.isArray(value)) {
               if (value.length === 0) {
                 return "[]";
@@ -14174,7 +14174,7 @@ ${originalIndentation}`;
                 indentation += spacer;
                 res += `
 ${indentation}`;
-                join6 = `,
+                join9 = `,
 ${indentation}`;
               }
               const maximumValuesToStringify = Math.min(value.length, maximumBreadth);
@@ -14182,13 +14182,13 @@ ${indentation}`;
               for (; i < maximumValuesToStringify - 1; i++) {
                 const tmp2 = stringifyArrayReplacer(String(i), value[i], stack, replacer, spacer, indentation);
                 res += tmp2 !== void 0 ? tmp2 : "null";
-                res += join6;
+                res += join9;
               }
               const tmp = stringifyArrayReplacer(String(i), value[i], stack, replacer, spacer, indentation);
               res += tmp !== void 0 ? tmp : "null";
               if (value.length - 1 > maximumBreadth) {
                 const removedKeys = value.length - maximumBreadth - 1;
-                res += `${join6}"... ${getItemCount(removedKeys)} not stringified"`;
+                res += `${join9}"... ${getItemCount(removedKeys)} not stringified"`;
               }
               if (spacer !== "") {
                 res += `
@@ -14201,7 +14201,7 @@ ${originalIndentation}`;
             let whitespace = "";
             if (spacer !== "") {
               indentation += spacer;
-              join6 = `,
+              join9 = `,
 ${indentation}`;
               whitespace = " ";
             }
@@ -14210,7 +14210,7 @@ ${indentation}`;
               const tmp = stringifyArrayReplacer(key2, value[key2], stack, replacer, spacer, indentation);
               if (tmp !== void 0) {
                 res += `${separator}${strEscape(key2)}:${whitespace}${tmp}`;
-                separator = join6;
+                separator = join9;
               }
             }
             if (spacer !== "" && separator.length > 1) {
@@ -14268,20 +14268,20 @@ ${originalIndentation}`;
               indentation += spacer;
               let res2 = `
 ${indentation}`;
-              const join7 = `,
+              const join10 = `,
 ${indentation}`;
               const maximumValuesToStringify = Math.min(value.length, maximumBreadth);
               let i = 0;
               for (; i < maximumValuesToStringify - 1; i++) {
                 const tmp2 = stringifyIndent(String(i), value[i], stack, spacer, indentation);
                 res2 += tmp2 !== void 0 ? tmp2 : "null";
-                res2 += join7;
+                res2 += join10;
               }
               const tmp = stringifyIndent(String(i), value[i], stack, spacer, indentation);
               res2 += tmp !== void 0 ? tmp : "null";
               if (value.length - 1 > maximumBreadth) {
                 const removedKeys = value.length - maximumBreadth - 1;
-                res2 += `${join7}"... ${getItemCount(removedKeys)} not stringified"`;
+                res2 += `${join10}"... ${getItemCount(removedKeys)} not stringified"`;
               }
               res2 += `
 ${originalIndentation}`;
@@ -14297,16 +14297,16 @@ ${originalIndentation}`;
               return '"[Object]"';
             }
             indentation += spacer;
-            const join6 = `,
+            const join9 = `,
 ${indentation}`;
             let res = "";
             let separator = "";
             let maximumPropertiesToStringify = Math.min(keyLength, maximumBreadth);
             if (isTypedArrayWithEntries(value)) {
-              res += stringifyTypedArray(value, join6, maximumBreadth);
+              res += stringifyTypedArray(value, join9, maximumBreadth);
               keys = keys.slice(value.length);
               maximumPropertiesToStringify -= value.length;
-              separator = join6;
+              separator = join9;
             }
             if (deterministic) {
               keys = sort(keys, comparator);
@@ -14317,13 +14317,13 @@ ${indentation}`;
               const tmp = stringifyIndent(key2, value[key2], stack, spacer, indentation);
               if (tmp !== void 0) {
                 res += `${separator}${strEscape(key2)}: ${tmp}`;
-                separator = join6;
+                separator = join9;
               }
             }
             if (keyLength > maximumBreadth) {
               const removedKeys = keyLength - maximumBreadth;
               res += `${separator}"...": "${getItemCount(removedKeys)} not stringified"`;
-              separator = join6;
+              separator = join9;
             }
             if (separator !== "") {
               res = `
@@ -24918,49 +24918,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative, options, skipNormalization) {
+    function resolveComponent(base, relative2, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse2(serialize(base, options), options);
-        relative = parse2(serialize(relative, options), options);
+        relative2 = parse2(serialize(relative2, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative.scheme) {
-        target.scheme = relative.scheme;
-        target.userinfo = relative.userinfo;
-        target.host = relative.host;
-        target.port = relative.port;
-        target.path = removeDotSegments(relative.path || "");
-        target.query = relative.query;
+      if (!options.tolerant && relative2.scheme) {
+        target.scheme = relative2.scheme;
+        target.userinfo = relative2.userinfo;
+        target.host = relative2.host;
+        target.port = relative2.port;
+        target.path = removeDotSegments(relative2.path || "");
+        target.query = relative2.query;
       } else {
-        if (relative.userinfo !== void 0 || relative.host !== void 0 || relative.port !== void 0) {
-          target.userinfo = relative.userinfo;
-          target.host = relative.host;
-          target.port = relative.port;
-          target.path = removeDotSegments(relative.path || "");
-          target.query = relative.query;
+        if (relative2.userinfo !== void 0 || relative2.host !== void 0 || relative2.port !== void 0) {
+          target.userinfo = relative2.userinfo;
+          target.host = relative2.host;
+          target.port = relative2.port;
+          target.path = removeDotSegments(relative2.path || "");
+          target.query = relative2.query;
         } else {
-          if (!relative.path) {
+          if (!relative2.path) {
             target.path = base.path;
-            if (relative.query !== void 0) {
-              target.query = relative.query;
+            if (relative2.query !== void 0) {
+              target.query = relative2.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative.path[0] === "/") {
-              target.path = removeDotSegments(relative.path);
+            if (relative2.path[0] === "/") {
+              target.path = removeDotSegments(relative2.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative.path;
+                target.path = "/" + relative2.path;
               } else if (!base.path) {
-                target.path = relative.path;
+                target.path = relative2.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative2.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative.query;
+            target.query = relative2.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -24968,7 +24968,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative.fragment;
+      target.fragment = relative2.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -28270,49 +28270,49 @@ var require_fast_uri2 = __commonJS({
       const resolved = resolveComponents(parse2(baseURI, schemelessOptions), parse2(relativeURI, schemelessOptions), schemelessOptions, true);
       return serialize(resolved, { ...schemelessOptions, skipEscape: true });
     }
-    function resolveComponents(base, relative, options, skipNormalization) {
+    function resolveComponents(base, relative2, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse2(serialize(base, options), options);
-        relative = parse2(serialize(relative, options), options);
+        relative2 = parse2(serialize(relative2, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative.scheme) {
-        target.scheme = relative.scheme;
-        target.userinfo = relative.userinfo;
-        target.host = relative.host;
-        target.port = relative.port;
-        target.path = removeDotSegments(relative.path || "");
-        target.query = relative.query;
+      if (!options.tolerant && relative2.scheme) {
+        target.scheme = relative2.scheme;
+        target.userinfo = relative2.userinfo;
+        target.host = relative2.host;
+        target.port = relative2.port;
+        target.path = removeDotSegments(relative2.path || "");
+        target.query = relative2.query;
       } else {
-        if (relative.userinfo !== void 0 || relative.host !== void 0 || relative.port !== void 0) {
-          target.userinfo = relative.userinfo;
-          target.host = relative.host;
-          target.port = relative.port;
-          target.path = removeDotSegments(relative.path || "");
-          target.query = relative.query;
+        if (relative2.userinfo !== void 0 || relative2.host !== void 0 || relative2.port !== void 0) {
+          target.userinfo = relative2.userinfo;
+          target.host = relative2.host;
+          target.port = relative2.port;
+          target.path = removeDotSegments(relative2.path || "");
+          target.query = relative2.query;
         } else {
-          if (!relative.path) {
+          if (!relative2.path) {
             target.path = base.path;
-            if (relative.query !== void 0) {
-              target.query = relative.query;
+            if (relative2.query !== void 0) {
+              target.query = relative2.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative.path.charAt(0) === "/") {
-              target.path = removeDotSegments(relative.path);
+            if (relative2.path.charAt(0) === "/") {
+              target.path = removeDotSegments(relative2.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative.path;
+                target.path = "/" + relative2.path;
               } else if (!base.path) {
-                target.path = relative.path;
+                target.path = relative2.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative2.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative.query;
+            target.query = relative2.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -28320,7 +28320,7 @@ var require_fast_uri2 = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative.fragment;
+      target.fragment = relative2.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -48244,10 +48244,10 @@ var require_ignore = __commonJS({
       ignored(p) {
         const fullpath = p.fullpath();
         const fullpaths = `${fullpath}/`;
-        const relative = p.relative() || ".";
-        const relatives = `${relative}/`;
+        const relative2 = p.relative() || ".";
+        const relatives = `${relative2}/`;
         for (const m of this.relative) {
-          if (m.match(relative) || m.match(relatives))
+          if (m.match(relative2) || m.match(relatives))
             return true;
         }
         for (const m of this.absolute) {
@@ -48258,9 +48258,9 @@ var require_ignore = __commonJS({
       }
       childrenIgnored(p) {
         const fullpath = p.fullpath() + "/";
-        const relative = (p.relative() || ".") + "/";
+        const relative2 = (p.relative() || ".") + "/";
         for (const m of this.relativeChildren) {
-          if (m.match(relative))
+          if (m.match(relative2))
             return true;
         }
         for (const m of this.absoluteChildren) {
@@ -49412,7 +49412,7 @@ var require_createHtmlDocument = __commonJS({
 // ../../node_modules/.pnpm/depd@2.0.0/node_modules/depd/index.js
 var require_depd = __commonJS({
   "../../node_modules/.pnpm/depd@2.0.0/node_modules/depd/index.js"(exports2, module2) {
-    var relative = require("path").relative;
+    var relative2 = require("path").relative;
     module2.exports = depd;
     var basePath = process.cwd();
     function containsNamespace(str, namespace) {
@@ -49604,7 +49604,7 @@ var require_depd = __commonJS({
       return formatted;
     }
     function formatLocation(callSite) {
-      return relative(basePath, callSite[0]) + ":" + callSite[1] + ":" + callSite[2];
+      return relative2(basePath, callSite[0]) + ":" + callSite[1] + ":" + callSite[2];
     }
     function getStack() {
       var limit = Error.stackTraceLimit;
@@ -50295,8 +50295,8 @@ var require_SendStream = __commonJS({
     var { parseBytesRange } = require_parseBytesRange();
     var { parseTokenList } = require_parseTokenList();
     var { setHeaders } = require_setHeaders();
-    var extname = path.extname;
-    var join6 = path.join;
+    var extname2 = path.extname;
+    var join9 = path.join;
     var normalize = path.normalize;
     var resolve2 = path.resolve;
     var sep = path.sep;
@@ -50538,7 +50538,7 @@ var require_SendStream = __commonJS({
           return res;
         }
         parts = path2.split(sep);
-        path2 = normalize(join6(root, path2));
+        path2 = normalize(join9(root, path2));
       } else {
         if (UP_PATH_REGEXP.test(path2)) {
           debug('malicious path "%s"', path2);
@@ -50643,7 +50643,7 @@ var require_SendStream = __commonJS({
       const self2 = this;
       debug('stat "%s"', path2);
       fs.stat(path2, function onstat(err, stat) {
-        if (err && err.code === "ENOENT" && !extname(path2) && path2[path2.length - 1] !== sep) {
+        if (err && err.code === "ENOENT" && !extname2(path2) && path2[path2.length - 1] !== sep) {
           return next(err);
         }
         if (err) return self2.onStatError(err);
@@ -50673,7 +50673,7 @@ var require_SendStream = __commonJS({
           if (err) return self2.onStatError(err);
           return self2.error(404);
         }
-        const p = join6(path2, self2._index[i]);
+        const p = join9(path2, self2._index[i]);
         debug('stat "%s"', p);
         fs.stat(p, function(err2, stat) {
           if (err2) return next(err2);
@@ -51331,7 +51331,7 @@ var require_static = __commonJS({
     var { PassThrough } = require("node:stream");
     var path = require("node:path");
     var { fileURLToPath: fileURLToPath3 } = require("node:url");
-    var { statSync: statSync2 } = require("node:fs");
+    var { statSync: statSync4 } = require("node:fs");
     var { glob } = require_commonjs5();
     var fp = require_plugin2();
     var send = require_send();
@@ -51696,7 +51696,7 @@ var require_static = __commonJS({
       }
       let pathStat;
       try {
-        pathStat = statSync2(rootPath);
+        pathStat = statSync4(rootPath);
       } catch (e) {
         if (e.code === "ENOENT") {
           fastify2.log.warn(`"root" path "${rootPath}" must exist`);
@@ -51720,7 +51720,7 @@ var require_static = __commonJS({
         return indexFiles.find((filename) => {
           const p = path.join(root, pathname, filename);
           try {
-            const stats = statSync2(p);
+            const stats = statSync4(p);
             return !stats.isDirectory();
           } catch {
             return false;
@@ -53914,8 +53914,8 @@ var require_sql_wasm = __commonJS({
 });
 
 // src/main.ts
-var import_node_fs7 = require("node:fs");
-var import_node_path6 = require("node:path");
+var import_node_fs10 = require("node:fs");
+var import_node_path9 = require("node:path");
 
 // src/config/loadConfig.ts
 var import_node_fs = require("node:fs");
@@ -57986,11 +57986,16 @@ var configSchema = external_exports.object({
     path: external_exports.string().default("./data/gateway.sqlite"),
     walMode: external_exports.boolean().default(true)
   }).default({}),
-  ollama: external_exports.object({
+  backend: external_exports.object({
     enabled: external_exports.boolean().default(true),
-    baseUrl: external_exports.string().url().default("http://127.0.0.1:11435"),
-    manageProcess: external_exports.boolean().default(true),
-    executable: external_exports.string().default("ollama"),
+    baseUrl: external_exports.string().url().default("http://127.0.0.1:11434"),
+    managed: external_exports.boolean().default(true),
+    executable: external_exports.string().default("llama-server"),
+    ggufDirectory: external_exports.string().default("./models"),
+    model: external_exports.string().nullable().default(null),
+    bindHost: external_exports.string().default("127.0.0.1"),
+    bindPort: external_exports.number().default(11434),
+    maxGpuLayers: external_exports.number().default(999),
     healthcheckIntervalMs: external_exports.number().default(1e4),
     restartOnFailure: external_exports.boolean().default(true)
   }).default({}),
@@ -58007,7 +58012,7 @@ var configSchema = external_exports.object({
     gamingMode: external_exports.object({
       rejectInteractiveLlm: external_exports.boolean().default(true),
       pauseBackgroundJobs: external_exports.boolean().default(true),
-      unloadOllamaModels: external_exports.boolean().default(true),
+      unloadBackendModels: external_exports.boolean().default(true),
       stopComfyUi: external_exports.boolean().default(true)
     }).default({})
   }).default({}),
@@ -58094,8 +58099,8 @@ function loadConfig(envPath = "config/gateway.local.yaml") {
 var import_fastify = __toESM(require_fastify(), 1);
 var import_cors = __toESM(require_cors(), 1);
 var import_static = __toESM(require_static(), 1);
-var import_node_fs2 = require("node:fs");
-var import_node_path2 = require("node:path");
+var import_node_fs3 = require("node:fs");
+var import_node_path3 = require("node:path");
 var import_node_url = require("node:url");
 
 // src/http/routes/health.routes.ts
@@ -58103,17 +58108,17 @@ function registerHealthRoutes(app) {
   app.get("/health", async (_request, reply) => {
     const ctx2 = app.ctx();
     const locked = ctx2.queueStore.getLeased().length > 0;
-    const ollama = ctx2.ollama.getSnapshot();
-    const degraded = ollama.status !== "running";
+    const backend = ctx2.backend.getSnapshot();
+    const degraded = backend.status !== "running";
     return reply.send({
       status: degraded ? "degraded" : "healthy",
-      reason: degraded ? `Ollama ${ollama.status}${ollama.lastError ? `: ${ollama.lastError}` : ""}` : null,
+      reason: degraded ? `llama.cpp ${backend.status}${backend.lastError ? `: ${backend.lastError}` : ""}` : null,
       uptime: process.uptime(),
       version: "0.1.0",
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       services: {
         gateway: "running",
-        ollama: ollama.status
+        llama_cpp: backend.status
       },
       queue: {
         gpuLocked: locked,
@@ -58129,7 +58134,7 @@ function registerStatusRoutes(app) {
     const ctx2 = app.ctx();
     const queueSnapshot = ctx2.queueStore.getSnapshot();
     const schedulerMode = ctx2.scheduler.getMode();
-    const ollama = ctx2.ollama.getSnapshot();
+    const backend = ctx2.backend.getSnapshot();
     const services = [
       {
         id: "gateway",
@@ -58144,14 +58149,14 @@ function registerStatusRoutes(app) {
         lastError: null,
         updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       },
-      ollama,
+      backend,
       ...ctx2.managedServices.list()
     ];
     const hardware = ctx2.hardware.getSnapshot();
     const logs = ctx2.logs.stats();
     const activeJob = ctx2.queueStore.getLeased()[0] ?? null;
     return reply.send({
-      health: ollama.status === "running" ? "healthy" : "degraded",
+      health: backend.status === "running" ? "healthy" : "degraded",
       mode: {
         mode: schedulerMode,
         gamingMode: ctx2.lockManager.isGamingModeActive() ? { active: true } : { active: false }
@@ -58178,7 +58183,7 @@ function registerStatusRoutes(app) {
       config: {
         dashboard: `${ctx2.config.server.publicBaseUrl}`,
         proxy: `${ctx2.config.server.proxyHost}:${ctx2.config.server.proxyPort}`,
-        ollama: ctx2.config.ollama.baseUrl
+        backend: ctx2.config.backend.baseUrl
       },
       services
     });
@@ -58503,20 +58508,39 @@ function registerJobsRoutes(app) {
 }
 
 // src/http/routes/models.routes.ts
+var import_node_fs2 = require("node:fs");
+var import_node_path2 = require("node:path");
+function getCtx(app) {
+  return app.ctx?.();
+}
 function registerModelsRoutes(app) {
-  const getOllamaBaseUrl = () => app.ctx().ollama.baseUrl;
   app.get("/models", async (_req, reply) => {
-    const ollamaBaseUrl = getOllamaBaseUrl();
+    const ctx2 = getCtx(app);
     try {
-      const res = await fetch(`${ollamaBaseUrl}/api/tags`);
-      if (!res.ok) throw new Error(`Ollama returned ${res.status}`);
-      const data = await res.json();
-      return reply.send({ models: data.models ?? [], backends: { ollama: ollamaBaseUrl, connected: true } });
+      const models = ctx2.backend.listModels();
+      return reply.send({
+        models: models.map((m) => ({
+          name: m.name,
+          model: m.name,
+          size: m.size,
+          digest: "gguf:" + m.path,
+          details: {
+            parent_model: "",
+            format: m.format,
+            family: m.name,
+            families: [m.name],
+            parameter_size: "",
+            quantization_level: ""
+          },
+          modified_at: m.modified_at
+        })),
+        backends: { llama_cpp: ctx2.backend.baseUrl, connected: ctx2.backend.getSnapshot().status === "running" }
+      });
     } catch (err) {
       return reply.send({
         models: [],
         backends: {
-          ollama: ollamaBaseUrl,
+          llama_cpp: ctx2.backend.baseUrl,
           connected: false,
           error: err instanceof Error ? err.message : String(err)
         }
@@ -58524,12 +58548,20 @@ function registerModelsRoutes(app) {
     }
   });
   app.get("/models/running", async (_req, reply) => {
-    const ollamaBaseUrl = getOllamaBaseUrl();
+    const ctx2 = getCtx(app);
     try {
-      const res = await fetch(`${ollamaBaseUrl}/api/ps`);
-      if (!res.ok) throw new Error(`Ollama returned ${res.status}`);
-      const data = await res.json();
-      return reply.send({ running: data.models ?? [], connected: true });
+      const snap = ctx2.backend.getSnapshot();
+      const running = snap.model ? [{
+        name: snap.model,
+        model: snap.model,
+        size: 0,
+        digest: "",
+        details: { parent_model: "", format: "gguf", family: "", families: [], parameter_size: "", quantization_level: "" },
+        size_vram: 0,
+        expires_at: "",
+        ttl: -1
+      }] : [];
+      return reply.send({ running, connected: snap.status === "running" });
     } catch (err) {
       return reply.send({
         running: [],
@@ -58539,65 +58571,71 @@ function registerModelsRoutes(app) {
     }
   });
   app.post("/models/pull", async (req, reply) => {
-    const ollamaBaseUrl = getOllamaBaseUrl();
     const body = req.body;
+    const downloadUrl = body?.url ?? body?.name;
+    if (!downloadUrl) {
+      return reply.status(400).send({ error: "A GGUF download URL is required (provide url or name)." });
+    }
+    const ctx2 = getCtx(app);
+    const ggufDir = ctx2.config.backend.ggufDirectory;
+    const filename = downloadUrl.split("/").pop() ?? "model.gguf";
+    const destPath = (0, import_node_path2.isAbsolute)(ggufDir) ? (0, import_node_path2.join)(ggufDir, filename) : (0, import_node_path2.join)(process.cwd(), ggufDir, filename);
     try {
-      const res = await fetch(`${ollamaBaseUrl}/api/pull`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: body.name, stream: false })
+      const res = await fetch(downloadUrl);
+      if (!res.ok) throw new Error(`Download failed: ${res.status} ${res.statusText}`);
+      if (!res.body) throw new Error("No response body");
+      const fileStream = (0, import_node_fs2.createWriteStream)(destPath);
+      const reader = res.body.getReader();
+      const pump = async () => {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          fileStream.write(value);
+        }
+        fileStream.end();
+      };
+      await pump();
+      await new Promise((resolve2, reject) => {
+        fileStream.on("finish", resolve2);
+        fileStream.on("error", reject);
       });
-      const data = await res.json();
-      app.ctx().events.emit("model:changed", { action: "pull", model: body.name });
-      return reply.send({ pulled: body.name, status: data.status });
+      ctx2.events.emit("model:changed", { action: "pull", model: filename });
+      return reply.send({ pulled: filename, path: destPath });
     } catch (err) {
       return reply.status(502).send({ error: err.message });
     }
   });
   app.post("/models/load", async (req, reply) => {
-    const ollamaBaseUrl = getOllamaBaseUrl();
     const body = req.body;
+    const ctx2 = getCtx(app);
     try {
-      const res = await fetch(`${ollamaBaseUrl}/api/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: body.model, prompt: "", stream: false, keep_alive: body.keep_alive ?? "5m" })
-      });
-      if (!res.ok) throw new Error(`Ollama returned ${res.status}: ${await res.text()}`);
-      const data = await res.json();
-      app.ctx().events.emit("model:changed", { action: "load", model: body.model });
-      return reply.send({ loaded: body.model, status: data.status ?? "loaded" });
+      await ctx2.backend.loadModel(body.model);
+      ctx2.events.emit("model:changed", { action: "load", model: body.model });
+      return reply.send({ loaded: body.model });
     } catch (err) {
       return reply.status(502).send({ error: err.message });
     }
   });
   app.post("/models/unload", async (req, reply) => {
-    const ollamaBaseUrl = getOllamaBaseUrl();
     const body = req.body;
+    const ctx2 = getCtx(app);
     try {
-      const res = await fetch(`${ollamaBaseUrl}/api/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: body.model, prompt: "", stream: false, keep_alive: 0 })
-      });
-      if (!res.ok) throw new Error(`Ollama returned ${res.status}: ${await res.text()}`);
-      app.ctx().events.emit("model:changed", { action: "unload", model: body.model });
+      await ctx2.backend.unloadModel();
+      ctx2.events.emit("model:changed", { action: "unload", model: body.model });
       return reply.send({ unloaded: body.model });
     } catch (err) {
       return reply.status(502).send({ error: err.message });
     }
   });
   app.delete("/models/:name", async (req, reply) => {
-    const ollamaBaseUrl = getOllamaBaseUrl();
     const name = req.params.name;
+    const ctx2 = getCtx(app);
     try {
-      const res = await fetch(`${ollamaBaseUrl}/api/delete`, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: name })
-      });
-      if (!res.ok) throw new Error(`Ollama returned ${res.status}: ${await res.text()}`);
-      app.ctx().events.emit("model:changed", { action: "delete", model: name });
+      const models = ctx2.backend.listModels();
+      const target = models.find((m) => m.name === name || m.path.endsWith(name));
+      if (!target) return reply.status(404).send({ error: `Model "${name}" not found` });
+      (0, import_node_fs2.unlinkSync)(target.path);
+      ctx2.events.emit("model:changed", { action: "delete", model: name });
       return reply.send({ deleted: name });
     } catch (err) {
       return reply.status(502).send({ error: err.message });
@@ -58609,7 +58647,7 @@ function registerModelsRoutes(app) {
 function registerServicesRoutes(app) {
   app.get("/services", async (_req, reply) => {
     const ctx2 = app.ctx();
-    const ollama = ctx2.ollama.getSnapshot();
+    const backend = ctx2.backend.getSnapshot();
     const services = [
       {
         id: "gateway",
@@ -58624,44 +58662,44 @@ function registerServicesRoutes(app) {
         lastError: null,
         updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       },
-      ollama,
+      backend,
       ...ctx2.managedServices.list()
     ];
     return reply.send({
       services,
-      healthyCount: services.filter((service) => service.status === "running").length,
-      unhealthyCount: services.filter((service) => service.status !== "running").length
+      healthyCount: services.filter((s) => s.status === "running").length,
+      unhealthyCount: services.filter((s) => s.status !== "running").length
     });
   });
-  app.get("/services/ollama/health", async (_req, reply) => {
+  app.get("/services/llama-server/health", async (_req, reply) => {
     const ctx2 = app.ctx();
-    const health = await ctx2.ollama.checkHealth();
+    const health = await ctx2.backend.checkHealth();
     return reply.send({
-      service: ctx2.ollama.getSnapshot(),
+      service: ctx2.backend.getSnapshot(),
       healthy: health.healthy,
       lastCheck: (/* @__PURE__ */ new Date()).toISOString(),
       latencyMs: health.latencyMs,
       error: health.error
     });
   });
-  app.post("/services/ollama/restart", async (_req, reply) => {
+  app.post("/services/llama-server/restart", async (_req, reply) => {
     const ctx2 = app.ctx();
-    if (!ctx2.config.ollama.manageProcess || !ctx2.ollama.isManaged) {
+    if (!ctx2.config.backend.managed || !ctx2.backend.isManaged) {
       return reply.status(409).send({
-        error: "Ollama is external or not managed by this gateway.",
-        service: ctx2.ollama.getSnapshot()
+        error: "llama.cpp is external or not managed by this gateway.",
+        service: ctx2.backend.getSnapshot()
       });
     }
-    const service = await ctx2.ollama.restart();
-    ctx2.events.emit("service:health", service);
-    return reply.send({ restarted: true, service });
+    const snap = await ctx2.backend.restart();
+    ctx2.events.emit("service:health", snap);
+    return reply.send({ restarted: true, service: snap });
   });
   app.post("/services/:id/start", async (req, reply) => {
     const ctx2 = app.ctx();
     const id = req.params.id;
-    if (id === "ollama") {
-      await ctx2.ollama.start();
-      return reply.send({ started: true, service: ctx2.ollama.getSnapshot() });
+    if (id === "llama-server") {
+      await ctx2.backend.start();
+      return reply.send({ started: true, service: ctx2.backend.getSnapshot() });
     }
     const service = ctx2.managedServices.get(id);
     if (!service) return reply.status(404).send({ error: "Service not found" });
@@ -58670,9 +58708,9 @@ function registerServicesRoutes(app) {
   app.post("/services/:id/stop", async (req, reply) => {
     const ctx2 = app.ctx();
     const id = req.params.id;
-    if (id === "ollama") {
-      await ctx2.ollama.stop();
-      return reply.send({ stopped: true, service: ctx2.ollama.getSnapshot() });
+    if (id === "llama-server") {
+      await ctx2.backend.stop();
+      return reply.send({ stopped: true, service: ctx2.backend.getSnapshot() });
     }
     const service = ctx2.managedServices.get(id);
     if (!service) return reply.status(404).send({ error: "Service not found" });
@@ -58681,9 +58719,9 @@ function registerServicesRoutes(app) {
   app.post("/services/:id/restart", async (req, reply) => {
     const ctx2 = app.ctx();
     const id = req.params.id;
-    if (id === "ollama") {
-      const service2 = await ctx2.ollama.restart();
-      return reply.send({ restarted: true, service: service2 });
+    if (id === "llama-server") {
+      const snap = await ctx2.backend.restart();
+      return reply.send({ restarted: true, service: snap });
     }
     const service = ctx2.managedServices.get(id);
     if (!service) return reply.status(404).send({ error: "Service not found" });
@@ -58692,9 +58730,9 @@ function registerServicesRoutes(app) {
   app.get("/services/:id/health", async (req, reply) => {
     const ctx2 = app.ctx();
     const id = req.params.id;
-    if (id === "ollama") {
-      const health = await ctx2.ollama.checkHealth();
-      return reply.send({ service: ctx2.ollama.getSnapshot(), healthy: health.healthy, lastCheck: (/* @__PURE__ */ new Date()).toISOString(), latencyMs: health.latencyMs, error: health.error });
+    if (id === "llama-server") {
+      const health = await ctx2.backend.checkHealth();
+      return reply.send({ service: ctx2.backend.getSnapshot(), healthy: health.healthy, lastCheck: (/* @__PURE__ */ new Date()).toISOString(), latencyMs: health.latencyMs, error: health.error });
     }
     const service = ctx2.managedServices.get(id);
     if (!service) return reply.status(404).send({ error: "Service not found" });
@@ -58715,7 +58753,7 @@ function registerModesRoutes(app) {
         active: true,
         rejectedInteractiveLlm: lockManager.shouldRejectInteractiveLlm(),
         pausedBackgroundJobs: lockManager.shouldPauseBackgroundJobs(),
-        unloadOllamaModels: lockManager.shouldUnloadOllamaModels()
+        unloadBackendModels: lockManager.shouldUnloadBackendModels()
       } : { active: false }
     });
   });
@@ -58812,11 +58850,11 @@ function assertNotSelfProxy(req, backendBaseUrl) {
   const backendPort = backend.port || (backend.protocol === "https:" ? "443" : "80");
   const backendHostPort = `${backend.hostname}:${backendPort}`;
   if (hostHeader === backendHostPort) {
-    throw new Error(`Ollama backend URL points back at the gateway (${backendBaseUrl})`);
+    throw new Error(`Backend URL points back at the gateway (${backendBaseUrl})`);
   }
 }
 
-// src/http/routes/proxy-ollama.routes.ts
+// src/http/routes/proxy-llama.routes.ts
 function releaseOnce(lease) {
   let released = false;
   return (status, data = {}) => {
@@ -58835,56 +58873,99 @@ function trackedStream(source, release) {
     }
   }));
 }
-function registerProxyOllamaRoutes(app) {
-  const getOllamaBaseUrl = () => app.ctx?.()?.ollama?.baseUrl || "http://127.0.0.1:11435";
+function getCtx2(app) {
+  return app.ctx?.();
+}
+function registerProxyLlamaRoutes(app) {
+  const getBaseUrl = () => {
+    const ctx2 = getCtx2(app);
+    return ctx2?.backend?.baseUrl || "http://127.0.0.1:11434";
+  };
   app.get("/api/tags", async (_req, reply) => {
     try {
-      const ollamaBaseUrl = getOllamaBaseUrl();
-      assertNotSelfProxy(_req, ollamaBaseUrl);
-      const res = await fetch(`${ollamaBaseUrl}/api/tags`);
-      const text = await res.text();
+      const ctx2 = getCtx2(app);
+      assertNotSelfProxy(_req, getBaseUrl());
+      const models = ctx2?.backend?.listModels() ?? [];
+      const backendModels = {
+        models: models.map((m) => ({
+          name: m.name,
+          model: m.name,
+          size: m.size,
+          digest: "gguf:" + m.path,
+          details: {
+            parent_model: "",
+            format: m.format,
+            family: m.name,
+            families: [m.name],
+            parameter_size: "",
+            quantization_level: ""
+          },
+          modified_at: m.modified_at
+        }))
+      };
       reply.headers({ "X-AI-Gateway": "inferdeck" });
-      return reply.type("application/json").send(text);
+      return reply.send(backendModels);
     } catch (err) {
-      return reply.status(502).send({ error: `Ollama unreachable: ${err.message}` });
+      return reply.status(502).send({ error: `llama.cpp unreachable: ${err.message}` });
     }
   });
   app.post("/api/show", async (req, reply) => {
     try {
-      const ollamaBaseUrl = getOllamaBaseUrl();
-      assertNotSelfProxy(req, ollamaBaseUrl);
-      const res = await fetch(`${ollamaBaseUrl}/api/show`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req.body)
-      });
-      const text = await res.text();
+      const ctx2 = getCtx2(app);
+      const body = req.body;
+      const name = body?.name ?? body?.model ?? "";
+      const models = ctx2?.backend?.listModels() ?? [];
+      const found = models.find((m) => m.name === name || m.path.endsWith(name));
+      if (!found) return reply.status(404).send({ error: `model "${name}" not found` });
       reply.headers({ "X-AI-Gateway": "inferdeck" });
-      return reply.type("application/json").send(text);
+      return reply.send({
+        name: found.name,
+        model: found.name,
+        size: found.size,
+        digest: "gguf:" + found.path,
+        details: {
+          parent_model: "",
+          format: found.format,
+          family: found.name,
+          families: [found.name],
+          parameter_size: "",
+          quantization_level: ""
+        },
+        modified_at: found.modified_at
+      });
     } catch (err) {
       return reply.status(502).send({ error: err.message });
     }
   });
   app.get("/api/ps", async (_req, reply) => {
     try {
-      const ollamaBaseUrl = getOllamaBaseUrl();
-      assertNotSelfProxy(_req, ollamaBaseUrl);
-      const res = await fetch(`${ollamaBaseUrl}/api/ps`);
-      const text = await res.text();
+      const ctx2 = getCtx2(app);
+      assertNotSelfProxy(_req, getBaseUrl());
+      const snap = ctx2?.backend?.getSnapshot();
+      const models = snap?.model ? [{
+        name: snap.model,
+        model: snap.model,
+        size: 0,
+        digest: "",
+        details: { parent_model: "", format: "gguf", family: "", families: [], parameter_size: "", quantization_level: "" },
+        size_vram: 0,
+        expires_at: "",
+        ttl: -1
+      }] : [];
       reply.headers({ "X-AI-Gateway": "inferdeck" });
-      return reply.type("application/json").send(text);
+      return reply.send({ models });
     } catch (err) {
       return reply.status(502).send({ error: err.message });
     }
   });
   app.get("/api/version", async (_req, reply) => {
     try {
-      const ollamaBaseUrl = getOllamaBaseUrl();
-      assertNotSelfProxy(_req, ollamaBaseUrl);
-      const res = await fetch(`${ollamaBaseUrl}/api/version`);
-      const text = await res.text();
+      const baseUrl = getBaseUrl();
+      assertNotSelfProxy(_req, baseUrl);
+      const res = await fetch(`${baseUrl}/health`);
+      if (!res.ok) throw new Error(`llama.cpp returned ${res.status}`);
       reply.headers({ "X-AI-Gateway": "inferdeck" });
-      return reply.type("application/json").send(text);
+      return reply.send({ version: "llama.cpp", status: "ok" });
     } catch (err) {
       return reply.status(502).send({ error: err.message });
     }
@@ -58893,9 +58974,9 @@ function registerProxyOllamaRoutes(app) {
     const stream = req.query.stream ?? req.body?.stream ?? false;
     const isStreaming = typeof stream === "string" ? stream === "true" : !!stream;
     const body = req.body || {};
-    const ctx2 = app.ctx?.();
+    const ctx2 = getCtx2(app);
     const lease = await ctx2.workloads.acquire(req, {
-      type: "ollama_chat",
+      type: "llama_chat",
       resourceClass: "gpu_llm",
       priority: 70,
       requestPath: "/api/chat",
@@ -58905,26 +58986,37 @@ function registerProxyOllamaRoutes(app) {
     const release = releaseOnce(lease);
     req.raw.on("close", () => release("cancelled", { reason: "client_closed" }));
     try {
-      const ollamaBaseUrl = getOllamaBaseUrl();
-      assertNotSelfProxy(req, ollamaBaseUrl);
-      const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
+      const baseUrl = getBaseUrl();
+      assertNotSelfProxy(req, baseUrl);
+      const openaiBody = {
+        model: body.model,
+        messages: body.messages ?? [],
+        stream: isStreaming
+      };
+      if (body.options?.temperature) openaiBody.temperature = body.options.temperature;
+      if (body.options?.top_p) openaiBody.top_p = body.options.top_p;
+      if (body.options?.max_tokens) openaiBody.max_tokens = body.options.max_tokens;
+      if (body.options?.stop) openaiBody.stop = body.options.stop;
+      const response = await fetch(`${baseUrl}/v1/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req.body)
+        body: JSON.stringify(openaiBody)
       });
-      if (!response.ok) throw new Error(`Ollama returned ${response.status}: ${await response.text()}`);
+      if (!response.ok) throw new Error(`llama.cpp returned ${response.status}: ${await response.text()}`);
       if (isStreaming && response.body) {
         reply.headers({
-          "Content-Type": "application/x-ndjson",
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
           "X-AI-Gateway": "inferdeck",
           "X-InferDeck-Job-Id": lease.jobId
         });
         return reply.send(trackedStream(response.body, release));
       }
-      const text = await response.text();
+      const json = await response.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-InferDeck-Job-Id": lease.jobId });
-      release("succeeded", { responseBytes: text.length });
-      return reply.type("application/json").send(text);
+      release("succeeded", { responseBytes: JSON.stringify(json).length });
+      return reply.send(json);
     } catch (err) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: err.message });
@@ -58934,9 +59026,9 @@ function registerProxyOllamaRoutes(app) {
     const stream = req.query.stream ?? req.body?.stream ?? false;
     const isStreaming = typeof stream === "string" ? stream === "true" : !!stream;
     const body = req.body || {};
-    const ctx2 = app.ctx?.();
+    const ctx2 = getCtx2(app);
     const lease = await ctx2.workloads.acquire(req, {
-      type: "ollama_generate",
+      type: "llama_generate",
       resourceClass: "gpu_llm",
       priority: 70,
       requestPath: "/api/generate",
@@ -58946,26 +59038,36 @@ function registerProxyOllamaRoutes(app) {
     const release = releaseOnce(lease);
     req.raw.on("close", () => release("cancelled", { reason: "client_closed" }));
     try {
-      const ollamaBaseUrl = getOllamaBaseUrl();
-      assertNotSelfProxy(req, ollamaBaseUrl);
-      const response = await fetch(`${ollamaBaseUrl}/api/generate`, {
+      const baseUrl = getBaseUrl();
+      assertNotSelfProxy(req, baseUrl);
+      const openaiBody = {
+        model: body.model,
+        prompt: body.prompt ?? "",
+        stream: isStreaming
+      };
+      if (body.options?.temperature) openaiBody.temperature = body.options.temperature;
+      if (body.options?.top_p) openaiBody.top_p = body.options.top_p;
+      if (body.options?.max_tokens) openaiBody.max_tokens = body.options.max_tokens;
+      const response = await fetch(`${baseUrl}/v1/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req.body)
+        body: JSON.stringify(openaiBody)
       });
-      if (!response.ok) throw new Error(`Ollama returned ${response.status}: ${await response.text()}`);
+      if (!response.ok) throw new Error(`llama.cpp returned ${response.status}: ${await response.text()}`);
       if (isStreaming && response.body) {
         reply.headers({
-          "Content-Type": "application/x-ndjson",
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
           "X-AI-Gateway": "inferdeck",
           "X-InferDeck-Job-Id": lease.jobId
         });
         return reply.send(trackedStream(response.body, release));
       }
-      const text = await response.text();
+      const json = await response.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-InferDeck-Job-Id": lease.jobId });
-      release("succeeded", { responseBytes: text.length });
-      return reply.type("application/json").send(text);
+      release("succeeded", { responseBytes: JSON.stringify(json).length });
+      return reply.send(json);
     } catch (err) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: err.message });
@@ -58973,9 +59075,9 @@ function registerProxyOllamaRoutes(app) {
   });
   app.post("/api/embed", async (req, reply) => {
     const body = req.body || {};
-    const ctx2 = app.ctx?.();
+    const ctx2 = getCtx2(app);
     const lease = await ctx2.workloads.acquire(req, {
-      type: "ollama_embed",
+      type: "llama_embed",
       resourceClass: "gpu_llm",
       priority: 55,
       requestPath: "/api/embed",
@@ -58985,18 +59087,18 @@ function registerProxyOllamaRoutes(app) {
     const release = releaseOnce(lease);
     req.raw.on("close", () => release("cancelled", { reason: "client_closed" }));
     try {
-      const ollamaBaseUrl = getOllamaBaseUrl();
-      assertNotSelfProxy(req, ollamaBaseUrl);
-      const res = await fetch(`${ollamaBaseUrl}/api/embed`, {
+      const baseUrl = getBaseUrl();
+      assertNotSelfProxy(req, baseUrl);
+      const res = await fetch(`${baseUrl}/v1/embeddings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req.body)
+        body: JSON.stringify({ model: body.model, input: body.input ?? body.prompt ?? "" })
       });
-      if (!res.ok) throw new Error(`Ollama returned ${res.status}: ${await res.text()}`);
-      const text = await res.text();
+      if (!res.ok) throw new Error(`llama.cpp returned ${res.status}: ${await res.text()}`);
+      const json = await res.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-InferDeck-Job-Id": lease.jobId });
-      release("succeeded", { responseBytes: text.length });
-      return reply.type("application/json").send(text);
+      release("succeeded", { responseBytes: JSON.stringify(json).length });
+      return reply.send(json);
     } catch (err) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: err.message });
@@ -59005,49 +59107,6 @@ function registerProxyOllamaRoutes(app) {
 }
 
 // src/http/routes/proxy-openai.routes.ts
-function createOllamaToOpenAIStream(source, model, mapper, onDone) {
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  let buffer = "";
-  return source.pipeThrough(new TransformStream({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      try {
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          const data = JSON.parse(trimmed);
-          if (data.done) continue;
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(mapper({ ...data, model }))}
-
-`));
-        }
-      } catch (err) {
-        onDone?.("failed", { error: err instanceof Error ? err.message : String(err) });
-        throw err;
-      }
-    },
-    flush(controller) {
-      try {
-        if (buffer.trim()) {
-          const data = JSON.parse(buffer.trim());
-          if (!data.done) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(mapper({ ...data, model }))}
-
-`));
-          }
-        }
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        onDone?.("succeeded", { streamed: true });
-      } catch (err) {
-        onDone?.("failed", { error: err instanceof Error ? err.message : String(err) });
-        throw err;
-      }
-    }
-  }));
-}
 function releaseOnce2(lease) {
   let released = false;
   return (status, data = {}) => {
@@ -59056,59 +59115,73 @@ function releaseOnce2(lease) {
     lease.release(status, data);
   };
 }
+function trackedStream2(source, release) {
+  return source.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      controller.enqueue(chunk);
+    },
+    flush() {
+      release("succeeded", { streamed: true });
+    }
+  }));
+}
+function getCtx3(app) {
+  return app.ctx?.();
+}
 function registerProxyOpenAIRoutes(app) {
-  const getOllamaBaseUrl = () => app.ctx?.()?.ollama?.baseUrl || "http://127.0.0.1:11435";
+  const getBaseUrl = () => {
+    const ctx2 = getCtx3(app);
+    return ctx2?.backend?.baseUrl || "http://127.0.0.1:11434";
+  };
   app.get("/v1/models", async (_req, reply) => {
     try {
-      const ollamaBaseUrl = getOllamaBaseUrl();
-      assertNotSelfProxy(_req, ollamaBaseUrl);
-      const res = await fetch(`${ollamaBaseUrl}/api/tags`);
+      const baseUrl = getBaseUrl();
+      assertNotSelfProxy(_req, baseUrl);
+      const res = await fetch(`${baseUrl}/v1/models`);
+      if (!res.ok) throw new Error(`llama.cpp returned ${res.status}`);
       const data = await res.json();
-      const models = (data.models ?? []).map((m) => ({
-        id: m.name,
-        object: "model",
-        created: Date.now(),
-        owned_by: "community"
-      }));
-      return reply.send({ object: "list", data: models });
+      return reply.send(data);
     } catch {
-      return reply.send({ object: "list", data: [] });
+      const ctx2 = getCtx3(app);
+      const models = ctx2?.backend?.listModels() ?? [];
+      return reply.send({
+        object: "list",
+        data: models.map((m) => ({
+          id: m.name,
+          object: "model",
+          created: Math.floor(new Date(m.modified_at).getTime() / 1e3),
+          owned_by: "community"
+        }))
+      });
     }
   });
   app.post("/v1/chat/completions", async (req, reply) => {
     const body = req.body || {};
     const stream = body?.stream ?? false;
-    const modelName = body?.model;
     const startTime = Date.now();
-    const ctx2 = app.ctx?.();
+    const ctx2 = getCtx3(app);
     const lease = await ctx2.workloads.acquire(req, {
       type: "openai_chat",
       resourceClass: "gpu_llm",
       priority: 70,
       requestPath: "/v1/chat/completions",
       requestMethod: "POST",
-      payload: { model: modelName, messages: body?.messages?.slice(0, 1), stream }
+      payload: { model: body.model, messages: body?.messages?.slice(0, 1), stream }
     });
     const release = releaseOnce2(lease);
     req.raw.on("close", () => release("cancelled", { reason: "client_closed" }));
-    const ollamaBody = {
-      model: modelName,
-      messages: body?.messages ?? [],
-      stream,
-      options: body?.options ?? {}
-    };
     try {
-      const ollamaBaseUrl = getOllamaBaseUrl();
-      assertNotSelfProxy(req, ollamaBaseUrl);
-      const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
+      const baseUrl = getBaseUrl();
+      assertNotSelfProxy(req, baseUrl);
+      const response = await fetch(`${baseUrl}/v1/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${body?.api_key ?? "x"}`
+          ...body?.api_key ? { Authorization: `Bearer ${body.api_key}` } : {}
         },
-        body: JSON.stringify(ollamaBody)
+        body: JSON.stringify(body)
       });
-      if (!response.ok) throw new Error(`Ollama returned ${response.status}: ${await response.text()}`);
+      if (!response.ok) throw new Error(`llama.cpp returned ${response.status}: ${await response.text()}`);
       if (stream && response.body) {
         reply.headers({
           "Content-Type": "text/event-stream",
@@ -59118,44 +59191,13 @@ function registerProxyOpenAIRoutes(app) {
           "X-AI-Resource-Class": "gpu_llm",
           "X-InferDeck-Job-Id": lease.jobId
         });
-        return reply.send(createOllamaToOpenAIStream(response.body, body.model, (data2) => ({
-          id: "chatcmpl-gateway",
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1e3),
-          model: data2.model,
-          choices: [
-            {
-              index: 0,
-              delta: { content: data2.message?.content ?? "" },
-              finish_reason: null
-            }
-          ]
-        }), (status, data2) => release(status, { ...data2, durationMs: Date.now() - startTime })));
+        return reply.send(trackedStream2(response.body, release));
       }
-      const text = await response.text();
-      const data = JSON.parse(text);
-      const openaiResponse = {
-        id: "chatcmpl-gateway",
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1e3),
-        model: body.model,
-        choices: [
-          {
-            index: 0,
-            message: { role: "assistant", content: data.message?.content ?? data.response ?? "" },
-            finish_reason: data.done ? "stop" : null
-          }
-        ],
-        usage: {
-          prompt_tokens: data.prompt_eval_count ?? 0,
-          completion_tokens: data.eval_count ?? 0,
-          total_tokens: (data.prompt_eval_count ?? 0) + (data.eval_count ?? 0)
-        }
-      };
+      const json = await response.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-AI-Resource-Class": "gpu_llm" });
       reply.header("X-InferDeck-Job-Id", lease.jobId);
-      release("succeeded", { response: data, durationMs: Date.now() - startTime });
-      return reply.send(openaiResponse);
+      release("succeeded", { response: json, durationMs: Date.now() - startTime });
+      return reply.send(json);
     } catch (err) {
       release("failed", { error: err.message, durationMs: Date.now() - startTime });
       return reply.status(502).send({ error: { message: err.message, type: "proxy_error" } });
@@ -59163,8 +59205,8 @@ function registerProxyOpenAIRoutes(app) {
   });
   app.post("/v1/completions", async (req, reply) => {
     const body = req.body;
-    const stream = body.stream ?? false;
-    const ctx2 = app.ctx?.();
+    const stream = body?.stream ?? false;
+    const ctx2 = getCtx3(app);
     const lease = await ctx2.workloads.acquire(req, {
       type: "openai_completion",
       resourceClass: "gpu_llm",
@@ -59175,21 +59217,15 @@ function registerProxyOpenAIRoutes(app) {
     });
     const release = releaseOnce2(lease);
     req.raw.on("close", () => release("cancelled", { reason: "client_closed" }));
-    const ollamaBody = {
-      model: body.model,
-      prompt: body.prompt,
-      stream,
-      options: body.options
-    };
     try {
-      const ollamaBaseUrl = getOllamaBaseUrl();
-      assertNotSelfProxy(req, ollamaBaseUrl);
-      const response = await fetch(`${ollamaBaseUrl}/api/generate`, {
+      const baseUrl = getBaseUrl();
+      assertNotSelfProxy(req, baseUrl);
+      const response = await fetch(`${baseUrl}/v1/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(ollamaBody)
+        body: JSON.stringify(body)
       });
-      if (!response.ok) throw new Error(`Ollama returned ${response.status}: ${await response.text()}`);
+      if (!response.ok) throw new Error(`llama.cpp returned ${response.status}: ${await response.text()}`);
       if (stream && response.body) {
         reply.headers({
           "Content-Type": "text/event-stream",
@@ -59199,26 +59235,13 @@ function registerProxyOpenAIRoutes(app) {
           "X-AI-Resource-Class": "gpu_llm",
           "X-InferDeck-Job-Id": lease.jobId
         });
-        return reply.send(createOllamaToOpenAIStream(response.body, body.model, (data2) => ({
-          id: "cmpl-gateway",
-          object: "text_completion",
-          created: Math.floor(Date.now() / 1e3),
-          model: data2.model,
-          choices: [{ index: 0, text: data2.response ?? "", finish_reason: null }]
-        }), (status, data2) => release(status, data2)));
+        return reply.send(trackedStream2(response.body, release));
       }
-      const text = await response.text();
-      const data = JSON.parse(text);
+      const json = await response.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-AI-Resource-Class": "gpu_llm" });
       reply.header("X-InferDeck-Job-Id", lease.jobId);
-      release("succeeded", { response: data });
-      return reply.send({
-        id: "cmpl-gateway",
-        object: "text_completion",
-        created: Math.floor(Date.now() / 1e3),
-        model: body.model,
-        choices: [{ index: 0, text: data.response, finish_reason: "stop" }]
-      });
+      release("succeeded", { response: json });
+      return reply.send(json);
     } catch (err) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: { message: err.message, type: "proxy_error" } });
@@ -59226,40 +59249,30 @@ function registerProxyOpenAIRoutes(app) {
   });
   app.post("/v1/embeddings", async (req, reply) => {
     const body = req.body;
-    const input = Array.isArray(body.input) ? body.input : [body.input];
-    const ctx2 = app.ctx?.();
+    const ctx2 = getCtx3(app);
     const lease = await ctx2.workloads.acquire(req, {
       type: "openai_embedding",
       resourceClass: "gpu_llm",
       priority: 55,
       requestPath: "/v1/embeddings",
       requestMethod: "POST",
-      payload: { model: body.model, inputCount: input.length }
+      payload: { model: body.model }
     });
     const release = releaseOnce2(lease);
     req.raw.on("close", () => release("cancelled", { reason: "client_closed" }));
     try {
-      const results = [];
-      for (const inp of input) {
-        const ollamaBaseUrl = getOllamaBaseUrl();
-        assertNotSelfProxy(req, ollamaBaseUrl);
-        const res = await fetch(`${ollamaBaseUrl}/api/embed`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: body.model, input: inp })
-        });
-        const data = await res.json();
-        results.push({ embedding: data.embedding, index: results.length });
-      }
-      const responseBody = {
-        object: "list",
-        data: results,
-        model: body.model,
-        usage: { prompt_tokens: 0, total_tokens: 0 }
-      };
+      const baseUrl = getBaseUrl();
+      assertNotSelfProxy(req, baseUrl);
+      const res = await fetch(`${baseUrl}/v1/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error(`llama.cpp returned ${res.status}: ${await res.text()}`);
+      const json = await res.json();
       reply.header("X-InferDeck-Job-Id", lease.jobId);
-      release("succeeded", { resultCount: results.length });
-      return reply.send(responseBody);
+      release("succeeded", { resultCount: json.data?.length ?? 0 });
+      return reply.send(json);
     } catch (err) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: { message: err.message, type: "proxy_error" } });
@@ -59421,20 +59434,20 @@ async function errorHandlerPlugin(app) {
 
 // src/http/server.ts
 var import_meta = {};
-var moduleDir = typeof import_meta.url === "string" ? (0, import_node_path2.dirname)((0, import_node_url.fileURLToPath)(import_meta.url)) : process.cwd();
+var moduleDir = typeof import_meta.url === "string" ? (0, import_node_path3.dirname)((0, import_node_url.fileURLToPath)(import_meta.url)) : process.cwd();
 function getExeDir() {
-  return (0, import_node_path2.dirname)(process.execPath);
+  return (0, import_node_path3.dirname)(process.execPath);
 }
 function findPublicDir() {
   const exeDir = getExeDir();
   const possiblePaths = [
-    (0, import_node_path2.join)(process.cwd(), "public", "dashboard"),
-    (0, import_node_path2.join)(process.cwd(), "apps", "gateway-service", "public", "dashboard"),
-    (0, import_node_path2.join)(exeDir, "public", "dashboard"),
-    process.resourcesPath ? (0, import_node_path2.join)(process.resourcesPath, "public", "dashboard") : "",
-    (0, import_node_path2.join)(moduleDir, "..", "public", "dashboard")
+    (0, import_node_path3.join)(process.cwd(), "public", "dashboard"),
+    (0, import_node_path3.join)(process.cwd(), "apps", "gateway-service", "public", "dashboard"),
+    (0, import_node_path3.join)(exeDir, "public", "dashboard"),
+    process.resourcesPath ? (0, import_node_path3.join)(process.resourcesPath, "public", "dashboard") : "",
+    (0, import_node_path3.join)(moduleDir, "..", "public", "dashboard")
   ];
-  return possiblePaths.find((p) => p && (0, import_node_fs2.existsSync)(p)) ?? possiblePaths[0];
+  return possiblePaths.find((p) => p && (0, import_node_fs3.existsSync)(p)) ?? possiblePaths[0];
 }
 async function createBaseApp(ctx2) {
   const app = (0, import_fastify.default)({
@@ -59468,7 +59481,7 @@ async function createDashboardApp(ctx2) {
     registerLogsRoutes(instance);
   }, { prefix: "/api" });
   const dashboardPath = findPublicDir();
-  if ((0, import_node_fs2.existsSync)(dashboardPath)) {
+  if ((0, import_node_fs3.existsSync)(dashboardPath)) {
     await app.register(import_static.default, {
       root: dashboardPath,
       prefix: "/",
@@ -59489,7 +59502,7 @@ async function createProxyApp(ctx2) {
   const app = await createBaseApp(ctx2);
   registerHealthRoutes(app);
   registerStatusRoutes(app);
-  registerProxyOllamaRoutes(app);
+  registerProxyLlamaRoutes(app);
   registerProxyOpenAIRoutes(app);
   return app;
 }
@@ -59500,7 +59513,7 @@ async function startServer(ctx2) {
   const dashboardPort = ctx2.config.server.dashboardPort;
   if (proxyPort === dashboardPort && proxyHost === dashboardHost) {
     const app = await createDashboardApp(ctx2);
-    registerProxyOllamaRoutes(app);
+    registerProxyLlamaRoutes(app);
     registerProxyOpenAIRoutes(app);
     await app.listen({ port: proxyPort, host: proxyHost });
     app.log.info(`Gateway + Dashboard listening on http://${proxyHost}:${proxyPort}`);
@@ -59516,7 +59529,7 @@ async function startServer(ctx2) {
   ]);
   proxyApp.log.info(`Gateway proxy API listening on http://${proxyHost}:${proxyPort}`);
   dashboardApp.log.info(`Dashboard control UI listening on http://${dashboardHost}:${dashboardPort}`);
-  proxyApp.log.info(`Ollama: ${ctx2.config.ollama.baseUrl}`);
+  proxyApp.log.info(`llama.cpp: ${ctx2.config.backend.baseUrl}`);
   proxyApp.log.info(`Mode: ${ctx2.config.modes.startupMode}`);
 }
 
@@ -59718,7 +59731,7 @@ var ResourceLockManager = class {
     active: false,
     rejectInteractiveLlm: true,
     pauseBackgroundJobs: true,
-    unloadOllamaModels: true,
+    unloadBackendModels: true,
     stopComfyUi: false
   };
   onGamingModeChange;
@@ -59801,8 +59814,8 @@ var ResourceLockManager = class {
   shouldPauseBackgroundJobs() {
     return this.gamingMode.active && this.gamingMode.pauseBackgroundJobs;
   }
-  shouldUnloadOllamaModels() {
-    return this.gamingMode.active && this.gamingMode.unloadOllamaModels;
+  shouldUnloadBackendModels() {
+    return this.gamingMode.active && this.gamingMode.unloadBackendModels;
   }
   release(jobId) {
     if (!this.locks.has(jobId))
@@ -60010,24 +60023,24 @@ var Scheduler = class {
 
 // src/db/database.ts
 var import_sql = __toESM(require_sql_wasm(), 1);
-var import_node_fs3 = require("node:fs");
-var import_node_path3 = require("node:path");
+var import_node_fs4 = require("node:fs");
+var import_node_path4 = require("node:path");
 var import_node_url2 = require("node:url");
 var import_pino = __toESM(require_pino(), 1);
 var import_meta2 = {};
 var LOG = (0, import_pino.default)({ name: "db" });
-var moduleDir2 = typeof import_meta2.url === "string" ? (0, import_node_path3.dirname)((0, import_node_url2.fileURLToPath)(import_meta2.url)) : process.cwd();
+var moduleDir2 = typeof import_meta2.url === "string" ? (0, import_node_path4.dirname)((0, import_node_url2.fileURLToPath)(import_meta2.url)) : process.cwd();
 function findWasmFile() {
   const possiblePaths = [
-    process.resourcesPath ? (0, import_node_path3.join)(process.resourcesPath, "sql-wasm.wasm") : "",
-    (0, import_node_path3.join)(process.cwd(), "sql-wasm.wasm"),
-    (0, import_node_path3.join)((0, import_node_path3.dirname)(process.execPath), "sql-wasm.wasm"),
-    (0, import_node_path3.join)(moduleDir2, "sql-wasm.wasm"),
-    (0, import_node_path3.join)(moduleDir2, "..", "sql-wasm.wasm")
+    process.resourcesPath ? (0, import_node_path4.join)(process.resourcesPath, "sql-wasm.wasm") : "",
+    (0, import_node_path4.join)(process.cwd(), "sql-wasm.wasm"),
+    (0, import_node_path4.join)((0, import_node_path4.dirname)(process.execPath), "sql-wasm.wasm"),
+    (0, import_node_path4.join)(moduleDir2, "sql-wasm.wasm"),
+    (0, import_node_path4.join)(moduleDir2, "..", "sql-wasm.wasm")
   ];
   for (const p of possiblePaths) {
     try {
-      if ((0, import_node_fs3.existsSync)(p)) return p;
+      if ((0, import_node_fs4.existsSync)(p)) return p;
     } catch {
     }
   }
@@ -60046,16 +60059,16 @@ var DatabaseManager = class {
     if (this.initialized) return;
     const wasmPath = findWasmFile();
     let SQL;
-    if (wasmPath && (0, import_node_fs3.existsSync)(wasmPath)) {
-      const wasmBinary = (0, import_node_fs3.readFileSync)(wasmPath);
+    if (wasmPath && (0, import_node_fs4.existsSync)(wasmPath)) {
+      const wasmBinary = (0, import_node_fs4.readFileSync)(wasmPath);
       SQL = await (0, import_sql.default)({ wasmBinary });
     } else {
       SQL = await (0, import_sql.default)();
     }
     let data;
-    if ((0, import_node_fs3.existsSync)(this.dbPath)) {
+    if ((0, import_node_fs4.existsSync)(this.dbPath)) {
       try {
-        data = (0, import_node_fs3.readFileSync)(this.dbPath);
+        data = (0, import_node_fs4.readFileSync)(this.dbPath);
       } catch (e) {
         LOG.warn("Could not read existing DB, creating new one");
       }
@@ -60067,7 +60080,7 @@ var DatabaseManager = class {
   }
   runMigrations() {
     if (!this.db) throw new Error("DB not initialized");
-    const migrationFiles = (0, import_node_fs3.readdirSync)(this.migrationsDir).filter((f) => f.endsWith(".sql")).sort();
+    const migrationFiles = (0, import_node_fs4.readdirSync)(this.migrationsDir).filter((f) => f.endsWith(".sql")).sort();
     try {
       const result = this.db.exec("SELECT name FROM schema_migrations");
       if (result.length > 0) {
@@ -60078,7 +60091,7 @@ var DatabaseManager = class {
     for (const file of migrationFiles) {
       if (this.appliedMigrations.has(file)) continue;
       LOG.info(`Running migration: ${file}`);
-      const sql = (0, import_node_fs3.readFileSync)((0, import_node_path3.join)(this.migrationsDir, file), "utf-8");
+      const sql = (0, import_node_fs4.readFileSync)((0, import_node_path4.join)(this.migrationsDir, file), "utf-8");
       this.db.exec(sql);
       LOG.info(`Migration applied: ${file}`);
     }
@@ -60102,11 +60115,11 @@ var DatabaseManager = class {
     if (!this.db) return;
     const data = this.db.export();
     const buffer = Buffer.from(data);
-    const dir = (0, import_node_path3.dirname)(this.dbPath);
-    if (!(0, import_node_fs3.existsSync)(dir)) {
-      (0, import_node_fs3.mkdirSync)(dir, { recursive: true });
+    const dir = (0, import_node_path4.dirname)(this.dbPath);
+    if (!(0, import_node_fs4.existsSync)(dir)) {
+      (0, import_node_fs4.mkdirSync)(dir, { recursive: true });
     }
-    (0, import_node_fs3.writeFileSync)(this.dbPath, buffer);
+    (0, import_node_fs4.writeFileSync)(this.dbPath, buffer);
   }
   close() {
     if (this.db) {
@@ -60116,26 +60129,200 @@ var DatabaseManager = class {
   }
 };
 
-// src/services/OllamaProcessManager.ts
+// src/services/LlamaServerProcessManager.ts
 var import_node_child_process = require("node:child_process");
-var OllamaProcessManager = class {
+var import_node_path6 = require("node:path");
+var import_node_fs6 = require("node:fs");
+
+// ../../packages/backend-llama/src/utils.ts
+var import_node_fs5 = require("node:fs");
+var import_node_path5 = require("node:path");
+function scanGgufFiles(directory, baseDir) {
+  const resolvedDir = (0, import_node_path5.join)(directory);
+  const root = baseDir ?? resolvedDir;
+  const results = [];
+  try {
+    const entries = (0, import_node_fs5.readdirSync)(resolvedDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = (0, import_node_path5.join)(resolvedDir, entry.name);
+      if (entry.isDirectory()) {
+        results.push(...scanGgufFiles(fullPath, root));
+      } else if (entry.isFile() && (0, import_node_path5.extname)(entry.name).toLowerCase() === ".gguf") {
+        try {
+          const stats = (0, import_node_fs5.statSync)(fullPath);
+          results.push({
+            name: (0, import_node_path5.relative)(root, fullPath),
+            path: fullPath,
+            size: stats.size,
+            modified_at: stats.mtime.toISOString(),
+            format: "gguf"
+          });
+        } catch {
+        }
+      }
+    }
+  } catch {
+  }
+  return results;
+}
+
+// ../../packages/backend-llama/src/LlamaClient.ts
+var LlamaClient = class {
+  baseUrl;
+  timeoutMs;
+  retries;
+  constructor(options) {
+    this.baseUrl = options.baseUrl.replace(/\/$/, "");
+    this.timeoutMs = options.timeoutMs ?? 3e4;
+    this.retries = options.retries ?? 2;
+  }
+  url(path) {
+    return `${this.baseUrl}${path}`;
+  }
+  async fetchWithRetry(path, options, retryCount = this.retries) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+      const res = await fetch(this.url(path), {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          ...options.headers
+        }
+      });
+      clearTimeout(timeout);
+      if (!res.ok) {
+        const body = await res.text();
+        let errorStr = body;
+        try {
+          const parsed = JSON.parse(body);
+          errorStr = parsed.error?.message ?? parsed.error ?? body;
+        } catch {
+        }
+        const err = new Error(`llama.cpp error ${res.status}: ${errorStr}`);
+        err.status = res.status;
+        throw err;
+      }
+      return res.json();
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error(`llama.cpp request timeout(${this.timeoutMs}ms): ${path}`);
+      }
+      if (retryCount > 0 && !err.status) {
+        await new Promise((r) => setTimeout(r, 1e3));
+        return this.fetchWithRetry(path, options, retryCount - 1);
+      }
+      throw err;
+    }
+  }
+  async stream(path, options) {
+    const res = await fetch(this.url(path), {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...options.headers
+      }
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      let errorStr = body;
+      try {
+        errorStr = JSON.parse(body).error?.message ?? JSON.parse(body).error ?? body;
+      } catch {
+      }
+      throw new Error(`llama.cpp stream error ${res.status}: ${errorStr}`);
+    }
+    if (!res.body) {
+      throw new Error("llama.cpp stream response has no body");
+    }
+    return res.body;
+  }
+  async health() {
+    return this.fetchWithRetry("/health", { method: "GET" });
+  }
+  async ping() {
+    try {
+      await this.fetchWithRetry("/health", { method: "GET" });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async chat(request, stream = false) {
+    if (stream) {
+      return this.stream("/v1/chat/completions", {
+        method: "POST",
+        body: JSON.stringify({ ...request, stream: true })
+      });
+    }
+    return this.fetchWithRetry("/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ ...request, stream: false })
+    });
+  }
+  async completions(request, stream = false) {
+    if (stream) {
+      return this.stream("/v1/completions", {
+        method: "POST",
+        body: JSON.stringify({ ...request, stream: true })
+      });
+    }
+    return this.fetchWithRetry("/v1/completions", {
+      method: "POST",
+      body: JSON.stringify({ ...request, stream: false })
+    });
+  }
+  async embed(request) {
+    return this.fetchWithRetry("/v1/embeddings", {
+      method: "POST",
+      body: JSON.stringify(request)
+    });
+  }
+  async rawFetch(path, options) {
+    const res = await fetch(this.url(path), {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...options.headers
+      }
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      const err = new Error(`llama.cpp ${res.status}: ${body}`);
+      err.status = res.status;
+      throw err;
+    }
+    return res;
+  }
+};
+
+// src/services/LlamaServerProcessManager.ts
+var LlamaServerProcessManager = class {
   config;
+  client;
   child = null;
   status = "stopped";
   managed = false;
   version = null;
+  currentModel = null;
   lastHealthcheckAt = null;
   lastError = null;
   healthTimer = null;
   stopping = false;
   constructor(config) {
     this.config = config;
+    this.client = new LlamaClient({ baseUrl: config.baseUrl, timeoutMs: 5e3 });
+    this.currentModel = config.model;
   }
   get baseUrl() {
     return this.config.baseUrl.replace(/\/$/, "");
   }
   get isManaged() {
     return this.managed;
+  }
+  get activeModel() {
+    return this.currentModel;
   }
   async start() {
     if (!this.config.enabled) {
@@ -60150,23 +60337,23 @@ var OllamaProcessManager = class {
       this.startHealthLoop();
       return;
     }
-    if (!this.config.manageProcess) {
+    if (!this.config.managed) {
       this.status = "unhealthy";
       this.lastError = health.error;
       this.startHealthLoop();
       return;
     }
-    this.spawnProcess();
+    await this.spawnProcess();
     this.startHealthLoop();
   }
   async restart() {
-    if (!this.config.manageProcess) {
+    if (!this.config.managed) {
       this.status = "unhealthy";
-      this.lastError = "Ollama is configured as an external service and cannot be restarted by the gateway.";
+      this.lastError = "llama.cpp is configured as an external service and cannot be restarted by the gateway.";
       return this.getSnapshot();
     }
     await this.stopChild();
-    this.spawnProcess();
+    await this.spawnProcess();
     return this.getSnapshot();
   }
   async stop() {
@@ -60178,30 +60365,37 @@ var OllamaProcessManager = class {
     await this.stopChild();
     this.status = "stopped";
   }
+  async loadModel(modelName) {
+    const models = scanGgufFiles(this.config.ggufDirectory);
+    const target = models.find((m) => m.name === modelName || m.path.endsWith(modelName));
+    if (!target) {
+      throw new Error(`Model "${modelName}" not found in ${this.config.ggufDirectory}`);
+    }
+    this.currentModel = target.name;
+    if (this.child) {
+      await this.stopChild();
+    }
+    await this.spawnProcess();
+  }
+  async unloadModel() {
+    this.currentModel = null;
+    await this.stopChild();
+    this.status = "stopped";
+  }
+  listModels() {
+    return scanGgufFiles(this.config.ggufDirectory);
+  }
   async checkHealth() {
     const started = Date.now();
     try {
-      const tagsResponse = await this.fetchWithTimeout(`${this.baseUrl}/api/tags`);
-      if (!tagsResponse.ok) {
-        throw new Error(`Ollama /api/tags returned ${tagsResponse.status}`);
-      }
-      let version = null;
-      try {
-        const versionResponse = await this.fetchWithTimeout(`${this.baseUrl}/api/version`);
-        if (versionResponse.ok) {
-          const versionJson = await versionResponse.json();
-          version = versionJson.version ?? null;
-        }
-      } catch {
-      }
+      const healthData = await this.client.health();
       this.status = "running";
-      this.version = version;
       this.lastError = null;
       this.lastHealthcheckAt = (/* @__PURE__ */ new Date()).toISOString();
       return {
         healthy: true,
         latencyMs: Date.now() - started,
-        version,
+        version: healthData.model_info ? `llama.cpp (ctx: ${healthData.model_info.n_ctx ?? "?"})` : "llama.cpp",
         error: null
       };
     } catch (err) {
@@ -60219,31 +60413,43 @@ var OllamaProcessManager = class {
   }
   getSnapshot() {
     return {
-      id: "ollama",
-      name: "Ollama",
-      kind: "ollama",
+      id: "llama-server",
+      name: "llama.cpp",
+      kind: "llama_cpp",
       status: this.status,
       pid: this.child?.pid ?? null,
       baseUrl: this.baseUrl,
       managed: this.managed,
+      model: this.currentModel,
       version: this.version,
       lastHealthcheckAt: this.lastHealthcheckAt,
       lastError: this.lastError,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
   }
-  spawnProcess() {
+  async spawnProcess() {
     if (this.child) return;
+    const modelPath = this.resolveModelPath();
+    if (!modelPath) {
+      this.status = "error";
+      this.lastError = `No GGUF model found in ${this.config.ggufDirectory}. Place a .gguf file or set backend.model in config.`;
+      return;
+    }
     this.status = "starting";
     this.managed = true;
     this.lastError = null;
-    const env = {
-      ...process.env,
-      OLLAMA_HOST: this.getOllamaHost()
-    };
+    const args = [
+      "-m",
+      modelPath,
+      "--host",
+      this.config.bindHost,
+      "--port",
+      String(this.config.bindPort),
+      "-ngl",
+      String(this.config.maxGpuLayers)
+    ];
     try {
-      const child = (0, import_node_child_process.spawn)(this.config.executable, ["serve"], {
-        env,
+      const child = (0, import_node_child_process.spawn)(this.config.executable, args, {
         stdio: ["ignore", "pipe", "pipe"]
       });
       this.child = child;
@@ -60266,13 +60472,27 @@ var OllamaProcessManager = class {
       this.child = null;
       if (this.stopping) return;
       this.status = "stopped";
-      this.lastError = `Ollama exited with ${signal ?? code ?? "unknown"}`;
-      if (this.config.restartOnFailure) {
+      this.lastError = `llama-server exited with ${signal ?? code ?? "unknown"}`;
+      if (this.config.restartOnFailure && this.currentModel) {
         setTimeout(() => {
-          if (!this.stopping && !this.child) this.spawnProcess();
+          if (!this.stopping && !this.child) void this.spawnProcess();
         }, 1e3);
       }
     });
+  }
+  resolveModelPath() {
+    if (this.currentModel) {
+      const candidate = (0, import_node_path6.isAbsolute)(this.currentModel) ? this.currentModel : (0, import_node_path6.join)(this.config.ggufDirectory, this.currentModel);
+      try {
+        if ((0, import_node_fs6.statSync)(candidate).isFile()) return candidate;
+      } catch {
+      }
+    }
+    const models = scanGgufFiles(this.config.ggufDirectory);
+    if (models.length === 0) return null;
+    const first = models[0];
+    this.currentModel = first.name;
+    return first.path;
   }
   startHealthLoop() {
     if (this.healthTimer) return;
@@ -60297,23 +60517,6 @@ var OllamaProcessManager = class {
     });
     this.child = null;
   }
-  getOllamaHost() {
-    try {
-      const url = new URL(this.baseUrl);
-      return `${url.hostname}:${url.port || (url.protocol === "https:" ? "443" : "80")}`;
-    } catch {
-      return "127.0.0.1:11434";
-    }
-  }
-  async fetchWithTimeout(url) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2e3);
-    try {
-      return await fetch(url, { signal: controller.signal });
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
 };
 
 // src/services/EventBus.ts
@@ -60331,7 +60534,7 @@ var EventBus = class {
 
 // src/services/HardwareTelemetry.ts
 var import_node_child_process2 = require("node:child_process");
-var import_node_fs4 = require("node:fs");
+var import_node_fs7 = require("node:fs");
 var import_node_util = require("node:util");
 var execFileAsync = (0, import_node_util.promisify)(import_node_child_process2.execFile);
 var HardwareTelemetryService = class {
@@ -60365,7 +60568,7 @@ var HardwareTelemetryService = class {
       return this.latest;
     }
     const helperPath = this.config.helperPath;
-    if (!helperPath || !(0, import_node_fs4.existsSync)(helperPath)) {
+    if (!helperPath || !(0, import_node_fs7.existsSync)(helperPath)) {
       this.latest = this.unavailable("adlx_helper_not_found");
       this.events.emit("hardware:update", this.latest);
       return this.latest;
@@ -60396,13 +60599,13 @@ var HardwareTelemetryService = class {
 };
 
 // src/services/LogStore.ts
-var import_node_fs5 = require("node:fs");
-var import_node_path4 = require("node:path");
+var import_node_fs8 = require("node:fs");
+var import_node_path7 = require("node:path");
 var LogStore = class {
   constructor(dir, events) {
     this.dir = dir;
     this.events = events;
-    if (!(0, import_node_fs5.existsSync)(dir)) (0, import_node_fs5.mkdirSync)(dir, { recursive: true });
+    if (!(0, import_node_fs8.existsSync)(dir)) (0, import_node_fs8.mkdirSync)(dir, { recursive: true });
   }
   dir;
   events;
@@ -60415,15 +60618,15 @@ var LogStore = class {
       jobId: entry.jobId ?? null,
       data: entry.data
     };
-    (0, import_node_fs5.appendFileSync)(this.pathFor(entry.service === "service-error" ? "service-errors" : "gateway"), `${JSON.stringify(full)}
+    (0, import_node_fs8.appendFileSync)(this.pathFor(entry.service === "service-error" ? "service-errors" : "gateway"), `${JSON.stringify(full)}
 `);
     this.events?.emit("log:entry", full);
   }
   list(query) {
     const file = query.tab === "service-errors" ? "service-errors.log" : "gateway.log";
-    const path = (0, import_node_path4.join)(this.dir, file);
-    if (!(0, import_node_fs5.existsSync)(path)) return [];
-    const lines = (0, import_node_fs5.readFileSync)(path, "utf-8").split(/\r?\n/).filter(Boolean).slice(-(query.limit ?? 500));
+    const path = (0, import_node_path7.join)(this.dir, file);
+    if (!(0, import_node_fs8.existsSync)(path)) return [];
+    const lines = (0, import_node_fs8.readFileSync)(path, "utf-8").split(/\r?\n/).filter(Boolean).slice(-(query.limit ?? 500));
     return lines.map((line) => {
       try {
         return JSON.parse(line);
@@ -60434,11 +60637,11 @@ var LogStore = class {
   }
   stats() {
     let totalBytes = 0;
-    if ((0, import_node_fs5.existsSync)(this.dir)) {
-      for (const file of (0, import_node_fs5.readdirSync)(this.dir)) {
-        const path = (0, import_node_path4.join)(this.dir, file);
+    if ((0, import_node_fs8.existsSync)(this.dir)) {
+      for (const file of (0, import_node_fs8.readdirSync)(this.dir)) {
+        const path = (0, import_node_path7.join)(this.dir, file);
         try {
-          const stat = (0, import_node_fs5.statSync)(path);
+          const stat = (0, import_node_fs8.statSync)(path);
           if (stat.isFile()) totalBytes += stat.size;
         } catch {
         }
@@ -60447,7 +60650,7 @@ var LogStore = class {
     return { dir: this.dir, totalBytes };
   }
   pathFor(name) {
-    return (0, import_node_path4.join)(this.dir, `${name}.log`);
+    return (0, import_node_path7.join)(this.dir, `${name}.log`);
   }
 };
 
@@ -60728,10 +60931,10 @@ var WorkloadCoordinator = class {
 };
 
 // src/app.ts
-var import_node_path5 = require("node:path");
-var import_node_fs6 = require("node:fs");
+var import_node_path8 = require("node:path");
+var import_node_fs9 = require("node:fs");
 function getExeDir2() {
-  return (0, import_node_path5.dirname)(process.execPath);
+  return (0, import_node_path8.dirname)(process.execPath);
 }
 var AppContext = class {
   config;
@@ -60739,7 +60942,7 @@ var AppContext = class {
   lockManager;
   scheduler;
   db;
-  ollama;
+  backend;
   events;
   logs;
   metrics;
@@ -60760,20 +60963,20 @@ var AppContext = class {
         this.config.modes.startupMode = mode;
       }
     });
-    this.ollama = new OllamaProcessManager(config.ollama);
+    this.backend = new LlamaServerProcessManager(config.backend);
     this.events = new EventBus();
-    const dbPath = config.database?.path ?? (0, import_node_path5.join)(process.cwd(), "data", "gateway.sqlite");
+    const dbPath = config.database?.path ?? (0, import_node_path8.join)(process.cwd(), "data", "gateway.sqlite");
     const exeDir = getExeDir2();
     const possibleMigrationsPaths = [
-      (0, import_node_path5.join)(process.cwd(), "db", "migrations"),
-      (0, import_node_path5.join)(process.cwd(), "src", "db", "migrations"),
-      (0, import_node_path5.join)(process.cwd(), "apps", "gateway-service", "src", "db", "migrations"),
-      (0, import_node_path5.join)(exeDir, "db", "migrations"),
-      process.resourcesPath ? (0, import_node_path5.join)(process.resourcesPath, "db", "migrations") : ""
+      (0, import_node_path8.join)(process.cwd(), "db", "migrations"),
+      (0, import_node_path8.join)(process.cwd(), "src", "db", "migrations"),
+      (0, import_node_path8.join)(process.cwd(), "apps", "gateway-service", "src", "db", "migrations"),
+      (0, import_node_path8.join)(exeDir, "db", "migrations"),
+      process.resourcesPath ? (0, import_node_path8.join)(process.resourcesPath, "db", "migrations") : ""
     ];
     let migrationsDir = possibleMigrationsPaths[0];
     for (const p of possibleMigrationsPaths) {
-      if ((0, import_node_fs6.existsSync)(p)) {
+      if ((0, import_node_fs9.existsSync)(p)) {
         migrationsDir = p;
         break;
       }
@@ -60787,7 +60990,7 @@ var AppContext = class {
   }
   async init() {
     await this.db.init();
-    await this.ollama.start();
+    await this.backend.start();
     await this.managedServices.startEnabled();
     this.hardware.start();
     this.restoreQueueFromDatabase();
@@ -60796,7 +60999,7 @@ var AppContext = class {
   async shutdown() {
     this.hardware.stop();
     await this.managedServices.stopAll();
-    await this.ollama.stop();
+    await this.backend.stop();
     this.db.close();
   }
   toJSON() {
@@ -60837,13 +61040,13 @@ function parseConfigArg() {
   }
   const possiblePaths = [
     configFile,
-    (0, import_node_path6.resolve)(process.cwd(), "config", configFile),
-    (0, import_node_path6.resolve)(process.cwd(), configFile),
-    (0, import_node_path6.resolve)((0, import_node_path6.dirname)(process.execPath), "config", configFile),
-    process.resourcesPath ? (0, import_node_path6.resolve)(process.resourcesPath, "config", configFile) : ""
+    (0, import_node_path9.resolve)(process.cwd(), "config", configFile),
+    (0, import_node_path9.resolve)(process.cwd(), configFile),
+    (0, import_node_path9.resolve)((0, import_node_path9.dirname)(process.execPath), "config", configFile),
+    process.resourcesPath ? (0, import_node_path9.resolve)(process.resourcesPath, "config", configFile) : ""
   ];
   for (const p of possiblePaths) {
-    if (p && (0, import_node_fs7.existsSync)(p)) {
+    if (p && (0, import_node_fs10.existsSync)(p)) {
       console.log(`Found config at: ${p}`);
       return p;
     }

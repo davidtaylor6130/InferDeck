@@ -228,10 +228,10 @@ const App: React.FC = () => {
         toast(formatError(err), 'danger');
       }
     },
-    restartOllama: async () => {
+    restartBackend: async () => {
       try {
-        await requestJson('/services/ollama/restart', { method: 'POST' });
-        toast('Ollama restart requested', 'success');
+        await requestJson('/services/llama-server/restart', { method: 'POST' });
+        toast('llama.cpp restart requested', 'success');
         fetchServices();
       } catch (err) {
         toast(err instanceof Error ? err.message : 'Restart failed', 'danger');
@@ -331,7 +331,7 @@ const App: React.FC = () => {
       lastUpdatedAt={lastUpdatedAt}
       onMode={actions.changeMode}
       onPauseQueue={actions.pauseQueue}
-      onRestartOllama={actions.restartOllama}
+      onRestartBackend={actions.restartBackend}
     >
       {loading ? <Skeleton /> : <Page {...pageProps} />}
       <ToastStack toasts={toasts} />

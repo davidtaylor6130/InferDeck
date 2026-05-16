@@ -9,6 +9,6 @@ export function assertNotSelfProxy(req: FastifyRequest, backendBaseUrl: string):
   const backendHostPort = `${backend.hostname}:${backendPort}`;
 
   if (hostHeader === backendHostPort) {
-    throw new Error(`Ollama backend URL points back at the gateway (${backendBaseUrl})`);
+    throw new Error(`Backend URL points back at the gateway (${backendBaseUrl})`);
   }
 }

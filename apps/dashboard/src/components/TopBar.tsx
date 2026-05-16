@@ -6,12 +6,12 @@ interface TopBarProps {
   onMenu: () => void;
   onMode: (mode: string) => void;
   onPauseQueue: () => void;
-  onRestartOllama: () => void;
+  onRestartBackend: () => void;
   lastUpdatedAt: Date | null;
   connected: boolean;
 }
 
-export const TopBar: React.FC<TopBarProps> = ({ onMenu, onMode, onPauseQueue, onRestartOllama, lastUpdatedAt, connected }) => (
+export const TopBar: React.FC<TopBarProps> = ({ onMenu, onMode, onPauseQueue, onRestartBackend, lastUpdatedAt, connected }) => (
   <header className="border-b border-border-slate bg-void-black/70 px-4 py-5 backdrop-blur xl:px-8">
     <div className="flex min-w-0 flex-col gap-4 2xl:flex-row 2xl:items-center 2xl:justify-between">
       <div className="flex min-w-0 items-start gap-3">
@@ -28,7 +28,7 @@ export const TopBar: React.FC<TopBarProps> = ({ onMenu, onMode, onPauseQueue, on
         <CommandButton tone="orange" onClick={() => onMode('gaming')}>Gaming</CommandButton>
         <CommandButton tone="amber" onClick={() => onMode('maintenance')}>Maint.</CommandButton>
         <CommandButton tone="blue" onClick={onPauseQueue}>Pause Queue</CommandButton>
-        <CommandButton tone="neutral" onClick={onRestartOllama}>Restart Ollama</CommandButton>
+        <CommandButton tone="neutral" onClick={onRestartBackend}>Restart llama.cpp</CommandButton>
         <div className="flex min-w-0 items-center gap-3 pl-1 text-sm text-text-secondary">
           <span className="truncate">Updated {timeAgo(lastUpdatedAt)}</span>
           <span className={`h-3 w-3 shrink-0 rounded-full ${connected ? 'bg-success-green' : 'bg-danger-rose'}`} title={connected ? 'Online' : 'Offline'} />

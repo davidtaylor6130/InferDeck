@@ -2,7 +2,7 @@ import { QueueStore } from "@r9700/gateway-core/QueueStore";
 import { ResourceLockManager } from "@r9700/gateway-core/ResourceLockManager";
 import { Scheduler } from "@r9700/gateway-core/Scheduler";
 import { DatabaseManager } from "./db/database";
-import { OllamaProcessManager } from "./services/OllamaProcessManager";
+import { LlamaServerProcessManager } from "./services/LlamaServerProcessManager";
 import { EventBus } from "./services/EventBus";
 import { HardwareTelemetryService } from "./services/HardwareTelemetry";
 import { LogStore } from "./services/LogStore";
@@ -23,7 +23,7 @@ export class AppContext {
   lockManager: ResourceLockManager;
   scheduler: Scheduler;
   db: DatabaseManager;
-  ollama: OllamaProcessManager;
+  backend: LlamaServerProcessManager;
   events: EventBus;
   logs: LogStore;
   metrics: MetricsStore;
@@ -45,7 +45,7 @@ export class AppContext {
         this.config.modes.startupMode = mode;
       },
     });
-    this.ollama = new OllamaProcessManager(config.ollama);
+    this.backend = new LlamaServerProcessManager(config.backend);
     this.events = new EventBus();
 
     const dbPath = config.database?.path ?? join(process.cwd(), "data", "gateway.sqlite");
@@ -75,7 +75,7 @@ export class AppContext {
 
   async init(): Promise<void> {
     await this.db.init();
-    await this.ollama.start();
+    await this.backend.start();
     await this.managedServices.startEnabled();
     this.hardware.start();
     this.restoreQueueFromDatabase();
@@ -85,7 +85,7 @@ export class AppContext {
   async shutdown(): Promise<void> {
     this.hardware.stop();
     await this.managedServices.stopAll();
-    await this.ollama.stop();
+    await this.backend.stop();
     this.db.close();
   }
 

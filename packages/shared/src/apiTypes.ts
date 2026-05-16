@@ -31,7 +31,7 @@ export interface StatusResponse {
     mode: GatewayMode;
     rejectInteractiveLlm: boolean;
     pauseBackgroundJobs: boolean;
-    unloadOllamaModels: boolean;
+    unloadBackendModels: boolean;
     stopComfyUi: boolean;
   };
   uptimeMs: number;
@@ -202,7 +202,7 @@ export interface ListRunningModelsResponse {
 
 export type ServiceKind =
   | "gateway"
-  | "ollama"
+  | "llama_cpp"
   | "comfyui"
   | "rag"
   | "speech";
@@ -240,15 +240,6 @@ export interface DatabaseConfig {
   walMode: boolean;
 }
 
-export interface OllamaConfig {
-  enabled: boolean;
-  baseUrl: string;
-  manageProcess: boolean;
-  executable: string;
-  healthcheckIntervalMs: number;
-  restartOnFailure: boolean;
-}
-
 export interface SchedulerConfig {
   maxConcurrentGpuHeavyJobs: number;
   maxHiddenInteractiveWaitMs: number;
@@ -263,7 +254,7 @@ export interface ModesConfig {
   gamingMode: {
     rejectInteractiveLlm: boolean;
     pauseBackgroundJobs: boolean;
-    unloadOllamaModels: boolean;
+    unloadBackendModels: boolean;
     stopComfyUi: boolean;
   };
 }
@@ -283,7 +274,7 @@ export interface GatewayConfig {
   server: ServerConfig;
   security: SecurityConfig;
   database: DatabaseConfig;
-  ollama: OllamaConfig;
+  backend: Record<string, unknown>;
   scheduler: SchedulerConfig;
   modes: ModesConfig;
   hardware: HardwareConfig;
@@ -353,29 +344,6 @@ export interface ErrorResponse {
 }
 
 // ─── Proxy Request Types ─────────────────────────────────────────
-
-export interface OllamaChatRequest {
-  model: string;
-  messages?: unknown[];
-  stream?: boolean;
-  options?: Record<string, unknown>;
-  keep_alive?: string | number | null;
-}
-
-export interface OllamaGenerateRequest {
-  model: string;
-  prompt: string;
-  stream?: boolean;
-  options?: Record<string, unknown>;
-  keep_alive?: string | number | null;
-}
-
-export interface OllamaEmbedRequest {
-  model: string;
-  input: string | string[];
-  truncate?: boolean;
-  keep_alive?: string | number | null;
-}
 
 export interface OpenAiChatRequest {
   model: string;

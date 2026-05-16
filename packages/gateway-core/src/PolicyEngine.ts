@@ -15,7 +15,7 @@ interface GamingModeState {
   active: boolean;
   rejectInteractiveLlm: boolean;
   pauseBackgroundJobs: boolean;
-  unloadOllamaModels: boolean;
+  unloadBackendModels: boolean;
   stopComfyUi: boolean;
 }
 
@@ -67,7 +67,7 @@ export class PolicyEngine {
         active: true,
         rejectInteractiveLlm: true,
         pauseBackgroundJobs: true,
-        unloadOllamaModels: true,
+        unloadBackendModels: true,
         stopComfyUi: true,
       });
     } else {
@@ -75,7 +75,7 @@ export class PolicyEngine {
         active: false,
         rejectInteractiveLlm: false,
         pauseBackgroundJobs: false,
-        unloadOllamaModels: false,
+        unloadBackendModels: false,
         stopComfyUi: false,
       });
     }

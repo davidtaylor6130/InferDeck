@@ -3,7 +3,7 @@
 # - server.proxyPort: Ollama-compatible gateway port (default 11434)
 # - database.path: SQLite file location
 # - logging.dir: Log files location
-# - ollama.baseUrl: Real Ollama backend URL
+# - backend.baseUrl: llama.cpp llama-server URL (default 11434)
 #
 # IMPORTANT: Do NOT commit this file with your API key if requiredApiKey is true.
 # Set R9700_GATEWAY_ADMIN_KEY environment variable instead.
@@ -28,11 +28,16 @@ database:
   path: "./data/gateway.sqlite"
   walMode: true
 
-ollama:
+backend:
   enabled: true
-  baseUrl: "http://127.0.0.1:11435"
-  manageProcess: true
-  executable: "C:/Users/YOUR_USER/AppData/Local/Programs/Ollama/ollama.exe"
+  baseUrl: "http://127.0.0.1:11434"
+  managed: true
+  executable: "llama-server"
+  ggufDirectory: "./models"
+  model: null
+  bindHost: "127.0.0.1"
+  bindPort: 11434
+  maxGpuLayers: 999
   healthcheckIntervalMs: 10000
   restartOnFailure: true
 
@@ -49,7 +54,7 @@ modes:
   gamingMode:
     rejectInteractiveLlm: true
     pauseBackgroundJobs: true
-    unloadOllamaModels: true
+    unloadBackendModels: true
     stopComfyUi: true
 
 hardware:

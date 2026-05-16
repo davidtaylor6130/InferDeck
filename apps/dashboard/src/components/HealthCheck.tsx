@@ -25,7 +25,7 @@ interface HealthCheckProps {
       lastCheckpoint: string;
     };
     services?: {
-      ollama?: {
+      llama_cpp?: {
         status: string;
         version: string;
         installed_models: number;
@@ -200,26 +200,26 @@ const HealthCheck: React.FC<HealthCheckProps> = ({ data }) => {
         </div>
       )}
 
-      {data.services && data.services.ollama && (
+      {data.services && data.services.llama_cpp && (
         <div className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow space-y-2">
-          <h3 className="text-gray-700 dark:text-gray-300 font-medium">Ollama Backend</h3>
+          <h3 className="text-gray-700 dark:text-gray-300 font-medium">llama.cpp Backend</h3>
           <div className="flex justify-between text-sm">
             <span className="text-gray-500 dark:text-gray-400">Status</span>
-            <span className={`font-semibold ${getStatusColor(data.services.ollama.status)}`}>
-              {getHealthIcon(data.services.ollama.status)} {getHealthLabel(data.services.ollama.status)}
+            <span className={`font-semibold ${getStatusColor(data.services.llama_cpp.status)}`}>
+              {getHealthIcon(data.services.llama_cpp.status)} {getHealthLabel(data.services.llama_cpp.status)}
             </span>
           </div>
           <div className="flex justify-between text-sm">
             <span className="text-gray-500 dark:text-gray-400">Version</span>
-            <span className="text-gray-700 dark:text-gray-300">{data.services.ollama.version}</span>
+            <span className="text-gray-700 dark:text-gray-300">{data.services.llama_cpp.version}</span>
           </div>
           <div className="flex justify-between text-sm">
             <span className="text-gray-500 dark:text-gray-400">Installed Models</span>
-            <span className="text-gray-700 dark:text-gray-300">{data.services.ollama.installed_models}</span>
+            <span className="text-gray-700 dark:text-gray-300">{data.services.llama_cpp.installed_models}</span>
           </div>
           <div className="flex justify-between text-sm">
             <span className="text-gray-500 dark:text-gray-400">Loaded Models</span>
-            <span className="text-gray-700 dark:text-gray-300">{data.services.ollama.loaded_models}</span>
+            <span className="text-gray-700 dark:text-gray-300">{data.services.llama_cpp.loaded_models}</span>
           </div>
         </div>
       )}

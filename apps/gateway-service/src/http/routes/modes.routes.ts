@@ -12,7 +12,7 @@ export function registerModesRoutes(app: FastifyInstance): void {
             active: true,
             rejectedInteractiveLlm: lockManager.shouldRejectInteractiveLlm(),
             pausedBackgroundJobs: lockManager.shouldPauseBackgroundJobs(),
-            unloadOllamaModels: lockManager.shouldUnloadOllamaModels(),
+            unloadBackendModels: lockManager.shouldUnloadBackendModels(),
           }
         : { active: false },
     });

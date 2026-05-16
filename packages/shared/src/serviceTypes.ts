@@ -1,6 +1,6 @@
 export type ServiceKind =
   | "gateway"
-  | "ollama"
+  | "llama_cpp"
   | "comfyui"
   | "rag"
   | "speech";

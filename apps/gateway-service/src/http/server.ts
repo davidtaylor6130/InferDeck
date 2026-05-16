@@ -1,6 +1,6 @@
 /**
  * HTTP server setup for the gateway service.
- * The dashboard/control app and Ollama-compatible proxy app are separate
+ * The dashboard/control app and OpenAI-compatible proxy app are separate
  * listeners when configured to use different ports.
  */
 
@@ -23,7 +23,7 @@ import { registerModesRoutes } from "./routes/modes.routes";
 import { registerMetricsRoutes } from "./routes/metrics.routes";
 import { registerHardwareRoutes } from "./routes/hardware.routes";
 import { registerLogsRoutes } from "./routes/logs.routes";
-import { registerProxyOllamaRoutes } from "./routes/proxy-ollama.routes";
+import { registerProxyLlamaRoutes } from "./routes/proxy-llama.routes";
 import { registerProxyOpenAIRoutes } from "./routes/proxy-openai.routes";
 import { requestIdPlugin } from "./middleware/requestId";
 import { installAuthHook } from "./middleware/auth";
@@ -111,7 +111,7 @@ export async function createProxyApp(ctx: AppContext): Promise<FastifyInstance> 
 
   registerHealthRoutes(app);
   registerStatusRoutes(app);
-  registerProxyOllamaRoutes(app);
+  registerProxyLlamaRoutes(app);
   registerProxyOpenAIRoutes(app);
 
   return app;
@@ -125,7 +125,7 @@ export async function startServer(ctx: AppContext): Promise<void> {
 
   if (proxyPort === dashboardPort && proxyHost === dashboardHost) {
     const app = await createDashboardApp(ctx);
-    registerProxyOllamaRoutes(app);
+    registerProxyLlamaRoutes(app);
     registerProxyOpenAIRoutes(app);
     await app.listen({ port: proxyPort, host: proxyHost });
     app.log.info(`Gateway + Dashboard listening on http://${proxyHost}:${proxyPort}`);
@@ -144,6 +144,6 @@ export async function startServer(ctx: AppContext): Promise<void> {
 
   proxyApp.log.info(`Gateway proxy API listening on http://${proxyHost}:${proxyPort}`);
   dashboardApp.log.info(`Dashboard control UI listening on http://${dashboardHost}:${dashboardPort}`);
-  proxyApp.log.info(`Ollama: ${ctx.config.ollama.baseUrl}`);
+  proxyApp.log.info(`llama.cpp: ${ctx.config.backend.baseUrl}`);
   proxyApp.log.info(`Mode: ${ctx.config.modes.startupMode}`);
 }
