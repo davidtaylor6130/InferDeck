@@ -3,7 +3,7 @@ import type { JobRecord, ServiceRecord } from './types';
 export const DASHBOARD_URL = 'http://ai.homelab.com:8721';
 export const GATEWAY_API = 'http://ai.homelab.com:11434';
 export const OPENAI_API = 'http://ai.homelab.com:11434/v1';
-export const OLLAMA_BACKEND = 'http://127.0.0.1:11435';
+export const LLAMA_BACKEND = 'http://127.0.0.1:11434';
 
 export function formatBytes(bytes?: number | null): string {
   if (!bytes || bytes <= 0) return 'N/A';
@@ -63,7 +63,7 @@ export function getQueueCounts(statusData: Record<string, any> | null, jobs: Job
 
 export function getServiceName(service: ServiceRecord): string {
   if (service.name) return service.name;
-  if (service.kind === 'ollama') return 'Ollama';
+  if (service.kind === 'llama_cpp') return 'llama.cpp';
   if (service.kind === 'gateway') return 'Gateway';
   return service.kind.replace(/[-_]/g, ' ').replace(/\b\w/g, m => m.toUpperCase());
 }

@@ -8,7 +8,7 @@ import { SectionCard } from '../components/SectionCard';
 import { StatusBadge } from '../components/StatusBadge';
 import { CommandButton } from '../components/CommandButton';
 import { CopyButton } from '../components/CopyButton';
-import { DASHBOARD_URL, GATEWAY_API, OLLAMA_BACKEND, OPENAI_API, formatUptime, getQueueCounts, isOnlineStatus, modeLabel, timeAgo } from '../utils';
+import { DASHBOARD_URL, GATEWAY_API, LLAMA_BACKEND, OPENAI_API, formatUptime, getQueueCounts, isOnlineStatus, modeLabel, timeAgo } from '../utils';
 
 export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const queue = getQueueCounts(state.statusData, state.jobsList);
@@ -19,7 +19,6 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const onlineServices = state.servicesList.filter(service => isOnlineStatus(service.status)).length;
   const activeModel = state.modelsList[0]?.name || 'N/A';
   const services = normalizeServices(state.servicesList, state.connected);
-  const ollamaService = services.find(s => s.kind === 'ollama');
   const telemetry = state.statusData?.hardware || state.statusData?.telemetry;
   const samples = Array.isArray(state.statusData?.metricsSamples) ? state.statusData.metricsSamples : [];
   const gpu = telemetry?.gpu;
@@ -32,7 +31,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
           <StatusBlock label="Overall Health" value={healthStatus === 'healthy' ? 'Healthy' : healthStatus === 'degraded' ? 'Degraded' : 'Offline'} tone={healthStatus} detail={healthStatus === 'healthy' ? 'Everything operating normally' : degradedReason} />
           <StatusBlock label="Current Mode" value={modeLabel(currentMode)} tone={currentMode} detail="Background jobs allowed" />
           <StatusBlock label="Gateway Uptime" value={formatUptime(state.healthData?.uptime)} detail="Since last service start" />
-          <StatusBlock label="Ollama Status" value={ollamaService && isOnlineStatus(ollamaService.status) ? 'Online' : state.connected ? 'Unknown' : 'Offline'} tone={ollamaService && isOnlineStatus(ollamaService.status) ? 'online' : state.connected ? 'degraded' : 'offline'} detail="127.0.0.1:11435" />
+          <StatusBlock label="llama.cpp Status" value={state.connected && state.servicesList.find(s => s.kind === 'llama_cpp') ? (isOnlineStatus(state.servicesList.find(s => s.kind === 'llama_cpp')!.status) ? 'Online' : 'Unknown') : 'Offline'} tone={state.connected ? (state.servicesList.find(s => s.kind === 'llama_cpp') && isOnlineStatus(state.servicesList.find(s => s.kind === 'llama_cpp')!.status) ? 'online' : 'degraded') : 'offline'} detail="127.0.0.1:11434" />
           <StatusBlock label="Queue Status" value={`${queue.queued} queued`} detail={`${queue.running} running • ${queue.paused} paused`} />
           <StatusBlock label="GPU Lock" value={queue.gpuLocked ? 'Locked' : 'Free'} tone={queue.gpuLocked ? 'locked' : 'free'} detail={queue.lockOwner || 'No active workload'} />
           <StatusBlock label="Last Heartbeat" value={timeAgo(state.lastUpdatedAt)} detail={state.connected ? 'All systems responsive' : 'Waiting for gateway'} />
@@ -41,7 +40,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
           <p className="mb-2 text-sm text-text-secondary">Quick Actions</p>
           <div className="flex flex-wrap gap-3">
             <CommandButton onClick={actions.unloadModels}>Unload Models</CommandButton>
-            <CommandButton tone="blue" onClick={actions.restartOllama}>Restart Ollama</CommandButton>
+            <CommandButton tone="blue" onClick={actions.restartBackend}>Restart llama.cpp</CommandButton>
             <CommandButton tone="amber" onClick={actions.pauseQueue}>Pause Queue</CommandButton>
             <CommandButton tone="violet" onClick={() => window.location.hash = '#queue'}>Open Full Queue</CommandButton>
           </div>
@@ -61,8 +60,8 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
           { label: 'Temp', value: gpu?.temperature != null ? `${gpu.temperature}°C` : 'N/A' },
           { label: 'Lock Owner', value: queue.lockOwner || '—' },
         ]} />
-        <MetricCard title="Ollama" icon="⬡" lines={[
-          { label: 'Status', value: ollamaService && isOnlineStatus(ollamaService.status) ? 'Online' : state.connected ? 'Unknown' : 'Offline', tone: ollamaService && isOnlineStatus(ollamaService.status) ? 'green' : 'amber' },
+        <MetricCard title="llama.cpp" icon="⬡" lines={[
+          { label: 'Status', value: state.connected ? 'Online' : 'Offline', tone: state.connected ? 'green' : 'amber' },
           { label: 'Loaded', value: state.modelsList.length ? Math.min(state.modelsList.length, 1) : 'N/A' },
           { label: 'Installed', value: state.modelsList.length || 'N/A' },
           { label: 'Active', value: <span className="font-mono text-[11px]" title={activeModel}>{activeModel}</span> },
@@ -81,7 +80,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
           { label: 'Dashboard', value: <NetworkValue value={DASHBOARD_URL} onCopied={actions.toast} /> },
           { label: 'Gateway', value: <NetworkValue value={GATEWAY_API} onCopied={actions.toast} /> },
           { label: 'OpenAI', value: <NetworkValue value={OPENAI_API} onCopied={actions.toast} /> },
-          { label: 'Backend', value: <NetworkValue value={OLLAMA_BACKEND} onCopied={actions.toast} /> },
+          { label: 'Backend', value: <NetworkValue value={LLAMA_BACKEND} onCopied={actions.toast} /> },
         ]} />
       </div>
 
@@ -114,7 +113,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
 
         <SectionCard title="Loaded Models" action={<CommandButton onClick={() => window.location.hash = '#models'}>View all</CommandButton>}>
           <ModelTable models={state.modelsList.slice(0, 3)} loadedNames={state.runningModels.map(m => m.name)} onLoad={actions.loadModel} onUnload={actions.unloadModel} onCopied={actions.toast} />
-          {state.modelsList.length === 0 && <EmptyState title="No models reported by Ollama." description="Installed models will appear here after the backend responds." />}
+          {state.modelsList.length === 0 && <EmptyState title="No GGUF models found." description="Place .gguf files in the models directory or check the llama.cpp backend connection at 127.0.0.1:11434." />}
         </SectionCard>
       </div>
 
@@ -178,7 +177,7 @@ const Strip: React.FC<{ label: string; value: string; mono?: boolean }> = ({ lab
 function normalizeServices(services: ServiceRecord[], connected: boolean): ServiceRecord[] {
   const fallback: ServiceRecord[] = [
     { id: 'gateway', name: 'Gateway', kind: 'gateway', status: connected ? 'running' : 'offline', baseUrl: DASHBOARD_URL, lastHealthcheckAt: connected ? new Date().toISOString() : null },
-    { id: 'ollama', name: 'Ollama', kind: 'ollama', status: 'unknown', baseUrl: OLLAMA_BACKEND, lastHealthcheckAt: null },
+    { id: 'llama-server', name: 'llama.cpp', kind: 'llama_cpp', status: 'unknown', baseUrl: LLAMA_BACKEND, lastHealthcheckAt: null },
     { id: 'comfyui', name: 'ComfyUI', kind: 'comfyui', status: 'not_configured', baseUrl: '127.0.0.1:8188' },
     { id: 'rag-worker', name: 'RAG Worker', kind: 'rag-worker', status: 'not_configured' },
     { id: 'speech', name: 'Speech', kind: 'speech', status: 'not_configured' },

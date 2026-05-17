@@ -18,7 +18,7 @@ interface GamingModeState {
   active: boolean;
   rejectInteractiveLlm: boolean;
   pauseBackgroundJobs: boolean;
-  unloadOllamaModels: boolean;
+  unloadBackendModels: boolean;
   stopComfyUi: boolean;
 }
 
@@ -30,7 +30,7 @@ export class ResourceLockManager {
     active: false,
     rejectInteractiveLlm: true,
     pauseBackgroundJobs: true,
-    unloadOllamaModels: true,
+    unloadBackendModels: true,
     stopComfyUi: false,
   };
   onGamingModeChange?: (active: boolean) => void;
@@ -143,8 +143,8 @@ export class ResourceLockManager {
     return this.gamingMode.active && this.gamingMode.pauseBackgroundJobs;
   }
 
-  shouldUnloadOllamaModels(): boolean {
-    return this.gamingMode.active && this.gamingMode.unloadOllamaModels;
+  shouldUnloadBackendModels(): boolean {
+    return this.gamingMode.active && this.gamingMode.unloadBackendModels;
   }
 
   release(jobId: string): boolean {

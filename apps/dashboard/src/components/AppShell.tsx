@@ -12,10 +12,10 @@ interface AppShellProps {
   lastUpdatedAt: Date | null;
   onMode: (mode: string) => void;
   onPauseQueue: () => void;
-  onRestartOllama: () => void;
+  onRestartBackend: () => void;
 }
 
-export const AppShell: React.FC<AppShellProps> = ({ activePage, onNavigate, children, version, connected, lastUpdatedAt, onMode, onPauseQueue, onRestartOllama }) => {
+export const AppShell: React.FC<AppShellProps> = ({ activePage, onNavigate, children, version, connected, lastUpdatedAt, onMode, onPauseQueue, onRestartBackend }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -37,7 +37,7 @@ export const AppShell: React.FC<AppShellProps> = ({ activePage, onNavigate, chil
             onMenu={() => setMobileOpen(true)}
             onMode={onMode}
             onPauseQueue={onPauseQueue}
-            onRestartOllama={onRestartOllama}
+            onRestartBackend={onRestartBackend}
             lastUpdatedAt={lastUpdatedAt}
             connected={connected}
           />

@@ -5,7 +5,7 @@ export function registerStatusRoutes(app: FastifyInstance): void {
     const ctx = (app as any).ctx();
     const queueSnapshot = ctx.queueStore.getSnapshot();
     const schedulerMode = ctx.scheduler.getMode();
-    const ollama = ctx.ollama.getSnapshot();
+    const backend = ctx.backend.getSnapshot();
     const services = [
       {
         id: "gateway",
@@ -20,14 +20,14 @@ export function registerStatusRoutes(app: FastifyInstance): void {
         lastError: null,
         updatedAt: new Date().toISOString(),
       },
-      ollama,
+      backend,
       ...ctx.managedServices.list(),
     ];
     const hardware = ctx.hardware.getSnapshot();
     const logs = ctx.logs.stats();
     const activeJob = ctx.queueStore.getLeased()[0] ?? null;
     return reply.send({
-      health: ollama.status === "running" ? "healthy" : "degraded",
+      health: backend.status === "running" ? "healthy" : "degraded",
       mode: {
         mode: schedulerMode,
         gamingMode: ctx.lockManager.isGamingModeActive() ? { active: true } : { active: false },
@@ -54,7 +54,7 @@ export function registerStatusRoutes(app: FastifyInstance): void {
       config: {
         dashboard: `${ctx.config.server.publicBaseUrl}`,
         proxy: `${ctx.config.server.proxyHost}:${ctx.config.server.proxyPort}`,
-        ollama: ctx.config.ollama.baseUrl,
+        backend: ctx.config.backend.baseUrl,
       },
       services,
     });

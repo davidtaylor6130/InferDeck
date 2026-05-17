@@ -1,0 +1,79 @@
+# Cleanup Sweep — Pre-Public Tasks
+
+## Critical (must fix before sharing publicly)
+
+### 1. No LICENSE file
+- **Impact:** Repo is effectively all-rights-reserved without one
+- **Fix:** Add a LICENSE file (MIT recommended based on package.json references)
+
+### 2. Tracked build artifacts in git
+- **Files committed:**
+  - `apps/gateway-service/dist-bundle/` (compiled bundle + source map with full source code)
+  - `apps/gateway-service/data/gateway.sqlite*`
+  - `apps/gateway-service/data/logs/gateway.log`
+  - `apps/gateway-service/release/` (release artifacts with SQLite DB, logs, bundled code)
+  - `apps/gateway-service/public/dashboard/` (bundled dashboard assets)
+- **Fix:** Unstage from git, add to `.gitignore`
+
+### 3. Hardcoded dashboard URLs
+- **File:** `apps/dashboard/src/utils.ts:3-6`
+- **Issue:** URLs hardcode `http://ai.homelab.com:8721` — breaks on other machines
+- **Fix:** Replace with `window.location.origin` or make config-driven
+
+### 4. README references non-existent packages
+- **File:** `README.md:20`
+- **Issue:** References `packages/backend-ollama` which doesn't exist (only `packages/backend-llama`)
+- **Issue:** References "Ollama" throughout but codebase switched to llama.cpp backend
+- **Fix:** Update all Ollama references to llama.cpp, fix package names
+
+## High Priority
+
+### 5. Issue tracker documents known bugs
+- **File:** `docs/issue-tracker.md`
+- **Issue:** 10 bugs/limitations listed — should be private or fixed before going public
+- **Fix:** Move to private tracker, or resolve and remove the file
+
+### 6. Architecture docs still reference Ollama
+- **File:** `docs/architecture.md`
+- **Issue:** Diagram and text reference "Ollama" as backend throughout
+- **Fix:** Update to reflect llama.cpp (`packages/backend-llama`)
+
+### 7. Sidebar icons render as empty squares
+- **File:** `apps/dashboard/src/components/Sidebar.tsx:62`
+- **Code:** `<span className="h-5 w-5 shrink-0 rounded border border-current" />`
+- **Fix:** Add real icons (inline SVG or icon library)
+
+### 8. pnpm-lock.yaml incorrectly ignored
+- **File:** `.gitignore:4`
+- **Issue:** Lockfile is ignored but required for `pnpm` workspaces to function
+- **Fix:** Remove `pnpm-lock.yaml` from `.gitignore`
+
+## Medium Priority
+
+### 9. .env.example doesn't match README docs
+- **Issue:** `.env.example` uses `LLAMA_HOST`/`LLAMA_GGUF_DIR` but README documents `OLLAMA_HOST`/`OLLAMA_MAX_QUEUE`
+- **Fix:** Unify to reflect the actual llama.cpp backend
+
+### 10. Version number mismatch
+- **Files:** `CHANGELOG.MD` (claims `1.0.0`) vs `package.json` (says `0.1.0`)
+- **Fix:** Align to `0.1.0` across all files
+
+### 11. Inconsistent project naming
+- **Issue:** `package.json` = `r9700-ai-gateway`, README = `r9700 AI Gateway`, repo = `InferDeck`, IDE = `R9700-AI-Gateway`
+- **Fix:** Canonical name = `InferDeck`, keep `r9700 AI Gateway` as subtitle/description
+
+### 12. Empty .gitattributes file
+- **File:** `.gitattributes`
+- **Fix:** Add `eol=lf` for cross-platform consistency
+
+## Nice to Have
+
+### 13. No CONTRIBUTING.md
+- **Fix:** Add brief guide for contributors (dev setup, test commands, branch naming)
+
+### 14. No GitHub issue/PR templates
+- **Fix:** Add `.github/ISSUE_TEMPLATE/` and `.github/PULL_REQUEST_TEMPLATE/`
+
+### 15. Stale entries in .gitignore
+- **Issue:** `.gitignore:31` references `data/test-gateway.sqlite` which doesn't exist in repo
+- **Fix:** Clean up stale ignore entries

@@ -3,7 +3,7 @@ import type { FastifyInstance } from "fastify";
 export function registerServicesRoutes(app: FastifyInstance): void {
   app.get("/services", async (_req, reply) => {
     const ctx = (app as any).ctx();
-    const ollama = ctx.ollama.getSnapshot();
+    const backend = ctx.backend.getSnapshot();
     const services = [
       {
         id: "gateway",
@@ -18,22 +18,22 @@ export function registerServicesRoutes(app: FastifyInstance): void {
         lastError: null,
         updatedAt: new Date().toISOString(),
       },
-      ollama,
+      backend,
       ...ctx.managedServices.list(),
     ];
 
     return reply.send({
       services,
-      healthyCount: services.filter((service) => service.status === "running").length,
-      unhealthyCount: services.filter((service) => service.status !== "running").length,
+      healthyCount: services.filter((s) => s.status === "running").length,
+      unhealthyCount: services.filter((s) => s.status !== "running").length,
     });
   });
 
-  app.get("/services/ollama/health", async (_req, reply) => {
+  app.get("/services/llama-server/health", async (_req, reply) => {
     const ctx = (app as any).ctx();
-    const health = await ctx.ollama.checkHealth();
+    const health = await ctx.backend.checkHealth();
     return reply.send({
-      service: ctx.ollama.getSnapshot(),
+      service: ctx.backend.getSnapshot(),
       healthy: health.healthy,
       lastCheck: new Date().toISOString(),
       latencyMs: health.latencyMs,
@@ -41,25 +41,25 @@ export function registerServicesRoutes(app: FastifyInstance): void {
     });
   });
 
-  app.post("/services/ollama/restart", async (_req, reply) => {
+  app.post("/services/llama-server/restart", async (_req, reply) => {
     const ctx = (app as any).ctx();
-    if (!ctx.config.ollama.manageProcess || !ctx.ollama.isManaged) {
+    if (!ctx.config.backend.managed || !ctx.backend.isManaged) {
       return reply.status(409).send({
-        error: "Ollama is external or not managed by this gateway.",
-        service: ctx.ollama.getSnapshot(),
+        error: "llama.cpp is external or not managed by this gateway.",
+        service: ctx.backend.getSnapshot(),
       });
     }
-    const service = await ctx.ollama.restart();
-    ctx.events.emit("service:health", service);
-    return reply.send({ restarted: true, service });
+    const snap = await ctx.backend.restart();
+    ctx.events.emit("service:health", snap);
+    return reply.send({ restarted: true, service: snap });
   });
 
   app.post("/services/:id/start", async (req, reply) => {
     const ctx = (app as any).ctx();
     const id = (req.params as { id: string }).id;
-    if (id === "ollama") {
-      await ctx.ollama.start();
-      return reply.send({ started: true, service: ctx.ollama.getSnapshot() });
+    if (id === "llama-server") {
+      await ctx.backend.start();
+      return reply.send({ started: true, service: ctx.backend.getSnapshot() });
     }
     const service = ctx.managedServices.get(id);
     if (!service) return reply.status(404).send({ error: "Service not found" });
@@ -69,9 +69,9 @@ export function registerServicesRoutes(app: FastifyInstance): void {
   app.post("/services/:id/stop", async (req, reply) => {
     const ctx = (app as any).ctx();
     const id = (req.params as { id: string }).id;
-    if (id === "ollama") {
-      await ctx.ollama.stop();
-      return reply.send({ stopped: true, service: ctx.ollama.getSnapshot() });
+    if (id === "llama-server") {
+      await ctx.backend.stop();
+      return reply.send({ stopped: true, service: ctx.backend.getSnapshot() });
     }
     const service = ctx.managedServices.get(id);
     if (!service) return reply.status(404).send({ error: "Service not found" });
@@ -81,9 +81,9 @@ export function registerServicesRoutes(app: FastifyInstance): void {
   app.post("/services/:id/restart", async (req, reply) => {
     const ctx = (app as any).ctx();
     const id = (req.params as { id: string }).id;
-    if (id === "ollama") {
-      const service = await ctx.ollama.restart();
-      return reply.send({ restarted: true, service });
+    if (id === "llama-server") {
+      const snap = await ctx.backend.restart();
+      return reply.send({ restarted: true, service: snap });
     }
     const service = ctx.managedServices.get(id);
     if (!service) return reply.status(404).send({ error: "Service not found" });
@@ -93,9 +93,9 @@ export function registerServicesRoutes(app: FastifyInstance): void {
   app.get("/services/:id/health", async (req, reply) => {
     const ctx = (app as any).ctx();
     const id = (req.params as { id: string }).id;
-    if (id === "ollama") {
-      const health = await ctx.ollama.checkHealth();
-      return reply.send({ service: ctx.ollama.getSnapshot(), healthy: health.healthy, lastCheck: new Date().toISOString(), latencyMs: health.latencyMs, error: health.error });
+    if (id === "llama-server") {
+      const health = await ctx.backend.checkHealth();
+      return reply.send({ service: ctx.backend.getSnapshot(), healthy: health.healthy, lastCheck: new Date().toISOString(), latencyMs: health.latencyMs, error: health.error });
     }
     const service = ctx.managedServices.get(id);
     if (!service) return reply.status(404).send({ error: "Service not found" });

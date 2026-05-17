@@ -18,11 +18,16 @@ database:
   path: "./data/gateway.sqlite"
   walMode: true
 
-ollama:
+backend:
   enabled: true
-  baseUrl: "http://127.0.0.1:11435"
-  manageProcess: true
-  executable: "ollama"
+  baseUrl: "http://127.0.0.1:11434"
+  managed: true
+  executable: "llama-server"
+  ggufDirectory: "./models"
+  model: null
+  bindHost: "127.0.0.1"
+  bindPort: 11434
+  maxGpuLayers: 999
   healthcheckIntervalMs: 10000
   restartOnFailure: true
 
@@ -39,7 +44,7 @@ modes:
   gamingMode:
     rejectInteractiveLlm: true
     pauseBackgroundJobs: true
-    unloadOllamaModels: true
+    unloadBackendModels: true
     stopComfyUi: true
 
 hardware:

@@ -17,7 +17,7 @@
   "dependencies": {
     "@fastify/cors": "^9.0.0",
     "@fastify/static": "^7.0.0",
-    "@r9700/backend-ollama": "workspace:*",
+    "@r9700/backend-llama": "workspace:*",
     "@r9700/gateway-core": "workspace:*",
     "@r9700/shared": "workspace:*",
     "sql.js": "^1.11.0",

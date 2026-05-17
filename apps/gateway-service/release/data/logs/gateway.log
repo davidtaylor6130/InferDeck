@@ -1,0 +1,135 @@
+{"timestamp":"2026-05-17T14:33:22.247Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T14:33:42.381Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779028422378-iiqq98r9fbq","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:33:42.389Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779028422386-w5x2x1mp5xe","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:34:02.482Z","level":"error","service":"scheduler","message":"Job failed","jobId":"job-1779028422378-iiqq98r9fbq","data":{"error":"llama.cpp returned 429: {\"statusCode\":429,\"error\":\"Too Many Requests\",\"message\":\"Timed out waiting for GPU lease\"}"}}
+{"timestamp":"2026-05-17T14:35:10.394Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779028510392-r5dfdt2mxq9","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:35:10.400Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779028510398-mz1kf29yos","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:35:30.525Z","level":"error","service":"scheduler","message":"Job failed","jobId":"job-1779028510392-r5dfdt2mxq9","data":{"error":"llama.cpp returned 429: {\"statusCode\":429,\"error\":\"Too Many Requests\",\"message\":\"Timed out waiting for GPU lease\"}"}}
+{"timestamp":"2026-05-17T14:38:21.747Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T14:38:58.501Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779028738498-mqy7oqv25i","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:38:58.509Z","level":"error","service":"scheduler","message":"Job failed","jobId":"job-1779028738498-mqy7oqv25i","data":{"error":"fetch failed"}}
+{"timestamp":"2026-05-17T14:40:21.390Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779028821388-p81y0g34fz","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:40:21.399Z","level":"error","service":"scheduler","message":"Job failed","jobId":"job-1779028821388-p81y0g34fz","data":{"error":"fetch failed"}}
+{"timestamp":"2026-05-17T14:42:54.249Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T14:43:27.043Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T14:44:55.395Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T14:45:34.947Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T14:46:06.348Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779029166345-jec0i53qztb","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:46:07.752Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779029166345-jec0i53qztb","data":{"responseBytes":647}}
+{"timestamp":"2026-05-17T14:46:16.192Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779029176189-pi1nw26lp3s","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:46:16.239Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779029176189-pi1nw26lp3s","data":{"responseBytes":639}}
+{"timestamp":"2026-05-17T14:46:21.354Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779029181352-7gk9dfxjxos","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:46:21.402Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779029181352-7gk9dfxjxos","data":{"streamed":true}}
+{"timestamp":"2026-05-17T14:47:28.244Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T14:47:41.278Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779029261275-7n9dkmd46h2","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:47:42.751Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779029261275-7n9dkmd46h2","data":{"streamed":true}}
+{"timestamp":"2026-05-17T14:47:57.727Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779029277724-godumasuy5t","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:47:58.401Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779029277724-godumasuy5t","data":{"streamed":true}}
+{"timestamp":"2026-05-17T14:52:32.281Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T14:53:18.033Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779029598029-17mx7thintp","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:53:18.142Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779029598029-17mx7thintp","data":{"responseBytes":656}}
+{"timestamp":"2026-05-17T14:53:22.089Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779029602086-osdccis5x7e","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:53:22.140Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779029602086-osdccis5x7e","data":{"streamed":true}}
+{"timestamp":"2026-05-17T14:54:30.971Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T14:55:07.874Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779029707871-e73t7bumm9","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T14:55:07.967Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779029707871-e73t7bumm9","data":{"streamed":true}}
+{"timestamp":"2026-05-17T14:58:11.542Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T15:07:59.728Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T15:14:04.272Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T15:16:13.904Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T15:16:49.204Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031009202-pah9mqzgwz9","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:16:49.355Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031009202-pah9mqzgwz9","data":{"responseBytes":695}}
+{"timestamp":"2026-05-17T15:17:05.452Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031025449-hdk5f28pc5c","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:17:05.597Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031025449-hdk5f28pc5c","data":{"responseBytes":692}}
+{"timestamp":"2026-05-17T15:20:07.647Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031207644-zw9l6oasmyp","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:20:07.764Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031207644-zw9l6oasmyp","data":{"responseBytes":655}}
+{"timestamp":"2026-05-17T15:22:30.583Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T15:23:30.197Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031410122-jrr3p8sn2wa","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:23:30.450Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031410122-jrr3p8sn2wa","data":{"responseBytes":680}}
+{"timestamp":"2026-05-17T15:23:49.776Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031429773-58ihta4gqrh","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:23:49.929Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031429773-58ihta4gqrh","data":{"streamed":true}}
+{"timestamp":"2026-05-17T15:24:08.701Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031448698-74ww9c31o6","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:24:08.818Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031448698-74ww9c31o6","data":{"responseBytes":681}}
+{"timestamp":"2026-05-17T15:24:46.556Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031486553-ymohomyjhf","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:24:46.644Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031486553-ymohomyjhf","data":{"responseBytes":642}}
+{"timestamp":"2026-05-17T15:26:45.140Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T15:27:13.564Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031633561-350rkzfhqx1","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:27:14.252Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031633561-350rkzfhqx1","data":{"streamed":true}}
+{"timestamp":"2026-05-17T15:27:24.476Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031644472-q21n169c12","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:27:24.845Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031644472-q21n169c12","data":{"responseBytes":857}}
+{"timestamp":"2026-05-17T15:27:35.511Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031655508-nclucg7i5rp","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:27:35.732Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031655508-nclucg7i5rp","data":{"responseBytes":768}}
+{"timestamp":"2026-05-17T15:28:12.304Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031692301-d9isghvqzqh","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:28:13.814Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031692301-d9isghvqzqh","data":{"streamed":true}}
+{"timestamp":"2026-05-17T15:28:34.565Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031714563-x16bv79aunm","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:28:34.818Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031714815-myhuqbrhc7n","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:28:36.000Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031714563-x16bv79aunm","data":{"streamed":true}}
+{"timestamp":"2026-05-17T15:28:37.366Z","level":"error","service":"scheduler","message":"Job failed","jobId":"job-1779031714815-myhuqbrhc7n","data":{"error":"fetch failed"}}
+{"timestamp":"2026-05-17T15:28:46.244Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779031726241-o1oo6a2j7hp","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:28:47.239Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779031726241-o1oo6a2j7hp","data":{"responseBytes":912}}
+{"timestamp":"2026-05-17T15:34:44.220Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T15:36:10.371Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779032170368-v5y0g4ps697","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:36:10.465Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779032170368-v5y0g4ps697","data":{"responseBytes":656}}
+{"timestamp":"2026-05-17T15:36:27.289Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779032187286-ooniv00z3wo","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:36:27.488Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779032187286-ooniv00z3wo","data":{"responseBytes":741}}
+{"timestamp":"2026-05-17T15:36:44.718Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779032204716-y5hmvpmn9b9","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:36:44.838Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779032204716-y5hmvpmn9b9","data":{"responseBytes":655}}
+{"timestamp":"2026-05-17T15:36:56.952Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779032216949-j5ynwko6zjk","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:36:57.070Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779032216949-j5ynwko6zjk","data":{"responseBytes":654}}
+{"timestamp":"2026-05-17T15:37:14.573Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779032234570-7rmmeg9kbz2","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:37:14.701Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779032234570-7rmmeg9kbz2","data":{"responseBytes":681}}
+{"timestamp":"2026-05-17T15:37:24.827Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779032244824-httpxc24kkq","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:37:24.955Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779032244824-httpxc24kkq","data":{"responseBytes":670}}
+{"timestamp":"2026-05-17T15:40:51.537Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779032451534-k4wzsb3gtjn","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:40:53.253Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779032451534-k4wzsb3gtjn","data":{"streamed":true}}
+{"timestamp":"2026-05-17T15:41:03.580Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779032463577-zv2w7xvc43p","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T15:41:04.259Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779032463577-zv2w7xvc43p","data":{"responseBytes":932}}
+{"timestamp":"2026-05-17T15:43:55.397Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T16:01:22.360Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T16:02:00.788Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T16:03:15.352Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779033795348-6eishrdsf9v","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:03:15.499Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779033795348-6eishrdsf9v","data":{"responseBytes":656}}
+{"timestamp":"2026-05-17T16:03:25.785Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779033805782-hkho1z4wwzl","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:03:25.940Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779033805782-hkho1z4wwzl","data":{"responseBytes":689}}
+{"timestamp":"2026-05-17T16:04:08.202Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779033848200-n0umqt0tk7j","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:04:08.356Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779033848200-n0umqt0tk7j","data":{"responseBytes":691}}
+{"timestamp":"2026-05-17T16:04:18.644Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779033858641-zyeoaqeygqr","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:04:18.810Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779033858641-zyeoaqeygqr","data":{"responseBytes":693}}
+{"timestamp":"2026-05-17T16:04:50.524Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779033890521-8uzm5iha5g5","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:04:52.320Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779033890521-8uzm5iha5g5","data":{"streamed":true}}
+{"timestamp":"2026-05-17T16:05:03.143Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779033903139-i0q6b9y5pgs","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:05:03.800Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779033903139-i0q6b9y5pgs","data":{"responseBytes":937}}
+{"timestamp":"2026-05-17T16:08:08.338Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779034088335-26jlqygvowl","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:08:10.062Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779034088335-26jlqygvowl","data":{"streamed":true}}
+{"timestamp":"2026-05-17T16:08:21.993Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779034101991-ng3anxhbwl","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:08:22.620Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779034101991-ng3anxhbwl","data":{"responseBytes":915}}
+{"timestamp":"2026-05-17T16:18:45.179Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779034725177-s6b7iuulf","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:18:47.030Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779034725177-s6b7iuulf","data":{"streamed":true}}
+{"timestamp":"2026-05-17T16:18:57.496Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779034737494-r1rs4jmf21d","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:18:58.153Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779034737494-r1rs4jmf21d","data":{"responseBytes":925}}
+{"timestamp":"2026-05-17T16:19:31.340Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779034771338-wknmarsjoh","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:19:33.443Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779034771338-wknmarsjoh","data":{"streamed":true}}
+{"timestamp":"2026-05-17T16:19:43.887Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779034783884-k3ekig29izp","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:19:44.599Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779034783884-k3ekig29izp","data":{"responseBytes":1023}}
+{"timestamp":"2026-05-17T16:23:10.077Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T16:24:09.468Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779035049465-iocux2biges","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:24:11.741Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779035049465-iocux2biges","data":{"streamed":true}}
+{"timestamp":"2026-05-17T16:24:22.968Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779035062964-gztndfnhyf5","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:24:23.566Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779035062964-gztndfnhyf5","data":{"responseBytes":881}}
+{"timestamp":"2026-05-17T16:31:08.373Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T16:32:28.928Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779035548924-lb52n1p8jg","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:32:44.275Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779035548924-lb52n1p8jg","data":{"streamed":true}}
+{"timestamp":"2026-05-17T16:32:45.027Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779035565023-zhdw3lz9ywq","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:32:55.290Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779035565023-zhdw3lz9ywq","data":{"responseBytes":7458}}
+{"timestamp":"2026-05-17T16:33:41.168Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779035621166-mqhoyxoamfg","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:33:55.654Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779035621166-mqhoyxoamfg","data":{"streamed":true}}
+{"timestamp":"2026-05-17T16:33:55.882Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779035635879-7p8s50aa7gx","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:34:13.035Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779035635879-7p8s50aa7gx","data":{"responseBytes":12139}}
+{"timestamp":"2026-05-17T16:35:35.233Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779035735229-75qxvy3xud","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:35:47.949Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779035735229-75qxvy3xud","data":{"streamed":true}}
+{"timestamp":"2026-05-17T16:35:48.104Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779035748098-ggxezl2d84r","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:35:51.423Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779035748098-ggxezl2d84r","data":{"responseBytes":2378}}
+{"timestamp":"2026-05-17T16:36:36.839Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779035796837-sqerjaco20m","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:36:45.140Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779035796837-sqerjaco20m","data":{"streamed":true}}
+{"timestamp":"2026-05-17T16:36:45.606Z","level":"info","service":"scheduler","message":"Job queued","jobId":"job-1779035805600-5s3jw9w9lw","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T16:36:47.782Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"job-1779035805600-5s3jw9w9lw","data":{"responseBytes":1629}}

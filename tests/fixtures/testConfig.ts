@@ -1,8 +1,14 @@
 /**
- * Integration test fixtures for the gateway service
+ * Test setup and fixtures
  */
 
+import { beforeAll } from "vitest";
 import type { GatewayConfig } from "../../apps/gateway-service/src/config/schema";
+
+beforeAll(() => {
+  // QueueStore uses no external dependencies or environment variables,
+  // so no global mocks are required.
+});
 
 // Test configuration
 export const testConfig: GatewayConfig = {
@@ -22,12 +28,17 @@ export const testConfig: GatewayConfig = {
     path: "./data/test-gateway.sqlite",
     walMode: true,
   },
-  ollama: {
+  backend: {
     enabled: true,
-    baseUrl: "http://127.0.0.1:11436",
-    manageProcess: false,
+    baseUrl: "http://127.0.0.1:11434",
+    managed: false,
     executable: "",
-    healthcheckIntervalMs: 1000,
+    ggufDirectory: "./models",
+    model: null,
+    bindHost: "127.0.0.1",
+    bindPort: 11434,
+    maxGpuLayers: 999,
+    healthcheckIntervalMs: 10000,
     restartOnFailure: false,
   },
   scheduler: {
@@ -43,7 +54,7 @@ export const testConfig: GatewayConfig = {
     gamingMode: {
       rejectInteractiveLlm: true,
       pauseBackgroundJobs: true,
-      unloadOllamaModels: true,
+      unloadBackendModels: true,
       stopComfyUi: true,
     },
   },

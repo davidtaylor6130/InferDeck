@@ -72,7 +72,7 @@ export interface DashboardActions {
   cancelJob: (jobId: string) => Promise<void>;
   retryJob: (jobId: string) => Promise<void>;
   reprioritizeJob: (jobId: string, priority: number) => Promise<void>;
-  restartOllama: () => Promise<void>;
+  restartBackend: () => Promise<void>;
   startService: (id: string) => Promise<void>;
   stopService: (id: string) => Promise<void>;
   restartService: (id: string) => Promise<void>;
