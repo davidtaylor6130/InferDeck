@@ -136,7 +136,14 @@ export class LlamaServerProcessManager {
       throw new Error(`Model "${modelName}" not found in ${this.config.ggufDirectory}`);
     }
 
+    // same model already running → skip
     if (this.currentModel === target.name && this.child) return;
+
+    // same model but process died → just restart
+    if (this.currentModel === target.name) {
+      await this.spawnProcess();
+      return;
+    }
 
     this.currentModel = target.name;
     if (this.child) {
