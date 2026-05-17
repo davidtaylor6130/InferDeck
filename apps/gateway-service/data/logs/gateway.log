@@ -124,3 +124,14 @@
 {"timestamp":"2026-05-17T22:00:13.613Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"0f2a20c4-80af-4a19-a776-122b1cfa3c3d","data":{"streamed":true}}
 {"timestamp":"2026-05-17T22:00:14.504Z","level":"info","service":"scheduler","message":"Job queued","jobId":"7af3f72e-8352-4520-adce-32f3957f06f8","data":{"resourceClass":"gpu_llm"}}
 {"timestamp":"2026-05-17T22:00:16.885Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"7af3f72e-8352-4520-adce-32f3957f06f8","data":{"responseBytes":1834}}
+{"timestamp":"2026-05-17T22:07:46.231Z","level":"info","service":"gateway","message":"InferDeck gateway initialized","jobId":null}
+{"timestamp":"2026-05-17T22:08:26.659Z","level":"info","service":"scheduler","message":"Job queued","jobId":"9d2160ef-1fc6-455d-a417-1a9aed4de413","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T22:08:26.702Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"9d2160ef-1fc6-455d-a417-1a9aed4de413","data":{"responseBytes":672}}
+{"timestamp":"2026-05-17T22:08:42.822Z","level":"info","service":"scheduler","message":"Job queued","jobId":"8ce02726-d3c7-4621-ae2a-9c8f6f3728b1","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T22:08:43.049Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"8ce02726-d3c7-4621-ae2a-9c8f6f3728b1","data":{"streamed":true}}
+{"timestamp":"2026-05-17T22:09:10.377Z","level":"info","service":"scheduler","message":"Job queued","jobId":"72ac2b4b-8349-42c2-9d34-9089b5f1c6f1","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T22:09:11.501Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"72ac2b4b-8349-42c2-9d34-9089b5f1c6f1","data":{"responseBytes":1230}}
+{"timestamp":"2026-05-17T22:14:50.332Z","level":"info","service":"scheduler","message":"Job queued","jobId":"72b5e945-de77-44c7-9aef-1b403aa357d2","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T22:15:29.928Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"72b5e945-de77-44c7-9aef-1b403aa357d2","data":{"streamed":true}}
+{"timestamp":"2026-05-17T22:15:31.330Z","level":"info","service":"scheduler","message":"Job queued","jobId":"4422a2ab-5f6a-4f11-88b5-45fd9900d338","data":{"resourceClass":"gpu_llm"}}
+{"timestamp":"2026-05-17T22:15:45.397Z","level":"info","service":"scheduler","message":"Job succeeded","jobId":"4422a2ab-5f6a-4f11-88b5-45fd9900d338","data":{"responseBytes":8640}}
