@@ -136,15 +136,19 @@ export class LlamaServerProcessManager {
       throw new Error(`Model "${modelName}" not found in ${this.config.ggufDirectory}`);
     }
 
-    // same model already running → skip
-    if (this.currentModel === target.name && this.child) return;
+    const childAlive = !!this.child;
+    if (this.currentModel === target.name && childAlive) {
+      console.log(`[backend] loadModel skip: "${target.name}" already loaded (child pid=${this.child?.pid})`);
+      return;
+    }
 
-    // same model but process died → just restart
     if (this.currentModel === target.name) {
+      console.log(`[backend] loadModel restart: "${target.name}" same model, child gone — re-spawning`);
       await this.spawnProcess();
       return;
     }
 
+    console.log(`[backend] loadModel switch: "${this.currentModel}" → "${target.name}"`);
     this.currentModel = target.name;
     if (this.child) {
       await this.stopChild();
@@ -284,6 +288,7 @@ export class LlamaServerProcessManager {
     this.child.on("exit", (code, signal) => {
       const pid = this.child?.pid;
       this.child = null;
+      console.log(`[backend] exit event: pid=${pid} code=${code} signal=${signal} stopping=${this.stopping} currentModel=${this.currentModel}`);
       if (this.stopping) return;
 
       this.status = "stopped";
@@ -315,6 +320,14 @@ export class LlamaServerProcessManager {
 
     const models = scanGgufFiles(this.config.ggufDirectory);
     if (models.length === 0) return null;
+
+    // respect currentModel if already set (e.g., from loadModel or startup)
+    const cm = this.currentModel;
+    if (cm) {
+      const current = models.find((m) => m.name === cm || m.path.endsWith(cm));
+      if (current) return current.path;
+      console.warn(`[backend] Current model "${cm}" not found in GGUF directory, will pick a model`);
+    }
 
     // if config.model is set, find matching model by name
     const preferred = this.config.model;
