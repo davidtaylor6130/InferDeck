@@ -1,8 +1,14 @@
 /**
- * Integration test fixtures for the gateway service
+ * Test setup and fixtures
  */
 
+import { beforeAll } from "vitest";
 import type { GatewayConfig } from "../../apps/gateway-service/src/config/schema";
+
+beforeAll(() => {
+  // QueueStore uses no external dependencies or environment variables,
+  // so no global mocks are required.
+});
 
 // Test configuration
 export const testConfig: GatewayConfig = {
