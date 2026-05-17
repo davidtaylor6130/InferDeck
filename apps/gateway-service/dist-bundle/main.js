@@ -60550,7 +60550,17 @@ var LlamaServerProcessManager = class {
     if (!target) {
       throw new Error(`Model "${modelName}" not found in ${this.config.ggufDirectory}`);
     }
-    if (this.currentModel === target.name && this.child) return;
+    const childAlive = !!this.child;
+    if (this.currentModel === target.name && childAlive) {
+      console.log(`[backend] loadModel skip: "${target.name}" already loaded (child pid=${this.child?.pid})`);
+      return;
+    }
+    if (this.currentModel === target.name) {
+      console.log(`[backend] loadModel restart: "${target.name}" same model, child gone \u2014 re-spawning`);
+      await this.spawnProcess();
+      return;
+    }
+    console.log(`[backend] loadModel switch: "${this.currentModel}" \u2192 "${target.name}"`);
     this.currentModel = target.name;
     if (this.child) {
       await this.stopChild();
@@ -60678,6 +60688,7 @@ var LlamaServerProcessManager = class {
     this.child.on("exit", (code, signal) => {
       const pid = this.child?.pid;
       this.child = null;
+      console.log(`[backend] exit event: pid=${pid} code=${code} signal=${signal} stopping=${this.stopping} currentModel=${this.currentModel}`);
       if (this.stopping) return;
       this.status = "stopped";
       this.lastError = `llama-server exited with ${signal ?? code ?? "unknown"}`;
@@ -60702,6 +60713,12 @@ var LlamaServerProcessManager = class {
     }
     const models = scanGgufFiles(this.config.ggufDirectory);
     if (models.length === 0) return null;
+    const cm = this.currentModel;
+    if (cm) {
+      const current = models.find((m) => m.name === cm || m.path.endsWith(cm));
+      if (current) return current.path;
+      console.warn(`[backend] Current model "${cm}" not found in GGUF directory, will pick a model`);
+    }
     const preferred = this.config.model;
     if (preferred) {
       const matched = this.findModel(models, preferred);
