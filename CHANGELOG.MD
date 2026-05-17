@@ -1,6 +1,6 @@
 # r9700 AI Gateway - Changelog
 
-## [1.0.0] - 2025-05-10
+## [0.1.0] - 2025-05-10
 
 ### Added
 - Full React + Vite + Tailwind dashboard with live data
