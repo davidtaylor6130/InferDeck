@@ -1,4 +1,4 @@
-# README - r9700 AI Gateway
+# InferDeck
 
 A production-ready monorepo for running and managing local AI workloads on single-GPU machines.
 The gateway provides smart GPU scheduling, mode switching (AI/Gaming/Maintenance), and a React dashboard.
@@ -6,7 +6,7 @@ The gateway provides smart GPU scheduling, mode switching (AI/Gaming/Maintenance
 ## Project Structure
 
 ```
-R9700-AI-Gateway/
+InferDeck/
 ├── apps/
 │   ├── gateway-service/   # Backend gateway service (Fastify, SQLite)
 │   └── dashboard/         # React + Vite + Tailwind dashboard
@@ -17,7 +17,7 @@ R9700-AI-Gateway/
 ├── docs/                  # Architecture and API documentation
 ├── packages/
 │   ├── gateway-core/      # Scheduler, resource lock manager
-│   ├── backend-ollama/    # Ollama client and types
+│   ├── backend-llama/     # llama.cpp client and types
 │   ├── service-installer/ # Windows/Linux/macOS service installers
 │   └── shared/            # Shared types and utilities
 ├── tests/                 # Test suites
@@ -31,7 +31,7 @@ R9700-AI-Gateway/
 ```bash
 # 1. Clone the repo
 git clone <repo-url>
-cd R9700-AI-Gateway
+cd InferDeck
 
 # 2. Install dependencies
 pnpm install
@@ -52,18 +52,18 @@ pnpm dev:dashboard
 Edit `config/gateway.local.yaml` to configure:
 
 - `server.dashboardPort`: Dashboard UI port (default: 8721)
-- `server.proxyPort`: Ollama-compatible gateway port (default: 11434)
+- `server.proxyPort`: llama.cpp-compatible gateway port (default: 11434)
 - `database.path`: SQLite database location
-- `ollama.baseUrl`: Your Ollama backend URL
+- `backend.baseUrl`: Your llama.cpp backend URL
 
 ## Environment Variables
 
 Copy `.env.example` to `.env` and set:
 
 ```bash
-OLLAMA_HOST=127.0.0.1:11435
-OLLAMA_MAX_QUEUE=512
-OLLAMA_MAX_LOADED_MODELS=1
+LLAMA_HOST=127.0.0.1:11435
+LLAMA_MAX_QUEUE=512
+LLAMA_MAX_LOADED_MODELS=1
 R9700_GATEWAY_ADMIN_KEY=change-me-to-a-random-secret
 R9700_LOG_LEVEL=info
 R9700_DB_PATH=./data/gateway.sqlite
@@ -74,8 +74,8 @@ R9700_LOG_DIR=./data/logs
 
 - **GPU Scheduling**: Queues and schedules GPU-heavy jobs, preventing conflicts
 - **Mode Switching**: AI / Gaming / Maintenance modes for flexible control
-- **Ollama Proxy**: Full Ollama API compatibility (chat, generate, embeddings)
-- **OpenAI Compatibility**: Proxy OpenAI API endpoints to Ollama
+- **llama.cpp Proxy**: Full llama.cpp API compatibility (chat, generate, embeddings)
+- **OpenAI Compatibility**: Proxy OpenAI API endpoints to llama.cpp
 - **React Dashboard**: Real-time monitoring and control
 - **Job Queue**: Priority-based job management with lifecycle tracking
 - **Health Monitoring**: Comprehensive health checks for all services
@@ -103,7 +103,7 @@ pnpm lint
 - `/status` - Gateway status
 - `/queue` - Job queue status
 - `/jobs` - Job management
-- `/models` - Ollama models
+- `/models` - llama.cpp models
 - `/services` - Service health
 - `/modes` - Mode switching
 - `/metrics` - System metrics
