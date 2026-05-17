@@ -2,7 +2,7 @@
 
 ## Overview
 
-R9700 AI Gateway is a production-ready local AI gateway designed for single-GPU machines.
+InferDeck is a production-ready local AI gateway designed for single-GPU machines.
 It provides intelligent GPU scheduling, mode switching, and API abstraction for local AI workloads.
 
 ## Architecture Diagram
@@ -19,7 +19,7 @@ It provides intelligent GPU scheduling, mode switching, and API abstraction for 
 └──────┬──────┘
        │
 ┌──────▼──────┐     ┌──────────────┐
-│ Gateway     │────▶│ Ollama       │
+│ Gateway     │────▶│ llama.cpp    │
 │ Proxy       │     │ Backend      │
 └──────┬──────┘     └──────────────┘
        │
@@ -38,7 +38,7 @@ It provides intelligent GPU scheduling, mode switching, and API abstraction for 
 ### Gateway Service
 - Fastify HTTP server with middleware stack
 - Handles both dashboard serving and API proxying
-- Provides Ollama API compatibility and OpenAI API proxy
+- Provides llama.cpp API compatibility and OpenAI API proxy
 - Database-backed job queue with SQLite
 
 ### Scheduler Module
@@ -66,7 +66,7 @@ It provides intelligent GPU scheduling, mode switching, and API abstraction for 
 3. Route handler processes request:
    - Dashboard requests: served from static files
    - API requests: routed to appropriate handler
-   - Proxy requests: forwarded to Ollama backend
+   - Proxy requests: forwarded to llama.cpp backend
 4. Scheduler determines if job can run immediately
 5. Resource locks prevent GPU contention
 6. Results returned to client or streamed back
