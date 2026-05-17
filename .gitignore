@@ -1,12 +1,15 @@
 # Dependencies
 node_modules/
 .pnpm-store/
-pnpm-lock.yaml
 
 # Build outputs
 dist/
 build/
 .vite/
+apps/gateway-service/dist-bundle/
+apps/gateway-service/release/
+apps/dashboard/dist/
+apps/gateway-service/public/dashboard/
 
 # Environment
 .env
@@ -28,7 +31,6 @@ Thumbs.db
 data/*.sqlite
 data/*.sqlite-wal
 data/*.sqlite-shm
-data/test-gateway.sqlite
 data/test-logs/
 
 # Logs

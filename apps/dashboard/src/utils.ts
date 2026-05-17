@@ -1,8 +1,10 @@
 import type { JobRecord, ServiceRecord } from './types';
 
-export const DASHBOARD_URL = 'http://ai.homelab.com:8721';
-export const GATEWAY_API = 'http://ai.homelab.com:11434';
-export const OPENAI_API = 'http://ai.homelab.com:11434/v1';
+const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8721';
+
+export const DASHBOARD_URL = origin;
+export const GATEWAY_API = origin.replace(/:8721$/, ':11434') || 'http://localhost:11434';
+export const OPENAI_API = origin.replace(/:8721$/, ':11434/v1') || 'http://localhost:11434/v1';
 export const LLAMA_BACKEND = 'http://127.0.0.1:11434';
 
 export function formatBytes(bytes?: number | null): string {
