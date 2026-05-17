@@ -155,28 +155,32 @@ export class LlamaServerProcessManager {
       throw new Error(`No GGUF models found in ${this.config.ggufDirectory}`);
     }
 
-    // If a model is already loaded and running, accept the request without restarting
-    if (this.currentModel && this.child) {
-      const target = this.findModel(models, modelName);
-      if (target && target.name === this.currentModel) {
-        console.log(`[backend] loadModel skip: "${this.currentModel}" already loaded and running`);
+    const target = this.findModel(models, modelName);
+    if (!target) {
+      // If no model is loaded yet, use the first available
+      if (!this.currentModel || !this.child) {
+        console.warn(`[backend] Model "${modelName}" not found, using first available: "${models[0].name}"`);
+        this.currentModel = models[0].name;
+        await this.spawnProcess();
         return;
       }
-      // Even if name doesn't match exactly, if we have a model loaded, allow it
-      // Open WebUI may send names with prefixes/tags that don't match exactly
+      // Model not found but one is loaded - accept the request as-is
       console.log(`[backend] loadModel accept: "${modelName}" -> using already loaded "${this.currentModel}"`);
       return;
     }
 
-    const target = this.findModel(models, modelName);
-    if (!target) {
-      // Fallback: use the first available model if requested name not found
-      console.warn(`[backend] Model "${modelName}" not found, falling back to first available: "${models[0].name}"`);
-      this.currentModel = models[0].name;
-    } else {
-      this.currentModel = target.name;
+    // If the same model is already loaded and running, skip
+    if (this.currentModel === target.name && this.child) {
+      console.log(`[backend] loadModel skip: "${target.name}" already loaded and running`);
+      return;
     }
 
+    // Switch to the new model
+    console.log(`[backend] loadModel switch: "${this.currentModel}" → "${target.name}"`);
+    this.currentModel = target.name;
+    if (this.child) {
+      await this.stopChild();
+    }
     await this.spawnProcess();
   }
 
