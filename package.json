@@ -11,9 +11,13 @@
     "build": "pnpm -r build",
     "dev:gateway": "pnpm --filter gateway-service dev",
     "dev:dashboard": "pnpm --filter dashboard dev",
-    "test": "node_modules/.pnpm/node_modules/.bin/vitest run",
+    "test": "vitest run",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
   },
   "engines": {
     "node": ">=22",
