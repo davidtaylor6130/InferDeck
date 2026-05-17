@@ -150,7 +150,11 @@ export class LlamaServerProcessManager {
   }
 
   async loadModel(modelName: string): Promise<void> {
-    const models = scanGgufFiles(this.config.ggufDirectory);
+    const allModels = scanGgufFiles(this.config.ggufDirectory);
+    const models = allModels.filter((m) => {
+      const fname = m.path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+      return !fname.startsWith("mmproj");
+    });
     if (models.length === 0) {
       throw new Error(`No GGUF models found in ${this.config.ggufDirectory}`);
     }
@@ -249,7 +253,10 @@ export class LlamaServerProcessManager {
   }
 
   listModels(): LlamaModelInfo[] {
-    return scanGgufFiles(this.config.ggufDirectory);
+    return scanGgufFiles(this.config.ggufDirectory).filter((m) => {
+      const fname = m.path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+      return !fname.startsWith("mmproj");
+    });
   }
 
   async checkHealth(): Promise<HealthResult> {
