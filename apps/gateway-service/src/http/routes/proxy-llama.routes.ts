@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { assertNotSelfProxy, ensureModel, toOllamaChatResponse, toOllamaGenerateResponse, openaiSseToOllamaChatStream, openaiSseToOllamaGenerateStream } from "./proxy-utils";
+import { normalizeModelName, stripConnectionPrefix, toOllamaModelName } from "../../services/LlamaServerProcessManager";
 import type { WorkloadLease } from "../../services/WorkloadCoordinator";
 import type { AppContext } from "../../app";
 
@@ -37,23 +38,29 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
     try {
       const ctx = getCtx(app);
       assertNotSelfProxy(_req, getBaseUrl());
-      const models = ctx?.backend?.listModels() ?? [];
+      const models = (ctx?.backend?.listModels() ?? []).filter((m) => {
+        const fname = m.path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+        return !fname.startsWith("mmproj");
+      });
       const backendModels = {
-        models: models.map((m) => ({
-          name: m.name,
-          model: m.name,
-          size: m.size,
-          digest: "gguf:" + m.path,
-          details: {
-            parent_model: "",
-            format: m.format,
-            family: m.name,
-            families: [m.name],
-            parameter_size: "",
-            quantization_level: "",
-          },
-          modified_at: m.modified_at,
-        })),
+        models: models.map((m) => {
+          const ollamaName = toOllamaModelName(m.path);
+          return {
+            name: ollamaName,
+            model: ollamaName,
+            size: m.size,
+            digest: "gguf:" + m.path,
+            details: {
+              parent_model: "",
+              format: m.format,
+              family: ollamaName.replace(/:latest$/, ""),
+              families: [ollamaName.replace(/:latest$/, "")],
+              parameter_size: "",
+              quantization_level: "",
+            },
+            modified_at: m.modified_at,
+          };
+        }),
       };
       reply.headers({ "X-AI-Gateway": "inferdeck" });
       return reply.send(backendModels);
@@ -68,19 +75,28 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
       const body = req.body as { name?: string; model?: string };
       const name = body?.name ?? body?.model ?? "";
       const models = ctx?.backend?.listModels() ?? [];
-      const found = models.find((m) => m.name === name || m.path.endsWith(name));
+      const found = ctx?.backend?.findModelByName?.(name) ?? models.find((m) => {
+        const ollamaName = toOllamaModelName(m.path);
+        const norm = (s: string) => s.toLowerCase().replace(/[:._\s\/\\-]/g, "");
+        const n = normalizeModelName(name);
+        return ollamaName.replace(/:latest$/i, "") === n ||
+               norm(ollamaName) === norm(n) ||
+               normalizeModelName(m.name) === n ||
+               m.path.endsWith(n);
+      });
       if (!found) return reply.status(404).send({ error: `model "${name}" not found` });
+      const ollamaName = toOllamaModelName(found.path);
       reply.headers({ "X-AI-Gateway": "inferdeck" });
       return reply.send({
-        name: found.name,
-        model: found.name,
+        name: ollamaName,
+        model: ollamaName,
         size: found.size,
         digest: "gguf:" + found.path,
         details: {
           parent_model: "",
           format: found.format,
-          family: found.name,
-          families: [found.name],
+          family: ollamaName.replace(/:latest$/, ""),
+          families: [ollamaName.replace(/:latest$/, "")],
           parameter_size: "",
           quantization_level: "",
         },
@@ -96,16 +112,19 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
       const ctx = getCtx(app);
       assertNotSelfProxy(_req, getBaseUrl());
       const snap = ctx?.backend?.getSnapshot();
-      const models = snap?.model ? [{
-        name: snap.model,
-        model: snap.model,
-        size: 0,
-        digest: "",
-        details: { parent_model: "", format: "gguf", family: "", families: [], parameter_size: "", quantization_level: "" },
-        size_vram: 0,
-        expires_at: "",
-        ttl: -1,
-      }] : [];
+      const models = snap?.model ? (() => {
+        const ollamaName = toOllamaModelName(snap.model);
+        return [{
+          name: ollamaName,
+          model: ollamaName,
+          size: 0,
+          digest: "gguf:" + snap.model,
+          details: { parent_model: "", format: "gguf", family: ollamaName.replace(/:latest$/, ""), families: [ollamaName.replace(/:latest$/, "")], parameter_size: "", quantization_level: "" },
+          size_vram: 0,
+          expires_at: "",
+          ttl: -1,
+        }];
+      })() : [];
       reply.headers({ "X-AI-Gateway": "inferdeck" });
       return reply.send({ models });
     } catch (err: any) {
@@ -137,6 +156,7 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
     } catch (err: any) {
       return reply.status(502).send({ error: err.message });
     }
+    const model = body.model ? normalizeModelName(body.model) : "";
 
     const lease = await ctx.workloads.acquire(req, {
       type: "llama_chat",
@@ -144,7 +164,7 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
       priority: 70,
       requestPath: "/api/chat",
       requestMethod: "POST",
-      payload: { model: body.model, messages: body.messages?.slice?.(0, 1), stream: isStreaming },
+      payload: { model, messages: body.messages?.slice?.(0, 1), stream: isStreaming },
     });
     const release = releaseOnce(lease);
     req.raw.on("close", () => release("cancelled", { reason: "client_closed" }));
@@ -153,7 +173,7 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
       const baseUrl = getBaseUrl();
       assertNotSelfProxy(req, baseUrl);
       const openaiBody: Record<string, unknown> = {
-        model: body.model,
+        model,
         messages: body.messages ?? [],
         stream: isStreaming,
       };
@@ -175,13 +195,13 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
           "X-AI-Gateway": "inferdeck",
           "X-InferDeck-Job-Id": lease.jobId,
         });
-        return reply.send(trackedStream(response.body.pipeThrough(openaiSseToOllamaChatStream(body.model)), release));
+        return reply.send(trackedStream(response.body.pipeThrough(openaiSseToOllamaChatStream(model)), release));
       }
 
       const json = await response.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-InferDeck-Job-Id": lease.jobId });
       release("succeeded", { responseBytes: JSON.stringify(json).length });
-      return reply.send(toOllamaChatResponse(json, body.model));
+      return reply.send(toOllamaChatResponse(json, model));
     } catch (err: any) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: err.message });
@@ -199,6 +219,7 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
     } catch (err: any) {
       return reply.status(502).send({ error: err.message });
     }
+    const model = body.model ? normalizeModelName(body.model) : "";
 
     const lease = await ctx.workloads.acquire(req, {
       type: "llama_generate",
@@ -206,7 +227,7 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
       priority: 70,
       requestPath: "/api/generate",
       requestMethod: "POST",
-      payload: { model: body.model, prompt: String(body.prompt ?? "").slice(0, 200), stream: isStreaming },
+      payload: { model, prompt: String(body.prompt ?? "").slice(0, 200), stream: isStreaming },
     });
     const release = releaseOnce(lease);
     req.raw.on("close", () => release("cancelled", { reason: "client_closed" }));
@@ -215,13 +236,13 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
       const baseUrl = getBaseUrl();
       assertNotSelfProxy(req, baseUrl);
       const openaiBody: Record<string, unknown> = {
-        model: body.model,
+        model,
         prompt: body.prompt ?? "",
         stream: isStreaming,
+        max_tokens: body.options?.max_tokens ?? 128,
       };
       if (body.options?.temperature) openaiBody.temperature = body.options.temperature;
       if (body.options?.top_p) openaiBody.top_p = body.options.top_p;
-      if (body.options?.max_tokens) openaiBody.max_tokens = body.options.max_tokens;
 
       const response = await fetch(`${baseUrl}/v1/completions`, {
         method: "POST",
@@ -236,13 +257,13 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
           "X-AI-Gateway": "inferdeck",
           "X-InferDeck-Job-Id": lease.jobId,
         });
-        return reply.send(trackedStream(response.body.pipeThrough(openaiSseToOllamaGenerateStream(body.model)), release));
+        return reply.send(trackedStream(response.body.pipeThrough(openaiSseToOllamaGenerateStream(model)), release));
       }
 
       const json = await response.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-InferDeck-Job-Id": lease.jobId });
       release("succeeded", { responseBytes: JSON.stringify(json).length });
-      return reply.send(toOllamaGenerateResponse(json, body.model));
+      return reply.send(toOllamaGenerateResponse(json, model));
     } catch (err: any) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: err.message });
@@ -252,13 +273,14 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
   app.post("/api/embed", async (req, reply) => {
     const body = req.body as any || {};
     const ctx = getCtx(app);
+    const model = body.model ? normalizeModelName(body.model) : "";
     const lease = await ctx.workloads.acquire(req, {
       type: "llama_embed",
       resourceClass: "gpu_llm",
       priority: 55,
       requestPath: "/api/embed",
       requestMethod: "POST",
-      payload: { model: body.model },
+      payload: { model },
     });
     const release = releaseOnce(lease);
     req.raw.on("close", () => release("cancelled", { reason: "client_closed" }));
@@ -269,7 +291,42 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
       const res = await fetch(`${baseUrl}/v1/embeddings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: body.model, input: body.input ?? body.prompt ?? "" }),
+        body: JSON.stringify({ model, input: body.input ?? body.prompt ?? "" }),
+      });
+      if (!res.ok) throw new Error(`llama.cpp returned ${res.status}: ${await res.text()}`);
+      const json = await res.json();
+      reply.headers({ "X-AI-Gateway": "inferdeck", "X-InferDeck-Job-Id": lease.jobId });
+      release("succeeded", { responseBytes: JSON.stringify(json).length });
+      return reply.send(json);
+    } catch (err: any) {
+      release("failed", { error: err.message });
+      return reply.status(502).send({ error: err.message });
+    }
+  });
+
+  // Open WebUI compatibility: /api/embeddings alias for /api/embed
+  app.post("/api/embeddings", async (req, reply) => {
+    const body = req.body as any || {};
+    const ctx = getCtx(app);
+    const model = body.model ? normalizeModelName(body.model) : "";
+    const lease = await ctx.workloads.acquire(req, {
+      type: "llama_embed",
+      resourceClass: "gpu_llm",
+      priority: 55,
+      requestPath: "/api/embeddings",
+      requestMethod: "POST",
+      payload: { model },
+    });
+    const release = releaseOnce(lease);
+    req.raw.on("close", () => release("cancelled", { reason: "client_closed" }));
+
+    try {
+      const baseUrl = getBaseUrl();
+      assertNotSelfProxy(req, baseUrl);
+      const res = await fetch(`${baseUrl}/v1/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, input: body.input ?? body.prompt ?? "" }),
       });
       if (!res.ok) throw new Error(`llama.cpp returned ${res.status}: ${await res.text()}`);
       const json = await res.json();

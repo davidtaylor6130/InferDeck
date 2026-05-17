@@ -30,13 +30,14 @@ database:
 
 backend:
   enabled: true
-  baseUrl: "http://127.0.0.1:11434"
+  baseUrl: "http://127.0.0.1:11435"
   managed: true
-  executable: "llama-server"
-  ggufDirectory: "./models"
+  executable: "C:\\Users\\david\\.lmstudio\\extensions\\backends\\llama.cpp-win-x86_64-vulkan-avx2-2.14.4\\llama-server.exe"
+  ggufDirectory: "C:\\Users\\david\\.lmstudio\\models"
   model: null
+  providerName: "inferdeck"
   bindHost: "127.0.0.1"
-  bindPort: 11434
+  bindPort: 11435
   maxGpuLayers: 999
   healthcheckIntervalMs: 10000
   restartOnFailure: true

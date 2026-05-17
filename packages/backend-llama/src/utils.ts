@@ -1,5 +1,5 @@
 import { readdirSync, statSync } from "node:fs";
-import { join, extname, relative } from "node:path";
+import { join, extname, relative, sep } from "node:path";
 import type { LlamaModelInfo } from "./types.js";
 
 export function scanGgufFiles(
@@ -19,8 +19,11 @@ export function scanGgufFiles(
       } else if (entry.isFile() && extname(entry.name).toLowerCase() === ".gguf") {
         try {
           const stats = statSync(fullPath);
+          const rawName = relative(root, fullPath);
+          // Normalize to forward slashes, strip .gguf extension
+          const cleanName = rawName.split(sep).join("/").replace(/\.gguf$/i, "");
           results.push({
-            name: relative(root, fullPath),
+            name: cleanName,
             path: fullPath,
             size: stats.size,
             modified_at: stats.mtime.toISOString(),

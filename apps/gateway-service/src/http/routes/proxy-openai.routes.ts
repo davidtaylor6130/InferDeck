@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { assertNotSelfProxy, ensureModel } from "./proxy-utils";
 import type { WorkloadLease } from "../../services/WorkloadCoordinator";
 import type { AppContext } from "../../app";
+import { normalizeModelName } from "../../services/LlamaServerProcessManager";
 
 function releaseOnce(lease: WorkloadLease): (status: "succeeded" | "failed" | "cancelled", data?: Record<string, unknown>) => void {
   let released = false;
@@ -67,6 +68,7 @@ export function registerProxyOpenAIRoutes(app: FastifyInstance): void {
     } catch (err: any) {
       return reply.status(502).send({ error: { message: err.message, type: "model_load_error" } });
     }
+    body.model = normalizeModelName(body.model);
 
     const lease = await ctx.workloads.acquire(req, {
       type: "openai_chat",
@@ -119,6 +121,7 @@ export function registerProxyOpenAIRoutes(app: FastifyInstance): void {
     const body = req.body as any;
     const stream = body?.stream ?? false;
     const ctx = getCtx(app);
+    if (body?.model) body.model = normalizeModelName(body.model);
     const lease = await ctx.workloads.acquire(req, {
       type: "openai_completion",
       resourceClass: "gpu_llm",
@@ -166,6 +169,7 @@ export function registerProxyOpenAIRoutes(app: FastifyInstance): void {
   app.post("/v1/embeddings", async (req, reply) => {
     const body = req.body as any;
     const ctx = getCtx(app);
+    if (body?.model) body.model = normalizeModelName(body.model);
     const lease = await ctx.workloads.acquire(req, {
       type: "openai_embedding",
       resourceClass: "gpu_llm",

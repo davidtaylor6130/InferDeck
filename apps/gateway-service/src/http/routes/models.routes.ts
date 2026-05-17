@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { createWriteStream, unlinkSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import type { AppContext } from "../../app";
+import { normalizeModelName, stripConnectionPrefix } from "../../services/LlamaServerProcessManager";
 
 function getCtx(app: FastifyInstance): AppContext {
   return (app as any).ctx?.();
@@ -135,7 +136,13 @@ export function registerModelsRoutes(app: FastifyInstance): void {
     const ctx = getCtx(app);
     try {
       const models = ctx.backend.listModels();
-      const target = models.find((m) => m.name === name || m.path.endsWith(name));
+      const cleanName = normalizeModelName(name);
+      const matchName = (n: string) => models.find((m) => normalizeModelName(m.name) === n || m.path.endsWith(n));
+      let target = matchName(cleanName);
+      if (!target) {
+        const unprefixed = stripConnectionPrefix(cleanName);
+        if (unprefixed !== cleanName) target = matchName(unprefixed);
+      }
       if (!target) return reply.status(404).send({ error: `Model "${name}" not found` });
       unlinkSync(target.path);
       ctx.events.emit("model:changed", { action: "delete", model: name });

@@ -45,6 +45,26 @@ interface HealthResult {
   error: string | null;
 }
 
+/** Strip :latest tag and .gguf extension from a model name */
+export function normalizeModelName(name: string): string {
+  return name
+    .replace(/:latest$/i, "")      // strip :latest tag
+    .replace(/\.gguf$/i, "");      // strip .gguf extension
+}
+
+/** Convert a GGUF file path to a clean Ollama-style model name (e.g. "qwen3-coder-30b-a3b-instruct:latest") */
+export function toOllamaModelName(ggufPath: string): string {
+  const basename = ggufPath.split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") ?? ggufPath;
+  // Remove quantization suffix (handles -Q2_K, .Q2_K, _Q2_K, -Q4_K_M, -UD-IQ3_XXS, -F32, -MXFP4, etc.)
+  const cleaned = basename.replace(/[-_.](Q[0-9]+[_][A-Z0-9_]+|UD[-_.][A-Z0-9_]+|F32|F16|BF16|MXFP4|Q[0-9]+_K|Q8_0)$/gi, "");
+  return cleaned.toLowerCase() + ":latest";
+}
+
+/** Try stripping an Open Web UI connection prefix (e.g. "asdf.modelname" -> "modelname") */
+export function stripConnectionPrefix(name: string): string {
+  return name.replace(/^[^.]+\./, "");
+}
+
 export class LlamaServerProcessManager {
   private readonly config: LlamaConfig;
   private readonly client: LlamaClient;
@@ -131,28 +151,32 @@ export class LlamaServerProcessManager {
 
   async loadModel(modelName: string): Promise<void> {
     const models = scanGgufFiles(this.config.ggufDirectory);
+    if (models.length === 0) {
+      throw new Error(`No GGUF models found in ${this.config.ggufDirectory}`);
+    }
+
+    // If a model is already loaded and running, accept the request without restarting
+    if (this.currentModel && this.child) {
+      const target = this.findModel(models, modelName);
+      if (target && target.name === this.currentModel) {
+        console.log(`[backend] loadModel skip: "${this.currentModel}" already loaded and running`);
+        return;
+      }
+      // Even if name doesn't match exactly, if we have a model loaded, allow it
+      // Open WebUI may send names with prefixes/tags that don't match exactly
+      console.log(`[backend] loadModel accept: "${modelName}" -> using already loaded "${this.currentModel}"`);
+      return;
+    }
+
     const target = this.findModel(models, modelName);
     if (!target) {
-      throw new Error(`Model "${modelName}" not found in ${this.config.ggufDirectory}`);
+      // Fallback: use the first available model if requested name not found
+      console.warn(`[backend] Model "${modelName}" not found, falling back to first available: "${models[0].name}"`);
+      this.currentModel = models[0].name;
+    } else {
+      this.currentModel = target.name;
     }
 
-    const childAlive = !!this.child;
-    if (this.currentModel === target.name && childAlive) {
-      console.log(`[backend] loadModel skip: "${target.name}" already loaded (child pid=${this.child?.pid})`);
-      return;
-    }
-
-    if (this.currentModel === target.name) {
-      console.log(`[backend] loadModel restart: "${target.name}" same model, child gone — re-spawning`);
-      await this.spawnProcess();
-      return;
-    }
-
-    console.log(`[backend] loadModel switch: "${this.currentModel}" → "${target.name}"`);
-    this.currentModel = target.name;
-    if (this.child) {
-      await this.stopChild();
-    }
     await this.spawnProcess();
   }
 
@@ -163,20 +187,61 @@ export class LlamaServerProcessManager {
   }
 
   private findModel(models: LlamaModelInfo[], name: string): LlamaModelInfo | undefined {
-    const norm = (s: string) => s.toLowerCase().replace(/[:._\s]/g, "-");
-    const normalized = norm(name);
-    return models.find((m) => {
-      if (m.name === name || m.path.endsWith(name)) return true;
-      const basename = m.path.split(/[\\/]/).pop() ?? "";
-      if (basename === name) return true;
-      const mName = m.name.toLowerCase();
-      if (mName === name.toLowerCase() || mName.endsWith(name.toLowerCase())) return true;
-      if (mName.includes(name.toLowerCase())) return true;
-      // normalized matching (handles "gpt-oss:20b" vs "gpt-oss-20b")
-      const mNorm = norm(m.name);
-      if (mNorm === normalized || mNorm.endsWith(normalized) || mNorm.includes(normalized)) return true;
-      return false;
-    });
+    const norm = (s: string) => s.toLowerCase().replace(/[:._\s\/\\-]/g, "");
+
+    const tryMatch = (n: string): LlamaModelInfo | undefined => {
+      const cleaned = normalizeModelName(n);
+      const normalized = norm(cleaned);
+
+      return models.find((m) => {
+        const mNameClean = normalizeModelName(m.name);
+        const mNorm = norm(mNameClean);
+        const basename = m.path.split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") ?? "";
+        const bNorm = norm(basename);
+        const ollamaName = toOllamaModelName(m.path).replace(/:latest$/i, "");
+        const oNorm = norm(ollamaName);
+
+        // Exact match (normalized)
+        if (mNameClean === cleaned) return true;
+        // Ollama-style name match
+        if (ollamaName === cleaned || oNorm === normalized) return true;
+        // Path ends with cleaned name
+        if (m.path.endsWith(cleaned)) return true;
+        // Basename match
+        if (normalizeModelName(basename) === cleaned) return true;
+        // Case-insensitive exact match
+        if (mNameClean.toLowerCase() === cleaned.toLowerCase()) return true;
+        // Ends with (case-insensitive)
+        if (mNameClean.toLowerCase().endsWith(cleaned.toLowerCase())) return true;
+        // Normalized comparison (strips all special chars)
+        if (mNorm === normalized) return true;
+        if (mNorm.endsWith(normalized) || mNorm.includes(normalized)) return true;
+        if (normalized.endsWith(mNorm) || normalized.includes(mNorm)) return true;
+        // Basename normalized match
+        if (bNorm === normalized || bNorm.includes(normalized) || normalized.includes(bNorm)) return true;
+        return false;
+      });
+    };
+
+    // Try full name first
+    let found = tryMatch(name);
+    if (found) return found;
+
+    // Strip Open WebUI connection prefix (e.g. "conn-id.modelname")
+    const prefixed = stripConnectionPrefix(name);
+    if (prefixed !== name) {
+      found = tryMatch(prefixed);
+      if (found) return found;
+    }
+
+    // Try just the filename part (after last /)
+    const lastSlash = name.lastIndexOf("/");
+    if (lastSlash !== -1) {
+      found = tryMatch(name.substring(lastSlash + 1));
+      if (found) return found;
+    }
+
+    return undefined;
   }
 
   listModels(): LlamaModelInfo[] {
