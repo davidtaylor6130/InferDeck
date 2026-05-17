@@ -1,19 +1,9 @@
-# Copy gateway.example.yaml and modify these settings for your environment:
-# - server.dashboardPort: Dashboard port (default 8721)
-# - server.proxyPort: Ollama-compatible gateway port (default 11434)
-# - database.path: SQLite file location
-# - logging.dir: Log files location
-# - ollama.baseUrl: Real Ollama backend URL
-#
-# IMPORTANT: Do NOT commit this file with your API key if requiredApiKey is true.
-# Set R9700_GATEWAY_ADMIN_KEY environment variable instead.
-
 server:
   dashboardHost: "0.0.0.0"
   dashboardPort: 8721
   proxyHost: "0.0.0.0"
   proxyPort: 11434
-  publicBaseUrl: "http://ai.homelab.com:8721"
+  publicBaseUrl: "http://localhost:8721"
 
 security:
   requireApiKey: false
@@ -28,11 +18,18 @@ database:
   path: "./data/gateway.sqlite"
   walMode: true
 
-ollama:
+backend:
   enabled: true
   baseUrl: "http://127.0.0.1:11435"
-  manageProcess: true
-  executable: "C:/Users/YOUR_USER/AppData/Local/Programs/Ollama/ollama.exe"
+  managed: true
+  executable: "C:\\Users\\david\\.lmstudio\\extensions\\backends\\llama.cpp-win-x86_64-vulkan-avx2-2.14.4\\llama-server.exe"
+  ggufDirectory: "C:\\Users\\david\\.lmstudio\\models"
+  model: null
+  bindHost: "127.0.0.1"
+  bindPort: 11435
+  maxGpuLayers: 999
+  noKvOffload: false
+  ctxSize: 100000
   healthcheckIntervalMs: 10000
   restartOnFailure: true
 
@@ -49,39 +46,12 @@ modes:
   gamingMode:
     rejectInteractiveLlm: true
     pauseBackgroundJobs: true
-    unloadOllamaModels: true
+    unloadBackendModels: true
     stopComfyUi: true
 
 hardware:
-  provider: "amd_adlx"
+  provider: "none"
   pollIntervalMs: 2000
-  helperPath: "./bin/inferdeck-adlx-helper.exe"
-
-managedServices:
-  - id: "comfyui"
-    name: "ComfyUI"
-    kind: "comfyui"
-    enabled: false
-    command: ""
-    args: []
-    baseUrl: "http://127.0.0.1:8188"
-    healthUrl: "http://127.0.0.1:8188"
-  - id: "rag-worker"
-    name: "RAG Worker"
-    kind: "rag"
-    enabled: false
-    command: ""
-    args: []
-    baseUrl: null
-    healthUrl: null
-  - id: "speech-worker"
-    name: "Speech Worker"
-    kind: "speech"
-    enabled: false
-    command: ""
-    args: []
-    baseUrl: null
-    healthUrl: null
 
 logging:
   level: "info"

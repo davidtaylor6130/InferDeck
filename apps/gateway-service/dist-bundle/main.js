@@ -29,9 +29,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/identity.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/identity.js
 var require_identity = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/identity.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/identity.js"(exports2) {
     "use strict";
     var ALIAS = /* @__PURE__ */ Symbol.for("yaml.alias");
     var DOC = /* @__PURE__ */ Symbol.for("yaml.document");
@@ -86,9 +86,9 @@ var require_identity = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/visit.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/visit.js
 var require_visit = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/visit.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/visit.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var BREAK = /* @__PURE__ */ Symbol("break visit");
@@ -244,9 +244,9 @@ var require_visit = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/doc/directives.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/doc/directives.js
 var require_directives = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/doc/directives.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/doc/directives.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var visit = require_visit();
@@ -415,9 +415,9 @@ var require_directives = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/doc/anchors.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/doc/anchors.js
 var require_anchors = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/doc/anchors.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/doc/anchors.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var visit = require_visit();
@@ -485,9 +485,9 @@ var require_anchors = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/doc/applyReviver.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/doc/applyReviver.js
 var require_applyReviver = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/doc/applyReviver.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/doc/applyReviver.js"(exports2) {
     "use strict";
     function applyReviver(reviver, obj, key, val) {
       if (val && typeof val === "object") {
@@ -535,9 +535,9 @@ var require_applyReviver = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/toJS.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/toJS.js
 var require_toJS = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/toJS.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/toJS.js"(exports2) {
     "use strict";
     var identity = require_identity();
     function toJS(value, arg, ctx2) {
@@ -565,9 +565,9 @@ var require_toJS = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/Node.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/Node.js
 var require_Node = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/Node.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/Node.js"(exports2) {
     "use strict";
     var applyReviver = require_applyReviver();
     var identity = require_identity();
@@ -606,9 +606,9 @@ var require_Node = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/Alias.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/Alias.js
 var require_Alias = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/Alias.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/Alias.js"(exports2) {
     "use strict";
     var anchors = require_anchors();
     var visit = require_visit();
@@ -722,9 +722,9 @@ var require_Alias = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/Scalar.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/Scalar.js
 var require_Scalar = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/Scalar.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/Scalar.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Node = require_Node();
@@ -752,9 +752,9 @@ var require_Scalar = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/doc/createNode.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/doc/createNode.js
 var require_createNode = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/doc/createNode.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/doc/createNode.js"(exports2) {
     "use strict";
     var Alias = require_Alias();
     var identity = require_identity();
@@ -827,9 +827,9 @@ var require_createNode = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/Collection.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/Collection.js
 var require_Collection = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/Collection.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/Collection.js"(exports2) {
     "use strict";
     var createNode = require_createNode();
     var identity = require_identity();
@@ -970,9 +970,9 @@ var require_Collection = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyComment.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyComment.js
 var require_stringifyComment = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyComment.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyComment.js"(exports2) {
     "use strict";
     var stringifyComment = (str) => str.replace(/^(?!$)(?: $)?/gm, "#");
     function indentComment(comment, indent) {
@@ -987,9 +987,9 @@ var require_stringifyComment = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/foldFlowLines.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/foldFlowLines.js
 var require_foldFlowLines = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/foldFlowLines.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/foldFlowLines.js"(exports2) {
     "use strict";
     var FOLD_FLOW = "flow";
     var FOLD_BLOCK = "block";
@@ -1123,9 +1123,9 @@ ${indent}${text.slice(fold + 1, end2)}`;
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyString.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyString.js
 var require_stringifyString = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyString.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyString.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var foldFlowLines = require_foldFlowLines();
@@ -1406,9 +1406,9 @@ ${indent}`);
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringify.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringify.js
 var require_stringify = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringify.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringify.js"(exports2) {
     "use strict";
     var anchors = require_anchors();
     var identity = require_identity();
@@ -1530,9 +1530,9 @@ ${ctx2.indent}${str}`;
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyPair.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyPair.js
 var require_stringifyPair = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyPair.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyPair.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Scalar = require_Scalar();
@@ -1663,9 +1663,9 @@ ${ctx2.indent}`;
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/log.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/log.js
 var require_log = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/log.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/log.js"(exports2) {
     "use strict";
     var node_process = require("process");
     function debug(logLevel, ...messages) {
@@ -1685,9 +1685,9 @@ var require_log = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/merge.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/merge.js
 var require_merge = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/merge.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/merge.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Scalar = require_Scalar();
@@ -1745,9 +1745,9 @@ var require_merge = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/addPairToJSMap.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/addPairToJSMap.js
 var require_addPairToJSMap = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/addPairToJSMap.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/addPairToJSMap.js"(exports2) {
     "use strict";
     var log = require_log();
     var merge = require_merge();
@@ -1809,9 +1809,9 @@ var require_addPairToJSMap = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/Pair.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/Pair.js
 var require_Pair = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/Pair.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/Pair.js"(exports2) {
     "use strict";
     var createNode = require_createNode();
     var stringifyPair = require_stringifyPair();
@@ -1849,9 +1849,9 @@ var require_Pair = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyCollection.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyCollection.js
 var require_stringifyCollection = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyCollection.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyCollection.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var stringify = require_stringify();
@@ -2000,9 +2000,9 @@ ${indent}${end}`;
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/YAMLMap.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/YAMLMap.js
 var require_YAMLMap = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/YAMLMap.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/YAMLMap.js"(exports2) {
     "use strict";
     var stringifyCollection = require_stringifyCollection();
     var addPairToJSMap = require_addPairToJSMap();
@@ -2144,9 +2144,9 @@ var require_YAMLMap = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/common/map.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/common/map.js
 var require_map = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/common/map.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/common/map.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var YAMLMap = require_YAMLMap();
@@ -2166,9 +2166,9 @@ var require_map = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/YAMLSeq.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/YAMLSeq.js
 var require_YAMLSeq = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/nodes/YAMLSeq.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/nodes/YAMLSeq.js"(exports2) {
     "use strict";
     var createNode = require_createNode();
     var stringifyCollection = require_stringifyCollection();
@@ -2282,9 +2282,9 @@ var require_YAMLSeq = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/common/seq.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/common/seq.js
 var require_seq = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/common/seq.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/common/seq.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var YAMLSeq = require_YAMLSeq();
@@ -2304,9 +2304,9 @@ var require_seq = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/common/string.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/common/string.js
 var require_string = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/common/string.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/common/string.js"(exports2) {
     "use strict";
     var stringifyString = require_stringifyString();
     var string = {
@@ -2323,9 +2323,9 @@ var require_string = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/common/null.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/common/null.js
 var require_null = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/common/null.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/common/null.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var nullTag = {
@@ -2341,9 +2341,9 @@ var require_null = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/core/bool.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/core/bool.js
 var require_bool = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/core/bool.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/core/bool.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var boolTag = {
@@ -2365,9 +2365,9 @@ var require_bool = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyNumber.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyNumber.js
 var require_stringifyNumber = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyNumber.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyNumber.js"(exports2) {
     "use strict";
     function stringifyNumber({ format, minFractionDigits, tag, value }) {
       if (typeof value === "bigint")
@@ -2392,9 +2392,9 @@ var require_stringifyNumber = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/core/float.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/core/float.js
 var require_float = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/core/float.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/core/float.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var stringifyNumber = require_stringifyNumber();
@@ -2438,9 +2438,9 @@ var require_float = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/core/int.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/core/int.js
 var require_int = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/core/int.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/core/int.js"(exports2) {
     "use strict";
     var stringifyNumber = require_stringifyNumber();
     var intIdentify = (value) => typeof value === "bigint" || Number.isInteger(value);
@@ -2483,9 +2483,9 @@ var require_int = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/core/schema.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/core/schema.js
 var require_schema = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/core/schema.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/core/schema.js"(exports2) {
     "use strict";
     var map = require_map();
     var _null = require_null();
@@ -2511,9 +2511,9 @@ var require_schema = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/json/schema.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/json/schema.js
 var require_schema2 = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/json/schema.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/json/schema.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var map = require_map();
@@ -2578,9 +2578,9 @@ var require_schema2 = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/binary.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/binary.js
 var require_binary = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/binary.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/binary.js"(exports2) {
     "use strict";
     var node_buffer = require("buffer");
     var Scalar = require_Scalar();
@@ -2644,9 +2644,9 @@ var require_binary = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/pairs.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/pairs.js
 var require_pairs = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/pairs.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/pairs.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Pair = require_Pair();
@@ -2722,9 +2722,9 @@ ${cn.comment}` : item.comment;
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/omap.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/omap.js
 var require_omap = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/omap.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/omap.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var toJS = require_toJS();
@@ -2800,9 +2800,9 @@ var require_omap = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/bool.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/bool.js
 var require_bool2 = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/bool.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/bool.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     function boolStringify({ value, source }, ctx2) {
@@ -2832,9 +2832,9 @@ var require_bool2 = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/float.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/float.js
 var require_float2 = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/float.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/float.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var stringifyNumber = require_stringifyNumber();
@@ -2881,9 +2881,9 @@ var require_float2 = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/int.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/int.js
 var require_int2 = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/int.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/int.js"(exports2) {
     "use strict";
     var stringifyNumber = require_stringifyNumber();
     var intIdentify = (value) => typeof value === "bigint" || Number.isInteger(value);
@@ -2960,9 +2960,9 @@ var require_int2 = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/set.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/set.js
 var require_set = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/set.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/set.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Pair = require_Pair();
@@ -3049,9 +3049,9 @@ var require_set = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/timestamp.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/timestamp.js
 var require_timestamp = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/timestamp.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/timestamp.js"(exports2) {
     "use strict";
     var stringifyNumber = require_stringifyNumber();
     function parseSexagesimal(str, asBigInt) {
@@ -3137,9 +3137,9 @@ var require_timestamp = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/schema.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/schema.js
 var require_schema3 = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/yaml-1.1/schema.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/yaml-1.1/schema.js"(exports2) {
     "use strict";
     var map = require_map();
     var _null = require_null();
@@ -3181,9 +3181,9 @@ var require_schema3 = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/tags.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/tags.js
 var require_tags = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/tags.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/tags.js"(exports2) {
     "use strict";
     var map = require_map();
     var _null = require_null();
@@ -3275,9 +3275,9 @@ var require_tags = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/Schema.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/Schema.js
 var require_Schema = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/schema/Schema.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/schema/Schema.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var map = require_map();
@@ -3307,9 +3307,9 @@ var require_Schema = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyDocument.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyDocument.js
 var require_stringifyDocument = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/stringify/stringifyDocument.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/stringify/stringifyDocument.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var stringify = require_stringify();
@@ -3387,9 +3387,9 @@ var require_stringifyDocument = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/doc/Document.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/doc/Document.js
 var require_Document = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/doc/Document.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/doc/Document.js"(exports2) {
     "use strict";
     var Alias = require_Alias();
     var Collection = require_Collection();
@@ -3696,9 +3696,9 @@ var require_Document = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/errors.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/errors.js
 var require_errors = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/errors.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/errors.js"(exports2) {
     "use strict";
     var YAMLError = class extends Error {
       constructor(name, pos, code, message) {
@@ -3761,9 +3761,9 @@ ${pointer}
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-props.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-props.js
 var require_resolve_props = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-props.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-props.js"(exports2) {
     "use strict";
     function resolveProps(tokens, { flow, indicator, next, offset, onError, parentIndent, startOnNewline }) {
       let spaceBefore = false;
@@ -3895,9 +3895,9 @@ var require_resolve_props = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/util-contains-newline.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/util-contains-newline.js
 var require_util_contains_newline = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/util-contains-newline.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/util-contains-newline.js"(exports2) {
     "use strict";
     function containsNewline(key) {
       if (!key)
@@ -3937,9 +3937,9 @@ var require_util_contains_newline = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/util-flow-indent-check.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/util-flow-indent-check.js
 var require_util_flow_indent_check = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/util-flow-indent-check.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/util-flow-indent-check.js"(exports2) {
     "use strict";
     var utilContainsNewline = require_util_contains_newline();
     function flowIndentCheck(indent, fc, onError) {
@@ -3955,9 +3955,9 @@ var require_util_flow_indent_check = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/util-map-includes.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/util-map-includes.js
 var require_util_map_includes = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/util-map-includes.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/util-map-includes.js"(exports2) {
     "use strict";
     var identity = require_identity();
     function mapIncludes(ctx2, items, search) {
@@ -3971,9 +3971,9 @@ var require_util_map_includes = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-block-map.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-map.js
 var require_resolve_block_map = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-block-map.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-map.js"(exports2) {
     "use strict";
     var Pair = require_Pair();
     var YAMLMap = require_YAMLMap();
@@ -4079,9 +4079,9 @@ var require_resolve_block_map = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-block-seq.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-seq.js
 var require_resolve_block_seq = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-block-seq.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-seq.js"(exports2) {
     "use strict";
     var YAMLSeq = require_YAMLSeq();
     var resolveProps = require_resolve_props();
@@ -4130,9 +4130,9 @@ var require_resolve_block_seq = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-end.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-end.js
 var require_resolve_end = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-end.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-end.js"(exports2) {
     "use strict";
     function resolveEnd(end, offset, reqSpace, onError) {
       let comment = "";
@@ -4173,9 +4173,9 @@ var require_resolve_end = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-flow-collection.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-flow-collection.js
 var require_resolve_flow_collection = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-flow-collection.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-flow-collection.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Pair = require_Pair();
@@ -4367,9 +4367,9 @@ var require_resolve_flow_collection = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/compose-collection.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/compose-collection.js
 var require_compose_collection = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/compose-collection.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/compose-collection.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Scalar = require_Scalar();
@@ -4432,9 +4432,9 @@ var require_compose_collection = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-block-scalar.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-scalar.js
 var require_resolve_block_scalar = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-block-scalar.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-block-scalar.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     function resolveBlockScalar(ctx2, scalar, onError) {
@@ -4615,9 +4615,9 @@ var require_resolve_block_scalar = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-flow-scalar.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-flow-scalar.js
 var require_resolve_flow_scalar = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/resolve-flow-scalar.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/resolve-flow-scalar.js"(exports2) {
     "use strict";
     var Scalar = require_Scalar();
     var resolveEnd = require_resolve_end();
@@ -4835,9 +4835,9 @@ var require_resolve_flow_scalar = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/compose-scalar.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/compose-scalar.js
 var require_compose_scalar = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/compose-scalar.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/compose-scalar.js"(exports2) {
     "use strict";
     var identity = require_identity();
     var Scalar = require_Scalar();
@@ -4916,9 +4916,9 @@ var require_compose_scalar = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/util-empty-scalar-position.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/util-empty-scalar-position.js
 var require_util_empty_scalar_position = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/util-empty-scalar-position.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/util-empty-scalar-position.js"(exports2) {
     "use strict";
     function emptyScalarPosition(offset, before, pos) {
       if (before) {
@@ -4946,9 +4946,9 @@ var require_util_empty_scalar_position = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/compose-node.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/compose-node.js
 var require_compose_node = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/compose-node.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/compose-node.js"(exports2) {
     "use strict";
     var Alias = require_Alias();
     var identity = require_identity();
@@ -5052,9 +5052,9 @@ var require_compose_node = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/compose-doc.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/compose-doc.js
 var require_compose_doc = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/compose-doc.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/compose-doc.js"(exports2) {
     "use strict";
     var Document = require_Document();
     var composeNode = require_compose_node();
@@ -5095,9 +5095,9 @@ var require_compose_doc = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/composer.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/composer.js
 var require_composer = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/compose/composer.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/compose/composer.js"(exports2) {
     "use strict";
     var node_process = require("process");
     var directives = require_directives();
@@ -5179,8 +5179,10 @@ ${cb}` : comment;
           }
         }
         if (afterDoc) {
-          Array.prototype.push.apply(doc.errors, this.errors);
-          Array.prototype.push.apply(doc.warnings, this.warnings);
+          for (let i = 0; i < this.errors.length; ++i)
+            doc.errors.push(this.errors[i]);
+          for (let i = 0; i < this.warnings.length; ++i)
+            doc.warnings.push(this.warnings[i]);
         } else {
           doc.errors = this.errors;
           doc.warnings = this.warnings;
@@ -5301,9 +5303,9 @@ ${end.comment}` : end.comment;
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/cst-scalar.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/cst-scalar.js
 var require_cst_scalar = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/cst-scalar.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/cst-scalar.js"(exports2) {
     "use strict";
     var resolveBlockScalar = require_resolve_block_scalar();
     var resolveFlowScalar = require_resolve_flow_scalar();
@@ -5486,9 +5488,9 @@ var require_cst_scalar = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/cst-stringify.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/cst-stringify.js
 var require_cst_stringify = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/cst-stringify.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/cst-stringify.js"(exports2) {
     "use strict";
     var stringify = (cst) => "type" in cst ? stringifyToken(cst) : stringifyItem(cst);
     function stringifyToken(token) {
@@ -5547,9 +5549,9 @@ var require_cst_stringify = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/cst-visit.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/cst-visit.js
 var require_cst_visit = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/cst-visit.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/cst-visit.js"(exports2) {
     "use strict";
     var BREAK = /* @__PURE__ */ Symbol("break visit");
     var SKIP = /* @__PURE__ */ Symbol("skip children");
@@ -5609,9 +5611,9 @@ var require_cst_visit = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/cst.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/cst.js
 var require_cst = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/cst.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/cst.js"(exports2) {
     "use strict";
     var cstScalar = require_cst_scalar();
     var cstStringify = require_cst_stringify();
@@ -5711,9 +5713,9 @@ var require_cst = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/lexer.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/lexer.js
 var require_lexer = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/lexer.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/lexer.js"(exports2) {
     "use strict";
     var cst = require_cst();
     function isEmpty(ch) {
@@ -5913,7 +5915,7 @@ var require_lexer = __commonJS({
           const n = (yield* this.pushCount(1)) + (yield* this.pushSpaces(true));
           this.indentNext = this.indentValue + 1;
           this.indentValue += n;
-          return yield* this.parseBlockStart();
+          return "block-start";
         }
         return "doc";
       }
@@ -6212,28 +6214,38 @@ var require_lexer = __commonJS({
         return 0;
       }
       *pushIndicators() {
-        switch (this.charAt(0)) {
-          case "!":
-            return (yield* this.pushTag()) + (yield* this.pushSpaces(true)) + (yield* this.pushIndicators());
-          case "&":
-            return (yield* this.pushUntil(isNotAnchorChar)) + (yield* this.pushSpaces(true)) + (yield* this.pushIndicators());
-          case "-":
-          // this is an error
-          case "?":
-          // this is an error outside flow collections
-          case ":": {
-            const inFlow = this.flowLevel > 0;
-            const ch1 = this.charAt(1);
-            if (isEmpty(ch1) || inFlow && flowIndicatorChars.has(ch1)) {
-              if (!inFlow)
-                this.indentNext = this.indentValue + 1;
-              else if (this.flowKey)
-                this.flowKey = false;
-              return (yield* this.pushCount(1)) + (yield* this.pushSpaces(true)) + (yield* this.pushIndicators());
+        let n = 0;
+        loop: while (true) {
+          switch (this.charAt(0)) {
+            case "!":
+              n += yield* this.pushTag();
+              n += yield* this.pushSpaces(true);
+              continue loop;
+            case "&":
+              n += yield* this.pushUntil(isNotAnchorChar);
+              n += yield* this.pushSpaces(true);
+              continue loop;
+            case "-":
+            // this is an error
+            case "?":
+            // this is an error outside flow collections
+            case ":": {
+              const inFlow = this.flowLevel > 0;
+              const ch1 = this.charAt(1);
+              if (isEmpty(ch1) || inFlow && flowIndicatorChars.has(ch1)) {
+                if (!inFlow)
+                  this.indentNext = this.indentValue + 1;
+                else if (this.flowKey)
+                  this.flowKey = false;
+                n += yield* this.pushCount(1);
+                n += yield* this.pushSpaces(true);
+                continue loop;
+              }
             }
           }
+          break loop;
         }
-        return 0;
+        return n;
       }
       *pushTag() {
         if (this.charAt(1) === "<") {
@@ -6290,9 +6302,9 @@ var require_lexer = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/line-counter.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/line-counter.js
 var require_line_counter = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/line-counter.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/line-counter.js"(exports2) {
     "use strict";
     var LineCounter = class {
       constructor() {
@@ -6321,9 +6333,9 @@ var require_line_counter = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/parser.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/parser.js
 var require_parser = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/parse/parser.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/parse/parser.js"(exports2) {
     "use strict";
     var node_process = require("process");
     var cst = require_cst();
@@ -6392,6 +6404,13 @@ var require_parser = __commonJS({
       }
       return prev.splice(i, prev.length);
     }
+    function arrayPushArray(target, source) {
+      if (source.length < 1e5)
+        Array.prototype.push.apply(target, source);
+      else
+        for (let i = 0; i < source.length; ++i)
+          target.push(source[i]);
+    }
     function fixFlowSeqItems(fc) {
       if (fc.start.type === "flow-seq-start") {
         for (const it of fc.items) {
@@ -6401,11 +6420,11 @@ var require_parser = __commonJS({
             delete it.key;
             if (isFlowToken(it.value)) {
               if (it.value.end)
-                Array.prototype.push.apply(it.value.end, it.sep);
+                arrayPushArray(it.value.end, it.sep);
               else
                 it.value.end = it.sep;
             } else
-              Array.prototype.push.apply(it.start, it.sep);
+              arrayPushArray(it.start, it.sep);
             delete it.sep;
           }
         }
@@ -6760,7 +6779,7 @@ var require_parser = __commonJS({
                 const prev = map.items[map.items.length - 2];
                 const end = prev?.value?.end;
                 if (Array.isArray(end)) {
-                  Array.prototype.push.apply(end, it.start);
+                  arrayPushArray(end, it.start);
                   end.push(this.sourceToken);
                   map.items.pop();
                   return;
@@ -6948,7 +6967,7 @@ var require_parser = __commonJS({
                 const prev = seq.items[seq.items.length - 2];
                 const end = prev?.value?.end;
                 if (Array.isArray(end)) {
-                  Array.prototype.push.apply(end, it.start);
+                  arrayPushArray(end, it.start);
                   end.push(this.sourceToken);
                   seq.items.pop();
                   return;
@@ -7188,9 +7207,9 @@ var require_parser = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/public-api.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/public-api.js
 var require_public_api = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/public-api.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/public-api.js"(exports2) {
     "use strict";
     var composer = require_composer();
     var Document = require_Document();
@@ -7285,9 +7304,9 @@ var require_public_api = __commonJS({
   }
 });
 
-// ../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/index.js
+// ../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/index.js
 var require_dist = __commonJS({
-  "../../node_modules/.pnpm/yaml@2.8.4/node_modules/yaml/dist/index.js"(exports2) {
+  "../../node_modules/.pnpm/yaml@2.9.0/node_modules/yaml/dist/index.js"(exports2) {
     "use strict";
     var composer = require_composer();
     var Document = require_Document();
@@ -57996,6 +58015,8 @@ var configSchema = external_exports.object({
     bindHost: external_exports.string().default("127.0.0.1"),
     bindPort: external_exports.number().default(11434),
     maxGpuLayers: external_exports.number().default(999),
+    noKvOffload: external_exports.boolean().default(false),
+    ctxSize: external_exports.number().default(0),
     healthcheckIntervalMs: external_exports.number().default(1e4),
     restartOnFailure: external_exports.boolean().default(true)
   }).default({}),
@@ -58853,6 +58874,149 @@ function assertNotSelfProxy(req, backendBaseUrl) {
     throw new Error(`Backend URL points back at the gateway (${backendBaseUrl})`);
   }
 }
+async function ensureModel(bodyModel, ctx2) {
+  if (!bodyModel || !ctx2?.backend) return;
+  await ctx2.backend.loadModel(bodyModel);
+  for (let i = 0; i < 120; i++) {
+    const health = await ctx2.backend.checkHealth();
+    if (health.healthy) return;
+    await new Promise((r) => setTimeout(r, 1e3));
+  }
+  throw new Error(`Model "${bodyModel}" failed to load within 120s`);
+}
+function toOllamaChatResponse(openai, model) {
+  const choice = openai.choices?.[0] ?? {};
+  return {
+    model,
+    created_at: openai.created ? new Date(openai.created * 1e3).toISOString().replace("Z", "000000Z") : (/* @__PURE__ */ new Date()).toISOString(),
+    message: choice.message ?? { role: "assistant", content: "" },
+    done: true,
+    done_reason: choice.finish_reason === "stop" ? "stop" : choice.finish_reason ?? "stop",
+    total_duration: 0,
+    load_duration: 0,
+    prompt_eval_count: openai.usage?.prompt_tokens ?? 0,
+    prompt_eval_duration: 0,
+    eval_count: openai.usage?.completion_tokens ?? 0,
+    eval_duration: 0
+  };
+}
+function toOllamaGenerateResponse(openai, model) {
+  const choice = openai.choices?.[0] ?? {};
+  return {
+    model,
+    created_at: openai.created ? new Date(openai.created * 1e3).toISOString().replace("Z", "000000Z") : (/* @__PURE__ */ new Date()).toISOString(),
+    response: choice.text ?? "",
+    done: true,
+    done_reason: choice.finish_reason === "stop" ? "stop" : choice.finish_reason ?? "stop",
+    total_duration: 0,
+    load_duration: 0,
+    prompt_eval_count: openai.usage?.prompt_tokens ?? 0,
+    prompt_eval_duration: 0,
+    eval_count: openai.usage?.completion_tokens ?? 0,
+    eval_duration: 0
+  };
+}
+function openaiSseToOllamaChatStream(model) {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+  return new TransformStream({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith("data: ")) continue;
+        const payload = trimmed.slice(6).trim();
+        if (payload === "[DONE]") continue;
+        try {
+          const data = JSON.parse(payload);
+          const choice = data.choices?.[0] ?? {};
+          if (choice.finish_reason) {
+            const done = {
+              model,
+              created_at: (/* @__PURE__ */ new Date()).toISOString(),
+              message: { role: "assistant", content: "" },
+              done: true,
+              done_reason: choice.finish_reason === "stop" ? "stop" : choice.finish_reason
+            };
+            controller.enqueue(encoder.encode(JSON.stringify(done) + "\n"));
+            continue;
+          }
+          const delta = choice.delta ?? {};
+          const content = delta.content ?? "";
+          const ollama = {
+            model,
+            created_at: (/* @__PURE__ */ new Date()).toISOString(),
+            message: {
+              role: delta.role ?? "assistant",
+              content
+            },
+            done: false
+          };
+          controller.enqueue(encoder.encode(JSON.stringify(ollama) + "\n"));
+        } catch {
+        }
+      }
+    }
+  });
+}
+function openaiSseToOllamaGenerateStream(model) {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+  let doneSent = false;
+  return new TransformStream({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith("data: ")) continue;
+        const payload = trimmed.slice(6).trim();
+        if (payload === "[DONE]") continue;
+        try {
+          const data = JSON.parse(payload);
+          const choice = data.choices?.[0] ?? {};
+          if (choice.finish_reason) {
+            doneSent = true;
+            const done = {
+              model,
+              created_at: (/* @__PURE__ */ new Date()).toISOString(),
+              response: "",
+              done: true,
+              done_reason: choice.finish_reason === "stop" ? "stop" : choice.finish_reason
+            };
+            controller.enqueue(encoder.encode(JSON.stringify(done) + "\n"));
+            continue;
+          }
+          const delta = choice.text ?? "";
+          const ollama = {
+            model,
+            created_at: (/* @__PURE__ */ new Date()).toISOString(),
+            response: delta,
+            done: false
+          };
+          controller.enqueue(encoder.encode(JSON.stringify(ollama) + "\n"));
+        } catch {
+        }
+      }
+    },
+    flush(controller) {
+      if (doneSent) return;
+      const done = {
+        model,
+        created_at: (/* @__PURE__ */ new Date()).toISOString(),
+        response: "",
+        done: true,
+        done_reason: "stop"
+      };
+      controller.enqueue(encoder.encode(JSON.stringify(done) + "\n"));
+    }
+  });
+}
 
 // src/http/routes/proxy-llama.routes.ts
 function releaseOnce(lease) {
@@ -58975,6 +59139,11 @@ function registerProxyLlamaRoutes(app) {
     const isStreaming = typeof stream === "string" ? stream === "true" : !!stream;
     const body = req.body || {};
     const ctx2 = getCtx2(app);
+    try {
+      await ensureModel(body.model, ctx2);
+    } catch (err) {
+      return reply.status(502).send({ error: err.message });
+    }
     const lease = await ctx2.workloads.acquire(req, {
       type: "llama_chat",
       resourceClass: "gpu_llm",
@@ -59005,18 +59174,16 @@ function registerProxyLlamaRoutes(app) {
       if (!response.ok) throw new Error(`llama.cpp returned ${response.status}: ${await response.text()}`);
       if (isStreaming && response.body) {
         reply.headers({
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
+          "Content-Type": "application/x-ndjson",
           "X-AI-Gateway": "inferdeck",
           "X-InferDeck-Job-Id": lease.jobId
         });
-        return reply.send(trackedStream(response.body, release));
+        return reply.send(trackedStream(response.body.pipeThrough(openaiSseToOllamaChatStream(body.model)), release));
       }
       const json = await response.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-InferDeck-Job-Id": lease.jobId });
       release("succeeded", { responseBytes: JSON.stringify(json).length });
-      return reply.send(json);
+      return reply.send(toOllamaChatResponse(json, body.model));
     } catch (err) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: err.message });
@@ -59027,6 +59194,11 @@ function registerProxyLlamaRoutes(app) {
     const isStreaming = typeof stream === "string" ? stream === "true" : !!stream;
     const body = req.body || {};
     const ctx2 = getCtx2(app);
+    try {
+      await ensureModel(body.model, ctx2);
+    } catch (err) {
+      return reply.status(502).send({ error: err.message });
+    }
     const lease = await ctx2.workloads.acquire(req, {
       type: "llama_generate",
       resourceClass: "gpu_llm",
@@ -59056,18 +59228,16 @@ function registerProxyLlamaRoutes(app) {
       if (!response.ok) throw new Error(`llama.cpp returned ${response.status}: ${await response.text()}`);
       if (isStreaming && response.body) {
         reply.headers({
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
+          "Content-Type": "application/x-ndjson",
           "X-AI-Gateway": "inferdeck",
           "X-InferDeck-Job-Id": lease.jobId
         });
-        return reply.send(trackedStream(response.body, release));
+        return reply.send(trackedStream(response.body.pipeThrough(openaiSseToOllamaGenerateStream(body.model)), release));
       }
       const json = await response.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-InferDeck-Job-Id": lease.jobId });
       release("succeeded", { responseBytes: JSON.stringify(json).length });
-      return reply.send(json);
+      return reply.send(toOllamaGenerateResponse(json, body.model));
     } catch (err) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: err.message });
@@ -59160,6 +59330,11 @@ function registerProxyOpenAIRoutes(app) {
     const stream = body?.stream ?? false;
     const startTime = Date.now();
     const ctx2 = getCtx3(app);
+    try {
+      await ensureModel(body.model, ctx2);
+    } catch (err) {
+      return reply.status(502).send({ error: { message: err.message, type: "model_load_error" } });
+    }
     const lease = await ctx2.workloads.acquire(req, {
       type: "openai_chat",
       resourceClass: "gpu_llm",
@@ -60334,15 +60509,19 @@ var LlamaServerProcessManager = class {
     if (health.healthy) {
       this.status = "running";
       this.managed = false;
+      console.log("[backend] Found already running at", this.config.baseUrl);
       this.startHealthLoop();
       return;
     }
+    console.log("[backend] Health check failed:", health.error);
     if (!this.config.managed) {
       this.status = "unhealthy";
       this.lastError = health.error;
+      console.log("[backend] Not managed, will not spawn");
       this.startHealthLoop();
       return;
     }
+    console.log("[backend] Managed mode, spawning process...");
     await this.spawnProcess();
     this.startHealthLoop();
   }
@@ -60367,10 +60546,11 @@ var LlamaServerProcessManager = class {
   }
   async loadModel(modelName) {
     const models = scanGgufFiles(this.config.ggufDirectory);
-    const target = models.find((m) => m.name === modelName || m.path.endsWith(modelName));
+    const target = this.findModel(models, modelName);
     if (!target) {
       throw new Error(`Model "${modelName}" not found in ${this.config.ggufDirectory}`);
     }
+    if (this.currentModel === target.name && this.child) return;
     this.currentModel = target.name;
     if (this.child) {
       await this.stopChild();
@@ -60381,6 +60561,21 @@ var LlamaServerProcessManager = class {
     this.currentModel = null;
     await this.stopChild();
     this.status = "stopped";
+  }
+  findModel(models, name) {
+    const norm = (s) => s.toLowerCase().replace(/[:._\s]/g, "-");
+    const normalized = norm(name);
+    return models.find((m) => {
+      if (m.name === name || m.path.endsWith(name)) return true;
+      const basename = m.path.split(/[\\/]/).pop() ?? "";
+      if (basename === name) return true;
+      const mName = m.name.toLowerCase();
+      if (mName === name.toLowerCase() || mName.endsWith(name.toLowerCase())) return true;
+      if (mName.includes(name.toLowerCase())) return true;
+      const mNorm = norm(m.name);
+      if (mNorm === normalized || mNorm.endsWith(normalized) || mNorm.includes(normalized)) return true;
+      return false;
+    });
   }
   listModels() {
     return scanGgufFiles(this.config.ggufDirectory);
@@ -60403,6 +60598,7 @@ var LlamaServerProcessManager = class {
       this.status = this.child ? "starting" : "unhealthy";
       this.lastError = message;
       this.lastHealthcheckAt = (/* @__PURE__ */ new Date()).toISOString();
+      console.error(`[backend] Health check failed: ${message}`);
       return {
         healthy: false,
         latencyMs: Date.now() - started,
@@ -60432,7 +60628,9 @@ var LlamaServerProcessManager = class {
     const modelPath = this.resolveModelPath();
     if (!modelPath) {
       this.status = "error";
-      this.lastError = `No GGUF model found in ${this.config.ggufDirectory}. Place a .gguf file or set backend.model in config.`;
+      const msg = `No GGUF model found in ${this.config.ggufDirectory}. Place a .gguf file or set backend.model in config.`;
+      this.lastError = msg;
+      console.error("[backend]", msg);
       return;
     }
     this.status = "starting";
@@ -60448,31 +60646,42 @@ var LlamaServerProcessManager = class {
       "-ngl",
       String(this.config.maxGpuLayers)
     ];
+    if (this.config.ctxSize > 0) args.push("-c", String(this.config.ctxSize));
+    if (this.config.noKvOffload) args.push("--no-kv-offload");
+    console.log(`[backend] Spawning: ${this.config.executable} ${args.join(" ")}`);
     try {
       const child = (0, import_node_child_process.spawn)(this.config.executable, args, {
         stdio: ["ignore", "pipe", "pipe"]
       });
       this.child = child;
+      console.log(`[backend] Spawned pid=${child.pid}`);
     } catch (err) {
       this.status = "error";
       this.lastError = err instanceof Error ? err.message : String(err);
       this.child = null;
+      console.error("[backend] Spawn failed:", this.lastError);
       return;
     }
     this.child.stderr?.on("data", (chunk) => {
       const text = String(chunk).trim();
-      if (text) this.lastError = text.slice(-500);
+      if (text) {
+        this.lastError = text.slice(-500);
+        console.error("[backend:stderr]", text);
+      }
     });
     this.child.on("error", (err) => {
       this.status = "error";
       this.lastError = err.message;
       this.child = null;
+      console.error("[backend] Process error:", err.message);
     });
     this.child.on("exit", (code, signal) => {
+      const pid = this.child?.pid;
       this.child = null;
       if (this.stopping) return;
       this.status = "stopped";
       this.lastError = `llama-server exited with ${signal ?? code ?? "unknown"}`;
+      console.error(`[backend] Process exited pid=${pid} code=${code} signal=${signal}`);
       if (this.config.restartOnFailure && this.currentModel) {
         setTimeout(() => {
           if (!this.stopping && !this.child) void this.spawnProcess();
@@ -60481,15 +60690,27 @@ var LlamaServerProcessManager = class {
     });
   }
   resolveModelPath() {
-    if (this.currentModel) {
-      const candidate = (0, import_node_path6.isAbsolute)(this.currentModel) ? this.currentModel : (0, import_node_path6.join)(this.config.ggufDirectory, this.currentModel);
+    if (this.config.model) {
+      const candidate = (0, import_node_path6.isAbsolute)(this.config.model) ? this.config.model : (0, import_node_path6.join)(this.config.ggufDirectory, this.config.model);
       try {
-        if ((0, import_node_fs6.statSync)(candidate).isFile()) return candidate;
+        if ((0, import_node_fs6.statSync)(candidate).isFile()) {
+          this.currentModel = this.config.model;
+          return candidate;
+        }
       } catch {
       }
     }
     const models = scanGgufFiles(this.config.ggufDirectory);
     if (models.length === 0) return null;
+    const preferred = this.config.model;
+    if (preferred) {
+      const matched = this.findModel(models, preferred);
+      if (matched) {
+        this.currentModel = matched.name;
+        return matched.path;
+      }
+      console.warn(`[backend] Model "${preferred}" not found, falling back to first available`);
+    }
     const first = models[0];
     this.currentModel = first.name;
     return first.path;

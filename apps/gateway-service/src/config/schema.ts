@@ -36,6 +36,8 @@ export const configSchema = z.object({
     bindHost: z.string().default("127.0.0.1"),
     bindPort: z.number().default(11434),
     maxGpuLayers: z.number().default(999),
+    noKvOffload: z.boolean().default(false),
+    ctxSize: z.number().default(0),
     healthcheckIntervalMs: z.number().default(10000),
     restartOnFailure: z.boolean().default(true),
   }).default({}),

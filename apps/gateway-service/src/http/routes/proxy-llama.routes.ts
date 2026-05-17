@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { assertNotSelfProxy } from "./proxy-utils";
+import { assertNotSelfProxy, ensureModel, toOllamaChatResponse, toOllamaGenerateResponse, openaiSseToOllamaChatStream, openaiSseToOllamaGenerateStream } from "./proxy-utils";
 import type { WorkloadLease } from "../../services/WorkloadCoordinator";
 import type { AppContext } from "../../app";
 
@@ -131,6 +131,13 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
     const isStreaming = typeof stream === "string" ? stream === "true" : !!stream;
     const body = req.body as any || {};
     const ctx = getCtx(app);
+
+    try {
+      await ensureModel(body.model, ctx);
+    } catch (err: any) {
+      return reply.status(502).send({ error: err.message });
+    }
+
     const lease = await ctx.workloads.acquire(req, {
       type: "llama_chat",
       resourceClass: "gpu_llm",
@@ -164,19 +171,17 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
 
       if (isStreaming && response.body) {
         reply.headers({
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
+          "Content-Type": "application/x-ndjson",
           "X-AI-Gateway": "inferdeck",
           "X-InferDeck-Job-Id": lease.jobId,
         });
-        return reply.send(trackedStream(response.body, release));
+        return reply.send(trackedStream(response.body.pipeThrough(openaiSseToOllamaChatStream(body.model)), release));
       }
 
       const json = await response.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-InferDeck-Job-Id": lease.jobId });
       release("succeeded", { responseBytes: JSON.stringify(json).length });
-      return reply.send(json);
+      return reply.send(toOllamaChatResponse(json, body.model));
     } catch (err: any) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: err.message });
@@ -188,6 +193,13 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
     const isStreaming = typeof stream === "string" ? stream === "true" : !!stream;
     const body = req.body as any || {};
     const ctx = getCtx(app);
+
+    try {
+      await ensureModel(body.model, ctx);
+    } catch (err: any) {
+      return reply.status(502).send({ error: err.message });
+    }
+
     const lease = await ctx.workloads.acquire(req, {
       type: "llama_generate",
       resourceClass: "gpu_llm",
@@ -220,19 +232,17 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
 
       if (isStreaming && response.body) {
         reply.headers({
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
+          "Content-Type": "application/x-ndjson",
           "X-AI-Gateway": "inferdeck",
           "X-InferDeck-Job-Id": lease.jobId,
         });
-        return reply.send(trackedStream(response.body, release));
+        return reply.send(trackedStream(response.body.pipeThrough(openaiSseToOllamaGenerateStream(body.model)), release));
       }
 
       const json = await response.json();
       reply.headers({ "X-AI-Gateway": "inferdeck", "X-InferDeck-Job-Id": lease.jobId });
       release("succeeded", { responseBytes: JSON.stringify(json).length });
-      return reply.send(json);
+      return reply.send(toOllamaGenerateResponse(json, body.model));
     } catch (err: any) {
       release("failed", { error: err.message });
       return reply.status(502).send({ error: err.message });

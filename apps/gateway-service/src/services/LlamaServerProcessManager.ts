@@ -15,6 +15,8 @@ export interface LlamaConfig {
   bindHost: string;
   bindPort: number;
   maxGpuLayers: number;
+  noKvOffload: boolean;
+  ctxSize: number;
   healthcheckIntervalMs: number;
   restartOnFailure: boolean;
 }
@@ -85,17 +87,22 @@ export class LlamaServerProcessManager {
     if (health.healthy) {
       this.status = "running";
       this.managed = false;
+      console.log("[backend] Found already running at", this.config.baseUrl);
       this.startHealthLoop();
       return;
     }
+
+    console.log("[backend] Health check failed:", health.error);
 
     if (!this.config.managed) {
       this.status = "unhealthy";
       this.lastError = health.error;
+      console.log("[backend] Not managed, will not spawn");
       this.startHealthLoop();
       return;
     }
 
+    console.log("[backend] Managed mode, spawning process...");
     await this.spawnProcess();
     this.startHealthLoop();
   }
@@ -124,10 +131,12 @@ export class LlamaServerProcessManager {
 
   async loadModel(modelName: string): Promise<void> {
     const models = scanGgufFiles(this.config.ggufDirectory);
-    const target = models.find((m) => m.name === modelName || m.path.endsWith(modelName));
+    const target = this.findModel(models, modelName);
     if (!target) {
       throw new Error(`Model "${modelName}" not found in ${this.config.ggufDirectory}`);
     }
+
+    if (this.currentModel === target.name && this.child) return;
 
     this.currentModel = target.name;
     if (this.child) {
@@ -140,6 +149,23 @@ export class LlamaServerProcessManager {
     this.currentModel = null;
     await this.stopChild();
     this.status = "stopped";
+  }
+
+  private findModel(models: LlamaModelInfo[], name: string): LlamaModelInfo | undefined {
+    const norm = (s: string) => s.toLowerCase().replace(/[:._\s]/g, "-");
+    const normalized = norm(name);
+    return models.find((m) => {
+      if (m.name === name || m.path.endsWith(name)) return true;
+      const basename = m.path.split(/[\\/]/).pop() ?? "";
+      if (basename === name) return true;
+      const mName = m.name.toLowerCase();
+      if (mName === name.toLowerCase() || mName.endsWith(name.toLowerCase())) return true;
+      if (mName.includes(name.toLowerCase())) return true;
+      // normalized matching (handles "gpt-oss:20b" vs "gpt-oss-20b")
+      const mNorm = norm(m.name);
+      if (mNorm === normalized || mNorm.endsWith(normalized) || mNorm.includes(normalized)) return true;
+      return false;
+    });
   }
 
   listModels(): LlamaModelInfo[] {
@@ -165,6 +191,7 @@ export class LlamaServerProcessManager {
       this.status = this.child ? "starting" : "unhealthy";
       this.lastError = message;
       this.lastHealthcheckAt = new Date().toISOString();
+      console.error(`[backend] Health check failed: ${message}`);
       return {
         healthy: false,
         latencyMs: Date.now() - started,
@@ -197,7 +224,9 @@ export class LlamaServerProcessManager {
     const modelPath = this.resolveModelPath();
     if (!modelPath) {
       this.status = "error";
-      this.lastError = `No GGUF model found in ${this.config.ggufDirectory}. Place a .gguf file or set backend.model in config.`;
+      const msg = `No GGUF model found in ${this.config.ggufDirectory}. Place a .gguf file or set backend.model in config.`;
+      this.lastError = msg;
+      console.error("[backend]", msg);
       return;
     }
 
@@ -211,36 +240,48 @@ export class LlamaServerProcessManager {
       "--port", String(this.config.bindPort),
       "-ngl", String(this.config.maxGpuLayers),
     ];
+    if (this.config.ctxSize > 0) args.push("-c", String(this.config.ctxSize));
+    if (this.config.noKvOffload) args.push("--no-kv-offload");
+
+    console.log(`[backend] Spawning: ${this.config.executable} ${args.join(" ")}`);
 
     try {
       const child = spawn(this.config.executable, args, {
         stdio: ["ignore", "pipe", "pipe"],
       });
       this.child = child;
+      console.log(`[backend] Spawned pid=${child.pid}`);
     } catch (err) {
       this.status = "error";
       this.lastError = err instanceof Error ? err.message : String(err);
       this.child = null;
+      console.error("[backend] Spawn failed:", this.lastError);
       return;
     }
 
     this.child.stderr?.on("data", (chunk) => {
       const text = String(chunk).trim();
-      if (text) this.lastError = text.slice(-500);
+      if (text) {
+        this.lastError = text.slice(-500);
+        console.error("[backend:stderr]", text);
+      }
     });
 
     this.child.on("error", (err) => {
       this.status = "error";
       this.lastError = err.message;
       this.child = null;
+      console.error("[backend] Process error:", err.message);
     });
 
     this.child.on("exit", (code, signal) => {
+      const pid = this.child?.pid;
       this.child = null;
       if (this.stopping) return;
 
       this.status = "stopped";
       this.lastError = `llama-server exited with ${signal ?? code ?? "unknown"}`;
+      console.error(`[backend] Process exited pid=${pid} code=${code} signal=${signal}`);
       if (this.config.restartOnFailure && this.currentModel) {
         setTimeout(() => {
           if (!this.stopping && !this.child) void this.spawnProcess();
@@ -250,19 +291,34 @@ export class LlamaServerProcessManager {
   }
 
   private resolveModelPath(): string | null {
-    if (this.currentModel) {
-      const candidate = isAbsolute(this.currentModel)
-        ? this.currentModel
-        : join(this.config.ggufDirectory, this.currentModel);
+    // use explicit config.model if set
+    if (this.config.model) {
+      const candidate = isAbsolute(this.config.model)
+        ? this.config.model
+        : join(this.config.ggufDirectory, this.config.model);
       try {
-        if (statSync(candidate).isFile()) return candidate;
+        if (statSync(candidate).isFile()) {
+          this.currentModel = this.config.model;
+          return candidate;
+        }
       } catch {
-        // not found at exact path
+        // not found
       }
     }
 
     const models = scanGgufFiles(this.config.ggufDirectory);
     if (models.length === 0) return null;
+
+    // if config.model is set, find matching model by name
+    const preferred = this.config.model;
+    if (preferred) {
+      const matched = this.findModel(models, preferred);
+      if (matched) {
+        this.currentModel = matched.name;
+        return matched.path;
+      }
+      console.warn(`[backend] Model "${preferred}" not found, falling back to first available`);
+    }
 
     const first = models[0];
     this.currentModel = first.name;

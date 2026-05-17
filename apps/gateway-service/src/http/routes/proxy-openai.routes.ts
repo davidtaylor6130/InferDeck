@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { assertNotSelfProxy } from "./proxy-utils";
+import { assertNotSelfProxy, ensureModel } from "./proxy-utils";
 import type { WorkloadLease } from "../../services/WorkloadCoordinator";
 import type { AppContext } from "../../app";
 
@@ -61,6 +61,13 @@ export function registerProxyOpenAIRoutes(app: FastifyInstance): void {
     const stream = body?.stream ?? false;
     const startTime = Date.now();
     const ctx = getCtx(app);
+
+    try {
+      await ensureModel(body.model, ctx);
+    } catch (err: any) {
+      return reply.status(502).send({ error: { message: err.message, type: "model_load_error" } });
+    }
+
     const lease = await ctx.workloads.acquire(req, {
       type: "openai_chat",
       resourceClass: "gpu_llm",
