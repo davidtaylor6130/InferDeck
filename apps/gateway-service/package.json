@@ -13,7 +13,7 @@
     "prestart": "pnpm build",
     "start": "node dist/main.js",
     "test": "cd ../.. && node_modules/.pnpm/node_modules/.bin/vitest run",
-    "dist": "pnpm build && pnpm bundle && pkg . --targets node22-win-x64,node22-linux-x64 --public --output release/inferdeck-gateway"
+    "dist": "pnpm build && pnpm bundle && npx @yao-pkg/pkg . --targets node22-win-x64,node22-linux-x64 --public --output release/inferdeck-gateway"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.0",
@@ -41,12 +41,11 @@
   },
   "pkg": {
     "outputPath": "release",
+    "scripts": [
+      "dist-bundle/main.js"
+    ],
     "assets": [
-      "packages/shared/dist/**/*",
-      "packages/gateway-core/dist/**/*",
-      "config/**/*",
-      "public/**/*",
-      "src/db/migrations/**/*",
+      "dist-bundle/sql-wasm.wasm",
       "dist-bundle/db/migrations/**/*",
       "dist-bundle/public/**/*",
       "dist-bundle/config/**/*"
