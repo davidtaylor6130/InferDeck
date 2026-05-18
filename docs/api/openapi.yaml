@@ -1,0 +1,458 @@
+openapi: 3.0.3
+info:
+  title: InferDeck Gateway API
+  description: OpenAI-compatible API for local LLM inference via llama.cpp
+  version: 0.1.0
+  contact:
+    name: InferDeck Team
+
+servers:
+  - url: https://localhost:8080
+    description: HTTPS server (default)
+  - url: http://localhost:8080
+    description: HTTP server
+
+paths:
+  /v1/chat/completions:
+    post:
+      summary: Create a chat completion
+      description: Send a chat message and receive a completion from the loaded model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+      responses:
+        '200':
+          description: Chat completion received
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Model not loaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/completions:
+    post:
+      summary: Create a text completion
+      description: Send a text prompt and receive a completion from the loaded model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompletionRequest'
+      responses:
+        '200':
+          description: Text completion received
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionResponse'
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Model not loaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/models:
+    get:
+      summary: List available models
+      description: List models available for inference
+      responses:
+        '200':
+          description: Model list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelsResponse'
+
+  /v1/embeddings:
+    post:
+      summary: Create embeddings
+      description: Generate embeddings for the given input text
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmbeddingsRequest'
+      responses:
+        '200':
+          description: Embeddings created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbeddingsResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Model not loaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/health:
+    get:
+      summary: Health check
+      description: Check if the gateway service is healthy
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /inferdeck/metrics:
+    get:
+      summary: Get inference metrics
+      description: Get real-time inference metrics and performance data
+      responses:
+        '200':
+          description: Metrics retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsResponse'
+
+  /inferdeck/status:
+    get:
+      summary: Get engine status
+      description: Get the current inference engine status
+      responses:
+        '200':
+          description: Engine status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+
+components:
+  schemas:
+    ChatCompletionRequest:
+      type: object
+      required:
+        - messages
+      properties:
+        model:
+          type: string
+          default: "default"
+          description: Model identifier
+        messages:
+          type: array
+          description: List of chat messages
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        max_tokens:
+          type: integer
+          default: 256
+          description: Maximum tokens to generate
+        temperature:
+          type: number
+          format: float
+          default: 0.7
+          description: Sampling temperature
+        top_p:
+          type: number
+          format: float
+          default: 0.9
+          description: Nucleus sampling parameter
+        stream:
+          type: boolean
+          default: false
+          description: Enable streaming response
+
+    ChatMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum:
+            - system
+            - user
+            - assistant
+            - tool
+        content:
+          type: string
+
+    ChatCompletionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique completion ID
+        object:
+          type: string
+          default: "chat.completion"
+        created:
+          type: integer
+          description: Unix timestamp
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatCompletionChoice'
+        usage:
+          $ref: '#/components/schemas/Usage'
+
+    ChatCompletionChoice:
+      type: object
+      properties:
+        index:
+          type: integer
+        message:
+          $ref: '#/components/schemas/ChatMessage'
+        finish_reason:
+          type: string
+          enum:
+            - stop
+            - length
+            - content_filter
+            null
+
+    CompletionRequest:
+      type: object
+      required:
+        - prompt
+      properties:
+        model:
+          type: string
+          default: "default"
+        prompt:
+          type: string
+          description: Text prompt to complete
+        max_tokens:
+          type: integer
+          default: 256
+        temperature:
+          type: number
+          format: float
+          default: 0.7
+        top_p:
+          type: number
+          format: float
+          default: 0.9
+        stream:
+          type: boolean
+          default: false
+
+    CompletionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          default: "text_completion"
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            $ref: '#/components/schemas/CompletionChoice'
+        usage:
+          $ref: '#/components/schemas/Usage'
+
+    CompletionChoice:
+      type: object
+      properties:
+        text:
+          type: string
+        index:
+          type: integer
+        finish_reason:
+          type: string
+          enum:
+            - stop
+            - length
+
+    EmbeddingsRequest:
+      type: object
+      required:
+        - input
+      properties:
+        model:
+          type: string
+          default: "default"
+        input:
+          type: string
+          description: Text to embed
+
+    EmbeddingsResponse:
+      type: object
+      properties:
+        object:
+          type: string
+          default: "list"
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Embedding'
+        model:
+          type: string
+        usage:
+          $ref: '#/components/schemas/Usage'
+
+    Embedding:
+      type: object
+      properties:
+        object:
+          type: string
+          default: "embedding"
+        index:
+          type: integer
+        embedding:
+          type: array
+          items:
+            type: number
+
+    Usage:
+      type: object
+      properties:
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+
+    ModelsResponse:
+      type: object
+      properties:
+        object:
+          type: string
+          default: "list"
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelInfo'
+
+    ModelInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          default: "model"
+        created:
+          type: integer
+        owned_by:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+            - degraded
+            - error
+        version:
+          type: string
+        uptime:
+          type: integer
+          description: Uptime in seconds
+
+    MetricsResponse:
+      type: object
+      properties:
+        counters:
+          type: object
+          description: Counter metrics
+        gauges:
+          type: object
+          description: Gauge metrics
+        histograms:
+          type: object
+          description: Histogram metrics
+
+    StatusResponse:
+      type: object
+      properties:
+        initialized:
+          type: boolean
+        model:
+          type: string
+          description: Currently loaded model name
+        gpu:
+          $ref: '#/components/schemas/GpuInfo'
+        quantization:
+          type: string
+          description: Detected quantization level
+        precision:
+          type: string
+          description: Active precision mode
+
+    GpuInfo:
+      type: object
+      properties:
+        device_name:
+          type: string
+        vram_total:
+          type: integer
+          format: int64
+          description: Total VRAM in bytes
+        vram_used:
+          type: integer
+          format: int64
+          description: Used VRAM in bytes
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+              enum:
+                - invalid_request_error
+                - not_found_error
+                - server_error
+                - service_unavailable
+            param:
+              type: string
+              nullable: true
+            code:
+              type: string
+              nullable: true
