@@ -22,4 +22,61 @@ export function registerHealthRoutes(app: FastifyInstance): void {
       },
     });
   });
+
+  /**
+   * /ready — for process supervisors (WinSW, systemd, Kubernetes)
+   * Returns 200 only when all critical subsystems are operational.
+   * Returns 503 if any critical subsystem is down.
+   */
+  app.get("/ready", async (_request, reply) => {
+    try {
+      const ctx = (app as any).ctx() as {
+        db: { client: any };
+        backend: { getSnapshot: () => { status: string } };
+      };
+
+      const checks: Record<string, boolean> = {
+        database: false,
+        llama_cpp: false,
+      };
+
+      // Check database
+      try {
+        ctx.db.client.exec("SELECT 1");
+        checks.database = true;
+      } catch {
+        checks.database = false;
+      }
+
+      // Check backend
+      try {
+        const snap = ctx.backend.getSnapshot();
+        checks.llama_cpp = snap.status === "running";
+      } catch {
+        checks.llama_cpp = false;
+      }
+
+      const allHealthy = Object.values(checks).every(Boolean);
+
+      if (!allHealthy) {
+        return reply.status(503).send({
+          status: "not_ready",
+          checks,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      return reply.send({
+        status: "ready",
+        checks,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      return reply.status(503).send({
+        status: "not_ready",
+        error: err.message,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
 }

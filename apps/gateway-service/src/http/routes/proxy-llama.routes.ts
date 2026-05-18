@@ -75,7 +75,7 @@ export function registerProxyLlamaRoutes(app: FastifyInstance): void {
       const body = req.body as { name?: string; model?: string };
       const name = body?.name ?? body?.model ?? "";
       const models = ctx?.backend?.listModels() ?? [];
-      const found = ctx?.backend?.findModelByName?.(name) ?? models.find((m) => {
+      const found = models.find((m) => {
         const ollamaName = toOllamaModelName(m.path);
         const norm = (s: string) => s.toLowerCase().replace(/[:._\s\/\\-]/g, "");
         const n = normalizeModelName(name);

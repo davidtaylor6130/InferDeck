@@ -54,6 +54,7 @@ async function createBaseApp(ctx: AppContext): Promise<FastifyInstance> {
     logger: {
       level: ctx.config.logging?.level ?? "info",
     },
+    bodyLimit: 50 * 1024 * 1024, // 50MB max request body
   });
 
   app.decorate("ctx", () => ctx);
@@ -117,7 +118,7 @@ export async function createProxyApp(ctx: AppContext): Promise<FastifyInstance> 
   return app;
 }
 
-export async function startServer(ctx: AppContext): Promise<void> {
+export async function startServer(ctx: AppContext): Promise<FastifyInstance[]> {
   const proxyHost = ctx.config.server.proxyHost;
   const proxyPort = ctx.config.server.proxyPort;
   const dashboardHost = ctx.config.server.dashboardHost;
@@ -129,7 +130,7 @@ export async function startServer(ctx: AppContext): Promise<void> {
     registerProxyOpenAIRoutes(app);
     await app.listen({ port: proxyPort, host: proxyHost });
     app.log.info(`Gateway + Dashboard listening on http://${proxyHost}:${proxyPort}`);
-    return;
+    return [app];
   }
 
   const [proxyApp, dashboardApp] = await Promise.all([
@@ -146,4 +147,6 @@ export async function startServer(ctx: AppContext): Promise<void> {
   dashboardApp.log.info(`Dashboard control UI listening on http://${dashboardHost}:${dashboardPort}`);
   proxyApp.log.info(`llama.cpp: ${ctx.config.backend.baseUrl}`);
   proxyApp.log.info(`Mode: ${ctx.config.modes.startupMode}`);
+
+  return [proxyApp, dashboardApp];
 }

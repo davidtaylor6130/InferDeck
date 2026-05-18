@@ -78,6 +78,13 @@ export class LlamaServerProcessManager {
   private healthTimer: NodeJS.Timeout | null = null;
   private stopping = false;
 
+  // Restart backoff tracking
+  private restartTimestamps: number[] = [];
+  private backoffMs = 1000;
+  private readonly maxRestartsInWindow = 5;
+  private readonly backoffWindowMs = 5 * 60 * 1000; // 5 minutes
+  private readonly maxBackoffMs = 30000; // 30 seconds cap
+
   constructor(config: LlamaConfig) {
     this.config = config;
     this.client = new LlamaClient({ baseUrl: config.baseUrl, timeoutMs: 5000 });
@@ -320,6 +327,7 @@ export class LlamaServerProcessManager {
     this.status = "starting";
     this.managed = true;
     this.lastError = null;
+    this.resetBackoff();
 
     const args = [
       "-m", modelPath,
@@ -370,12 +378,46 @@ export class LlamaServerProcessManager {
       this.status = "stopped";
       this.lastError = `llama-server exited with ${signal ?? code ?? "unknown"}`;
       console.error(`[backend] Process exited pid=${pid} code=${code} signal=${signal}`);
+
       if (this.config.restartOnFailure && this.currentModel) {
+        const delay = this.getRestartDelay();
+        console.log(`[backend] Restarting in ${delay}ms (backoff=${this.backoffMs}ms)`);
         setTimeout(() => {
           if (!this.stopping && !this.child) void this.spawnProcess();
-        }, 1000);
+        }, delay);
       }
     });
+  }
+
+  /** Calculate restart delay with exponential backoff. Returns 0 if circuit is open. */
+  private getRestartDelay(): number {
+    const now = Date.now();
+    // Remove timestamps outside the backoff window
+    this.restartTimestamps = this.restartTimestamps.filter((t) => now - t < this.backoffWindowMs);
+
+    if (this.restartTimestamps.length >= this.maxRestartsInWindow) {
+      // Circuit open — too many restarts in the window
+      this.status = "unhealthy";
+      this.lastError = `llama.cpp crashed ${this.maxRestartsInWindow} times in ${this.backoffWindowMs / 60000}min — circuit breaker open`;
+      console.error(`[backend] Circuit breaker open: ${this.maxRestartsInWindow} restarts in ${this.backoffWindowMs / 60000}min`);
+      return 0; // Don't restart
+    }
+
+    this.restartTimestamps.push(now);
+
+    if (this.restartTimestamps.length <= 2) {
+      this.backoffMs = 1000;
+    } else {
+      this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoffMs);
+    }
+
+    return this.backoffMs;
+  }
+
+  /** Reset backoff state — call when model loads successfully. */
+  private resetBackoff(): void {
+    this.restartTimestamps = [];
+    this.backoffMs = 1000;
   }
 
   private resolveModelPath(): string | null {

@@ -17,9 +17,12 @@ After=network.target
 Type=simple
 User=$(whoami)
 WorkingDirectory=${WORKING_DIR}
-ExecStart=node --import tsx apps/gateway-service/src/main.ts
+ExecStart=node apps/gateway-service/dist/main.js
 Restart=on-failure
 RestartSec=10
+RestartMaxAttempts=5
+TimeoutStartSec=60
+TimeoutStopSec=15
 Environment=NODE_ENV=production
 EnvironmentFile=${WORKING_DIR}/apps/gateway-service/.env
 

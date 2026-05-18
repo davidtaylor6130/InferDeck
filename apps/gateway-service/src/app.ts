@@ -66,7 +66,9 @@ export class AppContext {
       }
     }
     this.db = new DatabaseManager(dbPath, migrationsDir);
-    this.logs = new LogStore(config.logging.dir, this.events);
+    this.logs = new LogStore(config.logging.dir, this.events, {
+      retentionDays: config.logging.retentionDays,
+    });
     this.metrics = new MetricsStore(this.db);
     this.hardware = new HardwareTelemetryService(config.hardware, this.events, this.metrics);
     this.managedServices = new ManagedServicesRegistry(config.managedServices, this.events, this.logs);
@@ -78,12 +80,15 @@ export class AppContext {
     await this.backend.start();
     await this.managedServices.startEnabled();
     this.hardware.start();
+    this.workloads.start();
     this.restoreQueueFromDatabase();
     this.logs.write({ level: "info", service: "gateway", message: "InferDeck gateway initialized" });
   }
 
   async shutdown(): Promise<void> {
     this.hardware.stop();
+    this.workloads.stop();
+    this.metrics.stop();
     await this.managedServices.stopAll();
     await this.backend.stop();
     this.db.close();

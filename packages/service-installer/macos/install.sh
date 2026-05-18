@@ -21,9 +21,7 @@ cat > "${SERVICES_DIR}/com.r9700.ai-gateway.plist" << EOF
     <key>ProgramArguments</key>
     <array>
         <string>node</string>
-        <string>--import</string>
-        <string>tsx</string>
-        <string>apps/gateway-service/src/main.ts</string>
+        <string>apps/gateway-service/dist/main.js</string>
     </array>
     <key>WorkingDirectory</key>
     <string>${WORKING_DIR}</string>

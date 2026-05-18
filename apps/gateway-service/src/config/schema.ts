@@ -48,6 +48,7 @@ export const configSchema = z.object({
     staleRunningJobAfterMs: z.number().default(600000),
     heartbeatIntervalMs: z.number().default(5000),
     jobLeaseSeconds: z.number().default(120),
+    maxQueueSize: z.number().default(1000),
   }).default({}),
   modes: z.object({
     startupMode: z.enum(["ai", "gaming", "maintenance"]).default("ai"),

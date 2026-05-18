@@ -10,9 +10,10 @@
     "build": "tsc",
     "bundle": "node build-bundle.mjs",
     "typecheck": "tsc --noEmit",
+    "prestart": "pnpm build",
     "start": "node dist/main.js",
     "test": "cd ../.. && node_modules/.pnpm/node_modules/.bin/vitest run",
-    "dist": "pnpm build && pnpm bundle && pkg . --targets node18-win-x64 --public --output release/inferdeck-gateway.exe"
+    "dist": "pnpm build && pnpm bundle && pkg . --targets node22-win-x64,node22-linux-x64 --public --output release/inferdeck-gateway"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.0",

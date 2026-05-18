@@ -9,7 +9,59 @@ export interface WorkloadLease {
 }
 
 export class WorkloadCoordinator {
+  private recoveryTimer: NodeJS.Timeout | null = null;
+
   constructor(private readonly ctx: AppContext) {}
+
+  /** Start the background stuck-job recovery loop. Called during AppContext.init(). */
+  start(): void {
+    this.recoveryTimer = setInterval(() => {
+      this.recoverStuckJobs().catch((err) => {
+        this.ctx.logs.write({ level: "error", service: "workloads", message: "Stuck job recovery error", data: { error: err instanceof Error ? err.message : String(err) } });
+      });
+    }, 30000); // Check every 30 seconds
+    this.recoveryTimer.unref();
+  }
+
+  /** Stop the recovery loop. Called during shutdown. */
+  stop(): void {
+    if (this.recoveryTimer) {
+      clearInterval(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
+  }
+
+  /** Find and release jobs whose lease has expired but were never released. */
+  private async recoverStuckJobs(): Promise<void> {
+    const repo = createJobRepository(this.ctx.db);
+    const now = new Date().toISOString();
+
+    // Find jobs that are still "running" or "leased" but lease_until has passed
+    const rows = this.ctx.db.client.exec(
+      `SELECT id, type, lease_until FROM jobs WHERE status IN ('running', 'leased') AND lease_until IS NOT NULL AND lease_until <= '${now}'`
+    );
+    if (!rows.length) return;
+
+    const [result] = rows;
+    let recovered = 0;
+    for (const row of result.values) {
+      const [id, type, leaseUntil] = row as [string, string, string];
+      this.ctx.queueStore.remove(id);
+      repo.updateStatus(id, "failed", {
+        error_json: JSON.stringify({ error: "lease_expired", reason: "Job was not released before lease expiry" }),
+        finished_at: new Date().toISOString(),
+      });
+      repo.insertEvent(id, "failed", "Lease expired — auto-recovered", { lease_until: leaseUntil });
+      this.ctx.events.emit("job:updated", { jobId: id, status: "failed" });
+      this.ctx.events.emit("queue:changed", this.ctx.queueStore.getSnapshot());
+      this.ctx.logs.write({ level: "warn", service: "workloads", jobId: id, message: "Stuck job recovered (lease expired)", data: { type, lease_until: leaseUntil } });
+      recovered++;
+    }
+
+    if (recovered > 0) {
+      this.ctx.logs.write({ level: "info", service: "workloads", message: `Recovered ${recovered} stuck job(s)` });
+    }
+  }
 
   async acquire(req: FastifyRequest, input: {
     type: string;
@@ -21,6 +73,15 @@ export class WorkloadCoordinator {
   }): Promise<WorkloadLease> {
     const repo = createJobRepository(this.ctx.db);
     const jobId = globalThis.crypto?.randomUUID?.() ?? `job-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    // Check queue size limit
+    const maxQueueSize = this.ctx.config.scheduler.maxQueueSize ?? 1000;
+    const currentQueueSize = this.ctx.queueStore.getQueued(1, 0).length + this.ctx.queueStore.getLeased().length;
+    if (currentQueueSize >= maxQueueSize) {
+      this.ctx.logs.write({ level: "warn", service: "scheduler", jobId, message: "Queue full — rejecting request", data: { queueSize: currentQueueSize, maxQueueSize } });
+      throw Object.assign(new Error(`Queue is full (${currentQueueSize}/${maxQueueSize})`), { statusCode: 503, retryAfter: 10 });
+    }
+
     repo.insert({
       id: jobId,
       type: input.type,
