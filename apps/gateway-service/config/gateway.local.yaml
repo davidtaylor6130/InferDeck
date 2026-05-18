@@ -39,6 +39,12 @@ backend:
   bindHost: "127.0.0.1"
   bindPort: 11435
   maxGpuLayers: 999
+  noKvOffload: false
+  ctxSize: 100000
+  flashAttn: true
+  cacheTypeK: "q8_0"
+  cacheTypeV: "q8_0"
+  mmap: false
   healthcheckIntervalMs: 10000
   restartOnFailure: true
 

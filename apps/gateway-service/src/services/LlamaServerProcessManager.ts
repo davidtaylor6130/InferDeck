@@ -17,6 +17,10 @@ export interface LlamaConfig {
   maxGpuLayers: number;
   noKvOffload: boolean;
   ctxSize: number;
+  flashAttn: boolean;
+  cacheTypeK: string;
+  cacheTypeV: string;
+  mmap: boolean;
   healthcheckIntervalMs: number;
   restartOnFailure: boolean;
 }
@@ -336,6 +340,10 @@ export class LlamaServerProcessManager {
       "-ngl", String(this.config.maxGpuLayers),
     ];
     if (this.config.ctxSize > 0) args.push("-c", String(this.config.ctxSize));
+    if (this.config.flashAttn) args.push("--flash-attn", "on");
+    if (this.config.cacheTypeK) args.push("-ctk", this.config.cacheTypeK);
+    if (this.config.cacheTypeV) args.push("-ctv", this.config.cacheTypeV);
+    if (this.config.mmap === false) args.push("--no-mmap");
     if (this.config.noKvOffload) args.push("--no-kv-offload");
 
     console.log(`[backend] Spawning: ${this.config.executable} ${args.join(" ")}`);
