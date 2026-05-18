@@ -11,12 +11,12 @@ server:
 
 model:
   path: "models/llama-2-7b.Q4_K_M.gguf"
-  precision: "auto"  # auto, f32, f16, q4, q8
+  precision: "auto"
   ctx_len: 4096
   n_gpu_layers: -1
 
 gpu:
-  device_id: 0  # -1 = auto-detect
+  device_id: 0
   mem_alloc_percent: 95
 
 queue:
@@ -25,12 +25,12 @@ queue:
   timeout_seconds: 60
 
 logging:
-  level: "info"  # trace, debug, info, warn, error, fatal
+  level: "info"
   file: "logs/inferdeck.log"
   console: true
 
 api:
-  rate_limit: 100  # requests per minute
+  rate_limit: 100
   cors_origins: "*"
 
 # ===========================================================================

@@ -31,6 +31,8 @@ endif()
 # Add subdirectories
 add_subdirectory(libs/core)
 add_subdirectory(libs/llama_cpp_wrapper)
+add_subdirectory(libs/backends)
+add_subdirectory(libs/vector_store)
 add_subdirectory(apps/gateway-service)
 
 # Tests

@@ -22,6 +22,11 @@
 #include "routes/Embeddings.hpp"
 #include "routes/Health.hpp"
 #include "routes/Metrics.hpp"
+#include "routes/AudioTranscriptions.hpp"
+#include "routes/AudioSpeech.hpp"
+#include "routes/Images.hpp"
+#include "routes/Documents.hpp"
+#include "routes/FineTuningJobs.hpp"
 
 // Global server instance for signal handling
 static inferdeck::gateway::GatewayServer* g_server = nullptr;
@@ -164,6 +169,57 @@ int main(int argc, char* argv[]) {
         [](const httplib::Request& req, httplib::Response& resp) {
             // Alias for /v1/health
             inferdeck::gateway::routes::HandleHealth(req, resp);
+        });
+
+    // Audio transcription (STT)
+    server.RegisterRoute("POST", "/v1/audio/transcriptions",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleAudioTranscriptions(req, resp);
+        });
+
+    // Audio translation (STT)
+    server.RegisterRoute("POST", "/v1/audio/translations",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleAudioTranslations(req, resp);
+        });
+
+    // Audio speech (TTS)
+    server.RegisterRoute("POST", "/v1/audio/speech",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleAudioSpeech(req, resp);
+        });
+
+    // Image generation
+    server.RegisterRoute("POST", "/v1/images/generate",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleImageGenerate(req, resp);
+        });
+
+    // Document CRUD
+    server.RegisterRoute("GET", "/v1/documents",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDocumentsList(req, resp);
+        });
+
+    server.RegisterRoute("POST", "/v1/documents",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDocumentsCreate(req, resp);
+        });
+
+    server.RegisterRoute("GET", "/v1/documents/search",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDocumentsSearch(req, resp);
+        });
+
+    // Fine-tuning jobs
+    server.RegisterRoute("GET", "/v1/fine_tuning/jobs",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleFineTuningJobsList(req, resp);
+        });
+
+    server.RegisterRoute("POST", "/v1/fine_tuning/jobs",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleFineTuningJobsCreate(req, resp);
         });
 
     // Start server

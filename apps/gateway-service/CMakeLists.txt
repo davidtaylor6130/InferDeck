@@ -11,6 +11,11 @@ add_executable(gateway-service
     src/routes/Embeddings.cpp
     src/routes/Health.cpp
     src/routes/Metrics.cpp
+    src/routes/AudioTranscriptions.cpp
+    src/routes/AudioSpeech.cpp
+    src/routes/Images.cpp
+    src/routes/Documents.cpp
+    src/routes/FineTuningJobs.cpp
     src/config/ConfigLoader.cpp
 )
 
@@ -18,11 +23,15 @@ target_include_directories(gateway-service PRIVATE
     src
     ../core/include
     ../llama_cpp_wrapper/include
+    ../backends/include
+    ../vector_store/include
 )
 
 target_link_libraries(gateway-service PRIVATE
     core
     llama_cpp_wrapper
+    backends
+    vector_store
     cpp-httplib::httplib
     yaml-cpp
     nlohmann_json::nlohmann_json
