@@ -1,316 +1,108 @@
-# API Reference
+# API Overview
+
+## Base URL
+
+- **HTTPS**: `https://localhost:8080` (default)
+- **HTTP**: `http://localhost:8080`
 
 ## Authentication
 
-Most API endpoints require authentication via the `X-API-Key` header. The key value is read from the environment variable configured in `security.apiKeyEnv` (default: `R9700_GATEWAY_ADMIN_KEY`).
+Currently no authentication required. Rate limiting available via `api.rate_limit` in gateway.yml.
 
----
+## Content Types
 
-## Health Check
+- Requests: `application/json`
+- Responses: `application/json` (except SSE streams: `text/event-stream`)
 
-**GET** `/health`
+## Rate Limits
 
-Public endpoint. No authentication required.
+Configured via `api.rate_limit` in gateway.yml (requests per minute). Default: 100.
 
-**Response:**
+## CORS
+
+Configured via `api.cors_origins` in gateway.yml. Default: `"*"` (all origins).
+
+## Schema Compliance
+
+All endpoints follow OpenAI API schema exactly. This includes:
+- Response structure and field names
+- Error response format
+- Streaming format (SSE)
+- Token counting in usage fields
+
+## Versioning
+
+API version is included in response headers and response bodies:
+
+```
+X-InferDeck-Version: 0.1.0
+```
+
+## Error Format
+
+All errors use the OpenAI error format:
+
 ```json
 {
-  "status": "healthy",
-  "uptime": 3600,
-  "version": "1.0.0",
-  "timestamp": "2025-01-01T00:00:00.000Z",
-  "services": {
-    "ollama": "127.0.0.1:11435"
+  "error": {
+    "message": "Human-readable error description",
+    "type": "error_type",
+    "param": "parameter_name",
+    "code": "error_code"
   }
 }
 ```
 
----
+### Error Types
 
-## Status
+| Type | HTTP Code | Description |
+|------|-----------|-------------|
+| invalid_request_error | 400 | Malformed request |
+| not_found_error | 404 | Resource not found |
+| server_error | 500 | Internal error |
+| service_unavailable | 503 | Model not loaded |
 
-**GET** `/status`
+## Streaming
 
-Public endpoint. No authentication required.
+When `stream: true` is set in the request, the response is sent as Server-Sent Events (SSE):
 
-**Response:**
-```json
-{
-  "health": { ... },
-  "mode": {
-    "mode": "ai",
-    "enabledAt": "2025-01-01T00:00:00.000Z",
-    "details": {}
-  },
-  "queue": {
-    "totalQueued": 0,
-    "totalRunning": 0,
-    "totalLeased": 0,
-    "totalPaused": 0,
-    "totalDeadLetter": 0,
-    "totalFailed": 0,
-    "gpuLocked": false,
-    "lockedBy": null,
-    "estimatedWaitMs": 0
-  },
-  "modeConfig": {
-    "mode": "ai",
-    "rejectInteractiveLlm": true,
-    "pauseBackgroundJobs": true,
-    "unloadOllamaModels": true,
-    "stopComfyUi": true
-  },
-  "uptimeMs": 3600000
-}
+```
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
 ```
 
----
+Each chunk follows the OpenAI streaming format:
 
-## Jobs
-
-### List Jobs
-
-**GET** `/jobs`
-
-**Query Params:**
-- `page` (int, default: 1)
-- `pageSize` (int, default: 50)
-- `status` (string, optional)
-
-**Response:**
-```json
-{
-  "jobs": [
-    {
-      "id": "550e8400-e29b-41d4-a716-446655440000",
-      "type": "llm_chat",
-      "status": "queued",
-      "priority": 70,
-      "resourceClass": "gpu_llm",
-      "clientName": "opencode",
-      "requestPath": "/v1/chat/completions",
-      "requestMethod": "POST",
-      "payload": {},
-      "createdAt": "2025-01-01T00:00:00.000Z",
-      "updatedAt": "2025-01-01T00:00:00.000Z"
-    }
-  ],
-  "total": 1,
-  "page": 1,
-  "pageSize": 50
-}
 ```
+data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1700000000,"model":"default","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
 
-### Get Job by ID
-
-**GET** `/jobs/:id`
-
-**Response:** Full `JobRecord` object.
-
-### Create Job
-
-**POST** `/jobs`
-
-**Body:**
-```json
-{
-  "type": "llm_chat",
-  "payload": { "messages": [] },
-  "priority": 70,
-  "resourceClass": "gpu_llm",
-  "idempotencyKey": "optional-key"
-}
+data: [DONE]
 ```
-
-**Response:**
-```json
-{
-  "jobId": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "queued",
-  "position": 0
-}
-```
-
-### Cancel Job
-
-**POST** `/jobs/:id/cancel`
-
-### Change Priority
-
-**POST** `/jobs/:id/reprioritize`
-
-**Body:** `{"priority": 80}`
-
----
-
-## Models
-
-### List Models
-
-**GET** `/models`
-
-**Response:**
-```json
-{
-  "models": [
-    {
-      "name": "llama3",
-      "size": 4700000000,
-      "digest": "sha256:abc123",
-      "details": {
-        "parent_model": "",
-        "format": "gguf",
-        "family": "llama",
-        "families": ["llama"],
-        "parameter_size": "8B",
-        "quantization_level": "Q4_K_M"
-      }
-    }
-  ],
-  "backends": {
-    "ollama": "http://127.0.0.1:11435"
-  }
-}
-```
-
-### List Running Models
-
-**GET** `/models/running`
-
-**Response:**
-```json
-{
-  "running": [
-    {
-      "name": "llama3",
-      "size": 4700000000,
-      "size_vram": 4700000000,
-      "ttl": 300
-    }
-  ]
-}
-```
-
-### Pull Model
-
-**POST** `/models/pull`
-
-**Body:** `{"name": "llama3"}`
-
-### Load Model
-
-**POST** `/models/load`
-
-**Body:** `{"model": "llama3", "keep_alive": "5m"}`
-
-### Unload Model
-
-**POST** `/models/unload`
-
-**Body:** `{"model": "llama3"}`
-
-### Delete Model
-
-**DELETE** `/models/:name`
-
----
-
-## Services
-
-### List Services
-
-**GET** `/services`
-
-**Response:**
-```json
-{
-  "services": [
-    {
-      "id": "gateway",
-      "name": "r9700-AI-Gateway",
-      "kind": "gateway",
-      "status": "running",
-      "version": "1.0.0"
-    },
-    {
-      "id": "ollama",
-      "name": "Ollama",
-      "kind": "ollama",
-      "status": "running",
-      "baseUrl": "http://127.0.0.1:11435"
-    }
-  ]
-}
-```
-
-### Ollama Health
-
-**GET** `/services/ollama/health`
-
-**Response:**
-```json
-{
-  "healthy": true,
-  "backend": "http://127.0.0.1:11435",
-  "modelCount": 1
-}
-```
-
----
-
-## Modes
-
-### Switch Mode
-
-**POST** `/modes/:mode`
-
-**Path:** one of `ai`, `gaming`, `maintenance`
-
-**Response:**
-```json
-{
-  "mode": "ai",
-  "message": "Mode switched to AI"
-}
-```
-
----
 
 ## Metrics
 
-**GET** `/metrics`
+Real-time metrics available at `/inferdeck/metrics`:
 
-**Response:**
 ```json
 {
-  "samples": [],
-  "summary": {
-    "queueLengthHistory": [0, 0, 1],
-    "gpuUtilizationAvg": null,
-    "requestsLastHour": 0,
-    "errorsLastHour": 0,
-    "avgJobDuration": null
+  "counters": {
+    "inferdeck.requests.total": 100,
+    "inferdeck.requests.success": 95
+  },
+  "gauges": {
+    "gpu.vram_used": 8589934592,
+    "queue.pending": 2
+  },
+  "histograms": {
+    "inferdeck.latency_ms": {
+      "min": 10.5,
+      "max": 500.2,
+      "avg": 45.3,
+      "count": 100,
+      "sum": 4530.0
+    }
   }
 }
 ```
-
----
-
-## SSE Events
-
-**GET** `/events/stream`
-
-Open a Server-Sent Events connection. Events will be pushed in real time.
-
-**Event Types:**
-- `connected` — Initial connection confirmation
-- `queue:changed` — Queue length changed
-- `job:created` — New job submitted
-- `job:updated` — Job status changed
-- `job:cancelled` — Job was cancelled
-- `job:error` — Job failed
-- `mode:changed` — Gateway mode switched
-- `model:loaded` — Model was loaded
-- `model:unloaded` — Model was unloaded
-- `service:health` — Service health check
-- `hardware:update` — Hardware metrics update
