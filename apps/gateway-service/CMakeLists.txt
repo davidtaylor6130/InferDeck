@@ -27,6 +27,7 @@ target_link_libraries(gateway-service PRIVATE
     yaml-cpp
     nlohmann_json::nlohmann_json
     spdlog::spdlog
+    fmt::fmt
 )
 
 # TLS support
@@ -36,8 +37,8 @@ if(MSVC)
         OPENSSL_ISOPENSSL
     )
     target_link_libraries(gateway-service PRIVATE
-        openssl::ssllibrary
-        openssl::cryptolibrary
+        openssl::crypto
+        openssl::ssl
     )
 endif()
 

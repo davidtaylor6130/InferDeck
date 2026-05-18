@@ -7,6 +7,7 @@
 /// - Streaming predictions (SSE-compatible token output)
 /// - Mixed precision support (FP32, FP16, Q4, Q8)
 /// - GPU acceleration via Vulkan
+/// - Nucleus (top-p) sampling for text generation
 
 #pragma once
 
@@ -17,10 +18,8 @@
 #include <mutex>
 #include <optional>
 
-// Forward declare llama types
-struct llama_model;
-struct llama_context;
-struct llama_token_data_array;
+// Real llama.h integration
+#include <llama.h>
 
 namespace inferdeck::core {
 
@@ -150,18 +149,14 @@ private:
     /// Build the chat prompt from messages.
     std::string BuildPrompt(const std::vector<ChatMessage>& messages) const;
 
-    /// Tokenize text.
-    std::vector<int> Tokenize(const std::string& text) const;
+    /// Sample the next token from logits using nucleus sampling.
+    /// @param logits The logits from the model.
+    /// @param temperature Sampling temperature.
+    /// @param top_p Top-p probability threshold.
+    /// @return The sampled token ID.
+    llama_token SampleToken(const llama_logits* logits, float temperature, float top_p);
 
-    /// Detokenize tokens to text.
-    std::string Detokenize(const std::vector<int>& tokens) const;
-
-    /// Run a single inference step.
-    bool RunInference(const std::vector<int>& input_tokens,
-                      std::vector<int>& output_tokens,
-                      const InferenceParams& params);
-
-    // llama.cpp internal handles
+    // Real llama.cpp handles
     llama_model* model_ = nullptr;
     llama_context* ctx_ = nullptr;
 
@@ -173,6 +168,9 @@ private:
 
     // Metadata
     GGUFMetadata gguf_metadata_;
+
+    // Vocabulary cache (pre-computed token pieces)
+    std::vector<std::string> vocab_tokens_;
 
     // Stats
     InferenceStats stats_;

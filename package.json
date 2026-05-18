@@ -4,20 +4,11 @@
   "private": true,
   "description": "Production-ready local AI gateway for single-GPU machines",
   "workspaces": [
-    "apps/*",
-    "packages/*"
+    "apps/dashboard"
   ],
   "scripts": {
-    "build": "pnpm -r build",
-    "dev:gateway": "pnpm --filter gateway-service dev",
     "dev:dashboard": "pnpm --filter dashboard dev",
-    "test": "vitest run",
-    "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck"
-  },
-  "devDependencies": {
-    "typescript": "^5.6.0",
-    "vitest": "^3.0.0"
+    "build:dashboard": "pnpm --filter dashboard build"
   },
   "engines": {
     "node": ">=22",

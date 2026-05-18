@@ -2,10 +2,42 @@
 cmake_minimum_required(VERSION 3.27)
 project(llama_cpp_wrapper LANGUAGES CXX)
 
-# Add llama.cpp as a static library (vendored or submodule)
-# For V1, we include llama.cpp headers directly from a known location
-# In production, use: add_subdirectory(llama.cpp EXCLUDE_FROM_ALL)
+# Build llama.cpp as a static library from submodule
+add_library(llama STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp/src/llama.cpp
+)
 
+target_include_directories(llama PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp/ggml/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp/ggml/src/ggml-cpp
+)
+
+target_compile_definitions(llama PRIVATE
+    GGML_VULKAN=1
+    GGML_KV_OVERHEAD=1
+    GGML_USE_CUDA=0
+    GGML_USE_HIP=0
+    GGML_USE_METAL=0
+    GGML_USE_CANN=0
+    GGML_USE_SYCL=0
+    GGML_USE_BLAS=0
+)
+
+target_compile_options(llama PRIVATE
+    -O3
+    -march=native
+)
+
+# Vulkan-specific defines
+target_compile_definitions(llama PRIVATE
+    GGML_VULKAN_CHECK_RESULTS=0
+    GGML_VULKAN_MEMORY_DEBUG=0
+    GGML_VULKAN_DEBUG=0
+)
+
+# Create wrapper library
 add_library(llama_cpp_wrapper STATIC
     src/LlamaEngine.cpp
     src/VulkanDevice.cpp
@@ -14,13 +46,13 @@ add_library(llama_cpp_wrapper STATIC
 
 target_include_directories(llama_cpp_wrapper PUBLIC
     include
-    # llama.cpp includes (adjust path as needed)
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp/ggml/include
 )
 
 target_link_libraries(llama_cpp_wrapper PUBLIC
     core
+    llama
     Vulkan::Vulkan
 )
 
@@ -29,21 +61,12 @@ target_compile_options(llama_cpp_wrapper PRIVATE
     -Wall
     -Wextra
     -Wpedantic
+    -Wconversion
+    -Wsign-conversion
 )
 
-# WASM build (optional, requires Emscripten)
-option(INFERDECK_BUILD_WASM "Build WASM module" OFF)
-if(INFERDECK_BUILD_WASM)
-    add_executable(llama_cpp_wrapper_wasm
-        src/LlamaEngine.cpp
-        src/GGUFParser.cpp
-    )
-    set_target_properties(llama_cpp_wrapper_wasm PROPERTIES
-        SUFFIX ".wasm"
-        OUTPUT_NAME "llama_cpp_wrapper"
-    )
-    target_compile_options(llama_cpp_wrapper_wasm PRIVATE
-        -sEXPORTED_RUNTIME_METHODS=ccall,cwrap
-        -sALLOW_MEMORY_GROWTH=1
-    )
-endif()
+# Install wrapper library
+install(TARGETS llama_cpp_wrapper
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+)

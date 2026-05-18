@@ -144,7 +144,7 @@ GpuInfo VulkanDevice::PhysicalDeviceToGpuInfo(vk::PhysicalDevice device, uint32_
         if (!(mem_props.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal)) {
             continue;
         }
-        free_mem += mem_memHeaps[i].size;
+        free_mem += mem_props.memoryHeaps[i].size;
     }
     info.memory_free = free_mem;
 

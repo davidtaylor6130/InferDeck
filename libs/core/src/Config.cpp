@@ -4,11 +4,34 @@
 #include "core/Config.hpp"
 #include <fstream>
 #include <sstream>
+#include <algorithm>
+#include <cctype>
 
 namespace inferdeck::core {
 
 Config::Config() = default;
 Config::~Config() = default;
+
+namespace {
+    std::string trim(const std::string& s) {
+        size_t start = s.find_first_not_of(" \t\n\r");
+        if (start == std::string::npos) return "";
+        size_t end = s.find_last_not_of(" \t\n\r");
+        std::string result = s.substr(start, end - start + 1);
+        if ((result.front() == '"' && result.back() == '"') ||
+            (result.front() == '\'' && result.back() == '\'')) {
+            result = result.substr(1, result.size() - 2);
+        }
+        return result;
+    }
+
+    std::string to_lower(const std::string& s) {
+        std::string result = s;
+        std::transform(result.begin(), result.end(), result.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+        return result;
+    }
+}
 
 FullConfig Config::Load(const std::filesystem::path& config_path) {
     FullConfig config;
@@ -21,63 +44,84 @@ FullConfig Config::Load(const std::filesystem::path& config_path) {
     std::stringstream buffer;
     buffer << file.rdbuf();
     std::string yaml_content = buffer.str();
+    return LoadFromString(yaml_content, config);
+}
 
-    // Parse YAML (simple key-value extraction for V1)
+FullConfig Config::LoadFromString(const std::string& yaml_content) {
+    FullConfig config;
+    return LoadFromString(yaml_content, config);
+}
+
+FullConfig Config::LoadFromString(const std::string& yaml_content, FullConfig& config) {
     std::istringstream stream(yaml_content);
     std::string line;
     std::string current_section;
 
     while (std::getline(stream, line)) {
-        // Skip comments and empty lines
-        if (line.empty() || line[0] == '#') continue;
+        if (line.empty()) continue;
+        size_t comment_pos = line.find('#');
+        if (comment_pos != std::string::npos) {
+            line = line.substr(0, comment_pos);
+        }
+        if (line.empty()) continue;
 
-        // Remove leading whitespace
         size_t start = line.find_first_not_of(" \t");
         if (start == std::string::npos) continue;
         line = line.substr(start);
 
-        // Track sections
-        if (line.back() == ':') {
-            current_section = line.substr(0, line.size() - 1);
+        size_t colon_pos = line.find(':');
+        if (colon_pos == std::string::npos) continue;
+
+        std::string key = trim(line.substr(0, colon_pos));
+        std::string raw_value = trim(line.substr(colon_pos + 1));
+        std::string lower_key = to_lower(key);
+
+        if (lower_key == "server") {
+            current_section = "server";
+            continue;
+        } else if (lower_key == "model") {
+            current_section = "model";
+            continue;
+        } else if (lower_key == "gpu") {
+            current_section = "gpu";
+            continue;
+        } else if (lower_key == "queue") {
+            current_section = "queue";
+            continue;
+        } else if (lower_key == "logging" || lower_key == "log") {
+            current_section = "logging";
+            continue;
+        } else if (lower_key == "metrics") {
+            current_section = "metrics";
             continue;
         }
 
-        // Parse key: value
-        size_t colon = line.find(':');
-        if (colon == std::string::npos) continue;
-
-        std::string key = line.substr(0, colon);
-        std::string value = line.substr(colon + 1);
-
-        // Trim whitespace
-        size_t end = key.find_last_not_of(" \t");
-        if (end != std::string::npos) key = key.substr(0, end + 1);
-
-        start = value.find_first_not_of(" \t\"'");
-        if (start != std::string::npos) {
-            value = value.substr(start);
-            end = value.find_last_not_of(" \t\"'");
-            if (end != std::string::npos) value = value.substr(0, end + 1);
+        if (current_section == "server") {
+            if (lower_key == "host") config.server.host = raw_value;
+            else if (lower_key == "port") config.server.port = std::stoi(raw_value);
+            else if (lower_key == "enabled") config.server.tls_enabled = (raw_value == "true" || raw_value == "1");
+            else if (lower_key == "cert_file") config.server.cert_file = raw_value;
+            else if (lower_key == "key_file") config.server.key_file = raw_value;
+        } else if (current_section == "model") {
+            if (lower_key == "path") config.model.path = raw_value;
+            else if (lower_key == "precision") config.model.precision = raw_value;
+            else if (lower_key == "n_gpu_layers" || lower_key == "gpu_layers") config.model.n_gpu_layers = std::stoi(raw_value);
+            else if (lower_key == "context_size" || lower_key == "context_length") config.model.context_size = std::stoi(raw_value);
+            else if (lower_key == "batch_size") config.model.batch_size = std::stoi(raw_value);
+        } else if (current_section == "gpu") {
+            if (lower_key == "device_id") config.gpu.device_id = std::stoi(raw_value);
+        } else if (current_section == "queue") {
+            if (lower_key == "worker_threads") config.queue.worker_threads = std::stoi(raw_value);
+            else if (lower_key == "max_queue_size") config.queue.max_queue_size = std::stoi(raw_value);
+        } else if (current_section == "logging") {
+            if (lower_key == "level") config.logging.level = raw_value;
+            else if (lower_key == "file") config.logging.file = raw_value;
+        } else if (current_section == "metrics") {
+            if (lower_key == "enabled") config.metrics_enabled = (raw_value == "true" || raw_value == "1");
+            else if (lower_key == "endpoint") config.metrics_endpoint = raw_value;
         }
-
-        // Build dotted key
-        std::string dotted_key = current_section.empty() ? key : current_section + "." + key;
-        flat_config_[dotted_key] = value;
     }
 
-    // Apply defaults
-    return config;
-}
-
-FullConfig Config::LoadFromString(const std::string& yaml_content) {
-    // Temporary file for parsing
-    std::filesystem::path temp = std::filesystem::temp_directory_path() / "gateway_temp.yml";
-    std::ofstream file(temp);
-    file << yaml_content;
-    file.close();
-
-    FullConfig config = Load(temp);
-    std::filesystem::remove(temp);
     return config;
 }
 

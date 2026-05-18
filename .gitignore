@@ -5,16 +5,25 @@ node_modules/
 # Build outputs
 dist/
 build/
-.vite/
-apps/gateway-service/dist-bundle/
-apps/gateway-service/release/
+.VSCodeCounter/
+.out/
 apps/dashboard/dist/
-apps/gateway-service/public/dashboard/
 
-# Environment
-.env
-.env.local
-.env.*.local
+# CMake build
+CMakeBuilds/
+cmake-build-*/
+build/
+*.ninja
+*.log
+apps/gateway-service/build/
+apps/gateway-service/install/
+apps/gateway-service/deps/
+
+# vcpkg
+vcpkg/buildtrees/
+vcpkg/downloads/
+vcpkg/installed/
+vcpkg/packages/
 
 # IDE
 .idea/
@@ -26,6 +35,11 @@ apps/gateway-service/public/dashboard/
 # OS
 .DS_Store
 Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
 
 # Data
 data/*.sqlite
@@ -57,3 +71,6 @@ config/gateway.local.yaml
 *.example
 /.UAM
 /data
+
+# Legacy code archive
+.legacy/
