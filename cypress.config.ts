@@ -10,8 +10,14 @@ module.exports = defineConfig({
     viewportHeight: 720,
     video: false,
     screenshotOnRunFailure: true,
+    defaultCommandTimeout: 30000,
+    retries: {
+      runMode: 1,
+      openMode: 0,
+    },
     env: {
       API_URL: 'https://localhost:8080',
     },
+    chromeWebSecurity: false,
   },
 });

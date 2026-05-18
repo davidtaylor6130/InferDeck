@@ -9,14 +9,28 @@ add_executable(inferdeck-tests
     test_llama_engine.cpp
     test_vulkan_device.cpp
     test_gguf_parser.cpp
-    HealthTest.cpp
-    ModelsTest.cpp
-    MetricsTest.cpp
-    ChatCompletionsTest.cpp
-    CompletionsTest.cpp
-    EmbeddingsTest.cpp
-    benchmarks.cpp
+  HealthTest.cpp
+   ModelsTest.cpp
+   MetricsTest.cpp
+   ChatCompletionsTest.cpp
+   CompletionsTest.cpp
+   EmbeddingsTest.cpp
+   AudioTranscriptionsTest.cpp
+   AudioSpeechTest.cpp
+   ImagesTest.cpp
+   DocumentsTest.cpp
+   FineTuningJobsTest.cpp
+   test_stt_backend.cpp
+   test_tts_backend.cpp
+   test_image_backend.cpp
+   test_embedding_backend.cpp
+   test_training_backend.cpp
+   test_gpu_resource_manager.cpp
+   test_backend_registry.cpp
+   test_vector_store.cpp
 )
+
+add_subdirectory(benchmarks)
 
 target_include_directories(inferdeck-tests PRIVATE
     ../core/include
