@@ -1,0 +1,34 @@
+# InferDeck Gateway Configuration
+# Usage: ./inferdeck-gateway.exe -c config/gateway.yml
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  tls:
+    enabled: true
+    cert_file: "certs/server.crt"
+    key_file: "certs/server.key"
+
+model:
+  path: "models/llama-2-7b.Q4_K_M.gguf"
+  precision: "auto"  # auto, f32, f16, q4, q8
+  ctx_len: 4096
+  n_gpu_layers: -1
+
+gpu:
+  device_id: 0  # -1 = auto-detect
+  mem_alloc_percent: 95
+
+queue:
+  worker_threads: 4
+  max_queue_size: 10
+  timeout_seconds: 60
+
+logging:
+  level: "info"  # trace, debug, info, warn, error, fatal
+  file: "logs/inferdeck.log"
+  console: true
+
+api:
+  rate_limit: 100  # requests per minute
+  cors_origins: "*"
