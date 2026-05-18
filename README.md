@@ -3,6 +3,47 @@
 A production-ready monorepo for running and managing local AI workloads on single-GPU machines.
 The gateway provides smart GPU scheduling, mode switching (AI/Gaming/Maintenance), and a React dashboard.
 
+## C++ Gateway (v2.0)
+
+The gateway service has been converted from Node/TypeScript to C++ 23 with:
+
+- **Direct llama.cpp integration** — No external backend required
+- **Vulkan GPU acceleration** — AMD-first, auto-detects mixed precision from GGUF
+- **Strict OpenAI API compatibility** — `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`
+- **SSE streaming** — OpenAI-compatible chunked output
+- **Self-contained .exe** — No Node.js runtime needed
+
+### Quick Start (C++ Gateway)
+
+```bash
+# Build
+./scripts/build.sh Release
+
+# Run
+./build/inferdeck-gateway.exe
+
+# With custom config
+./build/inferdeck-gateway.exe -c config/gateway.yml
+```
+
+### C++ Gateway API
+
+The C++ gateway exposes OpenAI-compatible endpoints:
+
+- `POST /v1/chat/completions` — Chat completions (streaming + non-streaming)
+- `POST /v1/completions` — Text completions (streaming + non-streaming)
+- `GET /v1/models` — List available models
+- `POST /v1/embeddings` — Create embeddings
+- `GET /v1/health` — Health check
+- `GET /inferdeck/metrics` — Inference metrics
+- `GET /inferdeck/status` — Engine status
+
+See `docs/api_reference.md` for full API documentation.
+
+### Build & Deploy
+
+See `docs/BUILD.md` for build instructions and `docs/DEPLOY.md` for deployment.
+
 ## Project Structure
 
 ```
