@@ -21,6 +21,18 @@ bool GatewayServer::Initialize(const ServerConfig& config) {
     config_ = config;
     dashboard_server_ = std::make_unique<httplib::Server>();
     api_server_ = std::make_unique<httplib::Server>();
+
+    api_server_->set_default_headers({
+        {"Access-Control-Allow-Origin", "*"},
+        {"Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"},
+        {"Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With"},
+        {"Access-Control-Max-Age", "86400"}
+    });
+
+    api_server_->Options("/.*", [](const httplib::Request&, httplib::Response& resp) {
+        resp.status = 204;
+    });
+
     Logger::Get().Info("Dashboard server initialized");
     Logger::Get().Info("API server initialized");
     SetTimeout(config_.request_timeout_ms);

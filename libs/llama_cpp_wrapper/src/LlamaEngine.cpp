@@ -115,8 +115,10 @@ bool LlamaEngine::IsInitialized() const {
 }
 
 InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
-                                       const InferenceParams& params) {
+                                        const InferenceParams& params) {
     auto start = std::chrono::high_resolution_clock::now();
+
+    llama_memory_clear(llama_get_memory(ctx_), true);
 
     std::string prompt = BuildPrompt(messages);
 
@@ -213,9 +215,11 @@ InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
 }
 
 InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messages,
-                                              const InferenceParams& params,
-                                              TokenCallback on_token) {
+                                               const InferenceParams& params,
+                                               TokenCallback on_token) {
     auto start = std::chrono::high_resolution_clock::now();
+
+    llama_memory_clear(llama_get_memory(ctx_), true);
 
     std::string prompt = BuildPrompt(messages);
 
