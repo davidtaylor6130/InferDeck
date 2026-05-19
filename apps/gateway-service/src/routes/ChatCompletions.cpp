@@ -1,5 +1,7 @@
 #include "routes/ChatCompletions.hpp"
 #include "llama_cpp/LlamaEngine.hpp"
+#include "config/ConfigLoader.hpp"
+#include "core/Config.hpp"
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <chrono>
@@ -8,25 +10,56 @@
 #include <atomic>
 #include <filesystem>
 #include <vector>
+#include <unordered_map>
 using json = nlohmann::json;
 
 namespace {
 
 static std::string MakeModelId(const std::string& full_path) {
     if (full_path.empty()) return "local-model";
-    std::string name = full_path;
-    std::vector<std::string> extensions = {".gguf", ".bin", ".ggml", ".pt", ".pth"};
-    for (const auto& ext : extensions) {
-        if (name.size() > ext.size() && name.compare(name.size() - ext.size(), ext.size(), ext) == 0) {
-            name = name.substr(0, name.size() - ext.size());
-            break;
-        }
-    }
+    std::filesystem::path p(full_path);
+    std::string name = p.stem().string();
     for (auto& c : name) {
         if (c == ' ' || c == '_' || c == '-') c = '-';
         else c = std::tolower(static_cast<unsigned char>(c));
     }
     return name;
+}
+
+static std::unordered_map<std::string, std::string> g_model_cache;
+static std::mutex g_model_cache_mutex;
+
+static std::string FindModelPath(const std::string& model_id) {
+    std::lock_guard<std::mutex> lock(g_model_cache_mutex);
+    if (!g_model_cache.empty()) {
+        auto it = g_model_cache.find(model_id);
+        if (it != g_model_cache.end()) return it->second;
+    }
+
+    std::string model_dir;
+    try {
+        auto full = inferdeck::core::Config::Load(inferdeck::gateway::GetDefaultConfigPath());
+        model_dir = full.model.directory;
+    } catch (...) { return ""; }
+
+    if (model_dir.empty() || !std::filesystem::exists(model_dir)) return "";
+
+    std::vector<std::string> extensions = {".gguf", ".bin", ".ggml"};
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(model_dir)) {
+        if (entry.is_regular_file()) {
+            std::string ext = entry.path().extension().string();
+            std::string filename = entry.path().filename().string();
+            if (filename.find("mmproj") == 0) continue;
+            for (const auto& e : extensions) {
+                if (ext == e) {
+                    std::string id = MakeModelId(entry.path().string());
+                    g_model_cache[id] = entry.path().string();
+                    if (id == model_id) return entry.path().string();
+                }
+            }
+        }
+    }
+    return "";
 }
 
 }
@@ -113,7 +146,16 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
             if (body["stop"].is_string()) params.stop = body["stop"].get<std::string>();
         }
 
+        std::string requested_model = body.value("model", "");
         std::string model_id = MakeModelId(engine.GetModelName());
+
+        if (!requested_model.empty() && requested_model != model_id) {
+            std::string model_path = FindModelPath(requested_model);
+            if (!model_path.empty()) {
+                engine.SwitchModel(model_path);
+                model_id = requested_model;
+            }
+        }
 
         if (stream) {
             std::string id = MakeId();

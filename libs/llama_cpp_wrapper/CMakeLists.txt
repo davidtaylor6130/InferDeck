@@ -2,28 +2,22 @@ cmake_minimum_required(VERSION 3.27)
 project(llama_cpp_wrapper LANGUAGES CXX)
 
 add_library(llama_cpp_wrapper STATIC
+    src/LlamaServerManager.cpp
     src/LlamaEngine.cpp
-    src/VulkanDevice.cpp
     src/GGUFParser.cpp
 )
 
 target_include_directories(llama_cpp_wrapper PUBLIC
     include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/Vulkan-Headers/include
+    ${llama_cpp_SOURCE_DIR}/include
+    ${llama_cpp_SOURCE_DIR}/ggml/include
 )
 
 target_link_libraries(llama_cpp_wrapper PUBLIC
     core
-    llama
-    ${Vulkan_LIBRARIES}
-)
-
-target_include_directories(llama_cpp_wrapper PRIVATE
-    ${Vulkan_INCLUDE_DIRS}
-)
-
-target_compile_definitions(llama_cpp_wrapper PRIVATE
-    GGML_VULKAN=1
+    nlohmann_json::nlohmann_json
+    ws2_32
+    winhttp
 )
 
 if(MSVC)

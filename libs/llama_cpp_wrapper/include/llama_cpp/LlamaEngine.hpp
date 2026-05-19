@@ -2,14 +2,10 @@
 
 #include <string>
 #include <vector>
-#include <memory>
 #include <functional>
 #include <mutex>
 #include <optional>
-
-#include <llama.h>
-#include "llama_cpp/VulkanDevice.hpp"
-#include "llama_cpp/GGUFParser.hpp"
+#include <cstdint>
 
 namespace inferdeck::core {
 
@@ -55,6 +51,15 @@ struct InferenceStats {
     uint64_t tokens_processed = 0;
 };
 
+struct GpuInfo {
+    uint32_t device_index = 0;
+    std::string name;
+    uint64_t memory_total = 0;
+    uint64_t memory_free = 0;
+    uint32_t compute_units = 0;
+    bool is_discrete = true;
+};
+
 using TokenCallback = std::function<void(const std::string& token, int cumulative_tokens)>;
 
 class LlamaEngine {
@@ -63,6 +68,9 @@ public:
                     const std::string& precision = "auto",
                     int gpu_layers = -1,
                     int context_size = 4096);
+
+    bool SwitchModel(const std::string& model_path);
+    bool LoadModel(const std::string& model_path);
 
     static LlamaEngine& Get();
     bool IsInitialized() const;
@@ -74,7 +82,6 @@ public:
     InferenceStats GetStats() const;
     std::string GetModelName() const;
     std::string GetPrecision() const;
-    auto GetGgufMetadata() const { return gguf_metadata_; }
     void Shutdown();
     GpuInfo GetGpuInfo() const;
 
@@ -84,20 +91,16 @@ private:
     LlamaEngine(const LlamaEngine&) = delete;
     LlamaEngine& operator=(const LlamaEngine&) = delete;
 
-    std::string BuildPrompt(const std::vector<ChatMessage>& messages) const;
-    llama_token SampleToken(const float* logits, int n_vocab, float temperature, float top_p);
-
-    llama_model* model_ = nullptr;
-    llama_context* ctx_ = nullptr;
-    const llama_vocab* vocab_ = nullptr;
+    std::string role_to_string(MessageRole role) const;
+    std::string HttpPostJson(const std::string& path, const std::string& json_body) const;
+    std::string HttpPostStream(const std::string& path, const std::string& json_body, TokenCallback on_token) const;
 
     std::string model_path_;
     std::string precision_;
     int gpu_layers_ = -1;
     int context_size_ = 4096;
+    std::string current_model_name_;
 
-    GGUFMetadata gguf_metadata_;
-    std::vector<std::string> vocab_tokens_;
     InferenceStats stats_;
     mutable std::mutex mutex_;
     bool initialized_ = false;

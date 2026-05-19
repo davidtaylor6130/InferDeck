@@ -1,6 +1,6 @@
 #include "llama_cpp/LlamaEngine.hpp"
+#include "llama_cpp/LlamaServerManager.hpp"
 #include "llama_cpp/GGUFParser.hpp"
-#include "llama_cpp/VulkanDevice.hpp"
 #include "core/Logger.hpp"
 #include "core/Metrics.hpp"
 
@@ -10,19 +10,19 @@
 #include <random>
 #include <thread>
 #include <vector>
+#include <sstream>
+#include <nlohmann/json.hpp>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")
+#endif
+
+using json = nlohmann::json;
 
 namespace inferdeck::core {
-
-static std::string token_to_piece(const llama_vocab* vocab, llama_token token) {
-    char buf[32];
-    int n = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, false);
-    if (n < 0) {
-        std::vector<char> big_buf(-n);
-        llama_token_to_piece(vocab, token, big_buf.data(), -n, 0, false);
-        return std::string(big_buf.data(), -n);
-    }
-    return std::string(buf, n);
-}
 
 LlamaEngine& LlamaEngine::Get() {
     static LlamaEngine instance;
@@ -30,7 +30,6 @@ LlamaEngine& LlamaEngine::Get() {
 }
 
 LlamaEngine::LlamaEngine() = default;
-
 LlamaEngine::~LlamaEngine() {
     Shutdown();
 }
@@ -46,67 +45,30 @@ bool LlamaEngine::Initialize(const std::string& model_path,
     gpu_layers_ = gpu_layers;
     context_size_ = context_size;
 
-    if (!std::filesystem::exists(model_path)) {
-        Logger::Get().Error("Model file not found: " + model_path);
-        return false;
-    }
+    std::filesystem::path p(model_path);
+    current_model_name_ = p.stem().string();
 
-    GGUFMetadata metadata = GGUFParser::Parse(std::filesystem::path(model_path));
-    if (!metadata.valid) {
-        Logger::Get().Warn("Failed to parse GGUF model (continuing anyway): " + model_path);
-    }
-
-    gguf_metadata_ = metadata;
-
-    std::string actual_precision = precision;
-    if (precision == "auto" && metadata.valid) {
-        actual_precision = GGUFParser::QuantToString(metadata.quantization);
-    }
-
-    Logger::Get().Info("Loading model: " + model_path);
-    Logger::Get().Info("Precision: " + actual_precision);
+    Logger::Get().Info("Starting llama-server with model: " + model_path);
     Logger::Get().Info("GPU layers: " + std::to_string(gpu_layers));
     Logger::Get().Info("Context size: " + std::to_string(context_size));
 
-    llama_model_params model_params = llama_model_default_params();
-    model_params.n_gpu_layers = gpu_layers;
+    auto& server_mgr = LlamaServerManager::Get();
 
-    model_ = llama_model_load_from_file(model_path.c_str(), model_params);
-    if (!model_) {
-        Logger::Get().Error("Failed to load model: " + model_path);
+    if (!server_mgr.Start(model_path, gpu_layers, context_size, 18080)) {
+        Logger::Get().Error("Failed to start llama-server");
         return false;
     }
 
-    vocab_ = llama_model_get_vocab(model_);
-
-    Logger::Get().Info("Model loaded successfully");
-
-    llama_context_params ctx_params = llama_context_default_params();
-    ctx_params.n_ctx = context_size;
-    ctx_params.n_batch = 512;
-    ctx_params.n_ubatch = 512;
-    ctx_params.n_seq_max = 1;
-    ctx_params.n_threads = std::thread::hardware_concurrency();
-    ctx_params.n_threads_batch = ctx_params.n_threads;
-    ctx_params.embeddings = true;
-
-    ctx_ = llama_init_from_model(model_, ctx_params);
-    if (!ctx_) {
-        Logger::Get().Error("Failed to create context");
-        llama_free_model(model_);
-        model_ = nullptr;
+    if (!server_mgr.WaitForReady(120)) {
+        Logger::Get().Error("llama-server failed to become ready");
         return false;
-    }
-
-    Logger::Get().Info("Context created with " + std::to_string(context_size) + " tokens");
-
-    int n_vocab = llama_vocab_n_tokens(vocab_);
-    vocab_tokens_.resize(n_vocab);
-    for (int i = 0; i < n_vocab; i++) {
-        vocab_tokens_[i] = token_to_piece(vocab_, i);
     }
 
     initialized_ = true;
+    Logger::Get().Info("LlamaEngine initialized successfully");
+    Logger::Get().Info("Model: " + current_model_name_);
+    Logger::Get().Info("Precision: " + precision);
+
     return true;
 }
 
@@ -114,82 +76,288 @@ bool LlamaEngine::IsInitialized() const {
     return initialized_;
 }
 
+bool LlamaEngine::SwitchModel(const std::string& model_path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto& server_mgr = LlamaServerManager::Get();
+    if (!server_mgr.Restart(model_path, gpu_layers_, context_size_)) {
+        Logger::Get().Error("Failed to switch model");
+        return false;
+    }
+
+    if (!server_mgr.WaitForReady(120)) {
+        Logger::Get().Error("New model failed to become ready");
+        return false;
+    }
+
+    std::filesystem::path p(model_path);
+    current_model_name_ = p.stem().string();
+    model_path_ = model_path;
+
+    Logger::Get().Info("Model switched to: " + current_model_name_);
+    return true;
+}
+
+bool LlamaEngine::LoadModel(const std::string& model_path) {
+    return SwitchModel(model_path);
+}
+
+std::string LlamaEngine::role_to_string(MessageRole role) const {
+    switch (role) {
+        case MessageRole::System: return "system";
+        case MessageRole::User: return "user";
+        case MessageRole::Assistant: return "assistant";
+        case MessageRole::Tool: return "tool";
+        default: return "user";
+    }
+}
+
+struct HttpResult {
+    DWORD status_code = 0;
+    std::string body;
+};
+
+static HttpResult HttpPost(const std::string& path, const std::string& json_body, int port) {
+#ifdef _WIN32
+    HINTERNET hSession = WinHttpOpen(L"InferDeck/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return {};
+
+    std::wstring host = L"127.0.0.1";
+    std::wstring path_w(path.begin(), path.end());
+
+    HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), static_cast<INTERNET_PORT>(port), 0);
+    if (!hConnect) {
+        WinHttpCloseHandle(hSession);
+        return {};
+    }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", path_w.c_str(),
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return {};
+    }
+
+    // Send raw UTF-8 bytes - NOT wide strings
+    std::wstring headers = L"Content-Type: application/json\r\n";
+    BOOL result = WinHttpSendRequest(hRequest, headers.c_str(), -1,
+        (LPVOID)json_body.c_str(), static_cast<DWORD>(json_body.size()),
+        static_cast<DWORD>(json_body.size()), 0);
+
+    if (!result) {
+        Logger::Get().Error("WinHttpSendRequest failed: " + std::to_string(GetLastError()));
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return {};
+    }
+
+    result = WinHttpReceiveResponse(hRequest, nullptr);
+    if (!result) {
+        Logger::Get().Error("WinHttpReceiveResponse failed: " + std::to_string(GetLastError()));
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return {};
+    }
+
+    HttpResult http_result;
+
+    DWORD statusCode = 0;
+    DWORD statusCodeSize = sizeof(statusCode);
+    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX);
+    http_result.status_code = statusCode;
+
+    DWORD bytesAvailable = 0;
+    DWORD bytesRead = 0;
+    char buffer[65536];
+
+    while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
+        if (bytesAvailable > sizeof(buffer)) bytesAvailable = sizeof(buffer);
+        if (WinHttpReadData(hRequest, buffer, bytesAvailable, &bytesRead)) {
+            http_result.body.append(buffer, bytesRead);
+        } else {
+            break;
+        }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    return http_result;
+#else
+    return {};
+#endif
+}
+
+std::string LlamaEngine::HttpPostJson(const std::string& path, const std::string& json_body) const {
+    auto& server_mgr = LlamaServerManager::Get();
+    return HttpPost(path, json_body, server_mgr.GetPort()).body;
+}
+
+std::string LlamaEngine::HttpPostStream(const std::string& path, const std::string& json_body, TokenCallback on_token) const {
+#ifdef _WIN32
+    auto& server_mgr = LlamaServerManager::Get();
+    int port = server_mgr.GetPort();
+
+    HINTERNET hSession = WinHttpOpen(L"InferDeck/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return "";
+
+    std::wstring host = L"127.0.0.1";
+    std::wstring path_w(path.begin(), path.end());
+
+    HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), static_cast<INTERNET_PORT>(port), 0);
+    if (!hConnect) {
+        WinHttpCloseHandle(hSession);
+        return "";
+    }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", path_w.c_str(),
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return "";
+    }
+
+    // Send raw UTF-8 bytes
+    std::wstring headers = L"Content-Type: application/json\r\n";
+    BOOL result = WinHttpSendRequest(hRequest, headers.c_str(), -1,
+        (LPVOID)json_body.c_str(), static_cast<DWORD>(json_body.size()),
+        static_cast<DWORD>(json_body.size()), 0);
+
+    if (!result) {
+        Logger::Get().Error("WinHttpSendRequest failed: " + std::to_string(GetLastError()));
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return "";
+    }
+
+    result = WinHttpReceiveResponse(hRequest, nullptr);
+    if (!result) {
+        Logger::Get().Error("WinHttpReceiveResponse failed: " + std::to_string(GetLastError()));
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return "";
+    }
+
+    std::string full_text;
+    DWORD bytesAvailable = 0;
+    DWORD bytesRead = 0;
+    char buffer[65536];
+    std::string leftover;
+
+    while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
+        if (bytesAvailable > sizeof(buffer)) bytesAvailable = sizeof(buffer);
+        if (WinHttpReadData(hRequest, buffer, bytesAvailable, &bytesRead)) {
+            std::string chunk(buffer, bytesRead);
+            std::string data = leftover + chunk;
+
+            size_t pos = 0;
+            while ((pos = data.find("data: ", pos)) != std::string::npos) {
+                size_t end = data.find("\n", pos);
+                if (end == std::string::npos) {
+                    leftover = data.substr(pos);
+                    break;
+                }
+                std::string line = data.substr(pos + 6, end - pos - 6);
+                pos = end + 1;
+
+                if (line == "[DONE]") break;
+                if (line.empty()) continue;
+
+                try {
+                    auto j = json::parse(line);
+                    if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
+                        auto& choice = j["choices"][0];
+                        if (choice.contains("delta")) {
+                            auto& delta = choice["delta"];
+                            std::string token;
+                            if (delta.contains("content") && !delta["content"].is_null() && delta["content"].is_string()) {
+                                token = delta["content"].get<std::string>();
+                            } else if (delta.contains("reasoning_content") && !delta["reasoning_content"].is_null() && delta["reasoning_content"].is_string()) {
+                                token = delta["reasoning_content"].get<std::string>();
+                            }
+                            if (!token.empty()) {
+                                full_text += token;
+                                if (on_token) on_token(token, static_cast<int>(full_text.size()));
+                            }
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    Logger::Get().Warn("SSE parse error: " + std::string(e.what()));
+                }
+            }
+
+            if (pos >= data.size()) leftover.clear();
+            else leftover = data.substr(pos);
+        } else {
+            break;
+        }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    return full_text;
+#else
+    return "";
+#endif
+}
+
 InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
-                                        const InferenceParams& params) {
+                                      const InferenceParams& params) {
     auto start = std::chrono::high_resolution_clock::now();
 
-    llama_memory_clear(llama_get_memory(ctx_), true);
-
-    std::string prompt = BuildPrompt(messages);
-
-    int n_ctx = llama_n_ctx(ctx_);
-    std::vector<llama_token> tokens(n_ctx);
-    int n_tokens = llama_tokenize(vocab_, prompt.c_str(), static_cast<int>(prompt.size()), tokens.data(), n_ctx, true, false);
-    if (n_tokens < 0) {
-        n_tokens = -n_tokens;
-        tokens.resize(n_tokens);
-        llama_tokenize(vocab_, prompt.c_str(), static_cast<int>(prompt.size()), tokens.data(), n_tokens, true, false);
+    json body;
+    body["messages"] = json::array();
+    for (const auto& msg : messages) {
+        body["messages"].push_back({
+            {"role", role_to_string(msg.role)},
+            {"content", msg.content}
+        });
     }
+    body["max_tokens"] = params.max_tokens;
+    body["temperature"] = params.temperature;
+    body["top_p"] = params.top_p;
+    body["stream"] = false;
 
-    Logger::Get().Info("Prompt tokenized: " + std::to_string(n_tokens) + " tokens");
+    auto& server_mgr = LlamaServerManager::Get();
+    auto http_result = HttpPost("/v1/chat/completions", body.dump(), server_mgr.GetPort());
 
-    std::vector<llama_token> output_tokens;
-    output_tokens.reserve(params.max_tokens);
-
-    llama_batch batch = llama_batch_init(512, 0, 1);
-
-    for (int i = 0; i < n_tokens && i < 512; i++) {
-        batch.token[batch.n_tokens] = tokens[i];
-        batch.pos[batch.n_tokens] = i;
-        batch.n_seq_id[batch.n_tokens] = 1;
-        batch.seq_id[batch.n_tokens][0] = 0;
-        batch.logits[batch.n_tokens] = (i == n_tokens - 1);
-        batch.n_tokens++;
-    }
-
-    if (llama_decode(ctx_, batch) != 0) {
-        Logger::Get().Error("Failed to decode prompt");
-        llama_batch_free(batch);
-        return InferenceResult{};
-    }
-
-    for (int i = 0; i < params.max_tokens; i++) {
-        float* logits = llama_get_logits(ctx_);
-        if (!logits) {
-            break;
-        }
-
-        int n_vocab = llama_vocab_n_tokens(vocab_);
-        llama_token next_token = SampleToken(logits, n_vocab, params.temperature, params.top_p);
-
-        if (next_token == llama_token_eos(vocab_) || next_token == llama_token_eot(vocab_)) {
-            break;
-        }
-
-        output_tokens.push_back(next_token);
-
-        batch.n_tokens = 0;
-        batch.token[0] = next_token;
-        batch.pos[0] = n_tokens + i;
-        batch.n_seq_id[0] = 1;
-        batch.seq_id[0][0] = 0;
-        batch.logits[0] = true;
-        batch.n_tokens = 1;
-
-        if (llama_decode(ctx_, batch) != 0) {
-            break;
-        }
-    }
-
-    llama_batch_free(batch);
-
-    std::string result;
-    for (auto token : output_tokens) {
-        result += token_to_piece(vocab_, token);
+    if (http_result.status_code != 200) {
+        Logger::Get().Error("llama-server returned HTTP " + std::to_string(http_result.status_code) + ": " + http_result.body);
     }
 
     auto end = std::chrono::high_resolution_clock::now();
     float duration = std::chrono::duration<float, std::milli>(end - start).count();
+
+    InferenceResult result;
+    result.duration_ms = duration;
+
+    try {
+        auto j = json::parse(http_result.body);
+        if (j.contains("error")) {
+            Logger::Get().Error("llama-server error: " + j["error"].dump());
+        }
+        if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
+            result.text = j["choices"][0]["message"]["content"].get<std::string>();
+        }
+        if (j.contains("usage")) {
+            result.prompt_tokens = j["usage"].value("prompt_tokens", 0);
+            result.completion_tokens = j["usage"].value("completion_tokens", 0);
+            result.total_tokens = j["usage"].value("total_tokens", 0);
+        }
+    } catch (const std::exception& e) {
+        Logger::Get().Error("Failed to parse llama-server response: " + std::string(e.what()));
+        Logger::Get().Error("Raw response: " + http_result.body);
+    }
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -198,105 +366,44 @@ InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
         stats_.avg_latency_ms = (stats_.avg_latency_ms * (stats_.successful_requests - 1) + duration) / stats_.successful_requests;
         stats_.max_latency_ms = std::max(stats_.max_latency_ms, duration);
         stats_.min_latency_ms = std::min(stats_.min_latency_ms, duration);
-        stats_.tokens_generated += output_tokens.size();
-        stats_.tokens_processed += n_tokens;
+        stats_.tokens_generated += result.completion_tokens;
+        stats_.tokens_processed += result.prompt_tokens;
     }
 
-    Logger::Get().Info("Inference complete: " + std::to_string(output_tokens.size()) + " tokens in " +
+    Logger::Get().Info("Inference complete: " + std::to_string(result.completion_tokens) + " tokens in " +
                        std::to_string(duration) + "ms");
 
-    return InferenceResult{
-        .text = result,
-        .prompt_tokens = n_tokens,
-        .completion_tokens = static_cast<int>(output_tokens.size()),
-        .total_tokens = n_tokens + static_cast<int>(output_tokens.size()),
-        .duration_ms = duration
-    };
+    return result;
 }
 
 InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messages,
-                                               const InferenceParams& params,
-                                               TokenCallback on_token) {
+                                            const InferenceParams& params,
+                                            TokenCallback on_token) {
     auto start = std::chrono::high_resolution_clock::now();
 
-    llama_memory_clear(llama_get_memory(ctx_), true);
-
-    std::string prompt = BuildPrompt(messages);
-
-    int n_ctx = llama_n_ctx(ctx_);
-    std::vector<llama_token> tokens(n_ctx);
-    int n_tokens = llama_tokenize(vocab_, prompt.c_str(), static_cast<int>(prompt.size()), tokens.data(), n_ctx, true, false);
-    if (n_tokens < 0) {
-        n_tokens = -n_tokens;
-        tokens.resize(n_tokens);
-        llama_tokenize(vocab_, prompt.c_str(), static_cast<int>(prompt.size()), tokens.data(), n_tokens, true, false);
+    json body;
+    body["messages"] = json::array();
+    for (const auto& msg : messages) {
+        body["messages"].push_back({
+            {"role", role_to_string(msg.role)},
+            {"content", msg.content}
+        });
     }
+    body["max_tokens"] = params.max_tokens;
+    body["temperature"] = params.temperature;
+    body["top_p"] = params.top_p;
+    body["stream"] = true;
 
-    Logger::Get().Info("Prompt tokenized: " + std::to_string(n_tokens) + " tokens (streaming)");
-
-    std::vector<llama_token> output_tokens;
-    output_tokens.reserve(params.max_tokens);
-
-    llama_batch batch = llama_batch_init(512, 0, 1);
-
-    for (int i = 0; i < n_tokens && i < 512; i++) {
-        batch.token[batch.n_tokens] = tokens[i];
-        batch.pos[batch.n_tokens] = i;
-        batch.n_seq_id[batch.n_tokens] = 1;
-        batch.seq_id[batch.n_tokens][0] = 0;
-        batch.logits[batch.n_tokens] = (i == n_tokens - 1);
-        batch.n_tokens++;
-    }
-
-    if (llama_decode(ctx_, batch) != 0) {
-        Logger::Get().Error("Failed to decode prompt");
-        llama_batch_free(batch);
-        return InferenceResult{};
-    }
-
-    int cumulative = 0;
-    for (int i = 0; i < params.max_tokens; i++) {
-        float* logits = llama_get_logits(ctx_);
-        if (!logits) {
-            break;
-        }
-
-        int n_vocab = llama_vocab_n_tokens(vocab_);
-        llama_token next_token = SampleToken(logits, n_vocab, params.temperature, params.top_p);
-
-        if (next_token == llama_token_eos(vocab_) || next_token == llama_token_eot(vocab_)) {
-            break;
-        }
-
-        output_tokens.push_back(next_token);
-
-        std::string token_str = token_to_piece(vocab_, next_token);
-        if (on_token) {
-            on_token(token_str, cumulative++);
-        }
-
-        batch.n_tokens = 0;
-        batch.token[0] = next_token;
-        batch.pos[0] = n_tokens + i;
-        batch.n_seq_id[0] = 1;
-        batch.seq_id[0][0] = 0;
-        batch.logits[0] = true;
-        batch.n_tokens = 1;
-
-        if (llama_decode(ctx_, batch) != 0) {
-            break;
-        }
-    }
-
-    llama_batch_free(batch);
-
-    std::string result;
-    for (auto token : output_tokens) {
-        result += token_to_piece(vocab_, token);
-    }
+    std::string full_text = HttpPostStream("/v1/chat/completions", body.dump(), on_token);
 
     auto end = std::chrono::high_resolution_clock::now();
     float duration = std::chrono::duration<float, std::milli>(end - start).count();
+
+    InferenceResult result;
+    result.text = full_text;
+    result.duration_ms = duration;
+    result.completion_tokens = static_cast<int>(full_text.size() / 4);
+    result.total_tokens = result.completion_tokens;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -305,20 +412,13 @@ InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messa
         stats_.avg_latency_ms = (stats_.avg_latency_ms * (stats_.successful_requests - 1) + duration) / stats_.successful_requests;
         stats_.max_latency_ms = std::max(stats_.max_latency_ms, duration);
         stats_.min_latency_ms = std::min(stats_.min_latency_ms, duration);
-        stats_.tokens_generated += output_tokens.size();
-        stats_.tokens_processed += n_tokens;
+        stats_.tokens_generated += result.completion_tokens;
     }
 
-    Logger::Get().Info("Streaming inference complete: " + std::to_string(output_tokens.size()) +
-                       " tokens in " + std::to_string(duration) + "ms");
+    Logger::Get().Info("Stream inference complete: " + std::to_string(result.completion_tokens) + " tokens in " +
+                       std::to_string(duration) + "ms");
 
-    return InferenceResult{
-        .text = result,
-        .prompt_tokens = n_tokens,
-        .completion_tokens = static_cast<int>(output_tokens.size()),
-        .total_tokens = n_tokens + static_cast<int>(output_tokens.size()),
-        .duration_ms = duration
-    };
+    return result;
 }
 
 InferenceStats LlamaEngine::GetStats() const {
@@ -327,19 +427,7 @@ InferenceStats LlamaEngine::GetStats() const {
 }
 
 std::string LlamaEngine::GetModelName() const {
-    if (!gguf_metadata_.model_name.empty()) {
-        return gguf_metadata_.model_name;
-    }
-    if (!model_path_.empty()) {
-        std::filesystem::path p(model_path_);
-        std::string name = p.filename().string();
-        size_t dot = name.find_last_of('.');
-        if (dot != std::string::npos) {
-            name = name.substr(0, dot);
-        }
-        return name;
-    }
-    return "local-model";
+    return current_model_name_;
 }
 
 std::string LlamaEngine::GetPrecision() const {
@@ -348,98 +436,18 @@ std::string LlamaEngine::GetPrecision() const {
 
 void LlamaEngine::Shutdown() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (ctx_) {
-        llama_free(ctx_);
-        ctx_ = nullptr;
+    if (initialized_) {
+        LlamaServerManager::Get().Stop();
+        initialized_ = false;
+        Logger::Get().Info("LlamaEngine shut down");
     }
-    if (model_) {
-        llama_free_model(model_);
-        model_ = nullptr;
-    }
-    initialized_ = false;
-    Logger::Get().Info("LlamaEngine shut down");
 }
 
 GpuInfo LlamaEngine::GetGpuInfo() const {
-    return VulkanDevice::Get().GetBestGpu();
-}
-
-std::string LlamaEngine::BuildPrompt(const std::vector<ChatMessage>& messages) const {
-    std::string prompt;
-    for (const auto& msg : messages) {
-        std::string role_str;
-        switch (msg.role) {
-            case MessageRole::System:  role_str = "system"; break;
-            case MessageRole::User:    role_str = "user"; break;
-            case MessageRole::Assistant: role_str = "assistant"; break;
-            case MessageRole::Tool:    role_str = "tool"; break;
-        }
-        prompt += "<|" + role_str + "|>" + msg.content + "<|end|>\n";
-    }
-    prompt += "<|assistant|>";
-    return prompt;
-}
-
-llama_token LlamaEngine::SampleToken(const float* logits, int n_vocab, float temperature, float top_p) {
-    std::vector<float> probs(n_vocab);
-    float max_logit = -1e30f;
-    for (int i = 0; i < n_vocab; i++) {
-        max_logit = std::max(max_logit, logits[i]);
-    }
-
-    float sum_exp = 0.0f;
-    for (int i = 0; i < n_vocab; i++) {
-        float logit = logits[i];
-        if (temperature > 0.0f) {
-            logit /= temperature;
-        }
-        probs[i] = std::exp(logit - max_logit);
-        sum_exp += probs[i];
-    }
-
-    for (int i = 0; i < n_vocab; i++) {
-        probs[i] /= sum_exp;
-    }
-
-    std::vector<std::pair<float, int>> sorted_probs;
-    sorted_probs.reserve(n_vocab);
-    for (int i = 0; i < n_vocab; i++) {
-        sorted_probs.push_back({probs[i], i});
-    }
-    std::sort(sorted_probs.begin(), sorted_probs.end(), std::greater<>());
-
-    float cumulative = 0.0f;
-    int cutoff_idx = n_vocab;
-    for (int i = 0; i < n_vocab; i++) {
-        cumulative += sorted_probs[i].first;
-        if (cumulative >= top_p) {
-            cutoff_idx = i + 1;
-            break;
-        }
-    }
-
-    float renorm_sum = 0.0f;
-    for (int i = 0; i < cutoff_idx; i++) {
-        renorm_sum += sorted_probs[i].first;
-    }
-    for (int i = 0; i < cutoff_idx; i++) {
-        sorted_probs[i].first /= renorm_sum;
-    }
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> dis(0.0f, 1.0f);
-
-    float r = dis(gen);
-    cumulative = 0.0f;
-    for (int i = 0; i < cutoff_idx; i++) {
-        cumulative += sorted_probs[i].first;
-        if (r <= cumulative) {
-            return sorted_probs[i].second;
-        }
-    }
-
-    return sorted_probs[cutoff_idx - 1].second;
+    GpuInfo info;
+    info.name = "AMD GPU (HIP/Radeon)";
+    info.is_discrete = true;
+    return info;
 }
 
 } // namespace inferdeck::core

@@ -31,11 +31,21 @@ static std::vector<std::string> ScanModelDirectory(const std::string& dir_path) 
         return models;
     }
     std::vector<std::string> extensions = {".gguf", ".bin", ".ggml"};
+    std::vector<std::string> skip_keywords = {"0.5b", "0_5b", "mmproj"};
     for (const auto& entry : std::filesystem::recursive_directory_iterator(dir_path)) {
         if (entry.is_regular_file()) {
             std::string ext = entry.path().extension().string();
             std::string filename = entry.path().filename().string();
-            if (filename.find("mmproj") == 0) continue;
+            std::string lower_filename = filename;
+            for (auto& c : lower_filename) c = std::tolower(static_cast<unsigned char>(c));
+            bool skip = false;
+            for (const auto& keyword : skip_keywords) {
+                if (lower_filename.find(keyword) != std::string::npos) {
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip) continue;
             for (const auto& e : extensions) {
                 if (ext == e) {
                     models.push_back(entry.path().string());

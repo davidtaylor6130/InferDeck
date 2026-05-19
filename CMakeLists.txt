@@ -9,12 +9,12 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
-option(INFERDECK_BUILD_TESTS "Build tests" ON)
+option(INFERDECK_BUILD_TESTS "Build tests" OFF)
 option(INFERDECK_BUILD_WASM "Build WASM module" OFF)
 
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 
-find_package(Vulkan REQUIRED)
+# --- Dependencies via vcpkg ---
 find_package(nlohmann_json REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(fmt REQUIRED)
@@ -25,24 +25,22 @@ if(INFERDECK_BUILD_TESTS)
     find_package(Catch2 REQUIRED)
 endif()
 
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/llama.cpp/CMakeLists.txt")
-    message(FATAL_ERROR "llama.cpp not found. Run: git submodule update --init --recursive")
+# --- llama.cpp: FetchContent for headers only ---
+# We use the official pre-built llama-server binary at runtime.
+# FetchContent gives us the headers we need for our wrapper types.
+include(FetchContent)
+FetchContent_Declare(
+    llama_cpp
+    GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
+    GIT_TAG        b9222
+    SOURCE_SUBDIR  OFF
+)
+FetchContent_GetProperties(llama_cpp)
+if(NOT llama_cpp_POPULATED)
+    FetchContent_Populate(llama_cpp)
 endif()
 
-set(LLAMA_VULKAN ON CACHE BOOL "Enable Vulkan support" FORCE)
-set(LLAMA_BUILD_SHARED OFF CACHE BOOL "Build shared libraries" FORCE)
-set(LLAMA_BUILD_STATIC ON CACHE BOOL "Build static libraries" FORCE)
-set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
-set(LLAMA_BUILD_TESTS OFF CACHE BOOL "Build llama.cpp tests" FORCE)
-set(LLAMA_BUILD_SERVER OFF CACHE BOOL "Build server" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libs" FORCE)
-
-if(MSVC)
-    add_compile_options(/utf-8 /Zc:char8_t-)
-endif()
-
-add_subdirectory(libs/third_party/llama.cpp)
-
+# --- Our libraries and app ---
 add_subdirectory(libs/core)
 add_subdirectory(libs/llama_cpp_wrapper)
 add_subdirectory(libs/backends)
