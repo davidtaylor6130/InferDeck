@@ -323,7 +323,19 @@ InferenceStats LlamaEngine::GetStats() const {
 }
 
 std::string LlamaEngine::GetModelName() const {
-    return gguf_metadata_.model_name;
+    if (!gguf_metadata_.model_name.empty()) {
+        return gguf_metadata_.model_name;
+    }
+    if (!model_path_.empty()) {
+        std::filesystem::path p(model_path_);
+        std::string name = p.filename().string();
+        size_t dot = name.find_last_of('.');
+        if (dot != std::string::npos) {
+            name = name.substr(0, dot);
+        }
+        return name;
+    }
+    return "local-model";
 }
 
 std::string LlamaEngine::GetPrecision() const {

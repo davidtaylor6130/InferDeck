@@ -14,10 +14,10 @@
 #include "routes/Models.hpp"
 #include "routes/Embeddings.hpp"
 #include "routes/Health.hpp"
-#include "routes/Metrics.hpp"
 #include "routes/AudioTranscriptions.hpp"
 #include "routes/AudioSpeech.hpp"
 #include "routes/Images.hpp"
+#include "routes/Metrics.hpp"
 #include "routes/Documents.hpp"
 #include "routes/FineTuningJobs.hpp"
 
@@ -109,7 +109,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Mount dashboard static files
+    // Mount dashboard static files on port 8080
     std::filesystem::path public_dir = std::filesystem::current_path() / "apps" / "gateway-service" / "public" / "dashboard";
     if (std::filesystem::exists(public_dir)) {
         server.SetDashboardMountPoint("/", public_dir.string());
@@ -120,7 +120,10 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, SignalHandler);
     signal(SIGTERM, SignalHandler);
 
-    // API routes on port 11434 (MUST be registered BEFORE Start())
+    // ============================================================
+    // API SERVER (port 11434) - OpenAI-compatible API ONLY
+    // ============================================================
+
     server.RegisterApiRoute("POST", "/v1/chat/completions",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleChatCompletions(req, resp);
@@ -141,29 +144,9 @@ int main(int argc, char* argv[]) {
             inferdeck::gateway::routes::HandleEmbeddings(req, resp);
         });
 
-    server.RegisterApiRoute("GET", "/v1/health",
-        [](const httplib::Request& req, httplib::Response& resp) {
-            inferdeck::gateway::routes::HandleHealth(req, resp);
-        });
-
-    server.RegisterApiRoute("GET", "/inferdeck/metrics",
-        [](const httplib::Request& req, httplib::Response& resp) {
-            inferdeck::gateway::routes::HandleMetrics(req, resp);
-        });
-
-    server.RegisterApiRoute("GET", "/inferdeck/status",
-        [](const httplib::Request& req, httplib::Response& resp) {
-            inferdeck::gateway::routes::HandleHealth(req, resp);
-        });
-
     server.RegisterApiRoute("POST", "/v1/audio/transcriptions",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleAudioTranscriptions(req, resp);
-        });
-
-    server.RegisterApiRoute("POST", "/v1/audio/translations",
-        [](const httplib::Request& req, httplib::Response& resp) {
-            inferdeck::gateway::routes::HandleAudioTranslations(req, resp);
         });
 
     server.RegisterApiRoute("POST", "/v1/audio/speech",
@@ -176,27 +159,51 @@ int main(int argc, char* argv[]) {
             inferdeck::gateway::routes::HandleImageGenerate(req, resp);
         });
 
-    server.RegisterApiRoute("GET", "/v1/documents",
+    server.RegisterApiRoute("GET", "/health",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleHealth(req, resp);
+        });
+
+    server.RegisterApiRoute("GET", "/v1/health",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleHealth(req, resp);
+        });
+
+    // ============================================================
+    // DASHBOARD SERVER (port 8080) - Dashboard + Custom Routes
+    // ============================================================
+
+    server.RegisterDashboardRoute("GET", "/inferdeck/metrics",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleMetrics(req, resp);
+        });
+
+    server.RegisterDashboardRoute("GET", "/inferdeck/status",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleHealth(req, resp);
+        });
+
+    server.RegisterDashboardRoute("GET", "/v1/documents",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleDocumentsList(req, resp);
         });
 
-    server.RegisterApiRoute("POST", "/v1/documents",
+    server.RegisterDashboardRoute("POST", "/v1/documents",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleDocumentsCreate(req, resp);
         });
 
-    server.RegisterApiRoute("GET", "/v1/documents/search",
+    server.RegisterDashboardRoute("GET", "/v1/documents/search",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleDocumentsSearch(req, resp);
         });
 
-    server.RegisterApiRoute("GET", "/v1/fine_tuning/jobs",
+    server.RegisterDashboardRoute("GET", "/v1/fine_tuning/jobs",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleFineTuningJobsList(req, resp);
         });
 
-    server.RegisterApiRoute("POST", "/v1/fine_tuning/jobs",
+    server.RegisterDashboardRoute("POST", "/v1/fine_tuning/jobs",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleFineTuningJobsCreate(req, resp);
         });
