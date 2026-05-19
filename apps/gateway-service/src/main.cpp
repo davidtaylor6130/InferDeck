@@ -89,8 +89,9 @@ int main(int argc, char* argv[]) {
     inferdeck::core::Logger::Get().Info("InferDeck Gateway starting...");
 
     // Load configuration
+    inferdeck::gateway::ServerConfig server_config;
     try {
-        inferdeck::gateway::ServerConfig server_config = inferdeck::gateway::LoadConfig(config_path);
+        server_config = inferdeck::gateway::LoadConfig(config_path);
 
         // Initialize LlamaEngine
         auto& engine = inferdeck::core::LlamaEngine::Get();
@@ -118,6 +119,11 @@ int main(int argc, char* argv[]) {
     // Create and start server
     inferdeck::gateway::GatewayServer server;
     g_server = &server;
+
+    if (!server.Initialize(server_config)) {
+        inferdeck::core::Logger::Get().Error("Failed to initialize server");
+        return 1;
+    }
 
     // Set up signal handlers
     signal(SIGINT, SignalHandler);

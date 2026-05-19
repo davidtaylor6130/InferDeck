@@ -1,20 +1,28 @@
-/// @file LlamaEngine.cpp
-/// @brief LlamaEngine implementation with real llama.cpp integration.
-
 #include "llama_cpp/LlamaEngine.hpp"
 #include "llama_cpp/GGUFParser.hpp"
 #include "llama_cpp/VulkanDevice.hpp"
 #include "core/Logger.hpp"
 #include "core/Metrics.hpp"
 
-#include <llama.h>
 #include <chrono>
 #include <algorithm>
 #include <cmath>
 #include <random>
 #include <thread>
+#include <vector>
 
 namespace inferdeck::core {
+
+static std::string token_to_piece(const llama_vocab* vocab, llama_token token) {
+    char buf[32];
+    int n = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, false);
+    if (n < 0) {
+        std::vector<char> big_buf(-n);
+        llama_token_to_piece(vocab, token, big_buf.data(), -n, 0, false);
+        return std::string(big_buf.data(), -n);
+    }
+    return std::string(buf, n);
+}
 
 LlamaEngine& LlamaEngine::Get() {
     static LlamaEngine instance;
@@ -38,24 +46,20 @@ bool LlamaEngine::Initialize(const std::string& model_path,
     gpu_layers_ = gpu_layers;
     context_size_ = context_size;
 
-    // Validate model file exists
     if (!std::filesystem::exists(model_path)) {
         Logger::Get().Error("Model file not found: " + model_path);
         return false;
     }
 
-    // Parse GGUF metadata for validation
     GGUFMetadata metadata = GGUFParser::Parse(std::filesystem::path(model_path));
     if (!metadata.valid) {
-        Logger::Get().Error("Failed to parse GGUF model: " + model_path);
-        return false;
+        Logger::Get().Warn("Failed to parse GGUF model (continuing anyway): " + model_path);
     }
 
     gguf_metadata_ = metadata;
 
-    // Auto-detect precision from GGUF if requested
     std::string actual_precision = precision;
-    if (precision == "auto") {
+    if (precision == "auto" && metadata.valid) {
         actual_precision = GGUFParser::QuantToString(metadata.quantization);
     }
 
@@ -64,48 +68,29 @@ bool LlamaEngine::Initialize(const std::string& model_path,
     Logger::Get().Info("GPU layers: " + std::to_string(gpu_layers));
     Logger::Get().Info("Context size: " + std::to_string(context_size));
 
-    // Get GPU info
-    GpuInfo gpu = VulkanDevice::Get().GetBestGpu();
-    if (gpu.name.empty()) {
-        Logger::Get().Warn("No Vulkan GPU detected, falling back to CPU");
-    } else {
-        Logger::Get().Info("GPU: " + gpu.name);
-        Logger::Get().Info("VRAM: " + std::to_string(gpu.memory_total / (1024 * 1024)) + " MB");
-    }
-
-    // Configure llama.cpp model parameters
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = gpu_layers;
-    model_params.main_gpu = 0;
 
-    // Load the model
-    model_ = llama_load_model_from_file(model_path.c_str(), model_params);
+    model_ = llama_model_load_from_file(model_path.c_str(), model_params);
     if (!model_) {
         Logger::Get().Error("Failed to load model: " + model_path);
         return false;
     }
 
-    Logger::Get().Info("Model loaded successfully: " + metadata.model_name);
-    Logger::Get().Info("Architecture: " + GGUFParser::ArchToString(metadata.architecture));
-    Logger::Get().Info("Vocab size: " + std::to_string(metadata.vocab_size));
-    Logger::Get().Info("Block count: " + std::to_string(metadata.block_count));
+    vocab_ = llama_model_get_vocab(model_);
 
-    // Configure context parameters
+    Logger::Get().Info("Model loaded successfully");
+
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = context_size;
-    ctx_params.n_batch = metadata.vocab_size;
+    ctx_params.n_batch = 512;
     ctx_params.n_ubatch = 512;
     ctx_params.n_seq_max = 1;
     ctx_params.n_threads = std::thread::hardware_concurrency();
     ctx_params.n_threads_batch = ctx_params.n_threads;
     ctx_params.embeddings = true;
-    ctx_params.flash_attn = true;
-    ctx_params.no_kv_offload = false;
-    ctx_params.compute_type = GG_TYPE_F16;
-    ctx_params.causal_attn = true;
 
-    // Create context
-    ctx_ = llama_new_context_with_model(model_, ctx_params);
+    ctx_ = llama_init_from_model(model_, ctx_params);
     if (!ctx_) {
         Logger::Get().Error("Failed to create context");
         llama_free_model(model_);
@@ -114,12 +99,11 @@ bool LlamaEngine::Initialize(const std::string& model_path,
     }
 
     Logger::Get().Info("Context created with " + std::to_string(context_size) + " tokens");
-    Logger::Get().Info("Batch size: " + std::to_string(ctx_params.n_batch));
 
-    // Initialize tokenizer
-    vocab_tokens_.resize(llama_vocab_size(model_));
-    for (int i = 0; i < llama_vocab_size(model_); i++) {
-        vocab_tokens_[i] = llama_token_to_piece(ctx_, i);
+    int n_vocab = llama_vocab_n_tokens(vocab_);
+    vocab_tokens_.resize(n_vocab);
+    for (int i = 0; i < n_vocab; i++) {
+        vocab_tokens_[i] = token_to_piece(vocab_, i);
     }
 
     initialized_ = true;
@@ -131,78 +115,80 @@ bool LlamaEngine::IsInitialized() const {
 }
 
 InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
-                                      const InferenceParams& params) {
+                                       const InferenceParams& params) {
     auto start = std::chrono::high_resolution_clock::now();
 
-    // Build prompt from messages
     std::string prompt = BuildPrompt(messages);
 
-    // Tokenize
     int n_ctx = llama_n_ctx(ctx_);
-    std::vector<llama_token> tokens(n_ctx, 0);
-    int n_tokens = llama_tokenize(ctx_, prompt.c_str(), prompt.size(), tokens.data(), n_ctx, true, false);
+    std::vector<llama_token> tokens(n_ctx);
+    int n_tokens = llama_tokenize(vocab_, prompt.c_str(), static_cast<int>(prompt.size()), tokens.data(), n_ctx, true, false);
     if (n_tokens < 0) {
         n_tokens = -n_tokens;
         tokens.resize(n_tokens);
-        llama_tokenize(ctx_, prompt.c_str(), prompt.size(), tokens.data(), n_tokens, true, false);
+        llama_tokenize(vocab_, prompt.c_str(), static_cast<int>(prompt.size()), tokens.data(), n_tokens, true, false);
     }
 
     Logger::Get().Info("Prompt tokenized: " + std::to_string(n_tokens) + " tokens");
 
-    // Run inference
     std::vector<llama_token> output_tokens;
     output_tokens.reserve(params.max_tokens);
 
-    // Use first token to start generation
-    llama_token prev_token = tokens[n_tokens - 1];
+    llama_batch batch = llama_batch_init(512, 0, 1);
+
+    for (int i = 0; i < n_tokens && i < 512; i++) {
+        batch.token[batch.n_tokens] = tokens[i];
+        batch.pos[batch.n_tokens] = i;
+        batch.n_seq_id[batch.n_tokens] = 1;
+        batch.seq_id[batch.n_tokens][0] = 0;
+        batch.logits[batch.n_tokens] = (i == n_tokens - 1);
+        batch.n_tokens++;
+    }
+
+    if (llama_decode(ctx_, batch) != 0) {
+        Logger::Get().Error("Failed to decode prompt");
+        llama_batch_free(batch);
+        return InferenceResult{};
+    }
 
     for (int i = 0; i < params.max_tokens; i++) {
-        // Get logits from last position
-        const llama_logits* logits = llama_get_logits_item(ctx_, -1);
+        float* logits = llama_get_logits(ctx_);
         if (!logits) {
-            Logger::Get().Error("Failed to get logits");
             break;
         }
 
-        // Sample next token using nucleus sampling
-        llama_token next_token = SampleToken(logits, params.temperature, params.top_p);
+        int n_vocab = llama_vocab_n_tokens(vocab_);
+        llama_token next_token = SampleToken(logits, n_vocab, params.temperature, params.top_p);
 
-        // Check for EOS token
-        if (next_token == llama_token_eos(ctx_) || next_token == llama_token_eot(ctx_)) {
+        if (next_token == llama_token_eos(vocab_) || next_token == llama_token_eot(vocab_)) {
             break;
         }
 
         output_tokens.push_back(next_token);
 
-        // Decode the token to text
-        std::string token_str = llama_token_to_piece(ctx_, next_token);
+        batch.n_tokens = 0;
+        batch.token[0] = next_token;
+        batch.pos[0] = n_tokens + i;
+        batch.n_seq_id[0] = 1;
+        batch.seq_id[0][0] = 0;
+        batch.logits[0] = true;
+        batch.n_tokens = 1;
 
-        // Call streaming callback if provided
-        if (params.stream) {
-            // We'll handle this in PredictStream instead
-        }
-
-        // Prepare for next iteration
-        std::vector<llama_token> batch = {next_token};
-        if (llama_decode(ctx_, llama_batch_get_one(batch.data(), batch.size())) != 0) {
-            Logger::Get().Error("Failed to decode next token");
+        if (llama_decode(ctx_, batch) != 0) {
             break;
         }
-
-        prev_token = next_token;
     }
 
-    // Detokenize output
+    llama_batch_free(batch);
+
     std::string result;
     for (auto token : output_tokens) {
-        std::string piece = llama_token_to_piece(ctx_, token);
-        result += piece;
+        result += token_to_piece(vocab_, token);
     }
 
     auto end = std::chrono::high_resolution_clock::now();
     float duration = std::chrono::duration<float, std::milli>(end - start).count();
 
-    // Update stats
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stats_.total_requests++;
@@ -213,13 +199,6 @@ InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
         stats_.tokens_generated += output_tokens.size();
         stats_.tokens_processed += n_tokens;
     }
-
-    // Record metrics
-    MetricsStore::Get().IncrementCounter("inferdeck.requests.total", 1);
-    MetricsStore::Get().IncrementCounter("inferdeck.requests.success", 1);
-    MetricsStore::Get().RecordHistogram("inferdeck.latency_ms", duration);
-    MetricsStore::Get().RecordHistogram("inferdeck.prompt_tokens", n_tokens);
-    MetricsStore::Get().RecordHistogram("inferdeck.completion_tokens", output_tokens.size());
 
     Logger::Get().Info("Inference complete: " + std::to_string(output_tokens.size()) + " tokens in " +
                        std::to_string(duration) + "ms");
@@ -227,88 +206,94 @@ InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
     return InferenceResult{
         .text = result,
         .prompt_tokens = n_tokens,
-        .completion_tokens = output_tokens.size(),
-        .total_tokens = n_tokens + output_tokens.size(),
+        .completion_tokens = static_cast<int>(output_tokens.size()),
+        .total_tokens = n_tokens + static_cast<int>(output_tokens.size()),
         .duration_ms = duration
     };
 }
 
 InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messages,
-                                             const InferenceParams& params,
-                                             TokenCallback on_token) {
+                                              const InferenceParams& params,
+                                              TokenCallback on_token) {
     auto start = std::chrono::high_resolution_clock::now();
 
-    // Build prompt from messages
     std::string prompt = BuildPrompt(messages);
 
-    // Tokenize
     int n_ctx = llama_n_ctx(ctx_);
-    std::vector<llama_token> tokens(n_ctx, 0);
-    int n_tokens = llama_tokenize(ctx_, prompt.c_str(), prompt.size(), tokens.data(), n_ctx, true, false);
+    std::vector<llama_token> tokens(n_ctx);
+    int n_tokens = llama_tokenize(vocab_, prompt.c_str(), static_cast<int>(prompt.size()), tokens.data(), n_ctx, true, false);
     if (n_tokens < 0) {
         n_tokens = -n_tokens;
         tokens.resize(n_tokens);
-        llama_tokenize(ctx_, prompt.c_str(), prompt.size(), tokens.data(), n_tokens, true, false);
+        llama_tokenize(vocab_, prompt.c_str(), static_cast<int>(prompt.size()), tokens.data(), n_tokens, true, false);
     }
 
     Logger::Get().Info("Prompt tokenized: " + std::to_string(n_tokens) + " tokens (streaming)");
 
-    // Run inference with token-by-token streaming
     std::vector<llama_token> output_tokens;
     output_tokens.reserve(params.max_tokens);
 
-    // Use first token to start generation
-    llama_token prev_token = tokens[n_tokens - 1];
-    int cumulative = 0;
+    llama_batch batch = llama_batch_init(512, 0, 1);
 
+    for (int i = 0; i < n_tokens && i < 512; i++) {
+        batch.token[batch.n_tokens] = tokens[i];
+        batch.pos[batch.n_tokens] = i;
+        batch.n_seq_id[batch.n_tokens] = 1;
+        batch.seq_id[batch.n_tokens][0] = 0;
+        batch.logits[batch.n_tokens] = (i == n_tokens - 1);
+        batch.n_tokens++;
+    }
+
+    if (llama_decode(ctx_, batch) != 0) {
+        Logger::Get().Error("Failed to decode prompt");
+        llama_batch_free(batch);
+        return InferenceResult{};
+    }
+
+    int cumulative = 0;
     for (int i = 0; i < params.max_tokens; i++) {
-        // Get logits from last position
-        const llama_logits* logits = llama_get_logits_item(ctx_, -1);
+        float* logits = llama_get_logits(ctx_);
         if (!logits) {
-            Logger::Get().Error("Failed to get logits");
             break;
         }
 
-        // Sample next token using nucleus sampling
-        llama_token next_token = SampleToken(logits, params.temperature, params.top_p);
+        int n_vocab = llama_vocab_n_tokens(vocab_);
+        llama_token next_token = SampleToken(logits, n_vocab, params.temperature, params.top_p);
 
-        // Check for EOS token
-        if (next_token == llama_token_eos(ctx_) || next_token == llama_token_eot(ctx_)) {
+        if (next_token == llama_token_eos(vocab_) || next_token == llama_token_eot(vocab_)) {
             break;
         }
 
         output_tokens.push_back(next_token);
 
-        // Decode the token to text
-        std::string token_str = llama_token_to_piece(ctx_, next_token);
-
-        // Call streaming callback
+        std::string token_str = token_to_piece(vocab_, next_token);
         if (on_token) {
-            on_token(token_str, cumulative);
-            cumulative++;
+            on_token(token_str, cumulative++);
         }
 
-        // Prepare for next iteration
-        std::vector<llama_token> batch = {next_token};
-        if (llama_decode(ctx_, llama_batch_get_one(batch.data(), batch.size())) != 0) {
-            Logger::Get().Error("Failed to decode next token");
+        batch.n_tokens = 0;
+        batch.token[0] = next_token;
+        batch.pos[0] = n_tokens + i;
+        batch.n_seq_id[0] = 1;
+        batch.seq_id[0][0] = 0;
+        batch.logits[0] = true;
+        batch.n_tokens = 1;
+
+        if (llama_decode(ctx_, batch) != 0) {
             break;
         }
-
-        prev_token = next_token;
     }
 
-    // Detokenize output for final result
+    llama_batch_free(batch);
+
     std::string result;
     for (auto token : output_tokens) {
-        std::string piece = llama_token_to_piece(ctx_, token);
-        result += piece;
+        result += token_to_piece(vocab_, token);
     }
 
     auto end = std::chrono::high_resolution_clock::now();
     float duration = std::chrono::duration<float, std::milli>(end - start).count();
 
-    // Update stats
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stats_.total_requests++;
@@ -320,21 +305,14 @@ InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messa
         stats_.tokens_processed += n_tokens;
     }
 
-    // Record metrics
-    MetricsStore::Get().IncrementCounter("inferdeck.requests.total", 1);
-    MetricsStore::Get().IncrementCounter("inferdeck.requests.success", 1);
-    MetricsStore::Get().RecordHistogram("inferdeck.latency_ms", duration);
-    MetricsStore::Get().RecordHistogram("inferdeck.prompt_tokens", n_tokens);
-    MetricsStore::Get().RecordHistogram("inferdeck.completion_tokens", output_tokens.size());
-
     Logger::Get().Info("Streaming inference complete: " + std::to_string(output_tokens.size()) +
                        " tokens in " + std::to_string(duration) + "ms");
 
     return InferenceResult{
         .text = result,
         .prompt_tokens = n_tokens,
-        .completion_tokens = output_tokens.size(),
-        .total_tokens = n_tokens + output_tokens.size(),
+        .completion_tokens = static_cast<int>(output_tokens.size()),
+        .total_tokens = n_tokens + static_cast<int>(output_tokens.size()),
         .duration_ms = duration
     };
 }
@@ -371,11 +349,7 @@ GpuInfo LlamaEngine::GetGpuInfo() const {
 }
 
 std::string LlamaEngine::BuildPrompt(const std::vector<ChatMessage>& messages) const {
-    // Use llama.cpp chat template if available
     std::string prompt;
-
-    // For V1, use a simple chat format
-    // In production, this would use: llama_chat_apply_template()
     for (const auto& msg : messages) {
         std::string role_str;
         switch (msg.role) {
@@ -387,33 +361,30 @@ std::string LlamaEngine::BuildPrompt(const std::vector<ChatMessage>& messages) c
         prompt += "<|" + role_str + "|>" + msg.content + "<|end|>\n";
     }
     prompt += "<|assistant|>";
-
     return prompt;
 }
 
-llama_token LlamaEngine::SampleToken(const llama_logits* logits, float temperature, float top_p) {
-    // Get vocabulary size
-    int n_vocab = llama_n_vocab(model_);
-
-    // Convert logits to probabilities with temperature
+llama_token LlamaEngine::SampleToken(const float* logits, int n_vocab, float temperature, float top_p) {
     std::vector<float> probs(n_vocab);
-    float sum_exp = 0.0f;
+    float max_logit = -1e30f;
+    for (int i = 0; i < n_vocab; i++) {
+        max_logit = std::max(max_logit, logits[i]);
+    }
 
+    float sum_exp = 0.0f;
     for (int i = 0; i < n_vocab; i++) {
         float logit = logits[i];
         if (temperature > 0.0f) {
             logit /= temperature;
         }
-        probs[i] = std::exp(logit - *std::max_element(logits, logits + n_vocab));
+        probs[i] = std::exp(logit - max_logit);
         sum_exp += probs[i];
     }
 
-    // Normalize probabilities
     for (int i = 0; i < n_vocab; i++) {
         probs[i] /= sum_exp;
     }
 
-    // Apply top-p (nucleus) sampling
     std::vector<std::pair<float, int>> sorted_probs;
     sorted_probs.reserve(n_vocab);
     for (int i = 0; i < n_vocab; i++) {
@@ -421,7 +392,6 @@ llama_token LlamaEngine::SampleToken(const llama_logits* logits, float temperatu
     }
     std::sort(sorted_probs.begin(), sorted_probs.end(), std::greater<>());
 
-    // Find top-p cutoff
     float cumulative = 0.0f;
     int cutoff_idx = n_vocab;
     for (int i = 0; i < n_vocab; i++) {
@@ -432,7 +402,6 @@ llama_token LlamaEngine::SampleToken(const llama_logits* logits, float temperatu
         }
     }
 
-    // Renormalize probabilities for top-p
     float renorm_sum = 0.0f;
     for (int i = 0; i < cutoff_idx; i++) {
         renorm_sum += sorted_probs[i].first;
@@ -441,7 +410,6 @@ llama_token LlamaEngine::SampleToken(const llama_logits* logits, float temperatu
         sorted_probs[i].first /= renorm_sum;
     }
 
-    // Sample from top-p distribution
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<float> dis(0.0f, 1.0f);
@@ -455,7 +423,6 @@ llama_token LlamaEngine::SampleToken(const llama_logits* logits, float temperatu
         }
     }
 
-    // Fallback to last token
     return sorted_probs[cutoff_idx - 1].second;
 }
 

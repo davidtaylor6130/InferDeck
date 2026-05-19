@@ -1,6 +1,3 @@
-/// @file Config.cpp
-/// @brief Config implementation using yaml-cpp.
-
 #include "core/Config.hpp"
 #include <fstream>
 #include <sstream>
@@ -31,98 +28,97 @@ namespace {
             [](unsigned char c) { return std::tolower(c); });
         return result;
     }
+
+    Config::FullConfig ParseYaml(const std::string& yaml_content) {
+        Config::FullConfig config;
+        std::istringstream stream(yaml_content);
+        std::string line;
+        std::string current_section;
+
+        while (std::getline(stream, line)) {
+            if (line.empty()) continue;
+            size_t comment_pos = line.find('#');
+            if (comment_pos != std::string::npos) {
+                line = line.substr(0, comment_pos);
+            }
+            if (line.empty()) continue;
+
+            size_t start = line.find_first_not_of(" \t");
+            if (start == std::string::npos) continue;
+            line = line.substr(start);
+
+            size_t colon_pos = line.find(':');
+            if (colon_pos == std::string::npos) continue;
+
+            std::string key = trim(line.substr(0, colon_pos));
+            std::string raw_value = trim(line.substr(colon_pos + 1));
+            std::string lower_key = to_lower(key);
+
+            if (lower_key == "server") {
+                current_section = "server";
+                continue;
+            } else if (lower_key == "model") {
+                current_section = "model";
+                continue;
+            } else if (lower_key == "gpu") {
+                current_section = "gpu";
+                continue;
+            } else if (lower_key == "queue") {
+                current_section = "queue";
+                continue;
+            } else if (lower_key == "logging" || lower_key == "log") {
+                current_section = "logging";
+                continue;
+            } else if (lower_key == "metrics") {
+                current_section = "metrics";
+                continue;
+            }
+
+            if (raw_value.empty()) continue;
+
+            if (current_section == "server") {
+                if (lower_key == "host") config.server.host = raw_value;
+                else if (lower_key == "port") config.server.port = std::stoi(raw_value);
+                else if (lower_key == "enabled") config.server.tls_enabled = (raw_value == "true" || raw_value == "1");
+                else if (lower_key == "cert_file") config.server.cert_file = raw_value;
+                else if (lower_key == "key_file") config.server.key_file = raw_value;
+            } else if (current_section == "model") {
+                if (lower_key == "path") config.model.path = raw_value;
+                else if (lower_key == "precision") config.model.precision = raw_value;
+                else if (lower_key == "n_gpu_layers" || lower_key == "gpu_layers") config.model.n_gpu_layers = std::stoi(raw_value);
+                else if (lower_key == "context_size" || lower_key == "context_length") config.model.context_size = std::stoi(raw_value);
+                else if (lower_key == "batch_size") config.model.batch_size = std::stoi(raw_value);
+            } else if (current_section == "gpu") {
+                if (lower_key == "device_id") config.gpu.device_id = std::stoi(raw_value);
+            } else if (current_section == "queue") {
+                if (lower_key == "worker_threads") config.queue.worker_threads = std::stoi(raw_value);
+                else if (lower_key == "max_queue_size") config.queue.max_queue_size = std::stoi(raw_value);
+            } else if (current_section == "logging") {
+                if (lower_key == "level") config.logging.level = raw_value;
+                else if (lower_key == "file") config.logging.file = raw_value;
+            } else if (current_section == "metrics") {
+                if (lower_key == "enabled") config.metrics_enabled = (raw_value == "true" || raw_value == "1");
+                else if (lower_key == "endpoint") config.metrics_endpoint = raw_value;
+            }
+        }
+
+        return config;
+    }
 }
 
-FullConfig Config::Load(const std::filesystem::path& config_path) {
-    FullConfig config;
-
+Config::FullConfig Config::Load(const std::filesystem::path& config_path) {
     std::ifstream file(config_path);
     if (!file.is_open()) {
-        return config;
+        return FullConfig{};
     }
 
     std::stringstream buffer;
     buffer << file.rdbuf();
-    std::string yaml_content = buffer.str();
-    return LoadFromString(yaml_content, config);
+    return ParseYaml(buffer.str());
 }
 
-FullConfig Config::LoadFromString(const std::string& yaml_content) {
-    FullConfig config;
-    return LoadFromString(yaml_content, config);
-}
-
-FullConfig Config::LoadFromString(const std::string& yaml_content, FullConfig& config) {
-    std::istringstream stream(yaml_content);
-    std::string line;
-    std::string current_section;
-
-    while (std::getline(stream, line)) {
-        if (line.empty()) continue;
-        size_t comment_pos = line.find('#');
-        if (comment_pos != std::string::npos) {
-            line = line.substr(0, comment_pos);
-        }
-        if (line.empty()) continue;
-
-        size_t start = line.find_first_not_of(" \t");
-        if (start == std::string::npos) continue;
-        line = line.substr(start);
-
-        size_t colon_pos = line.find(':');
-        if (colon_pos == std::string::npos) continue;
-
-        std::string key = trim(line.substr(0, colon_pos));
-        std::string raw_value = trim(line.substr(colon_pos + 1));
-        std::string lower_key = to_lower(key);
-
-        if (lower_key == "server") {
-            current_section = "server";
-            continue;
-        } else if (lower_key == "model") {
-            current_section = "model";
-            continue;
-        } else if (lower_key == "gpu") {
-            current_section = "gpu";
-            continue;
-        } else if (lower_key == "queue") {
-            current_section = "queue";
-            continue;
-        } else if (lower_key == "logging" || lower_key == "log") {
-            current_section = "logging";
-            continue;
-        } else if (lower_key == "metrics") {
-            current_section = "metrics";
-            continue;
-        }
-
-        if (current_section == "server") {
-            if (lower_key == "host") config.server.host = raw_value;
-            else if (lower_key == "port") config.server.port = std::stoi(raw_value);
-            else if (lower_key == "enabled") config.server.tls_enabled = (raw_value == "true" || raw_value == "1");
-            else if (lower_key == "cert_file") config.server.cert_file = raw_value;
-            else if (lower_key == "key_file") config.server.key_file = raw_value;
-        } else if (current_section == "model") {
-            if (lower_key == "path") config.model.path = raw_value;
-            else if (lower_key == "precision") config.model.precision = raw_value;
-            else if (lower_key == "n_gpu_layers" || lower_key == "gpu_layers") config.model.n_gpu_layers = std::stoi(raw_value);
-            else if (lower_key == "context_size" || lower_key == "context_length") config.model.context_size = std::stoi(raw_value);
-            else if (lower_key == "batch_size") config.model.batch_size = std::stoi(raw_value);
-        } else if (current_section == "gpu") {
-            if (lower_key == "device_id") config.gpu.device_id = std::stoi(raw_value);
-        } else if (current_section == "queue") {
-            if (lower_key == "worker_threads") config.queue.worker_threads = std::stoi(raw_value);
-            else if (lower_key == "max_queue_size") config.queue.max_queue_size = std::stoi(raw_value);
-        } else if (current_section == "logging") {
-            if (lower_key == "level") config.logging.level = raw_value;
-            else if (lower_key == "file") config.logging.file = raw_value;
-        } else if (current_section == "metrics") {
-            if (lower_key == "enabled") config.metrics_enabled = (raw_value == "true" || raw_value == "1");
-            else if (lower_key == "endpoint") config.metrics_endpoint = raw_value;
-        }
-    }
-
-    return config;
+Config::FullConfig Config::LoadFromString(const std::string& yaml_content) {
+    return ParseYaml(yaml_content);
 }
 
 void Config::Save(const std::filesystem::path& config_path, const FullConfig& config) {
@@ -168,13 +164,15 @@ void Config::Save(const std::filesystem::path& config_path, const FullConfig& co
 }
 
 std::string Config::Get(const std::string& key) {
-    auto it = Config::Get().flat_config_.find(key);
-    return it != Config::Get().flat_config_.end() ? it->second : "";
+    static Config instance;
+    auto it = instance.flat_config_.find(key);
+    return it != instance.flat_config_.end() ? it->second : "";
 }
 
 int Config::GetInt(const std::string& key, int default_value) {
-    auto it = Config::Get().flat_config_.find(key);
-    if (it == Config::Get().flat_config_.end()) {
+    static Config instance;
+    auto it = instance.flat_config_.find(key);
+    if (it == instance.flat_config_.end()) {
         return default_value;
     }
     try {
@@ -185,8 +183,9 @@ int Config::GetInt(const std::string& key, int default_value) {
 }
 
 bool Config::GetBool(const std::string& key, bool default_value) {
-    auto it = Config::Get().flat_config_.find(key);
-    if (it == Config::Get().flat_config_.end()) {
+    static Config instance;
+    auto it = instance.flat_config_.find(key);
+    if (it == instance.flat_config_.end()) {
         return default_value;
     }
     return it->second == "true" || it->second == "1";

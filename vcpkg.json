@@ -1,33 +1,14 @@
-// vcpkg dependencies for InferDeck
 {
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/vcpkg.schema.json",
   "name": "inferdeck",
   "version": "1.0.0",
-  "builtin-baseline": "main",
   "dependencies": [
-    {
-      "name": "vulkan-headers",
-      "version>=": "1.3.0"
-    },
-    {
-      "name": "vulkan-loader",
-      "version>=": "1.3.0"
-    },
     "cpp-httplib",
     "spdlog",
     "catch2",
     "nlohmann-json",
     "fmt",
     "yaml-cpp",
-    "google-benchmark"
-  ],
-  "overrides": [
-    {
-      "name": "vulkan-headers",
-      "version": "1.3.290"
-    },
-    {
-      "name": "vulkan-loader",
-      "version": "1.3.290#1"
-    }
+    "sqlite3"
   ]
 }

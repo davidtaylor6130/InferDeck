@@ -1,4 +1,3 @@
-# apps/gateway-service CMakeLists.txt
 cmake_minimum_required(VERSION 3.27)
 project(gateway-service LANGUAGES CXX)
 
@@ -21,10 +20,11 @@ add_executable(gateway-service
 
 target_include_directories(gateway-service PRIVATE
     src
-    ../core/include
-    ../llama_cpp_wrapper/include
-    ../backends/include
-    ../vector_store/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../libs/core/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../libs/llama_cpp_wrapper/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../libs/backends/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../libs/vector_store/include
+    ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
 )
 
 target_link_libraries(gateway-service PRIVATE
@@ -32,34 +32,19 @@ target_link_libraries(gateway-service PRIVATE
     llama_cpp_wrapper
     backends
     vector_store
-    cpp-httplib::httplib
-    yaml-cpp
+    yaml-cpp::yaml-cpp
     nlohmann_json::nlohmann_json
     spdlog::spdlog
     fmt::fmt
+    ws2_32
+    crypt32
 )
 
-# TLS support
 if(MSVC)
-    target_compile_definitions(gateway-service PRIVATE
-        CPPHTTPLIB_OPENSSL_SUPPORT
-        OPENSSL_ISOPENSSL
-    )
-    target_link_libraries(gateway-service PRIVATE
-        openssl::crypto
-        openssl::ssl
-    )
+    target_compile_options(gateway-service PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(gateway-service PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-# Compiler warnings
-target_compile_options(gateway-service PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Wconversion
-    -Wsign-conversion
-)
-
-# Install
 install(TARGETS gateway-service
         RUNTIME DESTINATION .)

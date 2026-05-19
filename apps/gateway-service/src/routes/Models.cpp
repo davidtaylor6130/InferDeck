@@ -1,31 +1,20 @@
-/// @file Models.cpp
-/// @brief /v1/models route handler implementation.
-
 #include "routes/Models.hpp"
 #include "llama_cpp/LlamaEngine.hpp"
-
 #include <nlohmann/json.hpp>
-
 namespace inferdeck::gateway::routes {
-
-void HandleModels(const httplib::Request& /*req*/, httplib::Response& resp) {
+void HandleModels(const httplib::Request& req, httplib::Response& resp) {
+    nlohmann::json response;
+    response["object"] = "list";
+    response["data"] = nlohmann::json::array();
     auto& engine = inferdeck::core::LlamaEngine::Get();
-
-    nlohmann::json j;
-    j["object"] = "list";
-    j["data"] = nlohmann::json::array();
-
     if (engine.IsInitialized()) {
         nlohmann::json model;
         model["id"] = engine.GetModelName();
         model["object"] = "model";
-        model["created"] = static_cast<int>(std::time(nullptr));
+        model["created"] = std::time(nullptr);
         model["owned_by"] = "inferdeck";
-        j["data"].push_back(model);
+        response["data"].push_back(model);
     }
-
-    resp.set_content(j.dump(2), "application/json");
-    resp.status = 200;
+    resp.set_content(response.dump(), "application/json");
 }
-
-} // namespace inferdeck::gateway::routes
+}

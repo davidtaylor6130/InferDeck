@@ -229,7 +229,7 @@ nlohmann::json GpuResourceManager::GetDeviceInfo() const {
                                       ? (static_cast<double>(used_vram_) / total_vram_) * 100.0
                                       : 0.0;
     info["gpu_available"] = gpu_available_;
-    info["active_backends"] = active_backends_;
+    info["active_backends"] = active_backends_.load();
 
     nlohmann::json backends_json = nlohmann::json::array();
     for (const auto& [name, vram] : backend_vram_) {

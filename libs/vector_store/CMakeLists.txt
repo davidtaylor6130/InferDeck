@@ -1,4 +1,3 @@
-# libs/vector_store CMakeLists.txt
 cmake_minimum_required(VERSION 3.27)
 project(vector_store LANGUAGES CXX)
 
@@ -13,12 +12,11 @@ target_include_directories(vector_store PUBLIC
 target_link_libraries(vector_store PUBLIC
     core
     nlohmann_json::nlohmann_json
-    SQLite::SQLite3
+    unofficial::sqlite3::sqlite3
 )
 
-target_compile_options(vector_store PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-    --coverage
-)
+if(MSVC)
+    target_compile_options(vector_store PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(vector_store PRIVATE -Wall -Wextra -Wpedantic)
+endif()

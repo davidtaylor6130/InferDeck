@@ -18,7 +18,7 @@
 namespace inferdeck::core {
 
 /// GGUF magic number for version detection.
-constexpr uint32_t GGUF_MAGIC = 0x4655474c; // "llm"
+static const uint32_t GGUF_MAGIC_VAL = 1180083015u;
 
 /// Quantization types supported by InferDeck.
 enum class QuantType : uint32_t {
@@ -127,7 +127,7 @@ private:
     GGUFParser& operator=(const GGUFParser&) = delete;
 
     static QuantType ParseQuantType(uint32_t value);
-    static ModelArch ParseArchType(uint32_t value);
+    static ModelArch ParseArchType(const std::string& value);
 };
 
 } // namespace inferdeck::core

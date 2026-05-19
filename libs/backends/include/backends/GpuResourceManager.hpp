@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <functional>
+#include <nlohmann/json.hpp>
 #include <optional>
 
 namespace inferdeck::backends {
@@ -22,11 +23,11 @@ enum class VRamPriority {
     IMAGE_GENERATION = 1,
     FINE_TUNING = 3,
     TEXT_TO_SPEECH = 7,
-    SPEECH_TO_TEXT = 7,
+    SPEECH_TO_TEXT = 4,
     EMBEDDING = 6,
     DOCUMENT_QUERY = 8,
     DOCUMENT_INDEX = 5,
-    TEXT_GENERATION = 8
+    TEXT_GENERATION = 9
 };
 
 struct VRAMSnapshot {

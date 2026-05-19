@@ -129,10 +129,10 @@ nlohmann::json BackendRegistry::GetBackendStatusSummary() const {
 
     for (const auto& [name, backend] : backends_) {
         switch (backend->GetStatus()) {
-            case BackendStatus::READY: summary["ready"]++; break;
-            case BackendStatus::BUSY: summary["busy"]++; break;
-            case BackendStatus::ERROR: summary["error"]++; break;
-            default: summary["uninitialized"]++; break;
+            case BackendStatus::READY: summary["ready"] = summary["ready"].get<int>() + 1; break;
+            case BackendStatus::BUSY: summary["busy"] = summary["busy"].get<int>() + 1; break;
+            case BackendStatus::ERROR: summary["error"] = summary["error"].get<int>() + 1; break;
+            default: summary["uninitialized"] = summary["uninitialized"].get<int>() + 1; break;
         }
     }
     return summary;

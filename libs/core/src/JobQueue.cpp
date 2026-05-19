@@ -1,14 +1,12 @@
-/// @file JobQueue.cpp
-/// @brief Priority-based job queue implementation.
-
 #include "core/JobQueue.hpp"
 #include "core/Logger.hpp"
+#include <fmt/format.h>
 
 namespace inferdeck::core {
 
 JobQueue::JobQueue(int max_size, int worker_threads)
     : max_size_(max_size) {
-    Logger::Get().Info("JobQueue initialized: max_size=%d, workers=%d", max_size, worker_threads);
+    Logger::Get().Info(fmt::format("JobQueue initialized: max_size={}, workers={}", max_size, worker_threads));
 }
 
 bool JobQueue::Push(InferenceJob job) {
@@ -20,7 +18,7 @@ bool JobQueue::Push(InferenceJob job) {
     }
 
     if (static_cast<int>(queue_.size()) >= max_size_) {
-        Logger::Get().Warn("JobQueue is full (%d)", max_size_);
+        Logger::Get().Warn(fmt::format("JobQueue is full ({})", max_size_));
         return false;
     }
 

@@ -22,7 +22,7 @@ GGUFMetadata GGUFParser::Parse(const std::filesystem::path& path) {
     // Read GGUF magic number
     uint32_t magic;
     file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-    if (magic != GGUF_MAGIC) {
+    if (magic != GGUF_MAGIC_VAL) {
         return metadata; // Invalid GGUF
     }
 
@@ -115,8 +115,21 @@ QuantType GGUFParser::ParseQuantType(uint32_t value) {
     return static_cast<QuantType>(value);
 }
 
-ModelArch GGUFParser::ParseArchType(uint32_t value) {
-    return static_cast<ModelArch>(value);
+ModelArch GGUFParser::ParseArchType(const std::string& value) {
+    if (value == "llama") return ModelArch::LLAMA;
+    if (value == "qwen2") return ModelArch::QWEN2;
+    if (value == "phi2") return ModelArch::PHI2;
+    if (value == "gemma") return ModelArch::GEMMA;
+    if (value == "mpt") return ModelArch::MPT;
+    if (value == "bloom") return ModelArch::BLOOM;
+    if (value == "gpt2") return ModelArch::GPT2;
+    if (value == "gptj") return ModelArch::GPTJ;
+    if (value == "gptneox") return ModelArch::GPTNeoX;
+    if (value == "mamba") return ModelArch::Mamba;
+    if (value == "chatglm") return ModelArch::CHATGLM;
+    if (value == "t5") return ModelArch::T5;
+    if (value == "deepseek") return ModelArch::DEEPSEEK;
+    return ModelArch::Unknown;
 }
 
 std::string GGUFParser::QuantToString(QuantType quant) {
