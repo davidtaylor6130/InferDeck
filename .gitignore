@@ -18,6 +18,14 @@ build/
 apps/gateway-service/build/
 apps/gateway-service/install/
 apps/gateway-service/deps/
+apps/gateway-service/dist-bundle/
+apps/gateway-service/public/
+
+# Third-party submodules (cloned, not git submodules)
+libs/third_party/
+
+# vcpkg local install
+vcpkg_installed/
 
 # vcpkg
 vcpkg/buildtrees/
