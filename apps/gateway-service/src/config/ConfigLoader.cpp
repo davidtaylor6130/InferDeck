@@ -20,6 +20,7 @@ ServerConfig LoadConfig(const std::filesystem::path& config_path) {
     config.key_file = full.server.key_file;
     config.request_timeout_ms = 30000;
     config.model_path = full.model.path;
+    config.model_directory = full.model.directory;
     config.precision = full.model.precision;
     config.n_gpu_layers = full.model.n_gpu_layers;
     config.context_size = full.model.context_size;

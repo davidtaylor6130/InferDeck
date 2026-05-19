@@ -84,6 +84,7 @@ namespace {
                 else if (lower_key == "key_file") config.server.key_file = raw_value;
             } else if (current_section == "model") {
                 if (lower_key == "path") config.model.path = raw_value;
+                else if (lower_key == "directory") config.model.directory = raw_value;
                 else if (lower_key == "precision") config.model.precision = raw_value;
                 else if (lower_key == "n_gpu_layers" || lower_key == "gpu_layers") config.model.n_gpu_layers = std::stoi(raw_value);
                 else if (lower_key == "context_size" || lower_key == "context_length") config.model.context_size = std::stoi(raw_value);

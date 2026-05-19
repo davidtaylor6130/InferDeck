@@ -31,6 +31,7 @@ public:
     /// Model configuration settings.
     struct ModelConfig {
         std::string path;
+        std::string directory;
         std::string precision = "auto";
         int n_gpu_layers = -1;
         int context_size = 4096;
