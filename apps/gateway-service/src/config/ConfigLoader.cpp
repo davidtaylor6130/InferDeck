@@ -13,7 +13,8 @@ ServerConfig LoadConfig(const std::filesystem::path& config_path) {
     auto full = core::Config::Load(config_path);
 
     config.host = full.server.host;
-    config.port = full.server.port;
+    config.dashboardPort = full.server.port;
+    config.apiPort = 11434;
     config.tls_enabled = full.server.tls_enabled;
     config.cert_file = full.server.cert_file;
     config.key_file = full.server.key_file;
@@ -24,7 +25,8 @@ ServerConfig LoadConfig(const std::filesystem::path& config_path) {
     config.context_size = full.model.context_size;
 
     Logger::Get().Info("Loaded config from: " + config_path.string());
-    Logger::Get().Info("Server: " + config.host + ":" + std::to_string(config.port));
+    Logger::Get().Info("Dashboard: " + config.host + ":" + std::to_string(config.dashboardPort));
+    Logger::Get().Info("API: " + config.host + ":" + std::to_string(config.apiPort));
     Logger::Get().Info("TLS: " + std::string(config.tls_enabled ? "enabled" : "disabled"));
     Logger::Get().Info("Model path: " + config.model_path);
     Logger::Get().Info("Precision: " + config.precision);

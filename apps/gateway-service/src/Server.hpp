@@ -12,7 +12,8 @@ namespace inferdeck::gateway {
 
 struct ServerConfig {
     std::string host = "0.0.0.0";
-    int port = 8080;
+    int dashboardPort = 8080;
+    int apiPort = 11434;
     bool tls_enabled = false;
     std::string cert_file;
     std::string key_file;
@@ -36,16 +37,26 @@ public:
     bool Start();
     void Stop();
     void WaitForReady();
-    void RegisterRoute(const std::string& method, const std::string& path, RequestHandler handler);
+
+    void RegisterApiRoute(const std::string& method, const std::string& path, RequestHandler handler);
+    void RegisterDashboardRoute(const std::string& method, const std::string& path, RequestHandler handler);
+    void SetDashboardMountPoint(const std::string& base, const std::string& dir);
     void SetTimeout(int timeout_ms);
-    std::string GetBaseUrl() const;
+
+    std::string GetDashboardUrl() const;
+    std::string GetApiUrl() const;
     bool IsRunning() const;
     const ServerConfig& GetConfig() const { return config_; }
 
+    httplib::Server& ApiServer();
+    httplib::Server& DashboardServer();
+
 private:
     ServerConfig config_;
-    std::unique_ptr<httplib::Server> http_server_;
-    std::thread server_thread_;
+    std::unique_ptr<httplib::Server> dashboard_server_;
+    std::unique_ptr<httplib::Server> api_server_;
+    std::thread dashboard_thread_;
+    std::thread api_thread_;
     std::atomic<bool> running_;
     std::mutex server_mutex_;
 };

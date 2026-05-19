@@ -1,9 +1,3 @@
-/// @file main.cpp
-/// @brief InferDeck gateway service entry point.
-///
-/// Loads configuration, initializes the LlamaEngine, and starts the
-/// HTTPS server with OpenAI-compatible endpoints.
-
 #include <iostream>
 #include <string>
 #include <filesystem>
@@ -15,7 +9,6 @@
 #include "core/Logger.hpp"
 #include "core/Config.hpp"
 
-// Route handlers
 #include "routes/ChatCompletions.hpp"
 #include "routes/Completions.hpp"
 #include "routes/Models.hpp"
@@ -28,10 +21,8 @@
 #include "routes/Documents.hpp"
 #include "routes/FineTuningJobs.hpp"
 
-// Global server instance for signal handling
 static inferdeck::gateway::GatewayServer* g_server = nullptr;
 
-/// Signal handler for graceful shutdown.
 void SignalHandler(int signum) {
     if (g_server) {
         std::cerr << "\nReceived signal " << signum << ", shutting down...\n";
@@ -40,7 +31,6 @@ void SignalHandler(int signum) {
     exit(signum == SIGINT ? 0 : 1);
 }
 
-/// Print usage information.
 void PrintUsage(const char* program) {
     std::cout << "Usage: " << program << " [options]\n"
               << "\nOptions:\n"
@@ -50,7 +40,6 @@ void PrintUsage(const char* program) {
               << std::endl;
 }
 
-/// Print version information.
 void PrintVersion() {
     std::cout << "InferDeck Gateway v1.0.0\n"
               << "Built with C++23, Vulkan, and llama.cpp\n"
@@ -58,7 +47,6 @@ void PrintVersion() {
 }
 
 int main(int argc, char* argv[]) {
-    // Parse command-line arguments
     std::filesystem::path config_path = inferdeck::gateway::GetDefaultConfigPath();
 
     for (int i = 1; i < argc; i++) {
@@ -80,7 +68,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Initialize logger
     inferdeck::core::Logger::Get().Initialize(
         inferdeck::core::LogLevel::Info,
         "logs/gateway.log",
@@ -88,12 +75,10 @@ int main(int argc, char* argv[]) {
     );
     inferdeck::core::Logger::Get().Info("InferDeck Gateway starting...");
 
-    // Load configuration
     inferdeck::gateway::ServerConfig server_config;
     try {
         server_config = inferdeck::gateway::LoadConfig(config_path);
 
-        // Initialize LlamaEngine
         auto& engine = inferdeck::core::LlamaEngine::Get();
         bool engine_ok = engine.Initialize(
             server_config.model_path,
@@ -116,7 +101,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Create and start server
     inferdeck::gateway::GatewayServer server;
     g_server = &server;
 
@@ -125,118 +109,106 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Set up signal handlers
+    // Mount dashboard static files
+    std::filesystem::path public_dir = std::filesystem::current_path() / "apps" / "gateway-service" / "public" / "dashboard";
+    if (std::filesystem::exists(public_dir)) {
+        server.SetDashboardMountPoint("/", public_dir.string());
+    } else {
+        inferdeck::core::Logger::Get().Warn("Dashboard directory not found: " + public_dir.string());
+    }
+
     signal(SIGINT, SignalHandler);
     signal(SIGTERM, SignalHandler);
 
-    // Register routes
-    server.RegisterRoute("POST", "/v1/chat/completions",
+    // API routes on port 11434 (MUST be registered BEFORE Start())
+    server.RegisterApiRoute("POST", "/v1/chat/completions",
         [](const httplib::Request& req, httplib::Response& resp) {
-            if (req.get_header_value("Connection") == "upgrade" ||
-                req.get_header_value("Upgrade") == "websocket") {
-                // SSE streaming
-                inferdeck::gateway::routes::HandleChatCompletionsStream(req, resp);
-            } else {
-                // Non-streaming
-                inferdeck::gateway::routes::HandleChatCompletions(req, resp);
-            }
+            inferdeck::gateway::routes::HandleChatCompletions(req, resp);
         });
 
-    server.RegisterRoute("POST", "/v1/completions",
+    server.RegisterApiRoute("POST", "/v1/completions",
         [](const httplib::Request& req, httplib::Response& resp) {
-            if (req.get_header_value("Connection") == "upgrade") {
-                inferdeck::gateway::routes::HandleCompletionsStream(req, resp);
-            } else {
-                inferdeck::gateway::routes::HandleCompletions(req, resp);
-            }
+            inferdeck::gateway::routes::HandleCompletions(req, resp);
         });
 
-    server.RegisterRoute("GET", "/v1/models",
+    server.RegisterApiRoute("GET", "/v1/models",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleModels(req, resp);
         });
 
-    server.RegisterRoute("POST", "/v1/embeddings",
+    server.RegisterApiRoute("POST", "/v1/embeddings",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleEmbeddings(req, resp);
         });
 
-    server.RegisterRoute("GET", "/v1/health",
+    server.RegisterApiRoute("GET", "/v1/health",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleHealth(req, resp);
         });
 
-    server.RegisterRoute("GET", "/inferdeck/metrics",
+    server.RegisterApiRoute("GET", "/inferdeck/metrics",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleMetrics(req, resp);
         });
 
-    server.RegisterRoute("GET", "/inferdeck/status",
+    server.RegisterApiRoute("GET", "/inferdeck/status",
         [](const httplib::Request& req, httplib::Response& resp) {
-            // Alias for /v1/health
             inferdeck::gateway::routes::HandleHealth(req, resp);
         });
 
-    // Audio transcription (STT)
-    server.RegisterRoute("POST", "/v1/audio/transcriptions",
+    server.RegisterApiRoute("POST", "/v1/audio/transcriptions",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleAudioTranscriptions(req, resp);
         });
 
-    // Audio translation (STT)
-    server.RegisterRoute("POST", "/v1/audio/translations",
+    server.RegisterApiRoute("POST", "/v1/audio/translations",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleAudioTranslations(req, resp);
         });
 
-    // Audio speech (TTS)
-    server.RegisterRoute("POST", "/v1/audio/speech",
+    server.RegisterApiRoute("POST", "/v1/audio/speech",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleAudioSpeech(req, resp);
         });
 
-    // Image generation
-    server.RegisterRoute("POST", "/v1/images/generate",
+    server.RegisterApiRoute("POST", "/v1/images/generate",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleImageGenerate(req, resp);
         });
 
-    // Document CRUD
-    server.RegisterRoute("GET", "/v1/documents",
+    server.RegisterApiRoute("GET", "/v1/documents",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleDocumentsList(req, resp);
         });
 
-    server.RegisterRoute("POST", "/v1/documents",
+    server.RegisterApiRoute("POST", "/v1/documents",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleDocumentsCreate(req, resp);
         });
 
-    server.RegisterRoute("GET", "/v1/documents/search",
+    server.RegisterApiRoute("GET", "/v1/documents/search",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleDocumentsSearch(req, resp);
         });
 
-    // Fine-tuning jobs
-    server.RegisterRoute("GET", "/v1/fine_tuning/jobs",
+    server.RegisterApiRoute("GET", "/v1/fine_tuning/jobs",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleFineTuningJobsList(req, resp);
         });
 
-    server.RegisterRoute("POST", "/v1/fine_tuning/jobs",
+    server.RegisterApiRoute("POST", "/v1/fine_tuning/jobs",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleFineTuningJobsCreate(req, resp);
         });
 
-    // Start server
     if (!server.Start()) {
         inferdeck::core::Logger::Get().Error("Failed to start server");
         return 1;
     }
 
-    inferdeck::core::Logger::Get().Info("Server started on " + server.GetBaseUrl());
+    inferdeck::core::Logger::Get().Info("Dashboard: " + server.GetDashboardUrl());
+    inferdeck::core::Logger::Get().Info("API: " + server.GetApiUrl());
 
-    // Wait for shutdown
     server.WaitForReady();
 
     inferdeck::core::Logger::Get().Info("Server stopped");

@@ -19,36 +19,44 @@ GatewayServer::~GatewayServer() {
 
 bool GatewayServer::Initialize(const ServerConfig& config) {
     config_ = config;
-    http_server_ = std::make_unique<httplib::Server>();
-    Logger::Get().Info("HTTP server initialized");
+    dashboard_server_ = std::make_unique<httplib::Server>();
+    api_server_ = std::make_unique<httplib::Server>();
+    Logger::Get().Info("Dashboard server initialized");
+    Logger::Get().Info("API server initialized");
     SetTimeout(config_.request_timeout_ms);
     return true;
 }
 
 bool GatewayServer::Start() {
-    if (!http_server_) {
-        Logger::Get().Error("Server not initialized");
+    if (!dashboard_server_ || !api_server_) {
+        Logger::Get().Error("Servers not initialized");
         return false;
     }
 
     running_ = true;
-    server_thread_ = std::thread([this]() {
-        http_server_->listen(config_.host.c_str(), config_.port);
+
+    dashboard_thread_ = std::thread([this]() {
+        Logger::Get().Info("Dashboard listening on " + config_.host + ":" + std::to_string(config_.dashboardPort));
+        dashboard_server_->listen(config_.host.c_str(), config_.dashboardPort);
     });
 
-    Logger::Get().Info("Server listening on " + config_.host + ":" + std::to_string(config_.port));
+    api_thread_ = std::thread([this]() {
+        Logger::Get().Info("API listening on " + config_.host + ":" + std::to_string(config_.apiPort));
+        api_server_->listen(config_.host.c_str(), config_.apiPort);
+    });
+
+    Logger::Get().Info("Dashboard: " + GetDashboardUrl());
+    Logger::Get().Info("API: " + GetApiUrl());
     return true;
 }
 
 void GatewayServer::Stop() {
     running_ = false;
-    if (http_server_) {
-        http_server_->stop();
-    }
-    if (server_thread_.joinable()) {
-        server_thread_.join();
-    }
-    Logger::Get().Info("Server stopped");
+    if (dashboard_server_) dashboard_server_->stop();
+    if (api_server_) api_server_->stop();
+    if (dashboard_thread_.joinable()) dashboard_thread_.join();
+    if (api_thread_.joinable()) api_thread_.join();
+    Logger::Get().Info("Servers stopped");
 }
 
 void GatewayServer::WaitForReady() {
@@ -57,30 +65,60 @@ void GatewayServer::WaitForReady() {
     }
 }
 
-void GatewayServer::RegisterRoute(const std::string& method, const std::string& path, RequestHandler handler) {
+void GatewayServer::RegisterApiRoute(const std::string& method, const std::string& path, RequestHandler handler) {
     auto wrapper = [handler](const httplib::Request& req, httplib::Response& resp) {
         handler(req, resp);
     };
-
-    if (method == "GET") http_server_->Get(path, wrapper);
-    else if (method == "POST") http_server_->Post(path, wrapper);
-    else if (method == "PUT") http_server_->Put(path, wrapper);
-    else if (method == "DELETE") http_server_->Delete(path, wrapper);
+    if (method == "GET") api_server_->Get(path, wrapper);
+    else if (method == "POST") api_server_->Post(path, wrapper);
+    else if (method == "PUT") api_server_->Put(path, wrapper);
+    else if (method == "DELETE") api_server_->Delete(path, wrapper);
 }
 
-void GatewayServer::SetTimeout(int timeout_ms) {
-    if (http_server_) {
-        http_server_->set_read_timeout(timeout_ms / 1000);
-        http_server_->set_write_timeout(timeout_ms / 1000);
+void GatewayServer::RegisterDashboardRoute(const std::string& method, const std::string& path, RequestHandler handler) {
+    auto wrapper = [handler](const httplib::Request& req, httplib::Response& resp) {
+        handler(req, resp);
+    };
+    if (method == "GET") dashboard_server_->Get(path, wrapper);
+    else if (method == "POST") dashboard_server_->Post(path, wrapper);
+}
+
+void GatewayServer::SetDashboardMountPoint(const std::string& base, const std::string& dir) {
+    if (dashboard_server_) {
+        dashboard_server_->set_mount_point(base, dir);
+        Logger::Get().Info("Dashboard static files mounted: " + base + " -> " + dir);
     }
 }
 
-std::string GatewayServer::GetBaseUrl() const {
-    return "http://" + config_.host + ":" + std::to_string(config_.port);
+void GatewayServer::SetTimeout(int timeout_ms) {
+    if (dashboard_server_) {
+        dashboard_server_->set_read_timeout(timeout_ms / 1000);
+        dashboard_server_->set_write_timeout(timeout_ms / 1000);
+    }
+    if (api_server_) {
+        api_server_->set_read_timeout(timeout_ms / 1000);
+        api_server_->set_write_timeout(timeout_ms / 1000);
+    }
+}
+
+std::string GatewayServer::GetDashboardUrl() const {
+    return "http://" + config_.host + ":" + std::to_string(config_.dashboardPort);
+}
+
+std::string GatewayServer::GetApiUrl() const {
+    return "http://" + config_.host + ":" + std::to_string(config_.apiPort);
 }
 
 bool GatewayServer::IsRunning() const {
     return running_;
+}
+
+httplib::Server& GatewayServer::ApiServer() {
+    return *api_server_;
+}
+
+httplib::Server& GatewayServer::DashboardServer() {
+    return *dashboard_server_;
 }
 
 } // namespace inferdeck::gateway
