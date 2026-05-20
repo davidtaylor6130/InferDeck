@@ -32,8 +32,14 @@ struct InferenceParams {
     std::string user;
 };
 
+enum class TokenType {
+    Content,
+    Reasoning
+};
+
 struct InferenceResult {
     std::string text;
+    std::string reasoning_text;
     int prompt_tokens = 0;
     int completion_tokens = 0;
     int total_tokens = 0;
@@ -60,7 +66,12 @@ struct GpuInfo {
     bool is_discrete = true;
 };
 
-using TokenCallback = std::function<void(const std::string& token, int cumulative_tokens)>;
+struct HttpStreamResult {
+    std::string content_text;
+    std::string reasoning_text;
+};
+
+using TokenCallback = std::function<void(const std::string& token, TokenType type, int cumulative_tokens)>;
 
 class LlamaEngine {
 public:
@@ -93,7 +104,7 @@ private:
 
     std::string role_to_string(MessageRole role) const;
     std::string HttpPostJson(const std::string& path, const std::string& json_body) const;
-    std::string HttpPostStream(const std::string& path, const std::string& json_body, TokenCallback on_token) const;
+    HttpStreamResult HttpPostStream(const std::string& path, const std::string& json_body, TokenCallback on_token) const;
 
     std::string model_path_;
     std::string precision_;

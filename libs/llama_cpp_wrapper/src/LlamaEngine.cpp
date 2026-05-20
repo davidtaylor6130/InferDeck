@@ -198,13 +198,13 @@ std::string LlamaEngine::HttpPostJson(const std::string& path, const std::string
     return HttpPost(path, json_body, server_mgr.GetPort()).body;
 }
 
-std::string LlamaEngine::HttpPostStream(const std::string& path, const std::string& json_body, TokenCallback on_token) const {
+HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std::string& json_body, TokenCallback on_token) const {
 #ifdef _WIN32
     auto& server_mgr = LlamaServerManager::Get();
     int port = server_mgr.GetPort();
 
     HINTERNET hSession = WinHttpOpen(L"InferDeck/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return "";
+    if (!hSession) return {};
 
     std::wstring host = L"127.0.0.1";
     std::wstring path_w(path.begin(), path.end());
@@ -212,7 +212,7 @@ std::string LlamaEngine::HttpPostStream(const std::string& path, const std::stri
     HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), static_cast<INTERNET_PORT>(port), 0);
     if (!hConnect) {
         WinHttpCloseHandle(hSession);
-        return "";
+        return {};
     }
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", path_w.c_str(),
@@ -220,7 +220,7 @@ std::string LlamaEngine::HttpPostStream(const std::string& path, const std::stri
     if (!hRequest) {
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
-        return "";
+        return {};
     }
 
     // Send raw UTF-8 bytes
@@ -234,7 +234,7 @@ std::string LlamaEngine::HttpPostStream(const std::string& path, const std::stri
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
-        return "";
+        return {};
     }
 
     result = WinHttpReceiveResponse(hRequest, nullptr);
@@ -243,10 +243,10 @@ std::string LlamaEngine::HttpPostStream(const std::string& path, const std::stri
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
-        return "";
+        return {};
     }
 
-    std::string full_text;
+    HttpStreamResult stream_result;
     DWORD bytesAvailable = 0;
     DWORD bytesRead = 0;
     char buffer[65536];
@@ -277,15 +277,21 @@ std::string LlamaEngine::HttpPostStream(const std::string& path, const std::stri
                         auto& choice = j["choices"][0];
                         if (choice.contains("delta")) {
                             auto& delta = choice["delta"];
-                            std::string token;
+                            std::string content_token;
+                            std::string reasoning_token;
                             if (delta.contains("content") && !delta["content"].is_null() && delta["content"].is_string()) {
-                                token = delta["content"].get<std::string>();
-                            } else if (delta.contains("reasoning_content") && !delta["reasoning_content"].is_null() && delta["reasoning_content"].is_string()) {
-                                token = delta["reasoning_content"].get<std::string>();
+                                content_token = delta["content"].get<std::string>();
                             }
-                            if (!token.empty()) {
-                                full_text += token;
-                                if (on_token) on_token(token, static_cast<int>(full_text.size()));
+                            if (delta.contains("reasoning_content") && !delta["reasoning_content"].is_null() && delta["reasoning_content"].is_string()) {
+                                reasoning_token = delta["reasoning_content"].get<std::string>();
+                            }
+                            if (!content_token.empty()) {
+                                stream_result.content_text += content_token;
+                                if (on_token) on_token(content_token, TokenType::Content, static_cast<int>(stream_result.content_text.size()));
+                            }
+                            if (!reasoning_token.empty()) {
+                                stream_result.reasoning_text += reasoning_token;
+                                if (on_token) on_token(reasoning_token, TokenType::Reasoning, static_cast<int>(stream_result.reasoning_text.size()));
                             }
                         }
                     }
@@ -305,9 +311,9 @@ std::string LlamaEngine::HttpPostStream(const std::string& path, const std::stri
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
 
-    return full_text;
+    return stream_result;
 #else
-    return "";
+    return {};
 #endif
 }
 
@@ -347,7 +353,33 @@ InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
             Logger::Get().Error("llama-server error: " + j["error"].dump());
         }
         if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
-            result.text = j["choices"][0]["message"]["content"].get<std::string>();
+            auto& message = j["choices"][0]["message"];
+            if (message.contains("content") && !message["content"].is_null()) {
+                if (message["content"].is_string()) {
+                    result.text = message["content"].get<std::string>();
+                } else if (message["content"].is_array()) {
+                    for (const auto& part : message["content"]) {
+                        if (part.contains("type") && part["type"] == "text" && part.contains("text")) {
+                            result.text += part["text"].get<std::string>();
+                        } else if (part.is_string()) {
+                            result.text += part.get<std::string>();
+                        }
+                    }
+                }
+            }
+            if (message.contains("reasoning_content") && !message["reasoning_content"].is_null()) {
+                if (message["reasoning_content"].is_string()) {
+                    result.reasoning_text = message["reasoning_content"].get<std::string>();
+                } else if (message["reasoning_content"].is_array()) {
+                    for (const auto& part : message["reasoning_content"]) {
+                        if (part.contains("text") && part["text"].is_string()) {
+                            result.reasoning_text += part["text"].get<std::string>();
+                        } else if (part.is_string()) {
+                            result.reasoning_text += part.get<std::string>();
+                        }
+                    }
+                }
+            }
         }
         if (j.contains("usage")) {
             result.prompt_tokens = j["usage"].value("prompt_tokens", 0);
@@ -394,15 +426,16 @@ InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messa
     body["top_p"] = params.top_p;
     body["stream"] = true;
 
-    std::string full_text = HttpPostStream("/v1/chat/completions", body.dump(), on_token);
+    HttpStreamResult stream_result = HttpPostStream("/v1/chat/completions", body.dump(), on_token);
 
     auto end = std::chrono::high_resolution_clock::now();
     float duration = std::chrono::duration<float, std::milli>(end - start).count();
 
     InferenceResult result;
-    result.text = full_text;
+    result.text = stream_result.content_text;
+    result.reasoning_text = stream_result.reasoning_text;
     result.duration_ms = duration;
-    result.completion_tokens = static_cast<int>(full_text.size() / 4);
+    result.completion_tokens = static_cast<int>((stream_result.content_text.size() + stream_result.reasoning_text.size()) / 4);
     result.total_tokens = result.completion_tokens;
 
     {

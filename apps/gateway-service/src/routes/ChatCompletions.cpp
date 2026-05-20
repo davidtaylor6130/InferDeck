@@ -72,7 +72,7 @@ static std::string MakeId() {
     return "chatcmpl-" + std::to_string(ms);
 }
 
-static std::string SseChunk(const std::string& id, const std::string& model, const std::string& content, bool done) {
+static std::string SseChunk(const std::string& id, const std::string& model, const std::string& content, const std::string& reasoning_content, bool done) {
     json chunk;
     chunk["id"] = id;
     chunk["object"] = "chat.completion.chunk";
@@ -81,7 +81,14 @@ static std::string SseChunk(const std::string& id, const std::string& model, con
     if (done) {
         chunk["choices"] = json::array({{{"index", 0}, {"delta", json::object()}, {"finish_reason", "stop"}}});
     } else {
-        chunk["choices"] = json::array({{{"index", 0}, {"delta", {{"role", "assistant"}, {"content", content}}}, {"finish_reason", nullptr}}});
+        json delta = {{"role", "assistant"}};
+        if (!content.empty()) {
+            delta["content"] = content;
+        }
+        if (!reasoning_content.empty()) {
+            delta["reasoning_content"] = reasoning_content;
+        }
+        chunk["choices"] = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
     }
     return "data: " + chunk.dump() + "\n\n";
 }
@@ -134,7 +141,20 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                     else if (r == "assistant") role = inferdeck::core::MessageRole::Assistant;
                     else if (r == "tool") role = inferdeck::core::MessageRole::Tool;
                 }
-                messages.push_back({role, msg.value("content", "")});
+                std::string content;
+                auto& c = msg["content"];
+                if (c.is_string()) {
+                    content = c.get<std::string>();
+                } else if (c.is_array()) {
+                    for (const auto& part : c) {
+                        if (part.contains("type") && part["type"] == "text" && part.contains("text")) {
+                            content += part["text"].get<std::string>();
+                        } else if (part.is_string()) {
+                            content += part.get<std::string>();
+                        }
+                    }
+                }
+                messages.push_back({role, content});
             }
         }
 
@@ -162,8 +182,12 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
             auto queue = std::make_shared<StreamQueue>();
 
             std::thread predict_thread([&engine, messages, params, queue, model_id, id]() {
-                auto on_token = [queue, id, model_id](const std::string& token, int) {
-                    queue->push(SseChunk(id, model_id, token, false));
+                auto on_token = [queue, id, model_id](const std::string& token, inferdeck::core::TokenType type, int) {
+                    if (type == inferdeck::core::TokenType::Content) {
+                        queue->push(SseChunk(id, model_id, token, "", false));
+                    } else if (type == inferdeck::core::TokenType::Reasoning) {
+                        queue->push(SseChunk(id, model_id, "", token, false));
+                    }
                 };
                 engine.PredictStream(messages, params, on_token);
                 queue->push("data: [DONE]\n\n");
@@ -193,7 +217,11 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         response["object"] = "chat.completion";
         response["created"] = std::time(nullptr);
         response["model"] = model_id;
-        response["choices"] = json::array({{{"index", 0}, {"message", {{"role", "assistant"}, {"content", result.text}}}, {"finish_reason", "stop"}}});
+        json message = {{"role", "assistant"}, {"content", result.text}};
+        if (!result.reasoning_text.empty()) {
+            message["reasoning_content"] = result.reasoning_text;
+        }
+        response["choices"] = json::array({{{"index", 0}, {"message", message}, {"finish_reason", "stop"}}});
         response["usage"] = {{"prompt_tokens", result.prompt_tokens}, {"completion_tokens", result.completion_tokens}, {"total_tokens", result.total_tokens}};
         resp.set_content(response.dump(), "application/json");
     } catch (const std::exception& e) {
