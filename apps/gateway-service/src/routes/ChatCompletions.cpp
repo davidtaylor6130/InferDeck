@@ -267,7 +267,13 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                         }
                     }
                 }
-                messages.push_back({role, content});
+                std::string tool_call_id = msg.value("tool_call_id", "");
+                std::string name = msg.value("name", "");
+                std::string tool_calls_json;
+                if (role == inferdeck::core::MessageRole::Assistant && msg.contains("tool_calls") && msg["tool_calls"].is_array()) {
+                    tool_calls_json = msg["tool_calls"].dump();
+                }
+                messages.push_back({role, content, tool_call_id, name, tool_calls_json});
             }
         }
 
@@ -277,6 +283,9 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         if (body.contains("top_p")) params.top_p = body["top_p"].get<float>();
         if (body.contains("stop")) {
             if (body["stop"].is_string()) params.stop = body["stop"].get<std::string>();
+        }
+        if (body.contains("tools") && body["tools"].is_array()) {
+            params.tools_json = body["tools"].dump();
         }
 
         std::string requested_model = body.value("model", "");
@@ -342,11 +351,29 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         response["object"] = "chat.completion";
         response["created"] = std::time(nullptr);
         response["model"] = response_model_id;
-        json message = {{"role", "assistant"}, {"content", result.text}};
+        json message = {{"role", "assistant"}};
+        if (!result.text.empty()) {
+            message["content"] = result.text;
+        } else if (result.tool_calls.empty()) {
+            message["content"] = "";
+        }
         if (!result.reasoning_text.empty()) {
             message["reasoning_content"] = result.reasoning_text;
         }
-        response["choices"] = json::array({{{"index", 0}, {"message", message}, {"finish_reason", "stop"}}});
+        if (!result.tool_calls.empty()) {
+            json tool_calls = json::array();
+            for (const auto& tc : result.tool_calls) {
+                json tc_json;
+                tc_json["id"] = tc.id;
+                tc_json["type"] = tc.type;
+                tc_json["function"] = {{"name", tc.function_name}, {"arguments", tc.function_arguments}};
+                tool_calls.push_back(tc_json);
+            }
+            message["tool_calls"] = tool_calls;
+        }
+        std::string finish_reason = "stop";
+        if (!result.tool_calls.empty()) finish_reason = "tool_calls";
+        response["choices"] = json::array({{{"index", 0}, {"message", message}, {"finish_reason", finish_reason}}});
         response["usage"] = {{"prompt_tokens", result.prompt_tokens}, {"completion_tokens", result.completion_tokens}, {"total_tokens", result.total_tokens}};
         resp.set_content(response.dump(), "application/json");
     } catch (const std::exception& e) {

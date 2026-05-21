@@ -323,15 +323,27 @@ InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
     json body;
     body["messages"] = json::array();
     for (const auto& msg : messages) {
-        body["messages"].push_back({
-            {"role", role_to_string(msg.role)},
-            {"content", msg.content}
-        });
+        json msg_json;
+        msg_json["role"] = role_to_string(msg.role);
+        if (msg.role == MessageRole::Tool) {
+            msg_json["tool_call_id"] = msg.tool_call_id;
+            msg_json["content"] = msg.content;
+        } else {
+            msg_json["content"] = msg.content;
+            if (!msg.name.empty()) msg_json["name"] = msg.name;
+            if (!msg.tool_calls_json.empty()) {
+                msg_json["tool_calls"] = json::parse(msg.tool_calls_json);
+            }
+        }
+        body["messages"].push_back(msg_json);
     }
     body["max_tokens"] = params.max_tokens;
     body["temperature"] = params.temperature;
     body["top_p"] = params.top_p;
     body["stream"] = false;
+    if (!params.tools_json.empty()) {
+        body["tools"] = json::parse(params.tools_json);
+    }
 
     auto& server_mgr = LlamaServerManager::Get();
     auto http_result = HttpPost("/v1/chat/completions", body.dump(), server_mgr.GetPort());
@@ -379,6 +391,18 @@ InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
                     }
                 }
             }
+            if (message.contains("tool_calls") && message["tool_calls"].is_array()) {
+                for (const auto& tc : message["tool_calls"]) {
+                    ToolCall tool_call;
+                    tool_call.id = tc.value("id", "");
+                    tool_call.type = tc.value("type", "function");
+                    if (tc.contains("function") && tc["function"].is_object()) {
+                        tool_call.function_name = tc["function"].value("name", "");
+                        tool_call.function_arguments = tc["function"].value("arguments", "");
+                    }
+                    result.tool_calls.push_back(tool_call);
+                }
+            }
         }
         if (j.contains("usage")) {
             result.prompt_tokens = j["usage"].value("prompt_tokens", 0);
@@ -415,15 +439,27 @@ InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messa
     json body;
     body["messages"] = json::array();
     for (const auto& msg : messages) {
-        body["messages"].push_back({
-            {"role", role_to_string(msg.role)},
-            {"content", msg.content}
-        });
+        json msg_json;
+        msg_json["role"] = role_to_string(msg.role);
+        if (msg.role == MessageRole::Tool) {
+            msg_json["tool_call_id"] = msg.tool_call_id;
+            msg_json["content"] = msg.content;
+        } else {
+            msg_json["content"] = msg.content;
+            if (!msg.name.empty()) msg_json["name"] = msg.name;
+            if (!msg.tool_calls_json.empty()) {
+                msg_json["tool_calls"] = json::parse(msg.tool_calls_json);
+            }
+        }
+        body["messages"].push_back(msg_json);
     }
     body["max_tokens"] = params.max_tokens;
     body["temperature"] = params.temperature;
     body["top_p"] = params.top_p;
     body["stream"] = true;
+    if (!params.tools_json.empty()) {
+        body["tools"] = json::parse(params.tools_json);
+    }
 
     HttpStreamResult stream_result = HttpPostStream("/v1/chat/completions", body.dump(), on_token);
 

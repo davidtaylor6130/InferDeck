@@ -19,6 +19,9 @@ enum class MessageRole {
 struct ChatMessage {
     MessageRole role;
     std::string content;
+    std::string tool_call_id;
+    std::string name;
+    std::string tool_calls_json;
 };
 
 struct InferenceParams {
@@ -30,11 +33,19 @@ struct InferenceParams {
     std::string stop;
     std::vector<float> presence_penalty;
     std::string user;
+    std::string tools_json;
 };
 
 enum class TokenType {
     Content,
     Reasoning
+};
+
+struct ToolCall {
+    std::string id;
+    std::string type;
+    std::string function_name;
+    std::string function_arguments;
 };
 
 struct InferenceResult {
@@ -44,6 +55,7 @@ struct InferenceResult {
     int completion_tokens = 0;
     int total_tokens = 0;
     float duration_ms = 0.0f;
+    std::vector<ToolCall> tool_calls;
 };
 
 struct InferenceStats {
