@@ -26,8 +26,51 @@ static std::string MakeModelId(const std::string& full_path) {
     return name;
 }
 
-static std::unordered_map<std::string, std::string> g_model_cache;
-static std::mutex g_model_cache_mutex;
+static std::string MakeCleanModelId(const std::string& full_path) {
+    if (full_path.empty()) return "local-model";
+    std::filesystem::path p(full_path);
+    std::string name = p.stem().string();
+
+    static const std::vector<std::string> quant_suffixes = {
+        "-q4_k_m", "-q4_k_s", "-q4_0", "-q5_k_m", "-q5_k_s", "-q5_0",
+        "-q6_k", "-q6_k_m", "-q8_0", "-q2_k", "-q3_k_m", "-q3_k_s",
+        "-iq1_s", "-iq2_s", "-iq2_xs", "-iq2_xxs", "-iq3_s", "-iq3_xs",
+        "-iq3_xxs", "-iq4_nl", "-iq4_xs", "-iq4_xxs",
+        "-iq1_m", "-iq2_m", "-iq3_m",
+        "-mxfp4", "-mx4", "-mx6", "-mx8",
+        "-ud-iq3_xxs", "-ud-iq2_xs",
+        "-f16", "-f32", "-bf16",
+        "-gguf",
+        ".q4_k_m", ".q4_k_s", ".q4_0", ".q5_k_m", ".q5_k_s", ".q5_0",
+        ".q6_k", ".q6_k_m", ".q8_0", ".q2_k", ".q3_k_m", ".q3_k_s",
+        ".iq1_s", ".iq2_s", ".iq2_xs", ".iq2_xxs", ".iq3_s", ".iq3_xs",
+        ".iq3_xxs", ".iq4_nl", ".iq4_xs", ".iq4_xxs",
+        ".iq1_m", ".iq2_m", ".iq3_m",
+        ".mxfp4", ".mx4", ".mx6", ".mx8",
+        ".ud-iq3_xxs", ".ud-iq2_xs",
+        ".f16", ".f32", ".bf16",
+        ".gguf"
+    };
+
+    std::string lower = name;
+    for (auto& c : lower) c = std::tolower(static_cast<unsigned char>(c));
+
+    std::string clean = name;
+    for (const auto& suffix : quant_suffixes) {
+        size_t pos = lower.rfind(suffix);
+        if (pos != std::string::npos && pos + suffix.size() == lower.size()) {
+            clean = name.substr(0, pos);
+            break;
+        }
+    }
+
+    for (auto& c : clean) {
+        if (c == ' ' || c == '_' || c == '-') c = '-';
+        else c = std::tolower(static_cast<unsigned char>(c));
+    }
+
+    return clean;
+}
 
 static std::string NormalizeId(const std::string& id) {
     std::string result = id;
@@ -35,15 +78,58 @@ static std::string NormalizeId(const std::string& id) {
         if (c == ' ' || c == '_' || c == '-' || c == '.') c = '-';
         else c = std::tolower(static_cast<unsigned char>(c));
     }
+    if (result.size() > 8 && result.compare(result.size() - 8, 8, ":latest") == 0) {
+        result = result.substr(0, result.size() - 8);
+    }
     return result;
+}
+
+struct ModelEntry {
+    std::string path;
+    std::string clean_id;
+    std::string full_id;
+};
+
+static std::vector<ModelEntry> g_model_cache;
+static std::mutex g_model_cache_mutex;
+static bool g_cache_populated = false;
+
+static void PopulateModelCache(const std::string& model_dir) {
+    if (g_cache_populated) return;
+
+    std::vector<std::string> extensions = {".gguf", ".bin", ".ggml"};
+    std::unordered_map<std::string, ModelEntry> clean_map;
+
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(model_dir)) {
+        if (entry.is_regular_file()) {
+            std::string ext = entry.path().extension().string();
+            std::string filename = entry.path().filename().string();
+            if (filename.find("mmproj") == 0) continue;
+            for (const auto& e : extensions) {
+                if (ext == e) {
+                    ModelEntry me;
+                    me.path = entry.path().string();
+                    me.clean_id = MakeCleanModelId(me.path);
+                    me.full_id = MakeModelId(me.path);
+
+                    if (clean_map.find(me.clean_id) == clean_map.end()) {
+                        clean_map[me.clean_id] = me;
+                    }
+                    g_model_cache.push_back(me);
+                    break;
+                }
+            }
+        }
+    }
+
+    g_cache_populated = true;
 }
 
 static std::string FindModelPath(const std::string& model_id) {
     std::lock_guard<std::mutex> lock(g_model_cache_mutex);
-    if (!g_model_cache.empty()) {
-        auto it = g_model_cache.find(model_id);
-        if (it != g_model_cache.end()) return it->second;
-    }
+
+    std::string normalized = NormalizeId(model_id);
+    if (normalized.empty()) return "";
 
     std::string model_dir;
     try {
@@ -53,47 +139,40 @@ static std::string FindModelPath(const std::string& model_id) {
 
     if (model_dir.empty() || !std::filesystem::exists(model_dir)) return "";
 
-    std::vector<std::string> extensions = {".gguf", ".bin", ".ggml"};
-    std::string normalized_id = NormalizeId(model_id);
-    std::string best_match;
-    size_t best_score = 0;
+    PopulateModelCache(model_dir);
 
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(model_dir)) {
-        if (entry.is_regular_file()) {
-            std::string ext = entry.path().extension().string();
-            std::string filename = entry.path().filename().string();
-            if (filename.find("mmproj") == 0) continue;
-            for (const auto& e : extensions) {
-                if (ext == e) {
-                    std::string id = MakeModelId(entry.path().string());
-                    g_model_cache[id] = entry.path().string();
+    for (const auto& entry : g_model_cache) {
+        if (entry.clean_id == normalized || entry.full_id == normalized) {
+            return entry.path;
+        }
+    }
 
-                    if (id == normalized_id) return entry.path().string();
+    for (const auto& entry : g_model_cache) {
+        if (entry.clean_id.find(normalized) != std::string::npos ||
+            normalized.find(entry.clean_id) != std::string::npos) {
+            return entry.path;
+        }
+    }
 
-                    size_t score = 0;
-                    if (id.find(normalized_id) != std::string::npos) {
-                        score = normalized_id.size();
-                    } else if (normalized_id.find(id) != std::string::npos) {
-                        score = id.size();
-                    } else {
-                        std::string short_id = id;
-                        size_t dash = short_id.find_last_of('-');
-                        if (dash != std::string::npos) short_id = short_id.substr(0, dash);
-                        if (normalized_id.find(short_id) != std::string::npos || short_id.find(normalized_id) != std::string::npos) {
-                            score = short_id.size();
-                        }
-                    }
-                    if (score > best_score) {
-                        best_score = score;
-                        best_match = entry.path().string();
-                    }
-                }
+    for (const auto& entry : g_model_cache) {
+        std::string short_clean = entry.clean_id;
+        size_t dash = short_clean.find_last_of('-');
+        if (dash != std::string::npos) {
+            std::string prefix = short_clean.substr(0, dash);
+            if (normalized.find(prefix) != std::string::npos || prefix.find(normalized) != std::string::npos) {
+                return entry.path;
             }
         }
     }
 
-    if (!best_match.empty()) return best_match;
     return "";
+}
+
+static std::string GetCurrentCleanModelId() {
+    auto& engine = inferdeck::core::LlamaEngine::Get();
+    std::string model_name = engine.GetModelName();
+    if (model_name.empty()) return "";
+    return MakeCleanModelId(model_name);
 }
 
 }
@@ -201,13 +280,25 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         }
 
         std::string requested_model = body.value("model", "");
-        std::string model_id = MakeModelId(engine.GetModelName());
+        std::string current_clean_id = GetCurrentCleanModelId();
+        std::string response_model_id = current_clean_id;
 
-        if (!requested_model.empty() && requested_model != model_id) {
-            std::string model_path = FindModelPath(requested_model);
-            if (!model_path.empty()) {
-                engine.SwitchModel(model_path);
-                model_id = requested_model;
+        if (!requested_model.empty()) {
+            std::string normalized_requested = NormalizeId(requested_model);
+            std::string normalized_current = NormalizeId(current_clean_id);
+
+            bool needs_switch = (normalized_requested != normalized_current);
+
+            if (needs_switch) {
+                std::string model_path = FindModelPath(requested_model);
+                if (!model_path.empty()) {
+                    engine.SwitchModel(model_path);
+                    response_model_id = MakeCleanModelId(model_path);
+                } else {
+                    response_model_id = requested_model;
+                }
+            } else {
+                response_model_id = current_clean_id;
             }
         }
 
@@ -215,12 +306,12 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
             std::string id = MakeId();
             auto queue = std::make_shared<StreamQueue>();
 
-            std::thread predict_thread([&engine, messages, params, queue, model_id, id]() {
-                auto on_token = [queue, id, model_id](const std::string& token, inferdeck::core::TokenType type, int) {
+            std::thread predict_thread([&engine, messages, params, queue, response_model_id, id]() {
+                auto on_token = [queue, id, response_model_id](const std::string& token, inferdeck::core::TokenType type, int) {
                     if (type == inferdeck::core::TokenType::Content) {
-                        queue->push(SseChunk(id, model_id, token, "", false));
+                        queue->push(SseChunk(id, response_model_id, token, "", false));
                     } else if (type == inferdeck::core::TokenType::Reasoning) {
-                        queue->push(SseChunk(id, model_id, "", token, false));
+                        queue->push(SseChunk(id, response_model_id, "", token, false));
                     }
                 };
                 engine.PredictStream(messages, params, on_token);
@@ -250,7 +341,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         response["id"] = MakeId();
         response["object"] = "chat.completion";
         response["created"] = std::time(nullptr);
-        response["model"] = model_id;
+        response["model"] = response_model_id;
         json message = {{"role", "assistant"}, {"content", result.text}};
         if (!result.reasoning_text.empty()) {
             message["reasoning_content"] = result.reasoning_text;
