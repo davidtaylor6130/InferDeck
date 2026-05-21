@@ -26,37 +26,33 @@ static std::string MakeModelId(const std::string& full_path) {
     return name;
 }
 
-static std::string MakeCleanModelId(const std::string& full_path) {
-    if (full_path.empty()) return "local-model";
-    std::filesystem::path p(full_path);
-    std::string name = p.stem().string();
+static const std::vector<std::string> kQuantSuffixes = {
+    "-q4_k_m", "-q4_k_s", "-q4_0", "-q5_k_m", "-q5_k_s", "-q5_0",
+    "-q6_k", "-q6_k_m", "-q8_0", "-q2_k", "-q3_k_m", "-q3_k_s",
+    "-iq1_s", "-iq2_s", "-iq2_xs", "-iq2_xxs", "-iq3_s", "-iq3_xs",
+    "-iq3_xxs", "-iq4_nl", "-iq4_xs", "-iq4_xxs",
+    "-iq1_m", "-iq2_m", "-iq3_m",
+    "-mxfp4", "-mx4", "-mx6", "-mx8",
+    "-ud-iq3_xxs", "-ud-iq2_xs",
+    "-f16", "-f32", "-bf16",
+    "-gguf",
+    ".q4_k_m", ".q4_k_s", ".q4_0", ".q5_k_m", ".q5_k_s", ".q5_0",
+    ".q6_k", ".q6_k_m", ".q8_0", ".q2_k", ".q3_k_m", ".q3_k_s",
+    ".iq1_s", ".iq2_s", ".iq2_xs", ".iq2_xxs", ".iq3_s", ".iq3_xs",
+    ".iq3_xxs", ".iq4_nl", ".iq4_xs", ".iq4_xxs",
+    ".iq1_m", ".iq2_m", ".iq3_m",
+    ".mxfp4", ".mx4", ".mx6", ".mx8",
+    ".ud-iq3_xxs", ".ud-iq2_xs",
+    ".f16", ".f32", ".bf16",
+    ".gguf"
+};
 
-    static const std::vector<std::string> quant_suffixes = {
-        "-q4_k_m", "-q4_k_s", "-q4_0", "-q5_k_m", "-q5_k_s", "-q5_0",
-        "-q6_k", "-q6_k_m", "-q8_0", "-q2_k", "-q3_k_m", "-q3_k_s",
-        "-iq1_s", "-iq2_s", "-iq2_xs", "-iq2_xxs", "-iq3_s", "-iq3_xs",
-        "-iq3_xxs", "-iq4_nl", "-iq4_xs", "-iq4_xxs",
-        "-iq1_m", "-iq2_m", "-iq3_m",
-        "-mxfp4", "-mx4", "-mx6", "-mx8",
-        "-ud-iq3_xxs", "-ud-iq2_xs",
-        "-f16", "-f32", "-bf16",
-        "-gguf",
-        ".q4_k_m", ".q4_k_s", ".q4_0", ".q5_k_m", ".q5_k_s", ".q5_0",
-        ".q6_k", ".q6_k_m", ".q8_0", ".q2_k", ".q3_k_m", ".q3_k_s",
-        ".iq1_s", ".iq2_s", ".iq2_xs", ".iq2_xxs", ".iq3_s", ".iq3_xs",
-        ".iq3_xxs", ".iq4_nl", ".iq4_xs", ".iq4_xxs",
-        ".iq1_m", ".iq2_m", ".iq3_m",
-        ".mxfp4", ".mx4", ".mx6", ".mx8",
-        ".ud-iq3_xxs", ".ud-iq2_xs",
-        ".f16", ".f32", ".bf16",
-        ".gguf"
-    };
-
+static std::string NormalizeModelName(const std::string& name) {
     std::string lower = name;
     for (auto& c : lower) c = std::tolower(static_cast<unsigned char>(c));
 
     std::string clean = name;
-    for (const auto& suffix : quant_suffixes) {
+    for (const auto& suffix : kQuantSuffixes) {
         size_t pos = lower.rfind(suffix);
         if (pos != std::string::npos && pos + suffix.size() == lower.size()) {
             clean = name.substr(0, pos);
@@ -70,6 +66,13 @@ static std::string MakeCleanModelId(const std::string& full_path) {
     }
 
     return clean;
+}
+
+static std::string MakeCleanModelId(const std::string& full_path) {
+    if (full_path.empty()) return "local-model";
+    std::filesystem::path p(full_path);
+    std::string name = p.stem().string();
+    return NormalizeModelName(name);
 }
 
 static std::string NormalizeId(const std::string& id) {
@@ -93,6 +96,7 @@ struct ModelEntry {
 static std::vector<ModelEntry> g_model_cache;
 static std::mutex g_model_cache_mutex;
 static bool g_cache_populated = false;
+static std::mutex g_switch_mutex;
 
 static void PopulateModelCache(const std::string& model_dir) {
     if (g_cache_populated) return;
@@ -172,7 +176,7 @@ static std::string GetCurrentCleanModelId() {
     auto& engine = inferdeck::core::LlamaEngine::Get();
     std::string model_name = engine.GetModelName();
     if (model_name.empty()) return "";
-    return MakeCleanModelId(model_name);
+    return NormalizeModelName(model_name);
 }
 
 }
@@ -183,6 +187,74 @@ static std::string MakeId() {
     auto now = std::chrono::system_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     return "chatcmpl-" + std::to_string(ms);
+}
+
+static std::string SseDeltaChunk(const std::string& id, const std::string& model, const json& delta, const json& finish_reason = nullptr);
+
+std::string ValidateChatRequest(const std::string& body) {
+    if (body.empty()) return "Request body is required";
+
+    try {
+        auto parsed = json::parse(body);
+        if (!parsed.contains("messages") || !parsed["messages"].is_array()) {
+            return "Missing or invalid messages field";
+        }
+
+        for (const auto& message : parsed["messages"]) {
+            if (!message.contains("role") || !message["role"].is_string()) {
+                return "Each message requires a role";
+            }
+            std::string role = message["role"].get<std::string>();
+            if (role != "system" && role != "user" && role != "assistant" && role != "tool") {
+                return "Invalid message role";
+            }
+        }
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+
+    return "";
+}
+
+bool ShouldForceNonStreamingBackend(const nlohmann::json& request) {
+    return request.contains("tools") && request["tools"].is_array() && !request["tools"].empty();
+}
+
+std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response) {
+    std::string id = response.value("id", MakeId());
+    std::string model = response.value("model", "local-model");
+    std::string stream;
+
+    stream += SseDeltaChunk(id, model, json({{"role", "assistant"}}));
+
+    std::string finish_reason = "stop";
+    if (response.contains("choices") && response["choices"].is_array() && !response["choices"].empty()) {
+        const auto& choice = response["choices"][0];
+        if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
+            finish_reason = choice["finish_reason"].get<std::string>();
+        }
+
+        if (choice.contains("message") && choice["message"].is_object()) {
+            const auto& message = choice["message"];
+            if (message.contains("reasoning_content") && message["reasoning_content"].is_string() && !message["reasoning_content"].get<std::string>().empty()) {
+                stream += SseDeltaChunk(id, model, json({{"reasoning_content", message["reasoning_content"]}}));
+            }
+            if (message.contains("content") && message["content"].is_string() && !message["content"].get<std::string>().empty()) {
+                stream += SseDeltaChunk(id, model, json({{"content", message["content"]}}));
+            }
+            if (message.contains("tool_calls") && message["tool_calls"].is_array()) {
+                for (size_t i = 0; i < message["tool_calls"].size(); ++i) {
+                    json tool_call = message["tool_calls"][i];
+                    tool_call["index"] = i;
+                    stream += SseDeltaChunk(id, model, json({{"tool_calls", json::array({tool_call})}}));
+                }
+            }
+        }
+    }
+
+    stream += SseDeltaChunk(id, model, json::object(), finish_reason);
+    stream += "data: [DONE]\n\n";
+    return stream;
 }
 
 static std::string SseChunk(const std::string& id, const std::string& model, const std::string& content, const std::string& reasoning_content, bool done) {
@@ -204,6 +276,60 @@ static std::string SseChunk(const std::string& id, const std::string& model, con
         chunk["choices"] = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
     }
     return "data: " + chunk.dump() + "\n\n";
+}
+
+static std::string SseDeltaChunk(const std::string& id, const std::string& model, const json& delta, const json& finish_reason) {
+    json chunk;
+    chunk["id"] = id;
+    chunk["object"] = "chat.completion.chunk";
+    chunk["model"] = model;
+    chunk["created"] = std::time(nullptr);
+    chunk["choices"] = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", finish_reason}}});
+    return "data: " + chunk.dump() + "\n\n";
+}
+
+static json BuildChatCompletionResponse(const std::string& id,
+                                        const std::string& model,
+                                        const inferdeck::core::InferenceResult& result) {
+    json response;
+    response["id"] = id;
+    response["object"] = "chat.completion";
+    response["created"] = std::time(nullptr);
+    response["model"] = model;
+
+    json message = {{"role", "assistant"}};
+    if (!result.text.empty()) {
+        message["content"] = result.text;
+    } else if (result.tool_calls.empty()) {
+        message["content"] = "";
+    }
+    if (!result.reasoning_text.empty()) {
+        message["reasoning_content"] = result.reasoning_text;
+    }
+    if (!result.tool_calls.empty()) {
+        json tool_calls = json::array();
+        for (const auto& tc : result.tool_calls) {
+            json tc_json;
+            tc_json["id"] = tc.id;
+            tc_json["type"] = tc.type;
+            tc_json["function"] = {{"name", tc.function_name}, {"arguments", tc.function_arguments}};
+            tool_calls.push_back(tc_json);
+        }
+        message["tool_calls"] = tool_calls;
+    }
+
+    std::string finish_reason = result.tool_calls.empty() ? "stop" : "tool_calls";
+    response["choices"] = json::array({{{"index", 0}, {"message", message}, {"finish_reason", finish_reason}}});
+    response["usage"] = {{"prompt_tokens", result.prompt_tokens}, {"completion_tokens", result.completion_tokens}, {"total_tokens", result.total_tokens}};
+    return response;
+}
+
+static void SetInferenceError(httplib::Response& resp, const inferdeck::core::InferenceResult& result) {
+    int status = result.http_status >= 400 ? result.http_status : 502;
+    resp.status = status;
+    resp.set_content(json({{"error", {{"message", result.error_message.empty() ? "Backend inference failed" : result.error_message},
+                                      {"type", "backend_error"},
+                                      {"code", status}}}}).dump(), "application/json");
 }
 
 struct StreamQueue {
@@ -242,7 +368,8 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
     }
     try {
         auto body = json::parse(req.body);
-        bool stream = body.value("stream", false);
+        bool client_requested_stream = body.value("stream", false);
+        bool stream = client_requested_stream;
 
         std::vector<inferdeck::core::ChatMessage> messages;
         if (body.contains("messages")) {
@@ -284,16 +411,24 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         if (body.contains("stop")) {
             if (body["stop"].is_string()) params.stop = body["stop"].get<std::string>();
         }
+        bool force_non_streaming_backend = ShouldForceNonStreamingBackend(body);
         if (body.contains("tools") && body["tools"].is_array()) {
             params.tools_json = body["tools"].dump();
+        }
+        if (force_non_streaming_backend) {
             stream = false;
         }
 
-        std::string requested_model = body.value("model", "");
         std::string current_clean_id = GetCurrentCleanModelId();
         std::string response_model_id = current_clean_id;
 
+        std::string requested_model = body.value("model", "");
         if (!requested_model.empty()) {
+            std::lock_guard<std::mutex> lock(g_switch_mutex);
+
+            current_clean_id = GetCurrentCleanModelId();
+            response_model_id = current_clean_id;
+
             std::string normalized_requested = NormalizeId(requested_model);
             std::string normalized_current = NormalizeId(current_clean_id);
 
@@ -307,8 +442,6 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                 } else {
                     response_model_id = requested_model;
                 }
-            } else {
-                response_model_id = current_clean_id;
             }
         }
 
@@ -317,14 +450,20 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
             auto queue = std::make_shared<StreamQueue>();
 
             std::thread predict_thread([&engine, messages, params, queue, response_model_id, id]() {
-                auto on_token = [queue, id, response_model_id](const std::string& token, inferdeck::core::TokenType type, int) {
-                    if (type == inferdeck::core::TokenType::Content) {
-                        queue->push(SseChunk(id, response_model_id, token, "", false));
-                    } else if (type == inferdeck::core::TokenType::Reasoning) {
-                        queue->push(SseChunk(id, response_model_id, "", token, false));
-                    }
-                };
-                engine.PredictStream(messages, params, on_token);
+                try {
+                    auto on_token = [queue, id, response_model_id](const std::string& token, inferdeck::core::TokenType type, int) {
+                        if (type == inferdeck::core::TokenType::Content) {
+                            queue->push(SseChunk(id, response_model_id, token, "", false));
+                        } else if (type == inferdeck::core::TokenType::Reasoning) {
+                            queue->push(SseChunk(id, response_model_id, "", token, false));
+                        }
+                    };
+                    engine.PredictStream(messages, params, on_token);
+                    queue->push(SseChunk(id, response_model_id, "", "", true));
+                } catch (const std::exception& e) {
+                    queue->push(SseDeltaChunk(id, response_model_id, json({{"content", std::string("Backend stream error: ") + e.what()}})));
+                    queue->push(SseChunk(id, response_model_id, "", "", true));
+                }
                 queue->push("data: [DONE]\n\n");
                 queue->finish();
             });
@@ -341,41 +480,27 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                     return false;
                 }
             );
+            resp.set_header("Cache-Control", "no-cache");
+            resp.set_header("Connection", "keep-alive");
 
             predict_thread.detach();
             return;
         }
 
         auto result = engine.Predict(messages, params);
-        json response;
-        response["id"] = MakeId();
-        response["object"] = "chat.completion";
-        response["created"] = std::time(nullptr);
-        response["model"] = response_model_id;
-        json message = {{"role", "assistant"}};
-        if (!result.text.empty()) {
-            message["content"] = result.text;
-        } else if (result.tool_calls.empty()) {
-            message["content"] = "";
+        if (result.HasError()) {
+            SetInferenceError(resp, result);
+            return;
         }
-        if (!result.reasoning_text.empty()) {
-            message["reasoning_content"] = result.reasoning_text;
+
+        json response = BuildChatCompletionResponse(MakeId(), response_model_id, result);
+        if (client_requested_stream && force_non_streaming_backend) {
+            resp.set_header("Cache-Control", "no-cache");
+            resp.set_header("Connection", "keep-alive");
+            resp.set_content(BuildSyntheticChatCompletionStream(response), "text/event-stream");
+            return;
         }
-        if (!result.tool_calls.empty()) {
-            json tool_calls = json::array();
-            for (const auto& tc : result.tool_calls) {
-                json tc_json;
-                tc_json["id"] = tc.id;
-                tc_json["type"] = tc.type;
-                tc_json["function"] = {{"name", tc.function_name}, {"arguments", tc.function_arguments}};
-                tool_calls.push_back(tc_json);
-            }
-            message["tool_calls"] = tool_calls;
-        }
-        std::string finish_reason = "stop";
-        if (!result.tool_calls.empty()) finish_reason = "tool_calls";
-        response["choices"] = json::array({{{"index", 0}, {"message", message}, {"finish_reason", finish_reason}}});
-        response["usage"] = {{"prompt_tokens", result.prompt_tokens}, {"completion_tokens", result.completion_tokens}, {"total_tokens", result.total_tokens}};
+
         resp.set_content(response.dump(), "application/json");
     } catch (const std::exception& e) {
         resp.status = 400;

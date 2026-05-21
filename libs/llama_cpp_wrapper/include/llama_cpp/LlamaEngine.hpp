@@ -56,6 +56,10 @@ struct InferenceResult {
     int total_tokens = 0;
     float duration_ms = 0.0f;
     std::vector<ToolCall> tool_calls;
+    int http_status = 200;
+    std::string error_message;
+
+    bool HasError() const { return !error_message.empty() || http_status >= 400; }
 };
 
 struct InferenceStats {

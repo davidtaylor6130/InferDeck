@@ -18,7 +18,7 @@ ServerConfig LoadConfig(const std::filesystem::path& config_path) {
     config.tls_enabled = full.server.tls_enabled;
     config.cert_file = full.server.cert_file;
     config.key_file = full.server.key_file;
-    config.request_timeout_ms = 30000;
+    config.request_timeout_ms = full.server.request_timeout_ms;
     config.model_path = full.model.path;
     config.model_directory = full.model.directory;
     config.precision = full.model.precision;

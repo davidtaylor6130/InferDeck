@@ -4,6 +4,7 @@
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch.hpp>
 #include "routes/ChatCompletions.hpp"
+#include <nlohmann/json.hpp>
 
 TEST_CASE("ValidateChatRequest accepts valid input", "[route][chat]") {
     std::string valid_request = R"({
@@ -52,4 +53,50 @@ TEST_CASE("ValidateChatRequest accepts all valid roles", "[route][chat]") {
         std::string error = inferdeck::gateway::routes::ValidateChatRequest(valid);
         REQUIRE(error.empty());
     }
+}
+
+TEST_CASE("Tool requests force non-streaming backend", "[route][chat][opencode]") {
+    nlohmann::json request = {
+        {"stream", true},
+        {"messages", nlohmann::json::array({{{"role", "user"}, {"content", "write a file"}}})},
+        {"tools", nlohmann::json::array({{{"type", "function"}, {"function", {{"name", "write"}}}}})}
+    };
+
+    REQUIRE(inferdeck::gateway::routes::ShouldForceNonStreamingBackend(request));
+
+    request["tools"] = nlohmann::json::array();
+    REQUIRE_FALSE(inferdeck::gateway::routes::ShouldForceNonStreamingBackend(request));
+}
+
+TEST_CASE("Synthetic stream emits tool calls and final done marker", "[route][chat][opencode]") {
+    nlohmann::json response = {
+        {"id", "chatcmpl-test"},
+        {"object", "chat.completion"},
+        {"created", 1700000000},
+        {"model", "qwen3-coder"},
+        {"choices", nlohmann::json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"tool_calls", nlohmann::json::array({
+                        {
+                            {"id", "call_1"},
+                            {"type", "function"},
+                            {"function", {{"name", "write"}, {"arguments", R"({"filePath":"hello.cpp","content":"hi"})"}}}
+                        }
+                    })}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+
+    std::string stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response);
+
+    REQUIRE(stream.find("text/event-stream") == std::string::npos);
+    REQUIRE(stream.find("data: ") != std::string::npos);
+    REQUIRE(stream.find("\"tool_calls\"") != std::string::npos);
+    REQUIRE(stream.find("\"finish_reason\":\"tool_calls\"") != std::string::npos);
+    REQUIRE(stream.find("data: [DONE]") != std::string::npos);
 }

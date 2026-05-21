@@ -18,7 +18,7 @@ struct ServerConfig {
     std::string cert_file;
     std::string key_file;
     int max_connections = 100;
-    int request_timeout_ms = 30000;
+    int request_timeout_ms = 300000;
     std::string model_path;
     std::string model_directory;
     std::string precision = "auto";

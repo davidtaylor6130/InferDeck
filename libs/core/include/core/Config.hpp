@@ -26,6 +26,7 @@ public:
         bool tls_enabled = true;
         std::string cert_file = "certs/server.crt";
         std::string key_file = "certs/server.key";
+        int request_timeout_ms = 300000;
     };
 
     /// Model configuration settings.

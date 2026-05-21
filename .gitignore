@@ -82,3 +82,4 @@ config/gateway.local.yaml
 
 # Legacy code archive
 .legacy/
+/run-logs

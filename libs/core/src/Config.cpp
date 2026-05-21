@@ -82,6 +82,7 @@ namespace {
                 else if (lower_key == "enabled") config.server.tls_enabled = (raw_value == "true" || raw_value == "1");
                 else if (lower_key == "cert_file") config.server.cert_file = raw_value;
                 else if (lower_key == "key_file") config.server.key_file = raw_value;
+                else if (lower_key == "request_timeout_ms") config.server.request_timeout_ms = std::stoi(raw_value);
             } else if (current_section == "model") {
                 if (lower_key == "path") config.model.path = raw_value;
                 else if (lower_key == "directory") config.model.directory = raw_value;
@@ -141,6 +142,7 @@ void Config::Save(const std::filesystem::path& config_path, const FullConfig& co
     file << "server:\n";
     file << "  host: \"" << config.server.host << "\"\n";
     file << "  port: " << config.server.port << "\n";
+    file << "  request_timeout_ms: " << config.server.request_timeout_ms << "\n";
     file << "  tls:\n";
     file << "    enabled: " << (config.server.tls_enabled ? "true" : "false") << "\n";
     file << "    cert_file: \"" << config.server.cert_file << "\"\n";

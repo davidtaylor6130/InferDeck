@@ -20,10 +20,9 @@ static std::string MakeModelId(const std::string& full_path) {
     return name;
 }
 
-static std::string MakeCleanModelId(const std::string& full_path) {
-    if (full_path.empty()) return "local-model";
-    std::filesystem::path p(full_path);
-    std::string name = p.stem().string();
+static std::string NormalizeModelName(const std::string& name) {
+    std::string lower = name;
+    for (auto& c : lower) c = std::tolower(static_cast<unsigned char>(c));
 
     static const std::vector<std::string> quant_suffixes = {
         "-q4_k_m", "-q4_k_s", "-q4_0", "-q5_k_m", "-q5_k_s", "-q5_0",
@@ -46,9 +45,6 @@ static std::string MakeCleanModelId(const std::string& full_path) {
         ".gguf"
     };
 
-    std::string lower = name;
-    for (auto& c : lower) c = std::tolower(static_cast<unsigned char>(c));
-
     std::string clean = name;
     for (const auto& suffix : quant_suffixes) {
         size_t pos = lower.rfind(suffix);
@@ -64,6 +60,13 @@ static std::string MakeCleanModelId(const std::string& full_path) {
     }
 
     return clean;
+}
+
+static std::string MakeCleanModelId(const std::string& full_path) {
+    if (full_path.empty()) return "local-model";
+    std::filesystem::path p(full_path);
+    std::string name = p.stem().string();
+    return NormalizeModelName(name);
 }
 
 static std::string MakeDisplayName(const std::string& full_path) {
@@ -124,7 +127,21 @@ void HandleModels(const httplib::Request& req, httplib::Response& resp) {
     }
 
     if (model_files.empty() && engine.IsInitialized()) {
-        model_files.push_back(engine.GetModelName());
+        std::string stem = engine.GetModelName();
+        model_files.push_back(stem);
+        std::string clean_id = NormalizeModelName(stem);
+        nlohmann::json model;
+        model["id"] = clean_id;
+        model["object"] = "model";
+        model["created"] = std::time(nullptr);
+        model["owned_by"] = "inferdeck";
+        model["name"] = stem;
+        nlohmann::json aliases = nlohmann::json::array();
+        aliases.push_back(clean_id);
+        aliases.push_back(clean_id + ":latest");
+        response["data"].push_back(model);
+        resp.set_content(response.dump(), "application/json");
+        return;
     }
 
     std::unordered_set<std::string> seen_clean_ids;

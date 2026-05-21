@@ -73,6 +73,7 @@ bool LlamaEngine::Initialize(const std::string& model_path,
 }
 
 bool LlamaEngine::IsInitialized() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return initialized_;
 }
 
@@ -83,17 +84,20 @@ bool LlamaEngine::SwitchModel(const std::string& model_path) {
         return false;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::filesystem::path p(model_path);
+        current_model_name_ = p.stem().string();
+        model_path_ = model_path;
+    }
+
+    Logger::Get().Info("Model switched to: " + current_model_name_);
+
     if (!server_mgr.WaitForReady(120)) {
         Logger::Get().Error("New model failed to become ready");
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::filesystem::path p(model_path);
-    current_model_name_ = p.stem().string();
-    model_path_ = model_path;
-
-    Logger::Get().Info("Model switched to: " + current_model_name_);
     return true;
 }
 
@@ -348,20 +352,29 @@ InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
     auto& server_mgr = LlamaServerManager::Get();
     auto http_result = HttpPost("/v1/chat/completions", body.dump(), server_mgr.GetPort());
 
-    if (http_result.status_code != 200) {
-        Logger::Get().Error("llama-server returned HTTP " + std::to_string(http_result.status_code) + ": " + http_result.body);
-    }
-
     auto end = std::chrono::high_resolution_clock::now();
     float duration = std::chrono::duration<float, std::milli>(end - start).count();
 
     InferenceResult result;
     result.duration_ms = duration;
+    result.http_status = static_cast<int>(http_result.status_code);
+
+    if (http_result.status_code != 200) {
+        result.error_message = http_result.body.empty()
+            ? "llama-server returned HTTP " + std::to_string(http_result.status_code)
+            : http_result.body;
+        Logger::Get().Error("llama-server returned HTTP " + std::to_string(http_result.status_code) + ": " + http_result.body);
+        std::lock_guard<std::mutex> lock(mutex_);
+        stats_.total_requests++;
+        stats_.failed_requests++;
+        return result;
+    }
 
     try {
         auto j = json::parse(http_result.body);
         if (j.contains("error")) {
             Logger::Get().Error("llama-server error: " + j["error"].dump());
+            result.error_message = j["error"].dump();
         }
         if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
             auto& message = j["choices"][0]["message"];
@@ -495,6 +508,7 @@ InferenceStats LlamaEngine::GetStats() const {
 }
 
 std::string LlamaEngine::GetModelName() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return current_model_name_;
 }
 
