@@ -286,6 +286,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         }
         if (body.contains("tools") && body["tools"].is_array()) {
             params.tools_json = body["tools"].dump();
+            stream = false;
         }
 
         std::string requested_model = body.value("model", "");
