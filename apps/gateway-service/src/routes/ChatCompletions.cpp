@@ -75,7 +75,7 @@ static std::string MakeCleanModelId(const std::string& full_path) {
 static std::string NormalizeId(const std::string& id) {
     std::string result = id;
     for (auto& c : result) {
-        if (c == ' ' || c == '_' || c == '-' || c == '.') c = '-';
+        if (c == ' ' || c == '_') c = '-';
         else c = std::tolower(static_cast<unsigned char>(c));
     }
     if (result.size() > 8 && result.compare(result.size() - 8, 8, ":latest") == 0) {
