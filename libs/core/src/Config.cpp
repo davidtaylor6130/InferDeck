@@ -89,6 +89,13 @@ namespace {
                 else if (lower_key == "n_gpu_layers" || lower_key == "gpu_layers") config.model.n_gpu_layers = std::stoi(raw_value);
                 else if (lower_key == "context_size" || lower_key == "context_length") config.model.context_size = std::stoi(raw_value);
                 else if (lower_key == "batch_size") config.model.batch_size = std::stoi(raw_value);
+                else if (lower_key == "flash_attn") config.model.flash_attn = (raw_value == "true" || raw_value == "1");
+                else if (lower_key == "cache_type_k") config.model.cache_type_k = raw_value;
+                else if (lower_key == "cache_type_v") config.model.cache_type_v = raw_value;
+                else if (lower_key == "split_mode") config.model.split_mode = raw_value;
+                else if (lower_key == "fit_target") config.model.fit_target = std::stoi(raw_value);
+                else if (lower_key == "parallel") config.model.parallel = std::stoi(raw_value);
+                else if (lower_key == "kv_unified") config.model.kv_unified = (raw_value == "true" || raw_value == "1");
             } else if (current_section == "gpu") {
                 if (lower_key == "device_id") config.gpu.device_id = std::stoi(raw_value);
             } else if (current_section == "queue") {
@@ -144,7 +151,14 @@ void Config::Save(const std::filesystem::path& config_path, const FullConfig& co
     file << "  precision: \"" << config.model.precision << "\"\n";
     file << "  n_gpu_layers: " << config.model.n_gpu_layers << "\n";
     file << "  context_size: " << config.model.context_size << "\n";
-    file << "  batch_size: " << config.model.batch_size << "\n\n";
+    file << "  batch_size: " << config.model.batch_size << "\n";
+    file << "  flash_attn: " << (config.model.flash_attn ? "true" : "false") << "\n";
+    file << "  cache_type_k: \"" << config.model.cache_type_k << "\"\n";
+    file << "  cache_type_v: \"" << config.model.cache_type_v << "\"\n";
+    file << "  split_mode: \"" << config.model.split_mode << "\"\n";
+    file << "  fit_target: " << config.model.fit_target << "\n";
+    file << "  parallel: " << config.model.parallel << "\n";
+    file << "  kv_unified: " << (config.model.kv_unified ? "true" : "false") << "\n\n";
 
     file << "gpu:\n";
     file << "  device_id: " << config.gpu.device_id << "\n\n";

@@ -229,6 +229,17 @@ bool LlamaServerManager::LaunchProcess(const std::string& model_path, int gpu_la
     cmd += " --host 127.0.0.1";
     cmd += " --port " + std::to_string(port);
     cmd += " --n-predict -1";
+    cmd += " --flash-attn on";
+    cmd += " --cache-type-k q8_0";
+    cmd += " --cache-type-v q8_0";
+    cmd += " --main-gpu 0";
+    cmd += " --split-mode none";
+    cmd += " --no-mmap";
+    cmd += " --cache-ram 0";
+    cmd += " --fit on";
+    cmd += " --fit-target 512";
+    cmd += " --parallel 1";
+    cmd += " --kv-unified";
 
     Logger::Get().Info("Launching: " + cmd);
 
@@ -239,7 +250,6 @@ bool LlamaServerManager::LaunchProcess(const std::string& model_path, int gpu_la
 
     PROCESS_INFORMATION pi = {};
 
-    // Convert to wide string for CreateProcessW
     std::wstring cmd_w(cmd.begin(), cmd.end());
     std::wstring exe_dir_w = std::filesystem::path(exe_path).parent_path().wstring();
 
@@ -363,7 +373,24 @@ bool LlamaServerManager::Restart(const std::string& new_model_path, int gpu_laye
         running_.store(false);
     }
 
-    return Start(new_model_path, gpu_layers, context_size, port_);
+    if (!DownloadIfNeeded()) {
+        Logger::Get().Error("Failed to download llama-server binary");
+        return false;
+    }
+
+    if (!std::filesystem::exists(new_model_path)) {
+        Logger::Get().Error("Model file not found: " + new_model_path);
+        return false;
+    }
+
+    if (!LaunchProcess(new_model_path, gpu_layers, context_size, port_)) {
+        Logger::Get().Error("Failed to launch llama-server");
+        return false;
+    }
+
+    running_.store(true);
+    Logger::Get().Info("llama-server started on port " + std::to_string(port_));
+    return true;
 }
 
 } // namespace inferdeck::core

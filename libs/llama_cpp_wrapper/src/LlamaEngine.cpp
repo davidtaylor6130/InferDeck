@@ -77,8 +77,6 @@ bool LlamaEngine::IsInitialized() const {
 }
 
 bool LlamaEngine::SwitchModel(const std::string& model_path) {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto& server_mgr = LlamaServerManager::Get();
     if (!server_mgr.Restart(model_path, gpu_layers_, context_size_)) {
         Logger::Get().Error("Failed to switch model");
@@ -90,6 +88,7 @@ bool LlamaEngine::SwitchModel(const std::string& model_path) {
         return false;
     }
 
+    std::lock_guard<std::mutex> lock(mutex_);
     std::filesystem::path p(model_path);
     current_model_name_ = p.stem().string();
     model_path_ = model_path;

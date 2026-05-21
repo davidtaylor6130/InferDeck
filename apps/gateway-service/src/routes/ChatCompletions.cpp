@@ -29,6 +29,15 @@ static std::string MakeModelId(const std::string& full_path) {
 static std::unordered_map<std::string, std::string> g_model_cache;
 static std::mutex g_model_cache_mutex;
 
+static std::string NormalizeId(const std::string& id) {
+    std::string result = id;
+    for (auto& c : result) {
+        if (c == ' ' || c == '_' || c == '-' || c == '.') c = '-';
+        else c = std::tolower(static_cast<unsigned char>(c));
+    }
+    return result;
+}
+
 static std::string FindModelPath(const std::string& model_id) {
     std::lock_guard<std::mutex> lock(g_model_cache_mutex);
     if (!g_model_cache.empty()) {
@@ -45,6 +54,10 @@ static std::string FindModelPath(const std::string& model_id) {
     if (model_dir.empty() || !std::filesystem::exists(model_dir)) return "";
 
     std::vector<std::string> extensions = {".gguf", ".bin", ".ggml"};
+    std::string normalized_id = NormalizeId(model_id);
+    std::string best_match;
+    size_t best_score = 0;
+
     for (const auto& entry : std::filesystem::recursive_directory_iterator(model_dir)) {
         if (entry.is_regular_file()) {
             std::string ext = entry.path().extension().string();
@@ -54,11 +67,32 @@ static std::string FindModelPath(const std::string& model_id) {
                 if (ext == e) {
                     std::string id = MakeModelId(entry.path().string());
                     g_model_cache[id] = entry.path().string();
-                    if (id == model_id) return entry.path().string();
+
+                    if (id == normalized_id) return entry.path().string();
+
+                    size_t score = 0;
+                    if (id.find(normalized_id) != std::string::npos) {
+                        score = normalized_id.size();
+                    } else if (normalized_id.find(id) != std::string::npos) {
+                        score = id.size();
+                    } else {
+                        std::string short_id = id;
+                        size_t dash = short_id.find_last_of('-');
+                        if (dash != std::string::npos) short_id = short_id.substr(0, dash);
+                        if (normalized_id.find(short_id) != std::string::npos || short_id.find(normalized_id) != std::string::npos) {
+                            score = short_id.size();
+                        }
+                    }
+                    if (score > best_score) {
+                        best_score = score;
+                        best_match = entry.path().string();
+                    }
                 }
             }
         }
     }
+
+    if (!best_match.empty()) return best_match;
     return "";
 }
 
@@ -159,7 +193,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         }
 
         inferdeck::core::InferenceParams params;
-        if (body.contains("max_tokens")) params.max_tokens = body["max_tokens"].get<int>();
+        params.max_tokens = body.value("max_tokens", -1);
         if (body.contains("temperature")) params.temperature = body["temperature"].get<float>();
         if (body.contains("top_p")) params.top_p = body["top_p"].get<float>();
         if (body.contains("stop")) {

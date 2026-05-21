@@ -22,7 +22,7 @@ struct ChatMessage {
 };
 
 struct InferenceParams {
-    int max_tokens = 256;
+    int max_tokens = -1;
     float temperature = 0.7f;
     float top_p = 0.9f;
     float repetition_penalty = 1.0f;
@@ -78,7 +78,7 @@ public:
     bool Initialize(const std::string& model_path,
                     const std::string& precision = "auto",
                     int gpu_layers = -1,
-                    int context_size = 4096);
+                    int context_size = 100000);
 
     bool SwitchModel(const std::string& model_path);
     bool LoadModel(const std::string& model_path);
@@ -109,7 +109,7 @@ private:
     std::string model_path_;
     std::string precision_;
     int gpu_layers_ = -1;
-    int context_size_ = 4096;
+    int context_size_ = 100000;
     std::string current_model_name_;
 
     InferenceStats stats_;

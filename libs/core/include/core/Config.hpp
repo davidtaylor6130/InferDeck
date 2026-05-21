@@ -34,8 +34,15 @@ public:
         std::string directory;
         std::string precision = "auto";
         int n_gpu_layers = -1;
-        int context_size = 4096;
+        int context_size = 100000;
         int batch_size = 512;
+        bool flash_attn = true;
+        std::string cache_type_k = "q8_0";
+        std::string cache_type_v = "q8_0";
+        std::string split_mode = "none";
+        int fit_target = 512;
+        int parallel = 1;
+        bool kv_unified = true;
     };
 
     /// GPU configuration settings.

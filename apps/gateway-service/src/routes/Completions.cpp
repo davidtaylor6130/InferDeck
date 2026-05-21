@@ -25,7 +25,7 @@ void HandleCompletions(const httplib::Request& req, httplib::Response& resp) {
         std::string prompt = body.value("prompt", "");
 
         inferdeck::core::InferenceParams params;
-        if (body.contains("max_tokens")) params.max_tokens = body["max_tokens"].get<int>();
+        params.max_tokens = body.value("max_tokens", -1);
         if (body.contains("temperature")) params.temperature = body["temperature"].get<float>();
         if (body.contains("top_p")) params.top_p = body["top_p"].get<float>();
 

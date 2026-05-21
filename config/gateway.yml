@@ -8,12 +8,19 @@ server:
     key_file: ""
 
 model:
-  path: "C:/Users/david/.lmstudio/models/lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf"
-  directory: "C:/Users/david/.lmstudio/models"
+  path: "C:/InferDeck/models/lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf"
+  directory: "C:/InferDeck/models"
   precision: "auto"
   n_gpu_layers: -1
-  context_size: 8192
+  context_size: 100000
   batch_size: 512
+  flash_attn: true
+  cache_type_k: "q8_0"
+  cache_type_v: "q8_0"
+  split_mode: "none"
+  fit_target: 512
+  parallel: 1
+  kv_unified: true
 
 gpu:
   device_id: 0

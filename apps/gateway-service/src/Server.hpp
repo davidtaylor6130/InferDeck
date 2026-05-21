@@ -23,7 +23,7 @@ struct ServerConfig {
     std::string model_directory;
     std::string precision = "auto";
     int n_gpu_layers = -1;
-    int context_size = 4096;
+    int context_size = 100000;
 };
 
 using HttpCode = int;
