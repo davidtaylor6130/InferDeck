@@ -2,6 +2,7 @@
 #include "llama_cpp/LlamaEngine.hpp"
 #include "config/ConfigLoader.hpp"
 #include "core/Config.hpp"
+#include "core/Logger.hpp"
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <chrono>
@@ -81,8 +82,9 @@ static std::string NormalizeId(const std::string& id) {
         if (c == ' ' || c == '_') c = '-';
         else c = std::tolower(static_cast<unsigned char>(c));
     }
-    if (result.size() > 8 && result.compare(result.size() - 8, 8, ":latest") == 0) {
-        result = result.substr(0, result.size() - 8);
+    constexpr size_t latest_suffix_len = 7;
+    if (result.size() > latest_suffix_len && result.compare(result.size() - latest_suffix_len, latest_suffix_len, ":latest") == 0) {
+        result = result.substr(0, result.size() - latest_suffix_len);
     }
     return result;
 }
@@ -129,6 +131,12 @@ static void PopulateModelCache(const std::string& model_dir) {
     g_cache_populated = true;
 }
 
+static void RefreshModelCache(const std::string& model_dir) {
+    g_model_cache.clear();
+    g_cache_populated = false;
+    PopulateModelCache(model_dir);
+}
+
 static std::string FindModelPath(const std::string& model_id) {
     std::lock_guard<std::mutex> lock(g_model_cache_mutex);
 
@@ -142,6 +150,11 @@ static std::string FindModelPath(const std::string& model_id) {
     } catch (...) { return ""; }
 
     if (model_dir.empty() || !std::filesystem::exists(model_dir)) return "";
+
+    if (normalized == "gpt-oss-20b" || normalized == "openai-gpt-oss-20b") {
+        auto path = std::filesystem::path(model_dir) / "openai_gpt-oss-20b-GGUF" / "openai_gpt-oss-20b-MXFP4.gguf";
+        if (std::filesystem::exists(path)) return path.string();
+    }
 
     PopulateModelCache(model_dir);
 
@@ -166,6 +179,25 @@ static std::string FindModelPath(const std::string& model_id) {
             if (normalized.find(prefix) != std::string::npos || prefix.find(normalized) != std::string::npos) {
                 return entry.path;
             }
+        }
+    }
+
+    RefreshModelCache(model_dir);
+
+    for (const auto& entry : g_model_cache) {
+        if (entry.clean_id == normalized || entry.full_id == normalized ||
+            entry.clean_id.find(normalized) != std::string::npos ||
+            normalized.find(entry.clean_id) != std::string::npos) {
+            return entry.path;
+        }
+    }
+
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(model_dir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string filename = NormalizeId(entry.path().stem().string());
+        if (entry.path().extension() == ".gguf" &&
+            (filename.find(normalized) != std::string::npos || normalized.find(filename) != std::string::npos)) {
+            return entry.path().string();
         }
     }
 
@@ -431,15 +463,22 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
 
             std::string normalized_requested = NormalizeId(requested_model);
             std::string normalized_current = NormalizeId(current_clean_id);
+            inferdeck::core::Logger::Get().Info("Model request normalized: requested='" + normalized_requested + "' current='" + normalized_current + "'");
 
             bool needs_switch = (normalized_requested != normalized_current);
 
             if (needs_switch) {
                 std::string model_path = FindModelPath(requested_model);
+                if (model_path.empty() && normalized_requested == "gpt-oss-20b") {
+                    std::filesystem::path gpt_path = "C:/Users/david/Documents/00_Models/openai_gpt-oss-20b-GGUF/openai_gpt-oss-20b-MXFP4.gguf";
+                    if (std::filesystem::exists(gpt_path)) model_path = gpt_path.string();
+                }
                 if (!model_path.empty()) {
+                    inferdeck::core::Logger::Get().Info("Switching model for request '" + requested_model + "' -> " + model_path);
                     engine.SwitchModel(model_path);
                     response_model_id = MakeCleanModelId(model_path);
                 } else {
+                    inferdeck::core::Logger::Get().Warn("Requested model not found in model directory: " + requested_model);
                     response_model_id = requested_model;
                 }
             }

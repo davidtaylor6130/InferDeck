@@ -20,8 +20,9 @@ std::string NormalizeId(std::string id) {
         if (c == ' ' || c == '_') c = '-';
         else c = std::tolower(static_cast<unsigned char>(c));
     }
-    if (id.size() > 8 && id.compare(id.size() - 8, 8, ":latest") == 0) {
-        id = id.substr(0, id.size() - 8);
+    constexpr size_t latest_suffix_len = 7;
+    if (id.size() > latest_suffix_len && id.compare(id.size() - latest_suffix_len, latest_suffix_len, ":latest") == 0) {
+        id = id.substr(0, id.size() - latest_suffix_len);
     }
     return id;
 }
