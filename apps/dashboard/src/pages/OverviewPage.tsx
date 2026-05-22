@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowPathIcon,
   BoltIcon,
@@ -202,7 +202,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
             <IconHeading Icon={ListBulletIcon} title="Queue" tone={queue.failed ? 'critical' : queue.queued > 12 ? 'warn' : 'good'} />
             <CommandButton className="min-h-8 px-3 py-1 text-xs" onClick={() => window.location.hash = '#queue'}>Open</CommandButton>
           </div>
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <CountTile Icon={ListBulletIcon} label="Queued" value={queue.queued} tone={queue.queued > 12 ? 'warn' : 'good'} />
             <CountTile Icon={BriefcaseIcon} label="Running" value={queue.running} tone={queue.running ? 'info' : 'idle'} />
             <CountTile Icon={XCircleIcon} label="Failed" value={queue.failed} tone={queue.failed ? 'critical' : 'good'} />
@@ -220,7 +220,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
             <IconHeading Icon={BriefcaseIcon} title="Jobs" tone={failedToday ? 'critical' : 'good'} />
             {activeJob && <StatusBadge label="Running" tone="running" />}
           </div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
             <CountTile Icon={BriefcaseIcon} label="Today" value={jobsToday} tone="info" />
             <CountTile Icon={CheckCircleIcon} label="Done" value={summary.succeededToday ?? state.jobsList.filter(job => job.status === 'succeeded').length} tone="good" />
             <CountTile Icon={XCircleIcon} label="Failed" value={failedToday} tone={failedToday ? 'critical' : 'good'} />
@@ -250,7 +250,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
             <IconHeading Icon={DocumentTextIcon} title="Tokens" tone="info" />
             <span className="text-xs text-text-muted">{formatUptime(state.healthData?.uptime)}</span>
           </div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
             <CountTile Icon={DocumentTextIcon} label="Total" value={formatTokenCount(totalTokens)} tone="info" />
             <CountTile Icon={DocumentTextIcon} label="Prompt" value={formatTokenCount(promptTokens)} tone="idle" />
             <CountTile Icon={DocumentTextIcon} label="Output" value={formatTokenCount(completionTokens)} tone="good" />
@@ -379,7 +379,7 @@ const ActiveJob: React.FC<{ job: JobRecord; activeModel: string; onCancel: (id: 
 
 const ModelPicker: React.FC<{ models: ModelRecord[]; activeModel: string; onLoad: (model: string) => void }> = ({ models, activeModel, onLoad }) => (
   <select
-    className="min-h-10 min-w-0 rounded-lg border border-border-slate bg-deck-navy px-3 py-2 text-sm text-text-primary"
+    className="min-h-10 w-full min-w-0 max-w-full truncate rounded-lg border border-border-slate bg-deck-navy px-3 py-2 text-sm text-text-primary"
     value={models.some(model => model.name === activeModel) ? activeModel : ''}
     onChange={event => event.target.value && onLoad(event.target.value)}
     aria-label="Load model"
