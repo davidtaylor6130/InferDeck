@@ -131,7 +131,7 @@ bool LlamaServerManager::LaunchProcess(const std::string& model_path, int gpu_la
     cmd += " --split-mode none";
     cmd += " --no-mmap";
     cmd += " --cache-ram 0";
-    cmd += " --fit";
+    cmd += " --fit on";
     cmd += " --fit-target 512";
     cmd += " --parallel 1";
     cmd += " --kv-unified";
@@ -144,24 +144,43 @@ bool LlamaServerManager::LaunchProcess(const std::string& model_path, int gpu_la
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    std::filesystem::create_directories(std::filesystem::current_path() / "logs");
+    std::wstring stdout_path = (std::filesystem::current_path() / "logs" / "llama-server.out.log").wstring();
+    std::wstring stderr_path = (std::filesystem::current_path() / "logs" / "llama-server.err.log").wstring();
+    HANDLE stdout_handle = CreateFileW(stdout_path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, &sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE stderr_handle = CreateFileW(stderr_path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, &sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (stdout_handle != INVALID_HANDLE_VALUE && stderr_handle != INVALID_HANDLE_VALUE) {
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdOutput = stdout_handle;
+        si.hStdError = stderr_handle;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    }
 
     PROCESS_INFORMATION pi = {};
 
     std::wstring cmd_w(cmd.begin(), cmd.end());
     std::wstring exe_dir_w = std::filesystem::path(exe_path).parent_path().wstring();
 
-    if (!CreateProcessW(
+    BOOL created = CreateProcessW(
         nullptr,
         &cmd_w[0],
         nullptr,
         nullptr,
-        FALSE,
+        TRUE,
         CREATE_NO_WINDOW,
         nullptr,
         exe_dir_w.c_str(),
         &si,
         &pi
-    )) {
+    );
+    if (stdout_handle != INVALID_HANDLE_VALUE) CloseHandle(stdout_handle);
+    if (stderr_handle != INVALID_HANDLE_VALUE) CloseHandle(stderr_handle);
+
+    if (!created) {
         DWORD err = GetLastError();
         Logger::Get().Error("CreateProcess failed, error: " + std::to_string(err));
         return false;
