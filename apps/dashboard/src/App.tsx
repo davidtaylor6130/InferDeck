@@ -212,11 +212,11 @@ const App: React.FC = () => {
     },
     cancelJob: async (jobId: string) => {
       try {
-        await fetch(`${API}/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+        await requestJson(`/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
         toast(`Cancelled ${jobId}`, 'warning');
         fetchJobs();
       } catch (err) {
-        toast(err instanceof Error ? err.message : 'Cancel failed', 'danger');
+        toast(formatError(err), 'danger');
       }
     },
     retryJob: async (jobId: string) => {
@@ -275,11 +275,11 @@ const App: React.FC = () => {
     },
     pauseQueue: async () => {
       try {
-        await fetch(`${API}/queue/pause`, { method: 'POST' });
+        await requestJson('/queue/pause', { method: 'POST' });
         toast('Queue pause requested', 'warning');
         fetchStatus();
       } catch (err) {
-        toast(err instanceof Error ? err.message : 'Pause failed', 'danger');
+        toast(formatError(err), 'danger');
       }
     },
     resumeQueue: async () => {
@@ -302,11 +302,11 @@ const App: React.FC = () => {
     },
     unloadModels: async () => {
       try {
-        await Promise.all(modelsList.map(model => fetch(`${API}/models/unload`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: model.name }) })));
+        await Promise.all(modelsList.map(model => requestJson('/models/unload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: model.name }) })));
         toast('Unload requested for loaded models', 'success');
         fetchModels();
       } catch (err) {
-        toast(err instanceof Error ? err.message : 'Unload models failed', 'danger');
+        toast(formatError(err), 'danger');
       }
     },
     toast,
