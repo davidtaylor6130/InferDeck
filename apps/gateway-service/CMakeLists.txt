@@ -17,6 +17,7 @@ add_executable(gateway-service
     src/routes/Documents.cpp
     src/routes/FineTuningJobs.cpp
     src/config/ConfigLoader.cpp
+    src/routes/Dashboard.cpp
 )
 
 target_include_directories(gateway-service PRIVATE

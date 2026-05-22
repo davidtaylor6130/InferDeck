@@ -23,6 +23,7 @@ public:
     struct ServerConfig {
         std::string host = "0.0.0.0";
         int port = 8080;
+        int api_port = 11434;
         bool tls_enabled = true;
         std::string cert_file = "certs/server.crt";
         std::string key_file = "certs/server.key";

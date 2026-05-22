@@ -21,6 +21,7 @@
 #include "routes/Documents.hpp"
 #include "routes/FineTuningJobs.hpp"
 #include "routes/OllamaCompat.hpp"
+#include "routes/Dashboard.hpp"
 
 static inferdeck::gateway::GatewayServer* g_server = nullptr;
 
@@ -104,6 +105,7 @@ int main(int argc, char* argv[]) {
 
     inferdeck::gateway::GatewayServer server;
     g_server = &server;
+    auto gateway_started_at = std::chrono::steady_clock::now();
 
     if (!server.Initialize(server_config)) {
         inferdeck::core::Logger::Get().Error("Failed to initialize server");
@@ -197,6 +199,91 @@ int main(int argc, char* argv[]) {
     server.RegisterDashboardRoute("GET", "/inferdeck/status",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleHealth(req, resp);
+        });
+
+    server.RegisterDashboardRoute("GET", "/api/health",
+        [server_config, gateway_started_at](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardHealth(req, resp, server_config, gateway_started_at);
+        });
+
+    server.RegisterDashboardRoute("GET", "/api/status",
+        [server_config, gateway_started_at](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardStatus(req, resp, server_config, gateway_started_at);
+        });
+
+    server.RegisterDashboardRoute("GET", "/api/models",
+        [server_config](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardModels(req, resp, server_config);
+        });
+
+    server.RegisterDashboardRoute("GET", "/api/models/running",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardRunningModels(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/models/load",
+        [server_config](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardLoadModel(req, resp, server_config);
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/models/unload",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardUnloadModel(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/models/rescan",
+        [server_config](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardRescanModels(req, resp, server_config);
+        });
+
+    server.RegisterDashboardRoute("GET", "/api/services",
+        [server_config, gateway_started_at](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardServices(req, resp, server_config, gateway_started_at);
+        });
+
+    server.RegisterDashboardRoute("POST", R"(/api/services/([^/]+)/start)",
+        [server_config](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardStartService(req, resp, server_config);
+        });
+
+    server.RegisterDashboardRoute("POST", R"(/api/services/([^/]+)/stop)",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardStopService(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", R"(/api/services/([^/]+)/restart)",
+        [server_config](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardRestartService(req, resp, server_config);
+        });
+
+    server.RegisterDashboardRoute("GET", "/api/jobs",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardJobs(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/queue/pause",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardQueueAction(req, resp, "pause");
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/queue/resume",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardQueueAction(req, resp, "resume");
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/queue/clear-failed",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardQueueAction(req, resp, "clear-failed");
+        });
+
+    server.RegisterDashboardRoute("GET", "/api/logs",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardLogs(req, resp);
+        });
+
+    server.RegisterDashboardRoute("GET", "/api/events/stream",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardEvents(req, resp);
         });
 
     server.RegisterDashboardRoute("GET", "/v1/documents",

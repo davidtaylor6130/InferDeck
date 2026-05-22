@@ -2,7 +2,7 @@
 /// @brief API client for InferDeck C++ gateway service.
 /// Fetches from /v1/... endpoints with OpenAI-compatible schema.
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://localhost:8080';
+const API_BASE = (import.meta as any).env?.VITE_API_URL || '';
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -75,7 +75,7 @@ export async function chatCompletion(request: ChatCompletionRequest): Promise<Ch
   return response.json() as Promise<ChatCompletionResponse>;
 }
 
-export async function streamChatCompletion(request: ChatCompletionRequest): Promise<AsyncGenerator<string>> {
+export async function* streamChatCompletion(request: ChatCompletionRequest): AsyncGenerator<string> {
   const response = await fetch(`${API_BASE}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

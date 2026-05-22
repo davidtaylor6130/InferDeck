@@ -192,6 +192,15 @@ const App: React.FC = () => {
         toast(err instanceof Error ? err.message : 'Unload failed', 'danger');
       }
     },
+    rescanModels: async () => {
+      try {
+        await requestJson('/models/rescan', { method: 'POST' });
+        toast('Model inventory refreshed', 'success');
+        fetchModels();
+      } catch (err) {
+        toast(err instanceof Error ? err.message : 'Rescan failed', 'danger');
+      }
+    },
     deleteModel: async (model: string) => {
       try {
         await fetch(`${API}/models/${encodeURIComponent(model)}`, { method: 'DELETE' });

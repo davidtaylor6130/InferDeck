@@ -14,7 +14,7 @@ ServerConfig LoadConfig(const std::filesystem::path& config_path) {
 
     config.host = full.server.host;
     config.dashboardPort = full.server.port;
-    config.apiPort = 11434;
+    config.apiPort = full.server.api_port;
     config.tls_enabled = full.server.tls_enabled;
     config.cert_file = full.server.cert_file;
     config.key_file = full.server.key_file;

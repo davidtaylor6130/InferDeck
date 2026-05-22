@@ -17,7 +17,11 @@ export const ModelsPage: React.FC<PageProps> = ({ state, actions }) => {
         </div>
         <p className="mt-2 text-xs text-text-secondary">Enter a direct URL to a .gguf file. Models are placed in the configured models directory.</p>
       </SectionCard>
-      <SectionCard title="Installed Models" eyebrow="GGUF model inventory and GPU load controls">
+      <SectionCard
+        title="Installed Models"
+        eyebrow="GGUF model inventory and GPU load controls"
+        action={<CommandButton tone="blue" onClick={actions.rescanModels}>Rescan</CommandButton>}
+      >
         {state.modelsList.length ? (
           <ModelTable models={state.modelsList} loadedNames={state.runningModels.map(m => m.name)} onLoad={actions.loadModel} onUnload={actions.unloadModel} onDelete={(name) => window.confirm(`Delete model ${name}?`) && actions.deleteModel(name)} onCopied={actions.toast} />
         ) : (

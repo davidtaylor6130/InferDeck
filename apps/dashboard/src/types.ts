@@ -37,9 +37,13 @@ export interface JobRecord {
 }
 
 export interface ModelRecord {
+  id?: string;
   name: string;
+  path?: string;
   size?: number;
   digest?: string;
+  loaded?: boolean;
+  aliases?: string[];
   modified_at?: string;
   details?: {
     parameter_size?: string;
@@ -68,6 +72,7 @@ export interface DashboardActions {
   pullModel: (name: string) => Promise<void>;
   loadModel: (model: string) => Promise<void>;
   unloadModel: (model: string) => Promise<void>;
+  rescanModels: () => Promise<void>;
   deleteModel: (model: string) => Promise<void>;
   cancelJob: (jobId: string) => Promise<void>;
   retryJob: (jobId: string) => Promise<void>;

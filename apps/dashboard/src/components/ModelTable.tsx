@@ -29,17 +29,17 @@ export const ModelTable: React.FC<ModelTableProps> = ({ models, loadedNames = []
       </thead>
       <tbody className="divide-y divide-border-slate/70">
         {models.map((model, index) => {
-          const loaded = loadedNames.includes(model.name) || index === 0;
+          const loaded = Boolean(model.loaded) || loadedNames.includes(model.name);
           return (
             <tr key={model.name} className="hover:bg-card-highlight/40">
               <td className="px-3 py-3">
                 <div className="flex min-w-0 items-center gap-2">
-                  <span className="truncate font-mono text-xs text-text-primary" title={model.name}>{model.name}</span>
+                  <span className="truncate font-mono text-xs text-text-primary" title={model.path || model.name}>{model.name}</span>
                   <CopyButton value={model.name} label="Model name" onCopied={onCopied} />
                 </div>
               </td>
               <td className="px-3 py-3">{formatBytes(model.size)}</td>
-              <td className="px-3 py-3">{model.details?.parameter_size || '131072'}</td>
+              <td className="px-3 py-3">{model.details?.parameter_size || 'N/A'}</td>
               <td className="px-3 py-3"><StatusBadge label={loaded ? 'Yes' : 'No'} tone={loaded ? 'online' : 'stopped'} /></td>
               <td className="truncate px-3 py-3">Radeon AI PRO R9700</td>
               <td className="px-3 py-3">

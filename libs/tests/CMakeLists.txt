@@ -12,6 +12,7 @@ add_executable(inferdeck-tests
   HealthTest.cpp
    ModelsTest.cpp
    MetricsTest.cpp
+   DashboardRoutesTest.cpp
    ChatCompletionsTest.cpp
    CompletionsTest.cpp
    EmbeddingsTest.cpp
@@ -97,6 +98,28 @@ else()
 endif()
 
 catch_discover_tests(inferdeck-compat-tests)
+
+add_executable(inferdeck-dashboard-tests
+    DashboardRoutesTest.cpp
+)
+
+target_include_directories(inferdeck-dashboard-tests PRIVATE
+    .
+    ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+)
+
+target_link_libraries(inferdeck-dashboard-tests PRIVATE
+    Catch2::Catch2WithMain
+    nlohmann_json::nlohmann_json
+)
+
+if(MSVC)
+    target_compile_options(inferdeck-dashboard-tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(inferdeck-dashboard-tests PRIVATE -Wall -Wextra -Wpedantic --coverage)
+endif()
+
+catch_discover_tests(inferdeck-dashboard-tests)
 
 # Coverage target
 add_custom_target(coverage

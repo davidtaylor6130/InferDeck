@@ -78,7 +78,10 @@ namespace {
 
             if (current_section == "server") {
                 if (lower_key == "host") config.server.host = raw_value;
-                else if (lower_key == "port") config.server.port = std::stoi(raw_value);
+                else if (lower_key == "dashboardhost") config.server.host = raw_value;
+                else if (lower_key == "port" || lower_key == "dashboardport") config.server.port = std::stoi(raw_value);
+                else if (lower_key == "apiport" || lower_key == "proxyport") config.server.api_port = std::stoi(raw_value);
+                else if (lower_key == "proxyhost" && config.server.host.empty()) config.server.host = raw_value;
                 else if (lower_key == "enabled") config.server.tls_enabled = (raw_value == "true" || raw_value == "1");
                 else if (lower_key == "cert_file") config.server.cert_file = raw_value;
                 else if (lower_key == "key_file") config.server.key_file = raw_value;
