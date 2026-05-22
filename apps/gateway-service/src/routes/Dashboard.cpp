@@ -151,6 +151,71 @@ std::string ResolveModelPath(const std::string& requested, const ServerConfig& c
     return "";
 }
 
+#ifdef _WIN32
+std::uint64_t FileTimeToU64(const FILETIME& ft) {
+    ULARGE_INTEGER value{};
+    value.LowPart = ft.dwLowDateTime;
+    value.HighPart = ft.dwHighDateTime;
+    return value.QuadPart;
+}
+
+json CpuUsageJson() {
+    static std::uint64_t last_idle = 0;
+    static std::uint64_t last_kernel = 0;
+    static std::uint64_t last_user = 0;
+
+    FILETIME idle_time{};
+    FILETIME kernel_time{};
+    FILETIME user_time{};
+    if (!GetSystemTimes(&idle_time, &kernel_time, &user_time)) {
+        return {{"name", "Windows host CPU"}, {"utilization", nullptr}};
+    }
+
+    const auto idle = FileTimeToU64(idle_time);
+    const auto kernel = FileTimeToU64(kernel_time);
+    const auto user = FileTimeToU64(user_time);
+    double utilization = 0.0;
+    if (last_kernel != 0 || last_user != 0) {
+        const auto system_delta = (kernel - last_kernel) + (user - last_user);
+        const auto idle_delta = idle - last_idle;
+        if (system_delta > 0) {
+            utilization = 100.0 * static_cast<double>(system_delta - idle_delta) / static_cast<double>(system_delta);
+            utilization = std::clamp(utilization, 0.0, 100.0);
+        }
+    }
+
+    last_idle = idle;
+    last_kernel = kernel;
+    last_user = user;
+
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    return {
+        {"name", "Windows host CPU"},
+        {"utilization", utilization},
+        {"logicalProcessors", static_cast<unsigned int>(info.dwNumberOfProcessors)}
+    };
+}
+#endif
+
+json DiskJson() {
+    std::filesystem::path data_dir = std::filesystem::current_path() / "data";
+    std::error_code ec;
+    auto space = std::filesystem::space(data_dir, ec);
+    if (ec) {
+        return {{"path", data_dir.string()}, {"free", nullptr}, {"total", nullptr}, {"used", nullptr}, {"percentage", nullptr}};
+    }
+    const auto used = space.capacity > space.available ? space.capacity - space.available : 0;
+    const double percentage = space.capacity > 0 ? (static_cast<double>(used) * 100.0 / static_cast<double>(space.capacity)) : 0.0;
+    return {
+        {"path", data_dir.string()},
+        {"free", static_cast<std::uint64_t>(space.available)},
+        {"total", static_cast<std::uint64_t>(space.capacity)},
+        {"used", static_cast<std::uint64_t>(used)},
+        {"percentage", percentage}
+    };
+}
+
 json HardwareJson() {
     auto& engine = inferdeck::core::LlamaEngine::Get();
     auto gpu_info = engine.GetGpuInfo();
@@ -161,6 +226,7 @@ json HardwareJson() {
     hardware["gpu"] = {
         {"name", gpu_info.name.empty() ? "AMD GPU (Vulkan)" : gpu_info.name},
         {"backend", "llama.cpp b9276 Vulkan"},
+        {"driverVersion", "b9276 Vulkan runtime"},
         {"utilization", nullptr},
         {"temperature", nullptr},
         {"power", nullptr},
@@ -185,7 +251,12 @@ json HardwareJson() {
 #else
     hardware["memory"] = {{"percentage", nullptr}};
 #endif
-    hardware["cpu"] = {{"utilization", nullptr}, {"name", "Windows host CPU"}};
+#ifdef _WIN32
+    hardware["cpu"] = CpuUsageJson();
+#else
+    hardware["cpu"] = {{"utilization", nullptr}, {"name", "Host CPU"}};
+#endif
+    hardware["disk"] = DiskJson();
     return hardware;
 }
 
