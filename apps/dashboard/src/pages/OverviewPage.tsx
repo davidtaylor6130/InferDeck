@@ -19,6 +19,8 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const onlineServices = state.servicesList.filter(service => isOnlineStatus(service.status)).length;
   const activeModel = state.runningModels[0]?.name || state.modelsList.find(model => model.loaded)?.name || state.modelsList[0]?.name || 'N/A';
   const services = normalizeServices(state.servicesList, state.connected);
+  const llamaService = services.find(service => service.kind === 'llama_cpp' || service.id === 'llama-server');
+  const llamaBackendUrl = llamaService?.baseUrl || LLAMA_BACKEND;
   const telemetry = state.statusData?.hardware || state.statusData?.telemetry;
   const samples = Array.isArray(state.statusData?.metricsSamples) ? state.statusData.metricsSamples : [];
   const summary = state.statusData?.summary || {};
@@ -90,7 +92,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
           { label: 'Dashboard', value: <NetworkValue value={DASHBOARD_URL} onCopied={actions.toast} /> },
           { label: 'Gateway', value: <NetworkValue value={GATEWAY_API} onCopied={actions.toast} /> },
           { label: 'OpenAI', value: <NetworkValue value={OPENAI_API} onCopied={actions.toast} /> },
-          { label: 'Backend', value: <NetworkValue value={LLAMA_BACKEND} onCopied={actions.toast} /> },
+          { label: 'Backend', value: <NetworkValue value={llamaBackendUrl} onCopied={actions.toast} /> },
         ]} />
       </div>
 
