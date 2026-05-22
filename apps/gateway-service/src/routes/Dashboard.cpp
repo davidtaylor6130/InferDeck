@@ -216,9 +216,73 @@ json DiskJson() {
     };
 }
 
+struct LlamaGpuLogInfo {
+    bool found = false;
+    std::string name;
+    std::uint64_t memory_total = 0;
+    std::uint64_t memory_free = 0;
+};
+
+std::string TrimCopy(const std::string& value) {
+    auto first = value.begin();
+    while (first != value.end() && std::isspace(static_cast<unsigned char>(*first))) ++first;
+    auto last = value.end();
+    while (last != first && std::isspace(static_cast<unsigned char>(*(last - 1)))) --last;
+    return std::string(first, last);
+}
+
+bool ParseLlamaGpuLine(const std::string& line, LlamaGpuLogInfo& info) {
+    if (line.find("Vulkan") == std::string::npos || line.find("MiB") == std::string::npos) return false;
+    const auto colon = line.find(':');
+    const auto open = line.find('(', colon == std::string::npos ? 0 : colon);
+    const auto close = line.find(')', open == std::string::npos ? 0 : open);
+    if (colon == std::string::npos || open == std::string::npos || close == std::string::npos || open <= colon) return false;
+
+    std::vector<std::uint64_t> numbers;
+    std::uint64_t current = 0;
+    bool in_number = false;
+    for (const auto c : line.substr(open + 1, close - open - 1)) {
+        if (std::isdigit(static_cast<unsigned char>(c))) {
+            current = current * 10 + static_cast<std::uint64_t>(c - '0');
+            in_number = true;
+        } else if (in_number) {
+            numbers.push_back(current);
+            current = 0;
+            in_number = false;
+        }
+    }
+    if (in_number) numbers.push_back(current);
+    if (numbers.empty()) return false;
+
+    constexpr std::uint64_t mib = 1024ULL * 1024ULL;
+    info.found = true;
+    info.name = TrimCopy(line.substr(colon + 1, open - colon - 1));
+    info.memory_total = numbers[0] * mib;
+    info.memory_free = numbers.size() > 1 ? numbers[1] * mib : 0;
+    return !info.name.empty();
+}
+
+LlamaGpuLogInfo ReadLlamaGpuLogInfo() {
+    LlamaGpuLogInfo latest;
+    std::ifstream file("logs/llama-server.err.log");
+    if (!file.is_open()) return latest;
+    std::string line;
+    while (std::getline(file, line)) {
+        LlamaGpuLogInfo parsed;
+        if (ParseLlamaGpuLine(line, parsed)) latest = parsed;
+    }
+    return latest;
+}
+
 json HardwareJson() {
     auto& engine = inferdeck::core::LlamaEngine::Get();
     auto gpu_info = engine.GetGpuInfo();
+    auto gpu_log_info = ReadLlamaGpuLogInfo();
+    if (gpu_log_info.found) {
+        gpu_info.name = gpu_log_info.name;
+        gpu_info.memory_total = gpu_log_info.memory_total;
+        gpu_info.memory_free = gpu_log_info.memory_free;
+    }
     json hardware;
     hardware["available"] = true;
     hardware["provider"] = "windows";
