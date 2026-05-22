@@ -20,6 +20,7 @@
 #include "routes/Metrics.hpp"
 #include "routes/Documents.hpp"
 #include "routes/FineTuningJobs.hpp"
+#include "routes/OllamaCompat.hpp"
 
 static inferdeck::gateway::GatewayServer* g_server = nullptr;
 
@@ -167,6 +168,21 @@ int main(int argc, char* argv[]) {
     server.RegisterApiRoute("GET", "/v1/health",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleHealth(req, resp);
+        });
+
+    server.RegisterApiRoute("GET", "/api/version",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleOllamaVersion(req, resp);
+        });
+
+    server.RegisterApiRoute("GET", "/api/tags",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleOllamaTags(req, resp);
+        });
+
+    server.RegisterApiRoute("POST", "/api/chat",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleOllamaChat(req, resp);
         });
 
     // ============================================================

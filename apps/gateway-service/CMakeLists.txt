@@ -10,6 +10,7 @@ add_executable(gateway-service
     src/routes/Embeddings.cpp
     src/routes/Health.cpp
     src/routes/Metrics.cpp
+    src/routes/OllamaCompat.cpp
     src/routes/AudioTranscriptions.cpp
     src/routes/AudioSpeech.cpp
     src/routes/Images.cpp

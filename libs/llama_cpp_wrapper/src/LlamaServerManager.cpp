@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
+#include <vector>
 
 namespace inferdeck::core {
 
@@ -28,171 +30,63 @@ LlamaServerManager::~LlamaServerManager() {
 }
 
 std::string LlamaServerManager::GetExecutablePath() const {
-    return (std::filesystem::current_path() / "llama-server.exe").string();
+    return (std::filesystem::path(GetRuntimeDirectory()) / "llama-server.exe").string();
+}
+
+std::string LlamaServerManager::GetRuntimeDirectory() const {
+    return (std::filesystem::current_path() / "runtime" / "llama-b9276-vulkan").string();
+}
+
+std::string LlamaServerManager::GetCurrentModelPath() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return current_model_path_;
+}
+
+uint32_t LlamaServerManager::GetPid() const {
+    return pid_;
+}
+
+static bool ContainsForbiddenBackend(const std::filesystem::path& runtime_dir) {
+    static const std::vector<std::string> forbidden = {"ggml-hip.dll", "ggml-cuda.dll", "ggml-sycl.dll"};
+    for (const auto& name : forbidden) {
+        if (std::filesystem::exists(runtime_dir / name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ValidateVulkanRuntime(const std::filesystem::path& runtime_dir) {
+    return std::filesystem::exists(runtime_dir / "llama-server.exe") &&
+           std::filesystem::exists(runtime_dir / "ggml-vulkan.dll") &&
+           std::filesystem::exists(runtime_dir / "llama.dll") &&
+           std::filesystem::exists(runtime_dir / "llama-common.dll") &&
+           !ContainsForbiddenBackend(runtime_dir);
 }
 
 bool LlamaServerManager::DownloadIfNeeded() const {
     auto exe_path = GetExecutablePath();
-    if (std::filesystem::exists(exe_path)) {
-        Logger::Get().Info("llama-server.exe already exists at: " + exe_path);
+    auto runtime_dir = std::filesystem::path(GetRuntimeDirectory());
+    if (ValidateVulkanRuntime(runtime_dir)) {
+        Logger::Get().Info("llama.cpp runtime: b9276 Windows x64 Vulkan");
+        Logger::Get().Info("llama-server.exe: " + exe_path);
+        Logger::Get().Info("Vulkan backend DLL: " + (runtime_dir / "ggml-vulkan.dll").string());
         return true;
     }
-    Logger::Get().Info("llama-server.exe not found, downloading...");
-    return DownloadBinary();
+    Logger::Get().Error("Required b9276 Vulkan runtime is missing or polluted with HIP/CUDA/SYCL files: " + runtime_dir.string());
+    return false;
 }
 
 bool LlamaServerManager::DownloadBinary() const {
-#ifdef _WIN32
-    auto exe_path = GetExecutablePath();
-    auto exe_dir = std::filesystem::path(exe_path).parent_path();
-    std::filesystem::create_directories(exe_dir);
-
-    // Latest stable release: b9222 - AMD GPU uses HIP/Radeon build
-    const std::string url = "https://github.com/ggml-org/llama.cpp/releases/download/b9222/llama-b9222-bin-win-hip-radeon-x64.zip";
-    const std::string zip_path = (exe_dir / "llama-hip-radeon.zip").string();
-
-    Logger::Get().Info("Downloading llama.cpp AMD HIP/Radeon binary from GitHub releases...");
-
-    // Use WinHTTP to download
-    HINTERNET hSession = WinHttpOpen(L"InferDeck/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) {
-        Logger::Get().Error("WinHttpOpen failed");
-        return false;
-    }
-
-    HINTERNET hConnect = WinHttpConnect(hSession, L"github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) {
-        WinHttpCloseHandle(hSession);
-        Logger::Get().Error("WinHttpConnect failed");
-        return false;
-    }
-
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
-        L"/ggml-org/llama.cpp/releases/download/b9222/llama-b9222-bin-win-hip-radeon-x64.zip",
-        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!hRequest) {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        Logger::Get().Error("WinHttpOpenRequest failed");
-        return false;
-    }
-
-    BOOL bResults = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    if (!bResults) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        Logger::Get().Error("WinHttpSendRequest failed");
-        return false;
-    }
-
-    bResults = WinHttpReceiveResponse(hRequest, nullptr);
-    if (!bResults) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        Logger::Get().Error("WinHttpReceiveResponse failed");
-        return false;
-    }
-
-    DWORD statusCode = 0;
-    DWORD statusCodeSize = sizeof(statusCode);
-    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX);
-
-    if (statusCode != 200) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        Logger::Get().Error("Download failed with HTTP status: " + std::to_string(statusCode));
-        return false;
-    }
-
-    // Download in chunks
-    std::ofstream out(zip_path, std::ios::binary);
-    if (!out) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        Logger::Get().Error("Cannot open file for writing: " + zip_path);
-        return false;
-    }
-
-    DWORD bytesAvailable = 0;
-    DWORD bytesRead = 0;
-    char buffer[65536];
-    int64_t totalDownloaded = 0;
-
-    while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
-        if (bytesAvailable > sizeof(buffer)) bytesAvailable = sizeof(buffer);
-        if (WinHttpReadData(hRequest, buffer, bytesAvailable, &bytesRead)) {
-            out.write(buffer, bytesRead);
-            totalDownloaded += bytesRead;
-            if (totalDownloaded % (10 * 1024 * 1024) == 0) {
-                Logger::Get().Info("Downloaded: " + std::to_string(totalDownloaded / (1024 * 1024)) + " MB");
-            }
-        } else {
-            break;
-        }
-    }
-    out.close();
-
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-
-    Logger::Get().Info("Download complete: " + std::to_string(totalDownloaded / (1024 * 1024)) + " MB");
-
-    // Extract zip using PowerShell
-    std::wstring extract_cmd = L"powershell -Command \"Expand-Archive -Path '" + std::filesystem::path(zip_path).wstring() + L"' -DestinationPath '" + exe_dir.wstring() + L"' -Force\"";
-    STARTUPINFOW si = {};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    if (!CreateProcessW(nullptr, &extract_cmd[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-        Logger::Get().Error("Failed to extract zip file");
-        return false;
-    }
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-
-    // Clean up zip
-    std::filesystem::remove(zip_path);
-
-    // Check if llama-server.exe exists (might be in a subdirectory)
-    auto server_exe = std::filesystem::path(exe_path);
-    if (!std::filesystem::exists(server_exe)) {
-        // Search for it in subdirectories
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(exe_dir)) {
-            if (entry.is_regular_file() && entry.path().filename() == "llama-server.exe") {
-                std::filesystem::copy_file(entry.path(), server_exe, std::filesystem::copy_options::overwrite_existing);
-                break;
-            }
-        }
-    }
-
-    if (!std::filesystem::exists(server_exe)) {
-        Logger::Get().Error("llama-server.exe not found after extraction");
-        return false;
-    }
-
-    Logger::Get().Info("llama-server.exe extracted to: " + exe_path);
-    return true;
-#else
-    Logger::Get().Error("Download not implemented on this platform");
+    Logger::Get().Error("Automatic llama.cpp downloads are disabled. Install b9276 Windows x64 Vulkan under runtime/llama-b9276-vulkan.");
     return false;
-#endif
 }
 
 bool LlamaServerManager::Start(const std::string& model_path, int gpu_layers, int context_size, int port) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (running_.load()) {
-        Logger::Get().Warn("llama-server already running");
+    if (running_.load() && std::filesystem::equivalent(std::filesystem::path(current_model_path_), std::filesystem::path(model_path))) {
+        Logger::Get().Info("llama-server already running requested model; reusing PID " + std::to_string(pid_));
         return true;
     }
 
@@ -214,6 +108,7 @@ bool LlamaServerManager::Start(const std::string& model_path, int gpu_layers, in
     }
 
     running_.store(true);
+    current_model_path_ = model_path;
     Logger::Get().Info("llama-server started on port " + std::to_string(port));
     return true;
 }
@@ -225,7 +120,7 @@ bool LlamaServerManager::LaunchProcess(const std::string& model_path, int gpu_la
     std::string cmd = "\"" + exe_path + "\"";
     cmd += " --model \"" + model_path + "\"";
     cmd += " --ctx-size " + std::to_string(context_size);
-    cmd += " --gpu-layers " + std::to_string(gpu_layers);
+    cmd += " --gpu-layers " + (gpu_layers < 0 ? std::string("all") : std::to_string(gpu_layers));
     cmd += " --host 127.0.0.1";
     cmd += " --port " + std::to_string(port);
     cmd += " --n-predict -1";
@@ -236,12 +131,14 @@ bool LlamaServerManager::LaunchProcess(const std::string& model_path, int gpu_la
     cmd += " --split-mode none";
     cmd += " --no-mmap";
     cmd += " --cache-ram 0";
-    cmd += " --fit on";
+    cmd += " --fit";
     cmd += " --fit-target 512";
     cmd += " --parallel 1";
     cmd += " --kv-unified";
 
-    Logger::Get().Info("Launching: " + cmd);
+    Logger::Get().Info("Launching llama-server command: " + cmd);
+    Logger::Get().Info("Selected model path: " + model_path);
+    Logger::Get().Info("Resolved Vulkan runtime directory: " + GetRuntimeDirectory());
 
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
@@ -271,9 +168,10 @@ bool LlamaServerManager::LaunchProcess(const std::string& model_path, int gpu_la
     }
 
     process_handle_ = pi.hProcess;
+    pid_ = pi.dwProcessId;
     CloseHandle(pi.hThread);
 
-    Logger::Get().Info("llama-server process started, PID: " + std::to_string(pi.dwProcessId));
+    Logger::Get().Info("llama-server process started, PID: " + std::to_string(pid_));
     return true;
 #else
     return false;
@@ -301,6 +199,7 @@ bool LlamaServerManager::KillProcess() {
         }
         CloseHandle(process_handle_);
         process_handle_ = nullptr;
+        pid_ = 0;
         return true;
     }
 #endif
@@ -369,6 +268,19 @@ bool LlamaServerManager::Restart(const std::string& new_model_path, int gpu_laye
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (running_.load()) {
+        if (!current_model_path_.empty()) {
+            try {
+                if (std::filesystem::equivalent(std::filesystem::path(current_model_path_), std::filesystem::path(new_model_path))) {
+                    Logger::Get().Info("Requested model already loaded; skipping restart for: " + new_model_path);
+                    return true;
+                }
+            } catch (...) {
+                if (current_model_path_ == new_model_path) {
+                    Logger::Get().Info("Requested model already loaded; skipping restart for: " + new_model_path);
+                    return true;
+                }
+            }
+        }
         KillProcess();
         running_.store(false);
     }
@@ -389,6 +301,7 @@ bool LlamaServerManager::Restart(const std::string& new_model_path, int gpu_laye
     }
 
     running_.store(true);
+    current_model_path_ = new_model_path;
     Logger::Get().Info("llama-server started on port " + std::to_string(port_));
     return true;
 }

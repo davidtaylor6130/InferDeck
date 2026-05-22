@@ -30,11 +30,17 @@ add_executable(inferdeck-tests
    test_vector_store.cpp
 )
 
-add_subdirectory(benchmarks)
+option(INFERDECK_BUILD_BENCHMARKS "Build benchmark binaries" OFF)
+if(INFERDECK_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()
 
 target_include_directories(inferdeck-tests PRIVATE
+    .
     ../core/include
     ../llama_cpp_wrapper/include
+    ../backends/include
+    ../vector_store/include
     ../../apps/gateway-service/src
     ../../apps/gateway-service/src/routes
 )
@@ -44,22 +50,53 @@ target_link_libraries(inferdeck-tests PRIVATE
     llama_cpp_wrapper
     Catch2::Catch2WithMain
     nlohmann_json::nlohmann_json
-    cpp-httplib::httplib
+    httplib::httplib
     spdlog::spdlog
     fmt::fmt
 )
 
-target_compile_options(inferdeck-tests PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-    --coverage
-)
+if(MSVC)
+    target_compile_options(inferdeck-tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(inferdeck-tests PRIVATE -Wall -Wextra -Wpedantic --coverage)
+endif()
 
 # Add test discovery
 include(CTest)
-include(Catch2)
+include(Catch)
 catch_discover_tests(inferdeck-tests)
+
+add_executable(inferdeck-compat-tests
+    compat_orchestration_tests.cpp
+    ../../apps/gateway-service/src/routes/ChatCompletions.cpp
+    ../../apps/gateway-service/src/routes/OllamaCompat.cpp
+    ../../apps/gateway-service/src/config/ConfigLoader.cpp
+)
+
+target_include_directories(inferdeck-compat-tests PRIVATE
+    .
+    ../core/include
+    ../llama_cpp_wrapper/include
+    ../../apps/gateway-service/src
+)
+
+target_link_libraries(inferdeck-compat-tests PRIVATE
+    core
+    llama_cpp_wrapper
+    Catch2::Catch2WithMain
+    nlohmann_json::nlohmann_json
+    httplib::httplib
+    spdlog::spdlog
+    fmt::fmt
+)
+
+if(MSVC)
+    target_compile_options(inferdeck-compat-tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(inferdeck-compat-tests PRIVATE -Wall -Wextra -Wpedantic --coverage)
+endif()
+
+catch_discover_tests(inferdeck-compat-tests)
 
 # Coverage target
 add_custom_target(coverage

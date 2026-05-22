@@ -4,6 +4,7 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <cstdint>
 
 namespace inferdeck::core {
 
@@ -19,7 +20,9 @@ public:
     bool Restart(const std::string& new_model_path, int gpu_layers = -1, int context_size = 100000);
 
     std::string GetExecutablePath() const;
-    bool DownloadIfNeeded() const;
+    std::string GetRuntimeDirectory() const;
+    std::string GetCurrentModelPath() const;
+    uint32_t GetPid() const;
 
 private:
     LlamaServerManager();
@@ -27,6 +30,7 @@ private:
     LlamaServerManager(const LlamaServerManager&) = delete;
     LlamaServerManager& operator=(const LlamaServerManager&) = delete;
 
+    bool DownloadIfNeeded() const;
     bool DownloadBinary() const;
     bool LaunchProcess(const std::string& model_path, int gpu_layers, int context_size, int port);
     bool KillProcess();
@@ -34,6 +38,8 @@ private:
     void* process_handle_ = nullptr;
     std::atomic<bool> running_{false};
     int port_ = 18080;
+    uint32_t pid_ = 0;
+    std::string current_model_path_;
     mutable std::mutex mutex_;
 };
 

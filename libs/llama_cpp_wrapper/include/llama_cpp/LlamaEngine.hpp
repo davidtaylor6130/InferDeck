@@ -85,6 +85,8 @@ struct GpuInfo {
 struct HttpStreamResult {
     std::string content_text;
     std::string reasoning_text;
+    int http_status = 0;
+    std::string error_message;
 };
 
 using TokenCallback = std::function<void(const std::string& token, TokenType type, int cumulative_tokens)>;

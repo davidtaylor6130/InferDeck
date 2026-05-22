@@ -9,8 +9,8 @@ server:
     key_file: ""
 
 model:
-  path: "C:/InferDeck/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
-  directory: "C:/InferDeck/models"
+  path: "C:/Users/david/Documents/00_Models/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+  directory: "C:/Users/david/Documents/00_Models"
   precision: "auto"
   n_gpu_layers: -1
   context_size: 100000

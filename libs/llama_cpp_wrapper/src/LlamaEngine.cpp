@@ -207,7 +207,11 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
     int port = server_mgr.GetPort();
 
     HINTERNET hSession = WinHttpOpen(L"InferDeck/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return {};
+    if (!hSession) {
+        HttpStreamResult failed;
+        failed.error_message = "WinHttpOpen failed";
+        return failed;
+    }
 
     std::wstring host = L"127.0.0.1";
     std::wstring path_w(path.begin(), path.end());
@@ -215,7 +219,9 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
     HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), static_cast<INTERNET_PORT>(port), 0);
     if (!hConnect) {
         WinHttpCloseHandle(hSession);
-        return {};
+        HttpStreamResult failed;
+        failed.error_message = "WinHttpConnect failed";
+        return failed;
     }
 
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", path_w.c_str(),
@@ -223,7 +229,9 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
     if (!hRequest) {
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
-        return {};
+        HttpStreamResult failed;
+        failed.error_message = "WinHttpOpenRequest failed";
+        return failed;
     }
 
     // Send raw UTF-8 bytes
@@ -233,23 +241,34 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
         static_cast<DWORD>(json_body.size()), 0);
 
     if (!result) {
-        Logger::Get().Error("WinHttpSendRequest failed: " + std::to_string(GetLastError()));
+        DWORD error = GetLastError();
+        Logger::Get().Error("WinHttpSendRequest failed: " + std::to_string(error));
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
-        return {};
+        HttpStreamResult failed;
+        failed.error_message = "WinHttpSendRequest failed: " + std::to_string(error);
+        return failed;
     }
 
     result = WinHttpReceiveResponse(hRequest, nullptr);
     if (!result) {
-        Logger::Get().Error("WinHttpReceiveResponse failed: " + std::to_string(GetLastError()));
+        DWORD error = GetLastError();
+        Logger::Get().Error("WinHttpReceiveResponse failed: " + std::to_string(error));
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
-        return {};
+        HttpStreamResult failed;
+        failed.error_message = "WinHttpReceiveResponse failed: " + std::to_string(error);
+        return failed;
     }
 
     HttpStreamResult stream_result;
+    DWORD statusCode = 0;
+    DWORD statusCodeSize = sizeof(statusCode);
+    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX);
+    stream_result.http_status = static_cast<int>(statusCode);
     DWORD bytesAvailable = 0;
     DWORD bytesRead = 0;
     char buffer[65536];
@@ -480,6 +499,12 @@ InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messa
     float duration = std::chrono::duration<float, std::milli>(end - start).count();
 
     InferenceResult result;
+    result.http_status = stream_result.http_status;
+    if (!stream_result.error_message.empty() || stream_result.http_status == 0 || stream_result.http_status >= 400) {
+        result.error_message = !stream_result.error_message.empty()
+            ? stream_result.error_message
+            : "llama-server stream returned HTTP " + std::to_string(stream_result.http_status);
+    }
     result.text = stream_result.content_text;
     result.reasoning_text = stream_result.reasoning_text;
     result.duration_ms = duration;
@@ -489,15 +514,23 @@ InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messa
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stats_.total_requests++;
-        stats_.successful_requests++;
-        stats_.avg_latency_ms = (stats_.avg_latency_ms * (stats_.successful_requests - 1) + duration) / stats_.successful_requests;
+        if (result.HasError()) {
+            stats_.failed_requests++;
+        } else {
+            stats_.successful_requests++;
+            stats_.avg_latency_ms = (stats_.avg_latency_ms * (stats_.successful_requests - 1) + duration) / stats_.successful_requests;
+            stats_.tokens_generated += result.completion_tokens;
+        }
         stats_.max_latency_ms = std::max(stats_.max_latency_ms, duration);
         stats_.min_latency_ms = std::min(stats_.min_latency_ms, duration);
-        stats_.tokens_generated += result.completion_tokens;
     }
 
-    Logger::Get().Info("Stream inference complete: " + std::to_string(result.completion_tokens) + " tokens in " +
-                       std::to_string(duration) + "ms");
+    if (result.HasError()) {
+        Logger::Get().Error("Stream inference failed: " + result.error_message);
+    } else {
+        Logger::Get().Info("Stream inference complete: " + std::to_string(result.completion_tokens) + " tokens in " +
+                           std::to_string(duration) + "ms");
+    }
 
     return result;
 }
@@ -527,7 +560,7 @@ void LlamaEngine::Shutdown() {
 
 GpuInfo LlamaEngine::GetGpuInfo() const {
     GpuInfo info;
-    info.name = "AMD GPU (HIP/Radeon)";
+    info.name = "AMD GPU (Vulkan)";
     info.is_discrete = true;
     return info;
 }

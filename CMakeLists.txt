@@ -23,6 +23,7 @@ find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 if(INFERDECK_BUILD_TESTS)
     find_package(Catch2 REQUIRED)
+    find_package(httplib CONFIG REQUIRED)
 endif()
 
 # --- llama.cpp: FetchContent for headers only ---
@@ -32,7 +33,7 @@ include(FetchContent)
 FetchContent_Declare(
     llama_cpp
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
-    GIT_TAG        b9222
+    GIT_TAG        b9276
     SOURCE_SUBDIR  OFF
 )
 FetchContent_GetProperties(llama_cpp)
