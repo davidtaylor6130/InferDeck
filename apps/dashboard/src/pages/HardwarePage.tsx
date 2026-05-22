@@ -4,13 +4,14 @@ import { EmptyState } from '../components/EmptyState';
 import { HardwareMetricCard } from '../components/HardwareMetricCard';
 import { ResourceLockCard } from '../components/ResourceLockCard';
 import { SectionCard } from '../components/SectionCard';
-import { getQueueCounts } from '../utils';
+import { formatBytes, getQueueCounts } from '../utils';
 
 export const HardwarePage: React.FC<PageProps> = ({ state }) => {
   const queue = getQueueCounts(state.statusData, state.jobsList);
   const telemetry = state.statusData?.hardware || state.statusData?.telemetry;
   const gpu = telemetry?.gpu;
-  const vram = gpu?.memoryUsed != null && gpu?.memoryTotal != null ? `${(gpu.memoryUsed / 1024 / 1024 / 1024).toFixed(1)} / ${(gpu.memoryTotal / 1024 / 1024 / 1024).toFixed(1)} GB` : 'N/A';
+  const vram = gpu?.memoryUsed != null && gpu?.memoryTotal != null ? `${formatBytes(gpu.memoryUsed)} / ${formatBytes(gpu.memoryTotal)}` : 'N/A';
+  const diskPath = telemetry?.disk?.path || state.statusData?.storage?.dataDirectory || 'Data volume';
 
   return (
     <div className="space-y-5">
@@ -18,12 +19,13 @@ export const HardwarePage: React.FC<PageProps> = ({ state }) => {
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <HardwareMetricCard label="GPU utilization" value={gpu?.utilization != null ? `${gpu.utilization}%` : 'N/A'} percent={gpu?.utilization ?? 0} tone="violet" />
         <HardwareMetricCard label="VRAM used/free" value={vram} percent={gpu?.memoryPercent ?? 0} tone="mint" />
-        <HardwareMetricCard label="Temperature" value={gpu?.temperature != null ? `${gpu.temperature}°C` : 'N/A'} detail={gpu?.name || 'Radeon AI PRO R9700'} percent={gpu?.temperature ?? 0} tone="amber" />
+        <HardwareMetricCard label="GPU device" value={gpu?.name || 'AMD GPU'} detail={gpu?.backend || 'llama.cpp Vulkan'} tone="cyan" />
+        <HardwareMetricCard label="Driver/runtime" value={gpu?.driverVersion || 'Vulkan'} detail={gpu?.backend || 'llama.cpp'} tone="violet" />
+        <HardwareMetricCard label="Temperature" value={gpu?.temperature != null ? `${gpu.temperature} C` : 'N/A'} detail="Sensor telemetry" percent={gpu?.temperature ?? 0} tone="amber" />
         <HardwareMetricCard label="Power" value={gpu?.power != null ? `${gpu.power} W` : 'N/A'} detail="Board power" percent={gpu?.power ? Math.min(gpu.power / 3, 100) : 0} tone="cyan" />
-        <HardwareMetricCard label="Fan speed" value={gpu?.fanSpeed != null ? `${gpu.fanSpeed}%` : 'N/A'} percent={gpu?.fanSpeed ?? 0} tone="cyan" />
         <HardwareMetricCard label="CPU usage" value={telemetry?.cpu?.utilization != null ? `${telemetry.cpu.utilization}%` : 'N/A'} percent={telemetry?.cpu?.utilization ?? 0} tone="violet" />
         <HardwareMetricCard label="RAM usage" value={telemetry?.memory?.percentage != null ? `${telemetry.memory.percentage}%` : 'N/A'} percent={telemetry?.memory?.percentage ?? 0} tone="mint" />
-        <HardwareMetricCard label="Disk free" value={telemetry?.disk?.free != null ? `${telemetry.disk.free}` : 'N/A'} detail="Data volume" percent={telemetry?.disk?.percentage ?? 0} tone="mint" />
+        <HardwareMetricCard label="Disk free" value={formatBytes(telemetry?.disk?.free)} detail={diskPath} percent={telemetry?.disk?.percentage ?? 0} tone="mint" />
       </div>
       <SectionCard title="Resource Locks">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
