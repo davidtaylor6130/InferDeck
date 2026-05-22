@@ -135,6 +135,7 @@ bool LlamaServerManager::LaunchProcess(const std::string& model_path, int gpu_la
     cmd += " --fit-target 512";
     cmd += " --parallel 1";
     cmd += " --kv-unified";
+    cmd += " --timeout 1800";
     cmd += " --reasoning-format none";
 
     Logger::Get().Info("Launching llama-server command: " + cmd);

@@ -226,3 +226,69 @@ TEST_CASE("Ollama version route exposes InferDeck Vulkan identity", "[compat][ol
     auto body = json::parse(resp.body);
     REQUIRE(body["version"].get<std::string>().find("b9276-vulkan") != std::string::npos);
 }
+
+TEST_CASE("Ollama chat translation bounds Open WebUI generations by default", "[compat][ollama]") {
+    json ollama = {
+        {"model", "qwen3.6-35b-a3b:latest"},
+        {"stream", false},
+        {"messages", json::array({{{"role", "user"}, {"content", "write a longer answer"}}})}
+    };
+
+    auto openai = inferdeck::gateway::routes::BuildOpenAiChatBodyFromOllama(ollama);
+
+    REQUIRE(openai["model"] == "qwen3.6-35b-a3b:latest");
+    REQUIRE(openai["stream"] == false);
+    REQUIRE(openai["max_tokens"] == 4096);
+}
+
+TEST_CASE("Ollama chat translation preserves explicit num_predict", "[compat][ollama]") {
+    json ollama = {
+        {"model", "qwen3.6-35b-a3b:latest"},
+        {"stream", true},
+        {"messages", json::array({{{"role", "user"}, {"content", "write a longer answer"}}})},
+        {"options", {{"num_predict", 8192}, {"temperature", 0.2}, {"top_p", 0.95}}}
+    };
+
+    auto openai = inferdeck::gateway::routes::BuildOpenAiChatBodyFromOllama(ollama);
+
+    REQUIRE(openai["max_tokens"] == 8192);
+    REQUIRE(openai["temperature"] == 0.2);
+    REQUIRE(openai["top_p"] == 0.95);
+}
+
+TEST_CASE("Ollama chat stream translation emits newline JSON with thinking content and done", "[compat][ollama][opencode]") {
+    std::string openai_sse;
+    openai_sse += R"(data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null,"index":0}],"model":"qwen3.6-35b-a3b","object":"chat.completion.chunk"})";
+    openai_sse += "\n\n";
+    openai_sse += R"(data: {"choices":[{"delta":{"reasoning_content":"plan nodes"},"finish_reason":null,"index":0}],"model":"qwen3.6-35b-a3b","object":"chat.completion.chunk"})";
+    openai_sse += "\n\n";
+    openai_sse += R"(data: {"choices":[{"delta":{"content":"Here is the class."},"finish_reason":null,"index":0}],"model":"qwen3.6-35b-a3b","object":"chat.completion.chunk"})";
+    openai_sse += "\n\n";
+    openai_sse += R"(data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"model":"qwen3.6-35b-a3b","object":"chat.completion.chunk"})";
+    openai_sse += "\n\n";
+    openai_sse += "data: [DONE]\n\n";
+
+    auto ollama = inferdeck::gateway::routes::BuildOllamaChatStreamFromOpenAiSse(openai_sse, "qwen3.6-35b-a3b:latest");
+
+    REQUIRE(ollama.find("\"thinking\":\"plan nodes\"") != std::string::npos);
+    REQUIRE(ollama.find("\"content\":\"Here is the class.\"") != std::string::npos);
+    REQUIRE(ollama.find("\"done_reason\":\"stop\"") != std::string::npos);
+    REQUIRE(ollama.find("\"done\":true") != std::string::npos);
+    REQUIRE(ollama.find("data: ") == std::string::npos);
+}
+
+TEST_CASE("Ollama chat stream translation preserves tool calls", "[compat][ollama][opencode]") {
+    std::string openai_sse;
+    openai_sse += R"(data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"write","arguments":"{\"path\":\"index.html\"}"},"id":"call_1","index":0,"type":"function"}]},"finish_reason":null,"index":0}],"model":"qwen3.6-35b-a3b","object":"chat.completion.chunk"})";
+    openai_sse += "\n\n";
+    openai_sse += R"(data: {"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"model":"qwen3.6-35b-a3b","object":"chat.completion.chunk"})";
+    openai_sse += "\n\n";
+    openai_sse += "data: [DONE]\n\n";
+
+    auto ollama = inferdeck::gateway::routes::BuildOllamaChatStreamFromOpenAiSse(openai_sse, "qwen3.6-35b-a3b:latest");
+
+    REQUIRE(ollama.find("\"tool_calls\"") != std::string::npos);
+    REQUIRE(ollama.find("\"finish_reason\"") == std::string::npos);
+    REQUIRE(ollama.find("\"done_reason\":\"tool_calls\"") != std::string::npos);
+    REQUIRE(ollama.find("\"done\":true") != std::string::npos);
+}

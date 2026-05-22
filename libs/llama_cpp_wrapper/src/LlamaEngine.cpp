@@ -120,10 +120,16 @@ struct HttpResult {
     std::string body;
 };
 
+static constexpr DWORD kBackendResolveTimeoutMs = 30000;
+static constexpr DWORD kBackendConnectTimeoutMs = 30000;
+static constexpr DWORD kBackendSendTimeoutMs = 300000;
+static constexpr DWORD kBackendReceiveTimeoutMs = 1800000;
+
 static HttpResult HttpPost(const std::string& path, const std::string& json_body, int port) {
 #ifdef _WIN32
     HINTERNET hSession = WinHttpOpen(L"InferDeck/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return {};
+    WinHttpSetTimeouts(hSession, kBackendResolveTimeoutMs, kBackendConnectTimeoutMs, kBackendSendTimeoutMs, kBackendReceiveTimeoutMs);
 
     std::wstring host = L"127.0.0.1";
     std::wstring path_w(path.begin(), path.end());
@@ -141,10 +147,11 @@ static HttpResult HttpPost(const std::string& path, const std::string& json_body
         WinHttpCloseHandle(hSession);
         return {};
     }
+    WinHttpSetTimeouts(hRequest, kBackendResolveTimeoutMs, kBackendConnectTimeoutMs, kBackendSendTimeoutMs, kBackendReceiveTimeoutMs);
 
     // Send raw UTF-8 bytes - NOT wide strings
     std::wstring headers = L"Content-Type: application/json\r\n";
-    BOOL result = WinHttpSendRequest(hRequest, headers.c_str(), -1,
+    BOOL result = WinHttpSendRequest(hRequest, headers.c_str(), static_cast<DWORD>(-1L),
         (LPVOID)json_body.c_str(), static_cast<DWORD>(json_body.size()),
         static_cast<DWORD>(json_body.size()), 0);
 
@@ -212,6 +219,7 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
         failed.error_message = "WinHttpOpen failed";
         return failed;
     }
+    WinHttpSetTimeouts(hSession, kBackendResolveTimeoutMs, kBackendConnectTimeoutMs, kBackendSendTimeoutMs, kBackendReceiveTimeoutMs);
 
     std::wstring host = L"127.0.0.1";
     std::wstring path_w(path.begin(), path.end());
@@ -233,10 +241,11 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
         failed.error_message = "WinHttpOpenRequest failed";
         return failed;
     }
+    WinHttpSetTimeouts(hRequest, kBackendResolveTimeoutMs, kBackendConnectTimeoutMs, kBackendSendTimeoutMs, kBackendReceiveTimeoutMs);
 
     // Send raw UTF-8 bytes
     std::wstring headers = L"Content-Type: application/json\r\n";
-    BOOL result = WinHttpSendRequest(hRequest, headers.c_str(), -1,
+    BOOL result = WinHttpSendRequest(hRequest, headers.c_str(), static_cast<DWORD>(-1L),
         (LPVOID)json_body.c_str(), static_cast<DWORD>(json_body.size()),
         static_cast<DWORD>(json_body.size()), 0);
 
