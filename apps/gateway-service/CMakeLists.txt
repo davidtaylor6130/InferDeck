@@ -4,6 +4,7 @@ project(gateway-service LANGUAGES CXX)
 add_executable(gateway-service
     src/main.cpp
     src/Server.cpp
+    src/RuntimeActivity.cpp
     src/routes/ChatCompletions.cpp
     src/routes/Completions.cpp
     src/routes/Models.cpp

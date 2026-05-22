@@ -13,6 +13,8 @@ TEST_CASE("Dashboard status response exposes admin telemetry schema", "[dashboar
             {"memory", {{"percentage", 42}}}
         }},
         {"metrics", {{"total_requests", 1}, {"successful_requests", 1}, {"failed_requests", 0}}},
+        {"summary", {{"jobsToday", 1}, {"totalTokens", 42}, {"avgLatencyMs", 120}}},
+        {"storage", {{"dataDirectory", "data"}, {"logsDirectory", "logs"}, {"freeSpace", 1000}, {"logSize", 10}, {"storage", "filesystem + SQLite WAL"}}},
         {"services", nlohmann::json::array()}
     };
 
@@ -22,6 +24,10 @@ TEST_CASE("Dashboard status response exposes admin telemetry schema", "[dashboar
     REQUIRE(response["hardware"].contains("cpu"));
     REQUIRE(response["hardware"].contains("memory"));
     REQUIRE(response.contains("metrics"));
+    REQUIRE(response.contains("summary"));
+    REQUIRE(response["summary"].contains("totalTokens"));
+    REQUIRE(response.contains("storage"));
+    REQUIRE(response["storage"].contains("freeSpace"));
     REQUIRE(response.contains("queue"));
     REQUIRE(response.contains("services"));
 }
@@ -54,4 +60,29 @@ TEST_CASE("Dashboard model inventory includes aliases and loaded state", "[dashb
     REQUIRE(response["models"][0]["aliases"].is_array());
     REQUIRE(response["models"][0]["loaded"].is_boolean());
     REQUIRE(response["models"][0].contains("path"));
+}
+
+TEST_CASE("Dashboard jobs expose queue history and token usage", "[dashboard][jobs]") {
+    nlohmann::json response = {
+        {"jobs", nlohmann::json::array({
+            {
+                {"id", "job-1"},
+                {"type", "chat.completion"},
+                {"status", "succeeded"},
+                {"priority", 50},
+                {"client", "OpenAI compatible"},
+                {"resourceClass", "gpu_llm"},
+                {"createdAt", "2026-05-22T10:00:00Z"},
+                {"promptTokens", 12},
+                {"completionTokens", 8},
+                {"totalTokens", 20},
+                {"durationMs", 300.0}
+            }
+        })}
+    };
+
+    REQUIRE(response["jobs"].is_array());
+    REQUIRE(response["jobs"][0]["status"] == "succeeded");
+    REQUIRE(response["jobs"][0]["totalTokens"] == 20);
+    REQUIRE(response["jobs"][0]["resourceClass"] == "gpu_llm");
 }

@@ -40,6 +40,8 @@ export const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, onClose
           <Info label="Resource" value={job.resourceClass || job.resource_class || 'gpu_llm'} mono />
           <Info label="Created" value={formatDate(job.createdAt ?? job.created_at)} />
           <Info label="Started" value={formatDate(job.startedAt ?? job.started_at)} />
+          <Info label="Tokens" value={job.totalTokens ?? 0} />
+          <Info label="Duration" value={job.durationMs ? `${Math.round(job.durationMs)} ms` : 'N/A'} />
         </div>
 
         <div className="mt-5 flex flex-wrap gap-2">

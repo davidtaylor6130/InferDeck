@@ -8,7 +8,7 @@ import { SectionCard } from '../components/SectionCard';
 import { StatusBadge } from '../components/StatusBadge';
 import { CommandButton } from '../components/CommandButton';
 import { CopyButton } from '../components/CopyButton';
-import { DASHBOARD_URL, GATEWAY_API, LLAMA_BACKEND, OPENAI_API, formatUptime, getQueueCounts, isOnlineStatus, modeLabel, timeAgo } from '../utils';
+import { DASHBOARD_URL, GATEWAY_API, LLAMA_BACKEND, OPENAI_API, formatBytes, formatUptime, getQueueCounts, isOnlineStatus, modeLabel, timeAgo } from '../utils';
 
 export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const queue = getQueueCounts(state.statusData, state.jobsList);
@@ -17,10 +17,13 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const degradedReason = state.errors.health || state.errors.status || state.errors.services || 'Gateway reachable, telemetry partially unavailable';
   const activeJob = state.jobsList.find(job => job.status === 'running' || job.status === 'leased') || null;
   const onlineServices = state.servicesList.filter(service => isOnlineStatus(service.status)).length;
-  const activeModel = state.modelsList[0]?.name || 'N/A';
+  const activeModel = state.runningModels[0]?.name || state.modelsList.find(model => model.loaded)?.name || state.modelsList[0]?.name || 'N/A';
   const services = normalizeServices(state.servicesList, state.connected);
   const telemetry = state.statusData?.hardware || state.statusData?.telemetry;
   const samples = Array.isArray(state.statusData?.metricsSamples) ? state.statusData.metricsSamples : [];
+  const summary = state.statusData?.summary || {};
+  const metrics = state.statusData?.metrics || {};
+  const storage = state.statusData?.storage || {};
   const gpu = telemetry?.gpu;
   const vramLabel = gpu?.memoryUsed != null && gpu?.memoryTotal != null ? `${(gpu.memoryUsed / 1024 / 1024 / 1024).toFixed(1)} / ${(gpu.memoryTotal / 1024 / 1024 / 1024).toFixed(1)} GB` : 'N/A';
 
@@ -72,9 +75,16 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
           { label: 'Last Check', value: timeAgo(state.lastUpdatedAt) },
         ]} />
         <MetricCard title="Jobs Today" icon="○" lines={[
-          { label: 'Succeeded', value: state.jobsList.filter(j => j.status === 'succeeded').length },
-          { label: 'Failed', value: queue.failed, tone: queue.failed ? 'rose' : 'muted' },
-          { label: 'Avg. Wait', value: state.jobsList.length ? 'N/A' : 'No samples' },
+          { label: 'Total', value: summary.jobsToday ?? state.jobsList.length },
+          { label: 'Succeeded', value: summary.succeededToday ?? state.jobsList.filter(j => j.status === 'succeeded').length },
+          { label: 'Failed', value: summary.failedToday ?? queue.failed, tone: (summary.failedToday ?? queue.failed) ? 'rose' : 'muted' },
+          { label: 'Avg. Latency', value: summary.avgLatencyMs ? `${Math.round(summary.avgLatencyMs)} ms` : 'No samples' },
+        ]} />
+        <MetricCard title="Tokens" icon="T" lines={[
+          { label: 'Total', value: formatTokenCount(summary.totalTokens ?? metrics.total_tokens) },
+          { label: 'Prompt', value: formatTokenCount(summary.promptTokens ?? metrics.tokens_processed) },
+          { label: 'Completion', value: formatTokenCount(summary.completionTokens ?? metrics.tokens_generated) },
+          { label: 'Requests', value: metrics.total_requests ?? 0 },
         ]} />
         <MetricCard title="Network" icon="⌁" lines={[
           { label: 'Dashboard', value: <NetworkValue value={DASHBOARD_URL} onCopied={actions.toast} /> },
@@ -142,14 +152,14 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
       </div>
 
       <div className="grid gap-0 overflow-hidden rounded-xl border border-border-slate bg-panel-slate text-sm md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8">
-        <Strip label="Data Directory" value="D:\\AI-Gateway\\data" mono />
-        <Strip label="Free Space" value="1.2 TB" />
-        <Strip label="Logs Directory" value="D:\\AI-Gateway\\logs" mono />
-        <Strip label="Log Size" value="2.4 GB" />
-        <Strip label="DB Size" value="36 MB" />
-        <Strip label="Storage" value="SQLite WAL" />
-        <Strip label="Hardware" value="Radeon AI PRO R9700" mono />
-        <Strip label="Driver" value="24.4.1" />
+        <Strip label="Data Directory" value={storage.dataDirectory || 'N/A'} mono />
+        <Strip label="Free Space" value={formatBytes(storage.freeSpace)} />
+        <Strip label="Logs Directory" value={storage.logsDirectory || 'N/A'} mono />
+        <Strip label="Log Size" value={formatBytes(storage.logSize)} />
+        <Strip label="DB/Data Size" value={formatBytes(storage.dbSize)} />
+        <Strip label="Storage" value={storage.storage || 'filesystem'} />
+        <Strip label="Hardware" value={gpu?.name || 'AMD GPU (Vulkan)'} mono />
+        <Strip label="Driver" value={gpu?.driverVersion || gpu?.backend || 'Vulkan'} />
       </div>
     </div>
   );
@@ -173,6 +183,13 @@ const Info: React.FC<{ label: string; value: string; mono?: boolean; copy?: bool
 );
 
 const Strip: React.FC<{ label: string; value: string; mono?: boolean }> = ({ label, value, mono }) => <div className="min-w-0 border-b border-r border-border-slate p-3"><p className="truncate text-xs text-text-muted">{label}</p><p className={`mt-1 truncate text-sm text-text-primary ${mono ? 'font-mono text-xs' : ''}`} title={value}>{value}</p></div>;
+
+function formatTokenCount(value?: number | null): string {
+  const count = Number(value ?? 0);
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
+  return `${count}`;
+}
 
 function normalizeServices(services: ServiceRecord[], connected: boolean): ServiceRecord[] {
   const fallback: ServiceRecord[] = [

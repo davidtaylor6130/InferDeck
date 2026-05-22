@@ -1,4 +1,5 @@
 #include "routes/ChatCompletions.hpp"
+#include "RuntimeActivity.hpp"
 #include "llama_cpp/LlamaEngine.hpp"
 #include "config/ConfigLoader.hpp"
 #include "core/Config.hpp"
@@ -458,6 +459,29 @@ static json BuildChatCompletionResponse(const std::string& id,
     return response;
 }
 
+static std::string RequestClientName(const httplib::Request& req) {
+    std::string user_agent = req.get_header_value("User-Agent");
+    std::string lower = user_agent;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower.find("open-webui") != std::string::npos) return "Open WebUI";
+    if (lower.find("opencode") != std::string::npos) return "OpenCode";
+    if (lower.find("ollama") != std::string::npos) return "Ollama compatible";
+    if (!user_agent.empty()) return user_agent.substr(0, 80);
+    return "OpenAI compatible";
+}
+
+static json BuildJobPayloadPreview(const json& body, bool stream, bool force_non_streaming_backend) {
+    json preview;
+    preview["model"] = body.value("model", "");
+    preview["stream"] = stream;
+    preview["tools"] = body.contains("tools") && body["tools"].is_array() ? body["tools"].size() : 0;
+    preview["messages"] = body.contains("messages") && body["messages"].is_array() ? body["messages"].size() : 0;
+    preview["forcedNonStreamingBackend"] = force_non_streaming_backend;
+    if (body.contains("max_tokens")) preview["maxTokens"] = body["max_tokens"];
+    if (body.contains("temperature")) preview["temperature"] = body["temperature"];
+    return preview;
+}
+
 static void SetInferenceError(httplib::Response& resp, const inferdeck::core::InferenceResult& result) {
     int status = result.http_status >= 400 ? result.http_status : 502;
     resp.status = status;
@@ -586,11 +610,20 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
             }
         }
 
+        auto& activity = inferdeck::gateway::RuntimeActivity::Get();
+        std::string job_id = activity.StartJob(
+            force_non_streaming_backend ? "tool_chat.completion" : "chat.completion",
+            RequestClientName(req),
+            response_model_id.empty() ? body.value("model", "local-model") : response_model_id,
+            BuildJobPayloadPreview(body, client_requested_stream, force_non_streaming_backend),
+            force_non_streaming_backend ? 80 : 50
+        );
+
         if (stream) {
             std::string id = MakeId();
             auto queue = std::make_shared<StreamQueue>();
 
-            std::thread predict_thread([&engine, messages, params, queue, response_model_id, id]() {
+            std::thread predict_thread([&engine, messages, params, queue, response_model_id, id, job_id]() {
                 try {
                     auto on_token = [queue, id, response_model_id](const std::string& token, inferdeck::core::TokenType type, int) {
                         if (type == inferdeck::core::TokenType::Content) {
@@ -599,9 +632,11 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                             queue->push(SseChunk(id, response_model_id, "", token, false));
                         }
                     };
-                    engine.PredictStream(messages, params, on_token);
+                    auto result = engine.PredictStream(messages, params, on_token);
+                    inferdeck::gateway::RuntimeActivity::Get().CompleteJob(job_id, result, json({{"streamed", true}, {"contentPreview", result.text.substr(0, 240)}, {"reasoningPreview", result.reasoning_text.substr(0, 240)}}));
                     queue->push(SseChunk(id, response_model_id, "", "", true));
                 } catch (const std::exception& e) {
+                    inferdeck::gateway::RuntimeActivity::Get().FailJob(job_id, e.what());
                     queue->push(SseDeltaChunk(id, response_model_id, json({{"content", std::string("Backend stream error: ") + e.what()}})));
                     queue->push(SseChunk(id, response_model_id, "", "", true));
                 }
@@ -630,11 +665,18 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
 
         auto result = engine.Predict(messages, params);
         if (result.HasError()) {
+            activity.CompleteJob(job_id, result, json({{"error", result.error_message}}));
             SetInferenceError(resp, result);
             return;
         }
 
         json response = BuildChatCompletionResponse(MakeId(), response_model_id, result);
+        activity.CompleteJob(job_id, result, json({
+            {"contentPreview", result.text.substr(0, 500)},
+            {"reasoningPreview", result.reasoning_text.substr(0, 500)},
+            {"toolCalls", response["choices"][0]["message"].contains("tool_calls") ? response["choices"][0]["message"]["tool_calls"] : json::array()},
+            {"usage", response["usage"]}
+        }));
         if (client_requested_stream) {
             resp.set_header("Cache-Control", "no-cache");
             resp.set_header("Connection", "keep-alive");

@@ -11,6 +11,7 @@ export const QueuePage: React.FC<PageProps> = ({ state, actions }) => {
   const [status, setStatus] = useState('all');
   const [query, setQuery] = useState('');
   const queue = getQueueCounts(state.statusData, state.jobsList);
+  const summary = state.statusData?.summary || {};
   const filtered = useMemo(() => state.jobsList.filter(job => (status === 'all' || job.status === status) && `${job.id} ${job.type} ${job.client || ''}`.toLowerCase().includes(query.toLowerCase())), [state.jobsList, status, query]);
 
   return (
@@ -19,7 +20,7 @@ export const QueuePage: React.FC<PageProps> = ({ state, actions }) => {
         <MetricCard title="Queued" lines={[{ label: 'Waiting', value: queue.queued, tone: 'violet' }, { label: 'Running', value: queue.running }, { label: 'Paused', value: queue.paused }]} />
         <MetricCard title="Failures" lines={[{ label: 'Failed', value: queue.failed, tone: queue.failed ? 'rose' : 'muted' }, { label: 'Dead Letter', value: state.jobsList.filter(j => j.status === 'dead_letter').length }, { label: 'Retryable', value: state.jobsList.filter(j => j.status === 'failed').length }]} />
         <MetricCard title="GPU Lease" lines={[{ label: 'State', value: queue.gpuLocked ? 'Locked' : 'Free', tone: queue.gpuLocked ? 'blue' : 'mint' }, { label: 'Owner', value: queue.lockOwner || '—' }, { label: 'Policy', value: 'single_gpu_fifo' }]} />
-        <MetricCard title="Scheduler" lines={[{ label: 'Mode', value: 'AI Mode', tone: 'violet' }, { label: 'Avg. Wait', value: '00:04:21' }, { label: 'Priority', value: 'Enabled' }]} />
+        <MetricCard title="Scheduler" lines={[{ label: 'Mode', value: 'AI Mode', tone: 'violet' }, { label: 'Avg. Latency', value: summary.avgLatencyMs ? `${Math.round(summary.avgLatencyMs)} ms` : 'No samples' }, { label: 'Policy', value: state.statusData?.queue?.policy || 'single_gpu_fifo' }]} />
       </div>
       <SectionCard title="Queue Management" action={<CommandButton tone="rose" onClick={() => window.confirm('Clear failed jobs?') && actions.clearFailedJobs()}>Clear Failed</CommandButton>}>
         <div className="mb-4 flex flex-wrap gap-3">

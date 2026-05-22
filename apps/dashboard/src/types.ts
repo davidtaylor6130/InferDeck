@@ -33,6 +33,11 @@ export interface JobRecord {
   payload?: unknown;
   result?: unknown;
   error?: string | null;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  durationMs?: number;
+  httpStatus?: number;
   events?: Array<{ eventType?: string; message?: string; createdAt?: string; data?: unknown }>;
 }
 

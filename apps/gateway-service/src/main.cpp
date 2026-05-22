@@ -261,6 +261,31 @@ int main(int argc, char* argv[]) {
             inferdeck::gateway::routes::HandleDashboardJobs(req, resp);
         });
 
+    server.RegisterDashboardRoute("GET", R"(/api/jobs/([^/]+))",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardJobDetail(req, resp);
+        });
+
+    server.RegisterDashboardRoute("GET", R"(/api/jobs/([^/]+)/events)",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardJobEvents(req, resp);
+        });
+
+    server.RegisterDashboardRoute("GET", R"(/api/jobs/([^/]+)/result)",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardJobResult(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", R"(/api/jobs/([^/]+)/cancel)",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardCancelJob(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", R"(/api/jobs/([^/]+)/retry)",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardRetryJob(req, resp);
+        });
+
     server.RegisterDashboardRoute("POST", "/api/queue/pause",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleDashboardQueueAction(req, resp, "pause");

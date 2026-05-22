@@ -20,6 +20,11 @@ void HandleDashboardStartService(const httplib::Request& req, httplib::Response&
 void HandleDashboardStopService(const httplib::Request& req, httplib::Response& resp);
 void HandleDashboardRestartService(const httplib::Request& req, httplib::Response& resp, const ServerConfig& config);
 void HandleDashboardJobs(const httplib::Request& req, httplib::Response& resp);
+void HandleDashboardJobDetail(const httplib::Request& req, httplib::Response& resp);
+void HandleDashboardJobEvents(const httplib::Request& req, httplib::Response& resp);
+void HandleDashboardJobResult(const httplib::Request& req, httplib::Response& resp);
+void HandleDashboardCancelJob(const httplib::Request& req, httplib::Response& resp);
+void HandleDashboardRetryJob(const httplib::Request& req, httplib::Response& resp);
 void HandleDashboardQueueAction(const httplib::Request& req, httplib::Response& resp, const std::string& action);
 void HandleDashboardLogs(const httplib::Request& req, httplib::Response& resp);
 void HandleDashboardEvents(const httplib::Request& req, httplib::Response& resp);

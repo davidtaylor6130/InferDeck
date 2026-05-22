@@ -1,5 +1,6 @@
 #include "routes/Dashboard.hpp"
 
+#include "RuntimeActivity.hpp"
 #include "llama_cpp/LlamaEngine.hpp"
 #include "llama_cpp/LlamaServerManager.hpp"
 
@@ -24,8 +25,6 @@ using json = nlohmann::json;
 
 namespace inferdeck::gateway::routes {
 namespace {
-
-bool g_queue_paused = false;
 
 void JsonResponse(httplib::Response& resp, const json& body, int status = 200) {
     resp.status = status;
@@ -229,6 +228,8 @@ json GatewayServiceJson(const ServerConfig& config, GatewayStartTime started_at)
 
 json MetricsJson() {
     auto stats = inferdeck::core::LlamaEngine::Get().GetStats();
+    auto summary = inferdeck::gateway::RuntimeActivity::Get().SummaryJson();
+    auto queue = inferdeck::gateway::RuntimeActivity::Get().QueueJson();
     return {
         {"total_requests", stats.total_requests},
         {"successful_requests", stats.successful_requests},
@@ -238,16 +239,48 @@ json MetricsJson() {
         {"min_latency_ms", stats.min_latency_ms == 999999.0f ? 0.0f : stats.min_latency_ms},
         {"tokens_generated", stats.tokens_generated},
         {"tokens_processed", stats.tokens_processed},
+        {"jobs_today", summary["jobsToday"]},
+        {"total_tokens", summary["totalTokens"]},
         {"counters", {
             {"inferdeck.requests.total", stats.total_requests},
             {"inferdeck.requests.success", stats.successful_requests},
             {"inferdeck.requests.failed", stats.failed_requests},
             {"inferdeck.tokens.generated", stats.tokens_generated},
-            {"inferdeck.tokens.processed", stats.tokens_processed}
+            {"inferdeck.tokens.processed", stats.tokens_processed},
+            {"inferdeck.jobs.today", summary["jobsToday"]}
         }},
-        {"gauges", {{"queue.pending", 0}, {"queue.running", 0}}},
+        {"gauges", {{"queue.pending", queue["queued"]}, {"queue.running", queue["running"]}, {"queue.failed", queue["failed"]}}},
         {"histograms", {{"inferdeck.latency_ms", {{"min", stats.min_latency_ms == 999999.0f ? 0.0f : stats.min_latency_ms}, {"max", stats.max_latency_ms}, {"avg", stats.avg_latency_ms}, {"count", stats.successful_requests}, {"sum", stats.avg_latency_ms * stats.successful_requests}}}}}
     };
+}
+
+std::uint64_t DirectorySize(const std::filesystem::path& path) {
+    std::uint64_t total = 0;
+    if (!std::filesystem::exists(path)) return total;
+    try {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(path, std::filesystem::directory_options::skip_permission_denied)) {
+            if (entry.is_regular_file()) total += static_cast<std::uint64_t>(entry.file_size());
+        }
+    } catch (...) {}
+    return total;
+}
+
+json StorageJson(const ServerConfig& config) {
+    std::filesystem::path data_dir = std::filesystem::current_path() / "data";
+    std::filesystem::path logs_dir = std::filesystem::current_path() / "logs";
+    std::error_code ec;
+    auto data_space = std::filesystem::space(data_dir, ec);
+    json storage = {
+        {"dataDirectory", data_dir.string()},
+        {"logsDirectory", logs_dir.string()},
+        {"logSize", DirectorySize(logs_dir)},
+        {"dbSize", DirectorySize(data_dir)},
+        {"storage", "filesystem + SQLite WAL"},
+        {"modelDirectory", config.model_directory},
+        {"freeSpace", ec ? nullptr : json(static_cast<std::uint64_t>(data_space.available))},
+        {"totalSpace", ec ? nullptr : json(static_cast<std::uint64_t>(data_space.capacity))}
+    };
+    return storage;
 }
 
 void EnsureAdminPost(const httplib::Request& req, httplib::Response& resp) {
@@ -300,13 +333,18 @@ void HandleDashboardHealth(const httplib::Request&, httplib::Response& resp, con
 
 void HandleDashboardStatus(const httplib::Request&, httplib::Response& resp, const ServerConfig& config, GatewayStartTime started_at) {
     auto metrics = MetricsJson();
+    auto& activity = inferdeck::gateway::RuntimeActivity::Get();
+    auto queue = activity.QueueJson();
+    auto summary = activity.SummaryJson();
     JsonResponse(resp, {
         {"status", "ok"},
-        {"mode", {{"mode", "ai"}, {"queuePaused", g_queue_paused}}},
-        {"queue", {{"queued", 0}, {"running", 0}, {"paused", g_queue_paused ? 1 : 0}, {"failed", 0}, {"gpuLocked", inferdeck::core::LlamaServerManager::Get().IsRunning()}, {"lockOwner", inferdeck::core::LlamaEngine::Get().GetModelName()}}},
+        {"mode", {{"mode", "ai"}, {"queuePaused", queue["pausedByAdmin"]}}},
+        {"queue", queue},
         {"hardware", HardwareJson()},
+        {"storage", StorageJson(config)},
+        {"summary", summary},
         {"metrics", metrics},
-        {"metricsSamples", json::array({{{"metricName", "requests"}, {"metricValue", metrics["total_requests"]}}})},
+        {"metricsSamples", activity.SamplesJson()},
         {"services", json::array({GatewayServiceJson(config, started_at), LlamaServiceJson(config, started_at)})}
     });
 }
@@ -421,15 +459,56 @@ void HandleDashboardRestartService(const httplib::Request& req, httplib::Respons
 }
 
 void HandleDashboardJobs(const httplib::Request&, httplib::Response& resp) {
-    JsonResponse(resp, {{"jobs", json::array()}});
+    JsonResponse(resp, {{"jobs", inferdeck::gateway::RuntimeActivity::Get().JobsJson()}});
+}
+
+std::string JobIdFromMatch(const httplib::Request& req) {
+    return req.matches.size() > 1 ? req.matches[1].str() : "";
+}
+
+void HandleDashboardJobDetail(const httplib::Request& req, httplib::Response& resp) {
+    auto job = inferdeck::gateway::RuntimeActivity::Get().JobJson(JobIdFromMatch(req));
+    if (job.is_null()) {
+        JsonError(resp, 404, "job_not_found", "Job was not found in recent runtime history.");
+        return;
+    }
+    JsonResponse(resp, job);
+}
+
+void HandleDashboardJobEvents(const httplib::Request& req, httplib::Response& resp) {
+    JsonResponse(resp, {{"events", inferdeck::gateway::RuntimeActivity::Get().JobEventsJson(JobIdFromMatch(req))}});
+}
+
+void HandleDashboardJobResult(const httplib::Request& req, httplib::Response& resp) {
+    JsonResponse(resp, {{"result", inferdeck::gateway::RuntimeActivity::Get().JobResultJson(JobIdFromMatch(req))}});
+}
+
+void HandleDashboardCancelJob(const httplib::Request& req, httplib::Response& resp) {
+    EnsureAdminPost(req, resp);
+    if (resp.status >= 400) return;
+    inferdeck::gateway::RuntimeActivity::Get().CancelJob(JobIdFromMatch(req));
+    JsonResponse(resp, {{"ok", true}, {"id", JobIdFromMatch(req)}, {"status", "cancelled"}});
+}
+
+void HandleDashboardRetryJob(const httplib::Request& req, httplib::Response& resp) {
+    EnsureAdminPost(req, resp);
+    if (resp.status >= 400) return;
+    auto retry_id = inferdeck::gateway::RuntimeActivity::Get().RetryJob(JobIdFromMatch(req));
+    if (retry_id.empty()) {
+        JsonError(resp, 404, "job_not_found", "Job was not found in recent runtime history.");
+        return;
+    }
+    JsonResponse(resp, {{"ok", true}, {"id", retry_id}, {"status", "queued"}});
 }
 
 void HandleDashboardQueueAction(const httplib::Request& req, httplib::Response& resp, const std::string& action) {
     EnsureAdminPost(req, resp);
     if (resp.status >= 400) return;
-    if (action == "pause") g_queue_paused = true;
-    if (action == "resume") g_queue_paused = false;
-    JsonResponse(resp, {{"ok", true}, {"action", action}, {"paused", g_queue_paused}});
+    auto& activity = inferdeck::gateway::RuntimeActivity::Get();
+    if (action == "pause") activity.SetQueuePaused(true);
+    if (action == "resume") activity.SetQueuePaused(false);
+    if (action == "clear-failed") activity.ClearFailedJobs();
+    JsonResponse(resp, {{"ok", true}, {"action", action}, {"queue", activity.QueueJson()}});
 }
 
 void HandleDashboardLogs(const httplib::Request& req, httplib::Response& resp) {
@@ -441,6 +520,7 @@ void HandleDashboardLogs(const httplib::Request& req, httplib::Response& resp) {
     json logs = json::array();
     for (const auto& line : ReadTail("logs/gateway.log", limit / 2 + 1)) logs.push_back(ParseLogLine(line, "gateway"));
     for (const auto& line : ReadTail("logs/llama-server.err.log", limit / 2 + 1)) logs.push_back(ParseLogLine(line, "llama_cpp"));
+    for (const auto& item : inferdeck::gateway::RuntimeActivity::Get().LogsJson(limit / 2 + 1)) logs.push_back(item);
     if (logs.size() > limit) {
         logs.erase(logs.begin(), logs.begin() + static_cast<json::difference_type>(logs.size() - limit));
     }
