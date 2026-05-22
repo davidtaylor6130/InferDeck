@@ -2,9 +2,19 @@ import type { JobRecord, ServiceRecord } from './types';
 
 const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8721';
 
+function originWithPort(port: string): string {
+  try {
+    const url = new URL(origin);
+    url.port = port;
+    return url.origin;
+  } catch {
+    return `http://localhost:${port}`;
+  }
+}
+
 export const DASHBOARD_URL = origin;
-export const GATEWAY_API = origin.replace(/:8721$/, ':11434') || 'http://localhost:11434';
-export const OPENAI_API = origin.replace(/:8721$/, ':11434/v1') || 'http://localhost:11434/v1';
+export const GATEWAY_API = originWithPort('11434');
+export const OPENAI_API = `${GATEWAY_API}/v1`;
 export const LLAMA_BACKEND = 'http://127.0.0.1:11434';
 
 export function formatBytes(bytes?: number | null): string {
