@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <vector>
 #include <unordered_map>
+#include <string_view>
 using json = nlohmann::json;
 
 namespace {
@@ -252,6 +253,94 @@ bool ShouldForceNonStreamingBackend(const nlohmann::json& request) {
     return request.contains("tools") && request["tools"].is_array() && !request["tools"].empty();
 }
 
+static void ReplaceAll(std::string& text, std::string_view from, std::string_view to) {
+    if (from.empty()) return;
+    size_t pos = 0;
+    while ((pos = text.find(from.data(), pos, from.size())) != std::string::npos) {
+        text.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
+static std::string TrimCopy(std::string text) {
+    const auto start = text.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    const auto end = text.find_last_not_of(" \t\r\n");
+    return text.substr(start, end - start + 1);
+}
+
+static void AppendReasoning(std::string& reasoning, const std::string& text) {
+    auto clean = TrimCopy(text);
+    if (clean.empty()) return;
+    if (!reasoning.empty()) reasoning += "\n";
+    reasoning += clean;
+}
+
+std::string ExtractAssistantReasoningContent(const std::string& content) {
+    std::string text = content;
+    std::string reasoning;
+
+    while (true) {
+        const auto start = text.find("<think>");
+        if (start == std::string::npos) break;
+        const auto content_start = start + std::string("<think>").size();
+        const auto end = text.find("</think>", content_start);
+        if (end == std::string::npos) {
+            AppendReasoning(reasoning, text.substr(content_start));
+            break;
+        }
+        AppendReasoning(reasoning, text.substr(content_start, end - content_start));
+        text.erase(start, end + std::string("</think>").size() - start);
+    }
+
+    while (true) {
+        const auto start = text.find("<|channel|>analysis<|message|>");
+        if (start == std::string::npos) break;
+        const auto content_start = start + std::string("<|channel|>analysis<|message|>").size();
+        const auto end = text.find("<|end|>", content_start);
+        if (end == std::string::npos) {
+            AppendReasoning(reasoning, text.substr(content_start));
+            break;
+        }
+        AppendReasoning(reasoning, text.substr(content_start, end - content_start));
+        text.erase(start, end + std::string("<|end|>").size() - start);
+    }
+
+    return reasoning;
+}
+
+std::string SanitizeAssistantContent(const std::string& content) {
+    std::string text = content;
+
+    while (true) {
+        const auto start = text.find("<think>");
+        if (start == std::string::npos) break;
+        const auto end = text.find("</think>", start);
+        if (end == std::string::npos) {
+            text.erase(start);
+            break;
+        }
+        text.erase(start, end + std::string("</think>").size() - start);
+    }
+
+    while (true) {
+        const auto channel = text.find("<|channel|>analysis<|message|>");
+        if (channel == std::string::npos) break;
+        const auto end = text.find("<|end|>", channel);
+        if (end == std::string::npos) {
+            text.erase(channel);
+            break;
+        }
+        text.erase(channel, end + std::string("<|end|>").size() - channel);
+    }
+
+    ReplaceAll(text, "<|channel|>final<|message|>", "");
+    ReplaceAll(text, "<|channel|>commentary<|message|>", "");
+    ReplaceAll(text, "<|message|>", "");
+    ReplaceAll(text, "<|end|>", "");
+    return TrimCopy(text);
+}
+
 std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response) {
     std::string id = response.value("id", MakeId());
     std::string model = response.value("model", "local-model");
@@ -268,11 +357,22 @@ std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response) {
 
         if (choice.contains("message") && choice["message"].is_object()) {
             const auto& message = choice["message"];
-            if (message.contains("reasoning_content") && message["reasoning_content"].is_string() && !message["reasoning_content"].get<std::string>().empty()) {
-                stream += SseDeltaChunk(id, model, json({{"reasoning_content", message["reasoning_content"]}}));
+            std::string reasoning_content;
+            if (message.contains("reasoning_content") && message["reasoning_content"].is_string()) {
+                AppendReasoning(reasoning_content, message["reasoning_content"].get<std::string>());
             }
             if (message.contains("content") && message["content"].is_string() && !message["content"].get<std::string>().empty()) {
-                stream += SseDeltaChunk(id, model, json({{"content", message["content"]}}));
+                const auto raw_content = message["content"].get<std::string>();
+                AppendReasoning(reasoning_content, ExtractAssistantReasoningContent(raw_content));
+                const auto clean_content = SanitizeAssistantContent(raw_content);
+                if (!reasoning_content.empty()) {
+                    stream += SseDeltaChunk(id, model, json({{"reasoning_content", reasoning_content}}));
+                }
+                if (!clean_content.empty()) {
+                    stream += SseDeltaChunk(id, model, json({{"content", clean_content}}));
+                }
+            } else if (!reasoning_content.empty()) {
+                stream += SseDeltaChunk(id, model, json({{"reasoning_content", reasoning_content}}));
             }
             if (message.contains("tool_calls") && message["tool_calls"].is_array()) {
                 for (size_t i = 0; i < message["tool_calls"].size(); ++i) {
@@ -331,12 +431,14 @@ static json BuildChatCompletionResponse(const std::string& id,
 
     json message = {{"role", "assistant"}};
     if (!result.text.empty()) {
-        message["content"] = result.text;
+        message["content"] = SanitizeAssistantContent(result.text);
     } else if (result.tool_calls.empty()) {
         message["content"] = "";
     }
-    if (!result.reasoning_text.empty()) {
-        message["reasoning_content"] = result.reasoning_text;
+    std::string reasoning_text = result.reasoning_text;
+    AppendReasoning(reasoning_text, ExtractAssistantReasoningContent(result.text));
+    if (!reasoning_text.empty()) {
+        message["reasoning_content"] = reasoning_text;
     }
     if (!result.tool_calls.empty()) {
         json tool_calls = json::array();
@@ -447,7 +549,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         if (body.contains("tools") && body["tools"].is_array()) {
             params.tools_json = body["tools"].dump();
         }
-        if (force_non_streaming_backend) {
+        if (client_requested_stream || force_non_streaming_backend) {
             stream = false;
         }
 
@@ -533,7 +635,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         }
 
         json response = BuildChatCompletionResponse(MakeId(), response_model_id, result);
-        if (client_requested_stream && force_non_streaming_backend) {
+        if (client_requested_stream) {
             resp.set_header("Cache-Control", "no-cache");
             resp.set_header("Connection", "keep-alive");
             resp.set_content(BuildSyntheticChatCompletionStream(response), "text/event-stream");
