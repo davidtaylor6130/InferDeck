@@ -87,10 +87,41 @@ void HandleOllamaTags(const httplib::Request&, httplib::Response& resp) {
 
 void HandleOllamaChat(const httplib::Request& req, httplib::Response& resp) {
     try {
-        json body = ToOpenAiChatBody(json::parse(req.body));
+        json ollama_body = json::parse(req.body);
+        bool stream = ollama_body.value("stream", false);
+        json body = ToOpenAiChatBody(ollama_body);
         httplib::Request translated = req;
         translated.body = body.dump();
         HandleChatCompletions(translated, resp);
+        if (!stream && resp.status < 400 && resp.get_header_value("Content-Type").find("application/json") != std::string::npos) {
+            auto openai = json::parse(resp.body);
+            json message = {{"role", "assistant"}, {"content", ""}};
+            std::string finish_reason = "stop";
+            if (openai.contains("choices") && openai["choices"].is_array() && !openai["choices"].empty()) {
+                const auto& choice = openai["choices"][0];
+                finish_reason = choice.value("finish_reason", "stop");
+                if (choice.contains("message") && choice["message"].is_object()) {
+                    const auto& openai_message = choice["message"];
+                    message["role"] = openai_message.value("role", "assistant");
+                    message["content"] = openai_message.value("content", "");
+                    if (openai_message.contains("tool_calls")) {
+                        message["tool_calls"] = openai_message["tool_calls"];
+                    }
+                }
+            }
+            json ollama_response = {
+                {"model", ollama_body.value("model", body.value("model", ""))},
+                {"created_at", "2026-05-22T00:00:00Z"},
+                {"message", message},
+                {"done_reason", finish_reason},
+                {"done", true}
+            };
+            if (openai.contains("usage")) {
+                ollama_response["prompt_eval_count"] = openai["usage"].value("prompt_tokens", 0);
+                ollama_response["eval_count"] = openai["usage"].value("completion_tokens", 0);
+            }
+            resp.set_content(ollama_response.dump(), "application/json");
+        }
     } catch (const std::exception& e) {
         resp.status = 400;
         resp.set_content(json({{"error", e.what()}}).dump(), "application/json");
