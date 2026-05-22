@@ -12,6 +12,7 @@
 #include <ctime>
 #include <fstream>
 #include <filesystem>
+#include <optional>
 #include <sstream>
 #include <unordered_set>
 #include <vector>
@@ -19,6 +20,8 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <pdh.h>
+#include <pdhmsg.h>
 #endif
 
 using json = nlohmann::json;
@@ -196,6 +199,110 @@ json CpuUsageJson() {
         {"logicalProcessors", static_cast<unsigned int>(info.dwNumberOfProcessors)}
     };
 }
+
+class PdhDoubleSumCounter {
+public:
+    explicit PdhDoubleSumCounter(const wchar_t* path) : path_(path) {}
+
+    std::optional<double> Read() {
+        if (!EnsureInitialized()) return std::nullopt;
+        if (PdhCollectQueryData(query_) != ERROR_SUCCESS) return std::nullopt;
+
+        DWORD buffer_size = 0;
+        DWORD item_count = 0;
+        auto status = PdhGetFormattedCounterArrayW(counter_, PDH_FMT_DOUBLE, &buffer_size, &item_count, nullptr);
+        if (status != PDH_MORE_DATA || buffer_size == 0 || item_count == 0) return std::nullopt;
+
+        std::vector<std::byte> buffer(buffer_size);
+        auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+        status = PdhGetFormattedCounterArrayW(counter_, PDH_FMT_DOUBLE, &buffer_size, &item_count, items);
+        if (status != ERROR_SUCCESS) return std::nullopt;
+
+        double total = 0.0;
+        for (DWORD i = 0; i < item_count; ++i) {
+            if (items[i].FmtValue.CStatus == ERROR_SUCCESS) {
+                total += items[i].FmtValue.doubleValue;
+            }
+        }
+        return std::clamp(total, 0.0, 100.0);
+    }
+
+private:
+    bool EnsureInitialized() {
+        if (initialized_) return true;
+        initialized_ = true;
+        if (PdhOpenQueryW(nullptr, 0, &query_) != ERROR_SUCCESS) return false;
+        if (PdhAddEnglishCounterW(query_, path_, 0, &counter_) != ERROR_SUCCESS) {
+            PdhCloseQuery(query_);
+            query_ = nullptr;
+            return false;
+        }
+        PdhCollectQueryData(query_);
+        return true;
+    }
+
+    const wchar_t* path_;
+    PDH_HQUERY query_ = nullptr;
+    PDH_HCOUNTER counter_ = nullptr;
+    bool initialized_ = false;
+};
+
+class PdhLargeSumCounter {
+public:
+    explicit PdhLargeSumCounter(const wchar_t* path) : path_(path) {}
+
+    std::optional<std::uint64_t> Read() {
+        if (!EnsureInitialized()) return std::nullopt;
+        if (PdhCollectQueryData(query_) != ERROR_SUCCESS) return std::nullopt;
+
+        DWORD buffer_size = 0;
+        DWORD item_count = 0;
+        auto status = PdhGetFormattedCounterArrayW(counter_, PDH_FMT_LARGE, &buffer_size, &item_count, nullptr);
+        if (status != PDH_MORE_DATA || buffer_size == 0 || item_count == 0) return std::nullopt;
+
+        std::vector<std::byte> buffer(buffer_size);
+        auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+        status = PdhGetFormattedCounterArrayW(counter_, PDH_FMT_LARGE, &buffer_size, &item_count, items);
+        if (status != ERROR_SUCCESS) return std::nullopt;
+
+        std::uint64_t total = 0;
+        for (DWORD i = 0; i < item_count; ++i) {
+            if (items[i].FmtValue.CStatus == ERROR_SUCCESS && items[i].FmtValue.largeValue > 0) {
+                total += static_cast<std::uint64_t>(items[i].FmtValue.largeValue);
+            }
+        }
+        return total;
+    }
+
+private:
+    bool EnsureInitialized() {
+        if (initialized_) return true;
+        initialized_ = true;
+        if (PdhOpenQueryW(nullptr, 0, &query_) != ERROR_SUCCESS) return false;
+        if (PdhAddEnglishCounterW(query_, path_, 0, &counter_) != ERROR_SUCCESS) {
+            PdhCloseQuery(query_);
+            query_ = nullptr;
+            return false;
+        }
+        PdhCollectQueryData(query_);
+        return true;
+    }
+
+    const wchar_t* path_;
+    PDH_HQUERY query_ = nullptr;
+    PDH_HCOUNTER counter_ = nullptr;
+    bool initialized_ = false;
+};
+
+std::optional<double> ReadGpuUtilizationPercent() {
+    static PdhDoubleSumCounter counter(L"\\GPU Engine(*)\\Utilization Percentage");
+    return counter.Read();
+}
+
+std::optional<std::uint64_t> ReadDedicatedGpuMemoryBytes() {
+    static PdhLargeSumCounter counter(L"\\GPU Adapter Memory(*)\\Dedicated Usage");
+    return counter.Read();
+}
 #endif
 
 json DiskJson() {
@@ -283,6 +390,15 @@ json HardwareJson() {
         gpu_info.memory_total = gpu_log_info.memory_total;
         gpu_info.memory_free = gpu_log_info.memory_free;
     }
+#ifdef _WIN32
+    const auto gpu_utilization = ReadGpuUtilizationPercent();
+    const auto dedicated_memory = ReadDedicatedGpuMemoryBytes();
+    if (dedicated_memory && *dedicated_memory > 0) {
+        gpu_info.memory_total = gpu_info.memory_total == 0 ? *dedicated_memory : gpu_info.memory_total;
+        const auto used = std::min(*dedicated_memory, gpu_info.memory_total);
+        gpu_info.memory_free = gpu_info.memory_total > used ? gpu_info.memory_total - used : 0;
+    }
+#endif
     json hardware;
     hardware["available"] = true;
     hardware["provider"] = "windows";
@@ -291,7 +407,13 @@ json HardwareJson() {
         {"name", gpu_info.name.empty() ? "AMD GPU (Vulkan)" : gpu_info.name},
         {"backend", "llama.cpp b9276 Vulkan"},
         {"driverVersion", "b9276 Vulkan runtime"},
-        {"utilization", nullptr},
+        {"utilization",
+#ifdef _WIN32
+            gpu_utilization ? json(*gpu_utilization) : json(nullptr)
+#else
+            nullptr
+#endif
+        },
         {"temperature", nullptr},
         {"power", nullptr},
         {"fanSpeed", nullptr},

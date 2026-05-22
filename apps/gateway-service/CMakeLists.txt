@@ -41,6 +41,7 @@ target_link_libraries(gateway-service PRIVATE
     fmt::fmt
     ws2_32
     crypt32
+    pdh
 )
 
 if(MSVC)

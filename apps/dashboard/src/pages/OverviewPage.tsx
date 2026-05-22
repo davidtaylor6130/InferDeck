@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { PageProps, ServiceRecord } from '../types';
 import { EmptyState } from '../components/EmptyState';
 import { MetricCard } from '../components/MetricCard';
@@ -27,7 +27,21 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const metrics = state.statusData?.metrics || {};
   const storage = state.statusData?.storage || {};
   const gpu = telemetry?.gpu;
-  const vramLabel = gpu?.memoryUsed != null && gpu?.memoryTotal != null ? `${(gpu.memoryUsed / 1024 / 1024 / 1024).toFixed(1)} / ${(gpu.memoryTotal / 1024 / 1024 / 1024).toFixed(1)} GB` : 'N/A';
+  const gpuUtilization = normalizePercent(gpu?.utilization);
+  const vramPercent = normalizePercent(gpu?.memoryPercent);
+  const vramLabel = gpu?.memoryUsed != null && gpu?.memoryTotal != null ? `${formatBytes(gpu.memoryUsed)} / ${formatBytes(gpu.memoryTotal)}` : 'N/A';
+  const [gpuHistory, setGpuHistory] = useState<Array<{ timestamp: string; utilization: number; vram: number }>>([]);
+
+  useEffect(() => {
+    const timestamp = telemetry?.timestamp || state.lastUpdatedAt?.toISOString();
+    if (!timestamp || !gpu) return;
+    setGpuHistory(current => {
+      if (current[current.length - 1]?.timestamp === timestamp) return current;
+      return [...current, { timestamp, utilization: gpuUtilization ?? 0, vram: vramPercent ?? 0 }].slice(-60);
+    });
+  }, [gpu, gpuUtilization, state.lastUpdatedAt, telemetry?.timestamp, vramPercent]);
+
+  const taskManagerHistory = useMemo(() => gpuHistory.length ? gpuHistory : [{ timestamp: 'current', utilization: gpuUtilization ?? 0, vram: vramPercent ?? 0 }], [gpuHistory, gpuUtilization, vramPercent]);
 
   return (
     <div className="space-y-5">
@@ -52,6 +66,25 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
         </div>
       </SectionCard>
 
+      <SectionCard title="GPU Task Manager" action={<StatusBadge label="Live" tone={state.connected ? 'running' : 'offline'} />}>
+        <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <TaskMeter label="Utilization" value={gpuUtilization == null ? 'N/A' : `${gpuUtilization.toFixed(1)}%`} detail={gpu?.name || 'AMD GPU'} percent={gpuUtilization ?? 0} tone="cyan" />
+            <TaskMeter label="Dedicated VRAM" value={vramPercent == null ? 'N/A' : `${vramPercent.toFixed(1)}%`} detail={vramLabel} percent={vramPercent ?? 0} tone="mint" />
+          </div>
+          <div className="min-w-0">
+            <div className="mb-3 flex items-center justify-between gap-3 text-xs text-text-secondary">
+              <span>{gpu?.backend || 'llama.cpp Vulkan'}</span>
+              <span>{telemetry?.timestamp ? timeAgo(telemetry.timestamp) : timeAgo(state.lastUpdatedAt)}</span>
+            </div>
+            <div className="grid h-52 grid-cols-2 gap-4 rounded-lg border border-border-slate bg-deck-navy p-4">
+              <TaskGraph label="GPU %" color="bg-ion-cyan" values={taskManagerHistory.map(item => item.utilization)} />
+              <TaskGraph label="VRAM %" color="bg-gpu-mint" values={taskManagerHistory.map(item => item.vram)} />
+            </div>
+          </div>
+        </div>
+      </SectionCard>
+
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
         <MetricCard title="Queue" icon="◇" lines={[
           { label: 'Queued', value: queue.queued },
@@ -60,8 +93,8 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
           { label: 'Failed', value: queue.failed, tone: queue.failed ? 'rose' : 'muted' },
         ]} />
         <MetricCard title="GPU" icon="◌" lines={[
-          { label: 'Utilization', value: gpu?.utilization != null ? `${gpu.utilization}%` : 'N/A', bar: gpu?.utilization },
-          { label: 'VRAM', value: vramLabel, bar: gpu?.memoryPercent },
+          { label: 'Utilization', value: gpuUtilization != null ? `${gpuUtilization.toFixed(1)}%` : 'N/A', bar: gpuUtilization ?? undefined },
+          { label: 'VRAM', value: vramLabel, bar: vramPercent ?? undefined },
           { label: 'Temp', value: gpu?.temperature != null ? `${gpu.temperature}°C` : 'N/A' },
           { label: 'Lock Owner', value: queue.lockOwner || '—' },
         ]} />
@@ -175,6 +208,41 @@ const StatusBlock: React.FC<{ label: string; value: string; detail?: string; ton
   </div>
 );
 
+const TaskMeter: React.FC<{ label: string; value: string; detail: string; percent: number; tone: 'cyan' | 'mint' }> = ({ label, value, detail, percent, tone }) => (
+  <div className="min-w-0 rounded-lg border border-border-slate bg-deck-navy p-4">
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <p className="truncate text-xs uppercase tracking-wide text-text-secondary">{label}</p>
+        <p className="mt-2 truncate text-3xl font-semibold text-text-primary">{value}</p>
+      </div>
+      <div className={`h-3 w-3 shrink-0 rounded-sm ${tone === 'cyan' ? 'bg-ion-cyan' : 'bg-gpu-mint'}`} />
+    </div>
+    <p className="mt-2 truncate text-xs text-text-secondary" title={detail}>{detail}</p>
+    <div className="mt-4 h-2 overflow-hidden rounded-full bg-card-highlight">
+      <div className={`h-full rounded-full ${tone === 'cyan' ? 'bg-ion-cyan' : 'bg-gpu-mint'}`} style={{ width: `${Math.max(0, Math.min(percent, 100))}%` }} />
+    </div>
+  </div>
+);
+
+const TaskGraph: React.FC<{ label: string; color: string; values: number[] }> = ({ label, color, values }) => {
+  const padded = [...Array(Math.max(0, 40 - values.length)).fill(0), ...values].slice(-40);
+  return (
+    <div className="flex min-w-0 flex-col">
+      <div className="mb-2 flex items-center justify-between text-xs text-text-secondary">
+        <span>{label}</span>
+        <span>{padded[padded.length - 1]?.toFixed(1) ?? '0.0'}%</span>
+      </div>
+      <div className="flex min-h-0 flex-1 items-end gap-1 border border-border-slate/70 bg-panel-slate/60 p-2">
+        {padded.map((value, index) => (
+          <div key={`${label}-${index}`} className="flex flex-1 items-end">
+            <div className={`w-full rounded-t-sm ${color}`} style={{ height: `${Math.max(2, Math.min(value, 100))}%` }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const NetworkValue: React.FC<{ value: string; onCopied: (message: string) => void }> = ({ value, onCopied }) => <span className="flex min-w-0 items-center justify-end gap-1"><span className="truncate font-mono text-[11px]" title={value}>{value}</span><CopyButton value={value} label="URL" onCopied={onCopied} /></span>;
 
 const Info: React.FC<{ label: string; value: string; mono?: boolean; copy?: boolean; onCopied?: (message: string) => void }> = ({ label, value, mono, copy, onCopied }) => (
@@ -191,6 +259,11 @@ function formatTokenCount(value?: number | null): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
   if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
   return `${count}`;
+}
+
+function normalizePercent(value?: number | null): number | null {
+  if (value == null || Number.isNaN(Number(value))) return null;
+  return Math.max(0, Math.min(Number(value), 100));
 }
 
 function normalizeServices(services: ServiceRecord[], connected: boolean): ServiceRecord[] {
