@@ -120,7 +120,7 @@ WhisperResult WhisperRuntime::Transcribe(const std::string& audio_path, const nl
     if (translate || params.value("task", std::string{}) == "translate") command += " -tr";
     if (!extra_args.empty()) command += " " + extra_args;
 
-    auto exit_code = RunCommand(command);
+    auto exit_code = RunCommand(CommandForRuntimeDirectory(executable, command));
     result.text = Trim(ReadFile(prefix.string() + ".txt"));
     std::error_code ec;
     std::filesystem::remove(prefix.string() + ".txt", ec);
@@ -139,9 +139,11 @@ WhisperResult WhisperRuntime::Transcribe(const std::string& audio_path, const nl
         if (result.ok) {
             ++completed_;
             last_text_ = result.text;
+            last_duration_seconds_ = result.duration_seconds;
             last_error_.clear();
         } else {
             ++failed_;
+            last_duration_seconds_ = result.duration_seconds;
             last_error_ = result.error_message;
         }
     }
@@ -179,7 +181,8 @@ nlohmann::json WhisperRuntime::ActivityJsonLocked() const {
         {"running", running_jobs_},
         {"completed", completed_},
         {"failed", failed_},
-        {"lastText", last_text_}
+        {"lastText", last_text_},
+        {"lastDurationSeconds", last_duration_seconds_}
     };
 }
 
@@ -243,6 +246,16 @@ std::string WhisperRuntime::Quote(const std::string& value) const {
         pos += 2;
     }
     return "\"" + escaped + "\"";
+}
+
+std::string WhisperRuntime::CommandForRuntimeDirectory(const std::string& executable, const std::string& command) const {
+    auto runtime_dir = std::filesystem::path(executable).parent_path().string();
+    if (runtime_dir.empty()) return command;
+#ifdef _WIN32
+    return "cd /d " + Quote(runtime_dir) + " && " + command;
+#else
+    return "cd " + Quote(runtime_dir) + " && " + command;
+#endif
 }
 
 bool WhisperRuntime::IsConfiguredLocked() const {

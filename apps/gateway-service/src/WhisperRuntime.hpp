@@ -41,6 +41,7 @@ private:
     std::string ResolveModelPath(const std::string& requested) const;
     std::string NormalizeModelId(const std::string& value) const;
     std::string Quote(const std::string& value) const;
+    std::string CommandForRuntimeDirectory(const std::string& executable, const std::string& command) const;
     bool IsConfiguredLocked() const;
     nlohmann::json ActivityJsonLocked() const;
 
@@ -55,6 +56,7 @@ private:
     std::uint64_t completed_ = 0;
     std::uint64_t failed_ = 0;
     std::string last_text_;
+    double last_duration_seconds_ = 0.0;
 };
 
 } // namespace inferdeck::gateway

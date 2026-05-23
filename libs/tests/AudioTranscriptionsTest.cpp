@@ -98,6 +98,23 @@ TEST_CASE("AudioTranscriptions supports verbose_json response shape", "[route][a
     REQUIRE(body.contains("no_speech_prob"));
 }
 
+TEST_CASE("WhisperRuntime exposes completed activity metadata", "[runtime][whisper]") {
+    ConfigureFakeRuntime();
+    auto dir = std::filesystem::temp_directory_path() / "inferdeck-whisper-test";
+    auto audio = dir / "sample.wav";
+    std::ofstream(audio) << "RIFF....WAVEfmt ";
+
+    auto result = inferdeck::gateway::WhisperRuntime::Get().Transcribe(audio.string(), {{"language", "en"}}, false);
+    auto status = inferdeck::gateway::WhisperRuntime::Get().StatusJson();
+
+    REQUIRE(result.ok);
+    REQUIRE(status["status"] == "running");
+    REQUIRE(status["activity"]["completed"].get<std::uint64_t>() >= 1);
+    REQUIRE(status["activity"]["running"] == 0);
+    REQUIRE(status["activity"]["lastDurationSeconds"].get<double>() >= 0.0);
+    REQUIRE(status["activity"]["lastText"] == "local whisper ok");
+}
+
 TEST_CASE("AudioTranslations returns English translation response shape", "[route][audio]") {
     ConfigureFakeRuntime();
     auto req = MultipartAudioRequest();
