@@ -18,6 +18,7 @@ import {
   PowerIcon,
   ServerStackIcon,
   StopIcon,
+  ArrowUpTrayIcon,
   XCircleIcon,
 } from '@heroicons/react/24/outline';
 import type { JobRecord, ModelRecord, PageProps, ServiceRecord } from '../types';
@@ -450,12 +451,24 @@ const DictationPanel: React.FC<{
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Float32Array[]>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [recording, setRecording] = useState(false);
   const [busy, setBusy] = useState(false);
   const [text, setText] = useState('');
+  const [microphoneMessage, setMicrophoneMessage] = useState<string | null>(() => getMicrophoneUnavailableReason());
+
+  useEffect(() => {
+    setMicrophoneMessage(getMicrophoneUnavailableReason());
+  }, []);
 
   const start = async () => {
     try {
+      const unavailableReason = getMicrophoneUnavailableReason();
+      if (unavailableReason) {
+        setMicrophoneMessage(unavailableReason);
+        onToast(unavailableReason, 'warning');
+        return;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!AudioContextCtor) throw new Error('Audio capture is not available in this browser');
@@ -477,6 +490,19 @@ const DictationPanel: React.FC<{
     }
   };
 
+  const transcribeBlob = async (audio: Blob) => {
+    setBusy(true);
+    try {
+      const transcript = await onTranscribe(audio);
+      setText(transcript);
+      onToast('Dictation transcribed', 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Dictation failed', 'danger');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const stop = async () => {
     const audioContext = audioContextRef.current;
     const sampleRate = audioContext?.sampleRate || 16000;
@@ -487,17 +513,14 @@ const DictationPanel: React.FC<{
     audioContextRef.current = null;
     streamRef.current = null;
     setRecording(false);
-    setBusy(true);
-    try {
-      const audio = encodeWav(chunksRef.current, sampleRate);
-      const transcript = await onTranscribe(audio);
-      setText(transcript);
-      onToast('Dictation transcribed', 'success');
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Dictation failed', 'danger');
-    } finally {
-      setBusy(false);
-    }
+    await transcribeBlob(encodeWav(chunksRef.current, sampleRate));
+  };
+
+  const transcribeFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    await transcribeBlob(file);
   };
 
   return (
@@ -512,15 +535,33 @@ const DictationPanel: React.FC<{
         {models.map(model => <option key={model.path || model.name} value={model.path || model.name}>{model.name}</option>)}
       </select>
       <div className="flex flex-wrap gap-2">
-        <IconCommand title="Record dictation" onClick={start} tone="green" Icon={MicrophoneIcon} disabled={!canRecord || recording || busy} />
+        <IconCommand title={microphoneMessage || 'Record dictation'} onClick={start} tone="green" Icon={MicrophoneIcon} disabled={!canRecord || recording || busy || !!microphoneMessage} />
         <IconCommand title="Stop dictation" onClick={stop} tone="rose" Icon={StopIcon} disabled={!recording} />
+        <IconCommand title="Upload audio file" onClick={() => fileInputRef.current?.click()} tone="blue" Icon={ArrowUpTrayIcon} disabled={!canRecord || recording || busy} />
       </div>
+      <input ref={fileInputRef} className="hidden" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg,.webm" onChange={transcribeFile} />
+      {microphoneMessage && (
+        <p className="rounded-lg border border-warning-amber/30 bg-warning-amber/10 px-3 py-2 text-xs text-warning-amber">
+          {microphoneMessage}
+        </p>
+      )}
       <div className="min-h-16 rounded-lg border border-border-slate bg-deck-navy p-3 text-sm text-text-secondary">
         <p className="line-clamp-3 break-words">{busy ? 'Transcribing...' : text || 'No dictation yet'}</p>
       </div>
     </div>
   );
 };
+
+function getMicrophoneUnavailableReason(): string | null {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return null;
+  if (!window.isSecureContext) {
+    return 'Microphone recording requires HTTPS or localhost. Open this dashboard over HTTPS, localhost, or a trusted tunnel; audio upload still works.';
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return 'Microphone recording is not available in this browser. Use HTTPS/localhost or upload an audio file.';
+  }
+  return null;
+}
 
 const Endpoint: React.FC<{ label: string; value: string; onCopied: (message: string) => void }> = ({ label, value, onCopied }) => (
   <div className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-border-slate bg-deck-navy px-3 py-2">
