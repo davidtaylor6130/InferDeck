@@ -1,6 +1,7 @@
 #include "routes/Dashboard.hpp"
 
 #include "RuntimeActivity.hpp"
+#include "WhisperRuntime.hpp"
 #include "llama_cpp/LlamaEngine.hpp"
 #include "llama_cpp/LlamaServerManager.hpp"
 
@@ -584,7 +585,8 @@ void HandleDashboardHealth(const httplib::Request&, httplib::Response& resp, con
         {"uptime", UptimeSeconds(started_at)},
         {"engine_ready", engine.IsInitialized()},
         {"gateway", GatewayServiceJson(config, started_at)},
-        {"llama", LlamaServiceJson(config, started_at)}
+        {"llama", LlamaServiceJson(config, started_at)},
+        {"whisper", inferdeck::gateway::WhisperRuntime::Get().StatusJson()}
     });
 }
 
@@ -602,7 +604,8 @@ void HandleDashboardStatus(const httplib::Request&, httplib::Response& resp, con
         {"summary", summary},
         {"metrics", metrics},
         {"metricsSamples", activity.SamplesJson()},
-        {"services", json::array({GatewayServiceJson(config, started_at), LlamaServiceJson(config, started_at)})}
+        {"whisper", inferdeck::gateway::WhisperRuntime::Get().StatusJson()},
+        {"services", json::array({GatewayServiceJson(config, started_at), LlamaServiceJson(config, started_at), inferdeck::gateway::WhisperRuntime::Get().StatusJson()})}
     });
 }
 
@@ -625,7 +628,7 @@ void HandleDashboardModels(const httplib::Request&, httplib::Response& resp, con
         }
         models.push_back(ModelJson(path, loaded));
     }
-    JsonResponse(resp, {{"models", models}, {"current", inferdeck::core::LlamaEngine::Get().GetModelName()}, {"backends", {{"llama_cpp", "ready"}}}});
+    JsonResponse(resp, {{"models", models}, {"current", inferdeck::core::LlamaEngine::Get().GetModelName()}, {"whisperModels", inferdeck::gateway::WhisperRuntime::Get().ModelsJson()}, {"backends", {{"llama_cpp", "ready"}, {"whisper_cpp", inferdeck::gateway::WhisperRuntime::Get().StatusJson()["status"]}}}});
 }
 
 void HandleDashboardRunningModels(const httplib::Request&, httplib::Response& resp) {
@@ -674,12 +677,17 @@ void HandleDashboardRescanModels(const httplib::Request& req, httplib::Response&
 }
 
 void HandleDashboardServices(const httplib::Request&, httplib::Response& resp, const ServerConfig& config, GatewayStartTime started_at) {
-    JsonResponse(resp, {{"services", json::array({GatewayServiceJson(config, started_at), LlamaServiceJson(config, started_at)})}});
+    JsonResponse(resp, {{"services", json::array({GatewayServiceJson(config, started_at), LlamaServiceJson(config, started_at), inferdeck::gateway::WhisperRuntime::Get().StatusJson()})}});
 }
 
 void HandleDashboardStartService(const httplib::Request& req, httplib::Response& resp, const ServerConfig& config) {
     EnsureAdminPost(req, resp);
     if (resp.status >= 400) return;
+    const auto id = req.matches.size() > 1 ? req.matches[1].str() : "";
+    if (id == "whisper") {
+        HandleDashboardWhisperStart(req, resp);
+        return;
+    }
     if (!inferdeck::core::LlamaEngine::Get().Initialize(config.model_path, config.precision, config.n_gpu_layers, config.context_size)) {
         JsonError(resp, 500, "start_failed", "llama.cpp failed to start.");
         return;
@@ -690,6 +698,11 @@ void HandleDashboardStartService(const httplib::Request& req, httplib::Response&
 void HandleDashboardStopService(const httplib::Request& req, httplib::Response& resp) {
     EnsureAdminPost(req, resp);
     if (resp.status >= 400) return;
+    const auto id = req.matches.size() > 1 ? req.matches[1].str() : "";
+    if (id == "whisper") {
+        HandleDashboardWhisperStop(req, resp);
+        return;
+    }
     inferdeck::core::LlamaEngine::Get().Shutdown();
     JsonResponse(resp, {{"ok", true}, {"status", "stopped"}});
 }
@@ -697,6 +710,11 @@ void HandleDashboardStopService(const httplib::Request& req, httplib::Response& 
 void HandleDashboardRestartService(const httplib::Request& req, httplib::Response& resp, const ServerConfig& config) {
     EnsureAdminPost(req, resp);
     if (resp.status >= 400) return;
+    const auto id = req.matches.size() > 1 ? req.matches[1].str() : "";
+    if (id == "whisper") {
+        HandleDashboardWhisperRestart(req, resp);
+        return;
+    }
     auto current = inferdeck::core::LlamaServerManager::Get().GetCurrentModelPath();
     if (current.empty()) current = config.model_path;
     if (current.empty()) {
@@ -713,6 +731,60 @@ void HandleDashboardRestartService(const httplib::Request& req, httplib::Respons
         return;
     }
     JsonResponse(resp, {{"ok", true}, {"status", "running"}, {"model", engine.GetModelName()}});
+}
+
+void HandleDashboardWhisperStatus(const httplib::Request&, httplib::Response& resp) {
+    JsonResponse(resp, inferdeck::gateway::WhisperRuntime::Get().StatusJson());
+}
+
+void HandleDashboardWhisperStart(const httplib::Request& req, httplib::Response& resp) {
+    EnsureAdminPost(req, resp);
+    if (resp.status >= 400) return;
+    if (!inferdeck::gateway::WhisperRuntime::Get().Start()) {
+        JsonError(resp, 500, "whisper_start_failed", "Whisper executable or model is not configured.");
+        return;
+    }
+    JsonResponse(resp, {{"ok", true}, {"whisper", inferdeck::gateway::WhisperRuntime::Get().StatusJson()}});
+}
+
+void HandleDashboardWhisperStop(const httplib::Request& req, httplib::Response& resp) {
+    EnsureAdminPost(req, resp);
+    if (resp.status >= 400) return;
+    inferdeck::gateway::WhisperRuntime::Get().Stop();
+    JsonResponse(resp, {{"ok", true}, {"whisper", inferdeck::gateway::WhisperRuntime::Get().StatusJson()}});
+}
+
+void HandleDashboardWhisperRestart(const httplib::Request& req, httplib::Response& resp) {
+    EnsureAdminPost(req, resp);
+    if (resp.status >= 400) return;
+    if (!inferdeck::gateway::WhisperRuntime::Get().Restart()) {
+        JsonError(resp, 500, "whisper_restart_failed", "Whisper executable or model is not configured.");
+        return;
+    }
+    JsonResponse(resp, {{"ok", true}, {"whisper", inferdeck::gateway::WhisperRuntime::Get().StatusJson()}});
+}
+
+void HandleDashboardWhisperLoadModel(const httplib::Request& req, httplib::Response& resp) {
+    EnsureAdminPost(req, resp);
+    if (resp.status >= 400) return;
+    try {
+        auto body = req.body.empty() ? json::object() : json::parse(req.body);
+        std::string model = body.value("model", body.value("name", ""));
+        if (!inferdeck::gateway::WhisperRuntime::Get().LoadModel(model)) {
+            JsonError(resp, 404, "whisper_model_not_found", "No Whisper model matched '" + model + "'.");
+            return;
+        }
+        JsonResponse(resp, {{"ok", true}, {"whisper", inferdeck::gateway::WhisperRuntime::Get().StatusJson()}});
+    } catch (const std::exception& e) {
+        JsonError(resp, 400, "bad_request", e.what());
+    }
+}
+
+void HandleDashboardWhisperRescan(const httplib::Request& req, httplib::Response& resp) {
+    EnsureAdminPost(req, resp);
+    if (resp.status >= 400) return;
+    auto models = inferdeck::gateway::WhisperRuntime::Get().ModelsJson();
+    JsonResponse(resp, {{"ok", true}, {"count", models.size()}, {"models", models}});
 }
 
 void HandleDashboardJobs(const httplib::Request&, httplib::Response& resp) {

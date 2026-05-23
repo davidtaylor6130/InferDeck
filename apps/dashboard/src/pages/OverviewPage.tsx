@@ -13,6 +13,7 @@ import {
   FireIcon,
   ListBulletIcon,
   MagnifyingGlassIcon,
+  MicrophoneIcon,
   PlayIcon,
   PowerIcon,
   ServerStackIcon,
@@ -54,6 +55,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const services = normalizeServices(state.servicesList, state.connected);
   const gatewayService = services.find(service => service.kind === 'gateway' || service.id === 'gateway') || services[0];
   const llamaService = services.find(service => service.kind === 'llama_cpp' || service.id === 'llama-server');
+  const whisperService = services.find(service => service.kind === 'whisper_cpp' || service.id === 'whisper');
   const llamaBackendUrl = llamaService?.baseUrl || LLAMA_BACKEND;
   const telemetry = state.statusData?.hardware || state.statusData?.telemetry || {};
   const system = telemetry.system || state.statusData?.system || {};
@@ -81,6 +83,8 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const vramTotal = firstNumber(gpu.memoryTotal, gpu.vramTotal);
   const vramPercent = firstPercent(gpu.memoryPercent, gpu.vramPercent, percentOf(vramUsed, vramTotal));
   const gpuTemperature = firstNumber(gpu.temperature, gpu.tempC, gpu.temperatureC);
+  const whisper = state.statusData?.whisper || {};
+  const whisperActivity = whisper.activity || {};
   const queuePercent = queueHealthPercent(queue);
   const [history, setHistory] = useState<Array<{ timestamp: string; cpu: number; gpu: number; queue: number; vram: number }>>([]);
 
@@ -126,6 +130,14 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
       Icon: PowerIcon,
     },
     {
+      key: 'whisper',
+      label: 'Whisper',
+      value: whisperService && isOnlineStatus(whisperService.status) ? 'Ready' : whisperService?.status === 'not_configured' ? 'Config' : 'Offline',
+      detail: compactModel(String(whisper.currentModel || 'No speech model')),
+      tone: whisperService && isOnlineStatus(whisperService.status) ? 'good' as Tone : whisperService?.status === 'not_configured' ? 'warn' as Tone : 'critical' as Tone,
+      Icon: MicrophoneIcon,
+    },
+    {
       key: 'model',
       label: 'Model',
       value: compactModel(activeModel),
@@ -155,6 +167,9 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
               <StatusPill tone={llamaService && isOnlineStatus(llamaService.status) ? 'good' : 'critical'} icon={PowerIcon}>
                 llama.cpp {llamaService && isOnlineStatus(llamaService.status) ? 'ready' : 'down'}
               </StatusPill>
+              <StatusPill tone={whisperService && isOnlineStatus(whisperService.status) ? 'good' : 'warn'} icon={MicrophoneIcon}>
+                Whisper {whisperService && isOnlineStatus(whisperService.status) ? 'ready' : 'idle'}
+              </StatusPill>
               <StatusPill tone={queue.failed ? 'critical' : queue.queued > 12 ? 'warn' : 'good'} icon={ListBulletIcon}>
                 {queue.queued} queued
               </StatusPill>
@@ -170,12 +185,14 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
             <IconCommand title="Stop llama.cpp" onClick={() => actions.stopService(llamaService?.id || 'llama-server')} tone="rose" Icon={StopIcon} />
             <IconCommand title="Restart llama.cpp" onClick={actions.restartBackend} tone="blue" Icon={ArrowPathIcon} />
             <IconCommand title="Rescan models" onClick={actions.rescanModels} tone="amber" Icon={MagnifyingGlassIcon} />
+            <IconCommand title="Start Whisper" onClick={() => actions.startService('whisper')} tone="green" Icon={MicrophoneIcon} />
+            <IconCommand title="Restart Whisper" onClick={() => actions.restartService('whisper')} tone="blue" Icon={ArrowPathIcon} />
             <IconCommand title="View logs" onClick={() => window.location.hash = '#logs'} tone="neutral" Icon={DocumentTextIcon} />
           </div>
         </div>
       </section>
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {serviceTiles.map(({ key, ...tile }) => <StateTile key={key} {...tile} />)}
       </section>
 
@@ -214,7 +231,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
         </div>
       </section>
 
-      <section className="grid gap-3 xl:grid-cols-[0.9fr_1.1fr_1fr]">
+      <section className="grid gap-3 xl:grid-cols-4">
         <div className="rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
           <div className="mb-4 flex items-center justify-between gap-3">
             <IconHeading Icon={BriefcaseIcon} title="Jobs" tone={failedToday ? 'critical' : 'good'} />
@@ -227,6 +244,28 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
           </div>
           <div className="mt-4 rounded-lg border border-border-slate bg-deck-navy p-3">
             {activeJob ? <ActiveJob job={activeJob} activeModel={activeModel} onCancel={actions.cancelJob} onCopied={actions.toast} /> : <div className="flex items-center gap-3 text-sm text-text-secondary"><PowerIcon className="h-5 w-5 text-success-green" /> GPU lease is free</div>}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <IconHeading Icon={MicrophoneIcon} title="Dictation" tone={whisperService && isOnlineStatus(whisperService.status) ? 'good' : 'warn'} />
+            <StatusBadge label={whisperService?.status || 'offline'} tone={whisperService && isOnlineStatus(whisperService.status) ? 'running' : 'offline'} />
+          </div>
+          <div className="mb-3 min-w-0 rounded-lg border border-border-slate bg-deck-navy p-3">
+            <p className="truncate font-mono text-sm text-text-primary" title={String(whisper.currentModel || '')}>{compactModel(String(whisper.currentModel || 'No speech model'))}</p>
+            <p className="mt-1 truncate text-xs text-text-muted">{whisper.backend || 'whisper.cpp'} / {whisper.language || 'auto'}</p>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <CountTile Icon={ListBulletIcon} label="Queued" value={Number(whisperActivity.queued ?? 0)} tone={Number(whisperActivity.queued ?? 0) ? 'warn' : 'good'} />
+            <CountTile Icon={MicrophoneIcon} label="Live" value={Number(whisperActivity.running ?? 0)} tone={Number(whisperActivity.running ?? 0) ? 'info' : 'idle'} />
+            <CountTile Icon={CheckCircleIcon} label="Done" value={Number(whisperActivity.completed ?? 0)} tone="good" />
+            <CountTile Icon={XCircleIcon} label="Failed" value={Number(whisperActivity.failed ?? 0)} tone={Number(whisperActivity.failed ?? 0) ? 'critical' : 'good'} />
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <IconCommand title="Start Whisper" onClick={() => actions.startService('whisper')} tone="green" Icon={PlayIcon} />
+            <IconCommand title="Stop Whisper" onClick={() => actions.stopService('whisper')} tone="rose" Icon={StopIcon} />
+            <IconCommand title="Restart Whisper" onClick={() => actions.restartService('whisper')} tone="blue" Icon={ArrowPathIcon} />
           </div>
         </div>
 
@@ -401,6 +440,7 @@ function normalizeServices(services: ServiceRecord[], connected: boolean): Servi
   const fallback: ServiceRecord[] = [
     { id: 'gateway', name: 'Gateway', kind: 'gateway', status: connected ? 'running' : 'offline', baseUrl: DASHBOARD_URL, lastHealthcheckAt: connected ? new Date().toISOString() : null },
     { id: 'llama-server', name: 'llama.cpp', kind: 'llama_cpp', status: 'offline', baseUrl: LLAMA_BACKEND, lastHealthcheckAt: null },
+    { id: 'whisper', name: 'Whisper', kind: 'whisper_cpp', status: 'not_configured', baseUrl: null, lastHealthcheckAt: null },
   ];
   return fallback.map(item => services.find(service => service.kind === item.kind || service.id === item.id) || item);
 }

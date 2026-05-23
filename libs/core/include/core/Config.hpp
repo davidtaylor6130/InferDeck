@@ -47,6 +47,18 @@ public:
         bool kv_unified = true;
     };
 
+    /// Whisper speech-to-text runtime settings.
+    struct WhisperConfig {
+        bool enabled = false;
+        std::string executable;
+        std::string model_directory;
+        std::string model;
+        std::string backend = "vulkan";
+        std::string language = "auto";
+        std::string task = "transcribe";
+        std::string extra_args;
+    };
+
     /// GPU configuration settings.
     struct GpuConfig {
         int device_id = 0;
@@ -68,6 +80,7 @@ public:
     struct FullConfig {
         ServerConfig server;
         ModelConfig model;
+        WhisperConfig whisper;
         GpuConfig gpu;
         QueueConfig queue;
         LoggingConfig logging;

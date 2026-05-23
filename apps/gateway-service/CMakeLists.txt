@@ -5,6 +5,7 @@ add_executable(gateway-service
     src/main.cpp
     src/Server.cpp
     src/RuntimeActivity.cpp
+    src/WhisperRuntime.cpp
     src/routes/ChatCompletions.cpp
     src/routes/Completions.cpp
     src/routes/Models.cpp

@@ -23,6 +23,16 @@ model:
   parallel: 1
   kv_unified: true
 
+whisper:
+  enabled: false
+  executable: "C:/InferDeck/runtime/whisper.cpp/whisper-cli.exe"
+  model_directory: "C:/Users/david/Documents/00_Models/Whisper"
+  model: "ggml-large-v3-turbo.bin"
+  backend: "vulkan"
+  language: "auto"
+  task: "transcribe"
+  extra_args: ""
+
 gpu:
   device_id: 0
 

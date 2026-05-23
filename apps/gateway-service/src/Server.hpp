@@ -24,6 +24,14 @@ struct ServerConfig {
     std::string precision = "auto";
     int n_gpu_layers = -1;
     int context_size = 100000;
+    bool whisper_enabled = false;
+    std::string whisper_executable;
+    std::string whisper_model_directory;
+    std::string whisper_model;
+    std::string whisper_backend = "vulkan";
+    std::string whisper_language = "auto";
+    std::string whisper_task = "transcribe";
+    std::string whisper_extra_args;
 };
 
 using HttpCode = int;

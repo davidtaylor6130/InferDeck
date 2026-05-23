@@ -41,7 +41,7 @@ TEST_CASE("Config loads defaults when file not found", "[config][defaults]") {
     REQUIRE(config.server.tls_enabled == true);
 }
 
-TEST_CASE("Config saves and reloads correctly", "[config][save]) {
+TEST_CASE("Config saves and reloads correctly", "[config][save]") {
     auto config = inferdeck::core::Config::FullConfig{};
     config.server.port = 7777;
     config.model.path = "models/model.gguf";
@@ -55,4 +55,27 @@ TEST_CASE("Config saves and reloads correctly", "[config][save]) {
     REQUIRE(reloaded.model.precision == "f16");
 
     std::filesystem::remove(temp);
+}
+
+TEST_CASE("Config loads Whisper runtime settings", "[config][whisper]") {
+    std::string yaml =
+        "whisper:\n"
+        "  enabled: true\n"
+        "  executable: \"C:/InferDeck/runtime/whisper.cpp/whisper-cli.exe\"\n"
+        "  model_directory: \"C:/Users/david/Documents/00_Models/Whisper\"\n"
+        "  model: \"ggml-large-v3-turbo.bin\"\n"
+        "  backend: \"vulkan\"\n"
+        "  language: \"auto\"\n"
+        "  task: \"transcribe\"\n"
+        "  extra_args: \"--flash-attn\"\n";
+
+    auto config = inferdeck::core::Config::LoadFromString(yaml);
+    REQUIRE(config.whisper.enabled == true);
+    REQUIRE(config.whisper.executable.find("whisper-cli.exe") != std::string::npos);
+    REQUIRE(config.whisper.model_directory.find("Whisper") != std::string::npos);
+    REQUIRE(config.whisper.model == "ggml-large-v3-turbo.bin");
+    REQUIRE(config.whisper.backend == "vulkan");
+    REQUIRE(config.whisper.language == "auto");
+    REQUIRE(config.whisper.task == "transcribe");
+    REQUIRE(config.whisper.extra_args == "--flash-attn");
 }

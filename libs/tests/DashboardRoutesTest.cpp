@@ -15,7 +15,8 @@ TEST_CASE("Dashboard status response exposes admin telemetry schema", "[dashboar
         {"metrics", {{"total_requests", 1}, {"successful_requests", 1}, {"failed_requests", 0}}},
         {"summary", {{"jobsToday", 1}, {"totalTokens", 42}, {"avgLatencyMs", 120}}},
         {"storage", {{"dataDirectory", "data"}, {"logsDirectory", "logs"}, {"freeSpace", 1000}, {"logSize", 10}, {"storage", "filesystem + SQLite WAL"}}},
-        {"services", nlohmann::json::array()}
+        {"whisper", {{"id", "whisper"}, {"kind", "whisper_cpp"}, {"status", "running"}, {"currentModel", "ggml-large-v3-turbo.bin"}, {"activity", {{"queued", 0}, {"running", 1}, {"completed", 2}, {"failed", 0}}}}},
+        {"services", nlohmann::json::array({{{"id", "whisper"}, {"kind", "whisper_cpp"}, {"status", "running"}}})}
     };
 
     REQUIRE(response.contains("hardware"));
@@ -30,6 +31,8 @@ TEST_CASE("Dashboard status response exposes admin telemetry schema", "[dashboar
     REQUIRE(response["storage"].contains("freeSpace"));
     REQUIRE(response.contains("queue"));
     REQUIRE(response.contains("services"));
+    REQUIRE(response.contains("whisper"));
+    REQUIRE(response["whisper"]["activity"].contains("running"));
 }
 
 TEST_CASE("Dashboard control errors use clear JSON error envelope", "[dashboard][error]") {

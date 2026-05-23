@@ -60,6 +60,9 @@ namespace {
             } else if (lower_key == "model") {
                 current_section = "model";
                 continue;
+            } else if (lower_key == "whisper") {
+                current_section = "whisper";
+                continue;
             } else if (lower_key == "gpu") {
                 current_section = "gpu";
                 continue;
@@ -100,6 +103,15 @@ namespace {
                 else if (lower_key == "fit_target") config.model.fit_target = std::stoi(raw_value);
                 else if (lower_key == "parallel") config.model.parallel = std::stoi(raw_value);
                 else if (lower_key == "kv_unified") config.model.kv_unified = (raw_value == "true" || raw_value == "1");
+            } else if (current_section == "whisper") {
+                if (lower_key == "enabled") config.whisper.enabled = (raw_value == "true" || raw_value == "1");
+                else if (lower_key == "executable" || lower_key == "executable_path") config.whisper.executable = raw_value;
+                else if (lower_key == "model_directory" || lower_key == "modeldirectory" || lower_key == "directory") config.whisper.model_directory = raw_value;
+                else if (lower_key == "model" || lower_key == "default_model") config.whisper.model = raw_value;
+                else if (lower_key == "backend") config.whisper.backend = raw_value;
+                else if (lower_key == "language" || lower_key == "default_language") config.whisper.language = raw_value;
+                else if (lower_key == "task" || lower_key == "default_task") config.whisper.task = raw_value;
+                else if (lower_key == "extra_args" || lower_key == "flags") config.whisper.extra_args = raw_value;
             } else if (current_section == "gpu") {
                 if (lower_key == "device_id") config.gpu.device_id = std::stoi(raw_value);
             } else if (current_section == "queue") {

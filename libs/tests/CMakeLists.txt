@@ -29,6 +29,8 @@ add_executable(inferdeck-tests
    test_gpu_resource_manager.cpp
    test_backend_registry.cpp
    test_vector_store.cpp
+   ../../apps/gateway-service/src/WhisperRuntime.cpp
+   ../../apps/gateway-service/src/routes/AudioTranscriptions.cpp
 )
 
 option(INFERDECK_BUILD_BENCHMARKS "Build benchmark binaries" OFF)

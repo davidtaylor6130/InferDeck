@@ -8,6 +8,7 @@
 #include "llama_cpp/LlamaEngine.hpp"
 #include "core/Logger.hpp"
 #include "core/Config.hpp"
+#include "WhisperRuntime.hpp"
 
 #include "routes/ChatCompletions.hpp"
 #include "routes/Completions.hpp"
@@ -97,6 +98,7 @@ int main(int argc, char* argv[]) {
         inferdeck::core::Logger::Get().Info("LlamaEngine initialized successfully");
         inferdeck::core::Logger::Get().Info("Model: " + engine.GetModelName());
         inferdeck::core::Logger::Get().Info("Precision: " + engine.GetPrecision());
+        inferdeck::gateway::WhisperRuntime::Get().Configure(server_config);
 
     } catch (const std::exception& e) {
         inferdeck::core::Logger::Get().Error("Failed to load configuration: " + std::string(e.what()));
@@ -150,6 +152,11 @@ int main(int argc, char* argv[]) {
     server.RegisterApiRoute("POST", "/v1/audio/transcriptions",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleAudioTranscriptions(req, resp);
+        });
+
+    server.RegisterApiRoute("POST", "/v1/audio/translations",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleAudioTranslations(req, resp);
         });
 
     server.RegisterApiRoute("POST", "/v1/audio/speech",
@@ -239,6 +246,36 @@ int main(int argc, char* argv[]) {
     server.RegisterDashboardRoute("GET", "/api/services",
         [server_config, gateway_started_at](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleDashboardServices(req, resp, server_config, gateway_started_at);
+        });
+
+    server.RegisterDashboardRoute("GET", "/api/whisper/status",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardWhisperStatus(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/whisper/start",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardWhisperStart(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/whisper/stop",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardWhisperStop(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/whisper/restart",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardWhisperRestart(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/whisper/load",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardWhisperLoadModel(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", "/api/whisper/rescan",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleDashboardWhisperRescan(req, resp);
         });
 
     server.RegisterDashboardRoute("POST", R"(/api/services/([^/]+)/start)",

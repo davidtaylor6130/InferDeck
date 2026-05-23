@@ -10,6 +10,12 @@ using GatewayStartTime = std::chrono::steady_clock::time_point;
 
 void HandleDashboardHealth(const httplib::Request& req, httplib::Response& resp, const ServerConfig& config, GatewayStartTime started_at);
 void HandleDashboardStatus(const httplib::Request& req, httplib::Response& resp, const ServerConfig& config, GatewayStartTime started_at);
+void HandleDashboardWhisperStatus(const httplib::Request& req, httplib::Response& resp);
+void HandleDashboardWhisperStart(const httplib::Request& req, httplib::Response& resp);
+void HandleDashboardWhisperStop(const httplib::Request& req, httplib::Response& resp);
+void HandleDashboardWhisperRestart(const httplib::Request& req, httplib::Response& resp);
+void HandleDashboardWhisperLoadModel(const httplib::Request& req, httplib::Response& resp);
+void HandleDashboardWhisperRescan(const httplib::Request& req, httplib::Response& resp);
 void HandleDashboardModels(const httplib::Request& req, httplib::Response& resp, const ServerConfig& config);
 void HandleDashboardRunningModels(const httplib::Request& req, httplib::Response& resp);
 void HandleDashboardLoadModel(const httplib::Request& req, httplib::Response& resp, const ServerConfig& config);
