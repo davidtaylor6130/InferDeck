@@ -11,6 +11,7 @@ describe('OverviewPage', () => {
     expect(html).toContain('InferDeck Overview');
     expect(html).toContain('API healthy');
     expect(html).toContain('llama.cpp ready');
+    expect(html).toContain('Whisper ready');
     expect(html).toContain('18 queued');
     expect(html).toContain('96%');
     expect(html).toContain('84%');
@@ -22,6 +23,7 @@ describe('OverviewPage', () => {
     expect(html).toContain('aria-label="Stop llama.cpp"');
     expect(html).toContain('aria-label="Restart llama.cpp"');
     expect(html).toContain('aria-label="Rescan models"');
+    expect(html).toContain('aria-label="Record dictation"');
     expect(html).toContain('aria-label="View logs"');
     expect(html).toContain('text-danger-rose');
     expect(html).toContain('text-warning-amber');
@@ -71,6 +73,13 @@ const state: DashboardState = {
       warningCount: 2,
     },
     metrics: {},
+    whisper: {
+      status: 'running',
+      currentModel: 'ggml-large-v3-turbo.bin',
+      backend: 'vulkan',
+      language: 'auto',
+      activity: { queued: 0, running: 1, completed: 4, failed: 0 },
+    },
   },
   jobsList: [{
     id: 'chatcmpl-live',
@@ -80,10 +89,12 @@ const state: DashboardState = {
     model: 'Qwen3-32B-Q4_K_M.gguf',
   }],
   modelsList: [{ name: 'Qwen3-32B-Q4_K_M.gguf', loaded: true }],
+  whisperModels: [{ name: 'ggml-large-v3-turbo.bin', path: 'C:/models/ggml-large-v3-turbo.bin', loaded: true }],
   runningModels: [{ name: 'Qwen3-32B-Q4_K_M.gguf', loaded: true }],
   servicesList: [
     { id: 'gateway', name: 'Gateway', kind: 'gateway', status: 'running', baseUrl: 'http://127.0.0.1:11434' },
     { id: 'llama-server', name: 'llama.cpp', kind: 'llama_cpp', status: 'running', baseUrl: 'http://127.0.0.1:18080' },
+    { id: 'whisper', name: 'Whisper', kind: 'whisper_cpp', status: 'running' },
   ],
   errors: {},
   loading: false,
@@ -110,5 +121,8 @@ const actions: DashboardActions = {
   resumeQueue: vi.fn(),
   clearFailedJobs: vi.fn(),
   unloadModels: vi.fn(),
+  loadWhisperModel: vi.fn(),
+  rescanWhisperModels: vi.fn(),
+  transcribeAudio: vi.fn(),
   toast: vi.fn(),
 };

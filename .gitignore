@@ -23,6 +23,9 @@ apps/gateway-service/public/
 
 # Third-party submodules (cloned, not git submodules)
 libs/third_party/
+runtime/whisper.cpp-*-src/
+runtime/whisper.cpp-*-build/
+runtime/whisper.cpp-*-cpu-build/
 
 # vcpkg local install
 vcpkg_installed/

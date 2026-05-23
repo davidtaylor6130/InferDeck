@@ -54,25 +54,25 @@ namespace {
             std::string raw_value = trim(line.substr(colon_pos + 1));
             std::string lower_key = to_lower(key);
 
-            if (lower_key == "server") {
+            if (raw_value.empty() && lower_key == "server") {
                 current_section = "server";
                 continue;
-            } else if (lower_key == "model") {
+            } else if (raw_value.empty() && lower_key == "model") {
                 current_section = "model";
                 continue;
-            } else if (lower_key == "whisper") {
+            } else if (raw_value.empty() && lower_key == "whisper") {
                 current_section = "whisper";
                 continue;
-            } else if (lower_key == "gpu") {
+            } else if (raw_value.empty() && lower_key == "gpu") {
                 current_section = "gpu";
                 continue;
-            } else if (lower_key == "queue") {
+            } else if (raw_value.empty() && lower_key == "queue") {
                 current_section = "queue";
                 continue;
-            } else if (lower_key == "logging" || lower_key == "log") {
+            } else if (raw_value.empty() && (lower_key == "logging" || lower_key == "log")) {
                 current_section = "logging";
                 continue;
-            } else if (lower_key == "metrics") {
+            } else if (raw_value.empty() && lower_key == "metrics") {
                 current_section = "metrics";
                 continue;
             }

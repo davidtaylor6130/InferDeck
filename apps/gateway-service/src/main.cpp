@@ -248,6 +248,16 @@ int main(int argc, char* argv[]) {
             inferdeck::gateway::routes::HandleDashboardServices(req, resp, server_config, gateway_started_at);
         });
 
+    server.RegisterDashboardRoute("POST", "/v1/audio/transcriptions",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleAudioTranscriptions(req, resp);
+        });
+
+    server.RegisterDashboardRoute("POST", "/v1/audio/translations",
+        [](const httplib::Request& req, httplib::Response& resp) {
+            inferdeck::gateway::routes::HandleAudioTranslations(req, resp);
+        });
+
     server.RegisterDashboardRoute("GET", "/api/whisper/status",
         [](const httplib::Request& req, httplib::Response& resp) {
             inferdeck::gateway::routes::HandleDashboardWhisperStatus(req, resp);

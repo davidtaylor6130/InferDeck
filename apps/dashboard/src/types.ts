@@ -63,6 +63,7 @@ export interface DashboardState {
   statusData: Record<string, any> | null;
   jobsList: JobRecord[];
   modelsList: ModelRecord[];
+  whisperModels: ModelRecord[];
   runningModels: ModelRecord[];
   servicesList: ServiceRecord[];
   errors: Record<string, string | null>;
@@ -90,6 +91,9 @@ export interface DashboardActions {
   resumeQueue: () => Promise<void>;
   clearFailedJobs: () => Promise<void>;
   unloadModels: () => Promise<void>;
+  loadWhisperModel: (model: string) => Promise<void>;
+  rescanWhisperModels: () => Promise<void>;
+  transcribeAudio: (audio: Blob) => Promise<string>;
   toast: (message: string, tone?: 'success' | 'warning' | 'danger' | 'info') => void;
 }
 

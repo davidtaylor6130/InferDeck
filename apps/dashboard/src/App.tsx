@@ -26,6 +26,7 @@ const App: React.FC = () => {
   const [statusData, setStatusData] = useState<Record<string, any> | null>(null);
   const [jobsList, setJobsList] = useState<JobRecord[]>([]);
   const [modelsList, setModelsList] = useState<ModelRecord[]>([]);
+  const [whisperModels, setWhisperModels] = useState<ModelRecord[]>([]);
   const [runningModels, setRunningModels] = useState<ModelRecord[]>([]);
   const [servicesList, setServicesList] = useState<ServiceRecord[]>([]);
   const [errors, setErrors] = useState<Record<string, string | null>>({});
@@ -88,8 +89,9 @@ const App: React.FC = () => {
 
   const fetchModels = useCallback(async () => {
     try {
-      const data = await requestJson<{ models?: ModelRecord[]; backends?: { error?: string } }>('/models');
+      const data = await requestJson<{ models?: ModelRecord[]; whisperModels?: ModelRecord[]; backends?: { error?: string } }>('/models');
       setModelsList(data.models || []);
+      setWhisperModels(data.whisperModels || []);
       const running = await requestJson<{ running?: ModelRecord[] }>('/models/running').catch(() => ({ running: [] }));
       setRunningModels(running.running || []);
       setErrors(prev => ({ ...prev, models: data.backends?.error ? formatError(data.backends.error) : null }));
@@ -309,6 +311,38 @@ const App: React.FC = () => {
         toast(formatError(err), 'danger');
       }
     },
+    loadWhisperModel: async (model: string) => {
+      try {
+        await requestJson('/whisper/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
+        toast(`Loaded Whisper model ${model}`, 'success');
+        refreshAll();
+      } catch (err) {
+        toast(formatError(err), 'danger');
+      }
+    },
+    rescanWhisperModels: async () => {
+      try {
+        await requestJson('/whisper/rescan', { method: 'POST' });
+        toast('Whisper models refreshed', 'success');
+        refreshAll();
+      } catch (err) {
+        toast(formatError(err), 'danger');
+      }
+    },
+    transcribeAudio: async (audio: Blob) => {
+      const form = new FormData();
+      form.append('file', audio, `dictation-${Date.now()}.wav`);
+      form.append('model', 'whisper');
+      form.append('response_format', 'json');
+      const res = await fetch('/v1/audio/transcriptions', { method: 'POST', body: form });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(formatError(body.error || `HTTP ${res.status}`));
+      }
+      const body = await res.json() as { text?: string };
+      refreshAll();
+      return body.text || '';
+    },
     toast,
   }), [fetchJobs, fetchModels, fetchServices, fetchStatus, modelsList, refreshAll, requestJson, toast]);
 
@@ -317,6 +351,7 @@ const App: React.FC = () => {
     statusData,
     jobsList,
     modelsList,
+    whisperModels,
     runningModels,
     servicesList,
     errors,

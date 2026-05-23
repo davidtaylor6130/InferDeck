@@ -24,11 +24,11 @@ model:
   kv_unified: true
 
 whisper:
-  enabled: false
-  executable: "C:/InferDeck/runtime/whisper.cpp/whisper-cli.exe"
+  enabled: true
+  executable: "C:/Users/david/Documents/GitHub/InferDeck/runtime/whisper.cpp-v1.8.4-cpu-build/bin/Release/whisper-cli.exe"
   model_directory: "C:/Users/david/Documents/00_Models/Whisper"
-  model: "ggml-large-v3-turbo.bin"
-  backend: "vulkan"
+  model: "ggml-base.en.bin"
+  backend: "cpu"
   language: "auto"
   task: "transcribe"
   extra_args: ""

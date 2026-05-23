@@ -71,6 +71,7 @@ catch_discover_tests(inferdeck-tests)
 
 add_executable(inferdeck-compat-tests
     compat_orchestration_tests.cpp
+    ../../apps/gateway-service/src/RuntimeActivity.cpp
     ../../apps/gateway-service/src/routes/ChatCompletions.cpp
     ../../apps/gateway-service/src/routes/OllamaCompat.cpp
     ../../apps/gateway-service/src/config/ConfigLoader.cpp
@@ -122,6 +123,37 @@ else()
 endif()
 
 catch_discover_tests(inferdeck-dashboard-tests)
+
+add_executable(inferdeck-whisper-tests
+    AudioTranscriptionsTest.cpp
+    ../../apps/gateway-service/src/WhisperRuntime.cpp
+    ../../apps/gateway-service/src/routes/AudioTranscriptions.cpp
+)
+
+target_include_directories(inferdeck-whisper-tests PRIVATE
+    .
+    ../core/include
+    ../../apps/gateway-service/src
+    ../../apps/gateway-service/src/routes
+    ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+)
+
+target_link_libraries(inferdeck-whisper-tests PRIVATE
+    core
+    Catch2::Catch2WithMain
+    nlohmann_json::nlohmann_json
+    httplib::httplib
+    spdlog::spdlog
+    fmt::fmt
+)
+
+if(MSVC)
+    target_compile_options(inferdeck-whisper-tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(inferdeck-whisper-tests PRIVATE -Wall -Wextra -Wpedantic --coverage)
+endif()
+
+catch_discover_tests(inferdeck-whisper-tests)
 
 # Coverage target
 add_custom_target(coverage

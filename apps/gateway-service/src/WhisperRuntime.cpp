@@ -30,7 +30,11 @@ std::string ReadFile(const std::filesystem::path& path) {
 }
 
 int RunCommand(const std::string& command) {
+#ifdef _WIN32
+    return std::system(("cmd.exe /S /C \"" + command + "\"").c_str());
+#else
     return std::system(command.c_str());
+#endif
 }
 
 } // namespace

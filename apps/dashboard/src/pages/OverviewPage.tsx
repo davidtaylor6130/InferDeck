@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowPathIcon,
   BoltIcon,
@@ -85,6 +85,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const gpuTemperature = firstNumber(gpu.temperature, gpu.tempC, gpu.temperatureC);
   const whisper = state.statusData?.whisper || {};
   const whisperActivity = whisper.activity || {};
+  const whisperModels = state.whisperModels || [];
   const queuePercent = queueHealthPercent(queue);
   const [history, setHistory] = useState<Array<{ timestamp: string; cpu: number; gpu: number; queue: number; vram: number }>>([]);
 
@@ -266,7 +267,16 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
             <IconCommand title="Start Whisper" onClick={() => actions.startService('whisper')} tone="green" Icon={PlayIcon} />
             <IconCommand title="Stop Whisper" onClick={() => actions.stopService('whisper')} tone="rose" Icon={StopIcon} />
             <IconCommand title="Restart Whisper" onClick={() => actions.restartService('whisper')} tone="blue" Icon={ArrowPathIcon} />
+            <IconCommand title="Rescan Whisper models" onClick={actions.rescanWhisperModels} tone="amber" Icon={MagnifyingGlassIcon} />
           </div>
+          <DictationPanel
+            models={whisperModels}
+            currentModel={String(whisper.currentModel || '')}
+            canRecord={Boolean(whisperService && isOnlineStatus(whisperService.status))}
+            onLoadModel={actions.loadWhisperModel}
+            onTranscribe={actions.transcribeAudio}
+            onToast={actions.toast}
+          />
         </div>
 
         <div className="rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
@@ -379,8 +389,8 @@ const StatusPill: React.FC<{ tone: Tone; icon: React.ComponentType<React.SVGProp
   </span>
 );
 
-const IconCommand: React.FC<{ title: string; onClick: () => void; tone: 'green' | 'rose' | 'blue' | 'amber' | 'neutral'; Icon: React.ComponentType<React.SVGProps<SVGSVGElement>> }> = ({ title, onClick, tone, Icon }) => (
-  <CommandButton aria-label={title} title={title} onClick={onClick} tone={tone} className="h-10 w-10 px-0">
+const IconCommand: React.FC<{ title: string; onClick: () => void; tone: 'green' | 'rose' | 'blue' | 'amber' | 'neutral'; Icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; disabled?: boolean }> = ({ title, onClick, tone, Icon, disabled }) => (
+  <CommandButton aria-label={title} title={title} onClick={onClick} tone={tone} className="h-10 w-10 px-0" disabled={disabled}>
     <Icon className="h-5 w-5" />
   </CommandButton>
 );
@@ -427,6 +437,90 @@ const ModelPicker: React.FC<{ models: ModelRecord[]; activeModel: string; onLoad
     {models.map(model => <option key={model.name} value={model.name}>{model.name}</option>)}
   </select>
 );
+
+const DictationPanel: React.FC<{
+  models: ModelRecord[];
+  currentModel: string;
+  canRecord: boolean;
+  onLoadModel: (model: string) => Promise<void>;
+  onTranscribe: (audio: Blob) => Promise<string>;
+  onToast: (message: string, tone?: 'success' | 'warning' | 'danger' | 'info') => void;
+}> = ({ models, currentModel, canRecord, onLoadModel, onTranscribe, onToast }) => {
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Float32Array[]>([]);
+  const [recording, setRecording] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [text, setText] = useState('');
+
+  const start = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextCtor) throw new Error('Audio capture is not available in this browser');
+      const audioContext = new AudioContextCtor();
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      chunksRef.current = [];
+      processor.onaudioprocess = event => {
+        chunksRef.current.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+      };
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+      audioContextRef.current = audioContext;
+      processorRef.current = processor;
+      streamRef.current = stream;
+      setRecording(true);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Microphone unavailable', 'danger');
+    }
+  };
+
+  const stop = async () => {
+    const audioContext = audioContextRef.current;
+    const sampleRate = audioContext?.sampleRate || 16000;
+    processorRef.current?.disconnect();
+    streamRef.current?.getTracks().forEach(track => track.stop());
+    await audioContext?.close().catch(() => undefined);
+    processorRef.current = null;
+    audioContextRef.current = null;
+    streamRef.current = null;
+    setRecording(false);
+    setBusy(true);
+    try {
+      const audio = encodeWav(chunksRef.current, sampleRate);
+      const transcript = await onTranscribe(audio);
+      setText(transcript);
+      onToast('Dictation transcribed', 'success');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Dictation failed', 'danger');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 grid gap-2">
+      <select
+        className="min-h-10 w-full min-w-0 max-w-full truncate rounded-lg border border-border-slate bg-deck-navy px-3 py-2 text-sm text-text-primary"
+        value={models.find(model => model.path === currentModel || model.name === currentModel)?.path || ''}
+        onChange={event => event.target.value && onLoadModel(event.target.value)}
+        aria-label="Load Whisper model"
+      >
+        <option value="">Whisper model</option>
+        {models.map(model => <option key={model.path || model.name} value={model.path || model.name}>{model.name}</option>)}
+      </select>
+      <div className="flex flex-wrap gap-2">
+        <IconCommand title="Record dictation" onClick={start} tone="green" Icon={MicrophoneIcon} disabled={!canRecord || recording || busy} />
+        <IconCommand title="Stop dictation" onClick={stop} tone="rose" Icon={StopIcon} disabled={!recording} />
+      </div>
+      <div className="min-h-16 rounded-lg border border-border-slate bg-deck-navy p-3 text-sm text-text-secondary">
+        <p className="line-clamp-3 break-words">{busy ? 'Transcribing...' : text || 'No dictation yet'}</p>
+      </div>
+    </div>
+  );
+};
 
 const Endpoint: React.FC<{ label: string; value: string; onCopied: (message: string) => void }> = ({ label, value, onCopied }) => (
   <div className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-border-slate bg-deck-navy px-3 py-2">
@@ -509,6 +603,41 @@ function percentLabel(value?: number | null): string {
 function bytesPair(used?: number | null, total?: number | null): string {
   if (used == null || total == null) return 'N/A';
   return `${formatBytes(used)} / ${formatBytes(total)}`;
+}
+
+function encodeWav(chunks: Float32Array[], sampleRate: number): Blob {
+  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const buffer = new ArrayBuffer(44 + length * 2);
+  const view = new DataView(buffer);
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, 36 + length * 2, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, length * 2, true);
+
+  let offset = 44;
+  for (const chunk of chunks) {
+    for (let i = 0; i < chunk.length; i += 1) {
+      const sample = Math.max(-1, Math.min(1, chunk[i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += 2;
+    }
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function writeAscii(view: DataView, offset: number, value: string) {
+  for (let i = 0; i < value.length; i += 1) {
+    view.setUint8(offset + i, value.charCodeAt(i));
+  }
 }
 
 function formatTokenCount(value?: number | null): string {
