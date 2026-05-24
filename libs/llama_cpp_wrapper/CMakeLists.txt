@@ -11,6 +11,7 @@ target_include_directories(llama_cpp_wrapper PUBLIC
     include
     ${llama_cpp_SOURCE_DIR}/include
     ${llama_cpp_SOURCE_DIR}/ggml/include
+    ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
 )
 
 target_link_libraries(llama_cpp_wrapper PUBLIC
@@ -18,6 +19,7 @@ target_link_libraries(llama_cpp_wrapper PUBLIC
     nlohmann_json::nlohmann_json
     ws2_32
     winhttp
+    iphlpapi
 )
 
 if(MSVC)

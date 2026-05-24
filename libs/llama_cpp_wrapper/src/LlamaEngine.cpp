@@ -15,9 +15,12 @@
 
 #ifdef _WIN32
 #define NOMINMAX
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "ws2_32.lib")
 #endif
 
 using json = nlohmann::json;
@@ -120,13 +123,174 @@ struct HttpResult {
     std::string body;
 };
 
+static std::string DecodeChunkedBody(const std::string& encoded) {
+    std::string decoded;
+    std::size_t pos = 0;
+    while (pos < encoded.size()) {
+        std::size_t line_end = encoded.find("\r\n", pos);
+        if (line_end == std::string::npos) break;
+        std::string size_text = encoded.substr(pos, line_end - pos);
+        std::size_t extension_pos = size_text.find(';');
+        if (extension_pos != std::string::npos) size_text = size_text.substr(0, extension_pos);
+        std::size_t chunk_size = 0;
+        try {
+            chunk_size = static_cast<std::size_t>(std::stoull(size_text, nullptr, 16));
+        } catch (...) {
+            break;
+        }
+        pos = line_end + 2;
+        if (chunk_size == 0) break;
+        if (pos + chunk_size > encoded.size()) break;
+        decoded.append(encoded, pos, chunk_size);
+        pos += chunk_size;
+        if (encoded.compare(pos, 2, "\r\n") == 0) pos += 2;
+    }
+    return decoded;
+}
+
 static constexpr DWORD kBackendResolveTimeoutMs = 30000;
 static constexpr DWORD kBackendConnectTimeoutMs = 30000;
 static constexpr DWORD kBackendSendTimeoutMs = 300000;
 static constexpr DWORD kBackendReceiveTimeoutMs = 1800000;
+static constexpr DWORD kBackendStreamReceiveTimeoutMs = 15000;
+static constexpr auto kBackendStreamTotalTimeout = std::chrono::minutes(30);
 
 static HttpResult HttpPost(const std::string& path, const std::string& json_body, int port) {
 #ifdef _WIN32
+    HttpResult http_result;
+
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        Logger::Get().Error("WSAStartup failed: " + std::to_string(WSAGetLastError()));
+        return http_result;
+    }
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) {
+        Logger::Get().Error("socket failed: " + std::to_string(WSAGetLastError()));
+        WSACleanup();
+        return http_result;
+    }
+
+    DWORD recv_timeout = kBackendReceiveTimeoutMs;
+    DWORD send_timeout = kBackendSendTimeoutMs;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recv_timeout), sizeof(recv_timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&send_timeout), sizeof(send_timeout));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<u_short>(port));
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+        Logger::Get().Error("connect to llama-server failed: " + std::to_string(WSAGetLastError()));
+        closesocket(sock);
+        WSACleanup();
+        return http_result;
+    }
+
+    std::string request =
+        "POST " + path + " HTTP/1.1\r\n"
+        "Host: 127.0.0.1:" + std::to_string(port) + "\r\n"
+        "Content-Type: application/json\r\n"
+        "Accept: application/json\r\n"
+        "Connection: close\r\n"
+        "Content-Length: " + std::to_string(json_body.size()) + "\r\n\r\n" +
+        json_body;
+
+    const char* send_ptr = request.data();
+    int remaining = static_cast<int>(request.size());
+    while (remaining > 0) {
+        int sent = send(sock, send_ptr, remaining, 0);
+        if (sent == SOCKET_ERROR || sent == 0) {
+            Logger::Get().Error("send to llama-server failed: " + std::to_string(WSAGetLastError()));
+            closesocket(sock);
+            WSACleanup();
+            return http_result;
+        }
+        send_ptr += sent;
+        remaining -= sent;
+    }
+
+    std::string raw;
+    raw.reserve(65536);
+    char buffer[65536];
+    std::size_t header_end = std::string::npos;
+    std::size_t content_length = 0;
+    bool have_content_length = false;
+    bool chunked = false;
+
+    while (true) {
+        int received = recv(sock, buffer, sizeof(buffer), 0);
+        if (received == 0) break;
+        if (received == SOCKET_ERROR) {
+            const auto error = WSAGetLastError();
+            if (header_end != std::string::npos && error == WSAETIMEDOUT) {
+                break;
+            }
+            Logger::Get().Error("recv from llama-server failed: " + std::to_string(error));
+            break;
+        }
+        raw.append(buffer, static_cast<std::size_t>(received));
+
+        if (header_end == std::string::npos) {
+            header_end = raw.find("\r\n\r\n");
+            if (header_end != std::string::npos) {
+                auto headers = raw.substr(0, header_end);
+                std::istringstream status_stream(headers);
+                std::string http_version;
+                status_stream >> http_version >> http_result.status_code;
+
+                std::string lower_headers = headers;
+                std::transform(lower_headers.begin(), lower_headers.end(), lower_headers.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                auto content_pos = lower_headers.find("content-length:");
+                if (content_pos != std::string::npos) {
+                    content_pos += std::string("content-length:").size();
+                    while (content_pos < lower_headers.size() && std::isspace(static_cast<unsigned char>(lower_headers[content_pos]))) {
+                        ++content_pos;
+                    }
+                    std::size_t end_pos = lower_headers.find("\r\n", content_pos);
+                    try {
+                        content_length = static_cast<std::size_t>(std::stoull(lower_headers.substr(content_pos, end_pos - content_pos)));
+                        have_content_length = true;
+                    } catch (...) {
+                        have_content_length = false;
+                    }
+                }
+                chunked = lower_headers.find("transfer-encoding: chunked") != std::string::npos;
+                if (!have_content_length && !chunked) {
+                    DWORD post_header_timeout = 2000;
+                    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&post_header_timeout), sizeof(post_header_timeout));
+                }
+            }
+        }
+
+        if (header_end != std::string::npos && have_content_length) {
+            const std::size_t body_start = header_end + 4;
+            if (raw.size() >= body_start + content_length) break;
+        }
+        if (header_end != std::string::npos && chunked) {
+            const std::size_t body_start = header_end + 4;
+            auto body = raw.substr(body_start);
+            if (body.find("\r\n0\r\n\r\n") != std::string::npos || body.find("\n0\r\n\r\n") != std::string::npos) break;
+        }
+    }
+
+    closesocket(sock);
+    WSACleanup();
+
+    if (header_end == std::string::npos) {
+        Logger::Get().Error("llama-server response ended before headers");
+        return http_result;
+    }
+    const std::size_t body_start = header_end + 4;
+    if (chunked) {
+        http_result.body = DecodeChunkedBody(raw.substr(body_start));
+    } else {
+        http_result.body = raw.substr(body_start, have_content_length ? content_length : std::string::npos);
+    }
+    return http_result;
+#if 0
     HINTERNET hSession = WinHttpOpen(L"InferDeck/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return {};
     WinHttpSetTimeouts(hSession, kBackendResolveTimeoutMs, kBackendConnectTimeoutMs, kBackendSendTimeoutMs, kBackendReceiveTimeoutMs);
@@ -150,7 +314,7 @@ static HttpResult HttpPost(const std::string& path, const std::string& json_body
     WinHttpSetTimeouts(hRequest, kBackendResolveTimeoutMs, kBackendConnectTimeoutMs, kBackendSendTimeoutMs, kBackendReceiveTimeoutMs);
 
     // Send raw UTF-8 bytes - NOT wide strings
-    std::wstring headers = L"Content-Type: application/json\r\n";
+    std::wstring headers = L"Content-Type: application/json\r\nConnection: close\r\n";
     BOOL result = WinHttpSendRequest(hRequest, headers.c_str(), static_cast<DWORD>(-1L),
         (LPVOID)json_body.c_str(), static_cast<DWORD>(json_body.size()),
         static_cast<DWORD>(json_body.size()), 0);
@@ -187,8 +351,10 @@ static HttpResult HttpPost(const std::string& path, const std::string& json_body
     while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
         if (bytesAvailable > sizeof(buffer)) bytesAvailable = sizeof(buffer);
         if (WinHttpReadData(hRequest, buffer, bytesAvailable, &bytesRead)) {
+            if (bytesRead == 0) break;
             http_result.body.append(buffer, bytesRead);
         } else {
+            Logger::Get().Error("WinHttpReadData failed: " + std::to_string(GetLastError()));
             break;
         }
     }
@@ -198,6 +364,7 @@ static HttpResult HttpPost(const std::string& path, const std::string& json_body
     WinHttpCloseHandle(hSession);
 
     return http_result;
+#endif
 #else
     return {};
 #endif
@@ -208,7 +375,10 @@ std::string LlamaEngine::HttpPostJson(const std::string& path, const std::string
     return HttpPost(path, json_body, server_mgr.GetPort()).body;
 }
 
-HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std::string& json_body, TokenCallback on_token) const {
+HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path,
+                                             const std::string& json_body,
+                                             TokenCallback on_token,
+                                             StreamHeartbeatCallback on_heartbeat) const {
 #ifdef _WIN32
     auto& server_mgr = LlamaServerManager::Get();
     int port = server_mgr.GetPort();
@@ -219,7 +389,7 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
         failed.error_message = "WinHttpOpen failed";
         return failed;
     }
-    WinHttpSetTimeouts(hSession, kBackendResolveTimeoutMs, kBackendConnectTimeoutMs, kBackendSendTimeoutMs, kBackendReceiveTimeoutMs);
+    WinHttpSetTimeouts(hSession, kBackendResolveTimeoutMs, kBackendConnectTimeoutMs, kBackendSendTimeoutMs, kBackendStreamReceiveTimeoutMs);
 
     std::wstring host = L"127.0.0.1";
     std::wstring path_w(path.begin(), path.end());
@@ -241,7 +411,7 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
         failed.error_message = "WinHttpOpenRequest failed";
         return failed;
     }
-    WinHttpSetTimeouts(hRequest, kBackendResolveTimeoutMs, kBackendConnectTimeoutMs, kBackendSendTimeoutMs, kBackendReceiveTimeoutMs);
+    WinHttpSetTimeouts(hRequest, kBackendResolveTimeoutMs, kBackendConnectTimeoutMs, kBackendSendTimeoutMs, kBackendStreamReceiveTimeoutMs);
 
     // Send raw UTF-8 bytes
     std::wstring headers = L"Content-Type: application/json\r\n";
@@ -282,10 +452,29 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
     DWORD bytesRead = 0;
     char buffer[65536];
     std::string leftover;
+    bool saw_done = false;
+    auto started_at = std::chrono::steady_clock::now();
 
-    while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
+    while (true) {
+        if (std::chrono::steady_clock::now() - started_at > kBackendStreamTotalTimeout) {
+            stream_result.error_message = "llama-server stream exceeded total timeout";
+            break;
+        }
+
+        if (!WinHttpQueryDataAvailable(hRequest, &bytesAvailable)) {
+            DWORD error = GetLastError();
+            if (error == ERROR_WINHTTP_TIMEOUT) {
+                if (on_heartbeat) on_heartbeat();
+                continue;
+            }
+            stream_result.error_message = "WinHttpQueryDataAvailable failed: " + std::to_string(error);
+            break;
+        }
+        if (bytesAvailable == 0) break;
+
         if (bytesAvailable > sizeof(buffer)) bytesAvailable = sizeof(buffer);
         if (WinHttpReadData(hRequest, buffer, bytesAvailable, &bytesRead)) {
+            if (bytesRead == 0) break;
             std::string chunk(buffer, bytesRead);
             std::string data = leftover + chunk;
 
@@ -299,7 +488,10 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
                 std::string line = data.substr(pos + 6, end - pos - 6);
                 pos = end + 1;
 
-                if (line == "[DONE]") break;
+                if (line == "[DONE]") {
+                    saw_done = true;
+                    break;
+                }
                 if (line.empty()) continue;
 
                 try {
@@ -333,9 +525,20 @@ HttpStreamResult LlamaEngine::HttpPostStream(const std::string& path, const std:
 
             if (pos >= data.size()) leftover.clear();
             else leftover = data.substr(pos);
+            if (saw_done) break;
         } else {
+            DWORD error = GetLastError();
+            if (error == ERROR_WINHTTP_TIMEOUT) {
+                if (on_heartbeat) on_heartbeat();
+                continue;
+            }
+            stream_result.error_message = "WinHttpReadData failed: " + std::to_string(error);
             break;
         }
+    }
+
+    if (stream_result.error_message.empty() && stream_result.http_status == 200 && !saw_done) {
+        stream_result.error_message = "llama-server stream ended before [DONE]";
     }
 
     WinHttpCloseHandle(hRequest);
@@ -466,15 +669,13 @@ InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
         stats_.tokens_processed += result.prompt_tokens;
     }
 
-    Logger::Get().Info("Inference complete: " + std::to_string(result.completion_tokens) + " tokens in " +
-                       std::to_string(duration) + "ms");
-
     return result;
 }
 
 InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messages,
                                             const InferenceParams& params,
-                                            TokenCallback on_token) {
+                                            TokenCallback on_token,
+                                            StreamHeartbeatCallback on_heartbeat) {
     auto start = std::chrono::high_resolution_clock::now();
 
     json body;
@@ -502,7 +703,7 @@ InferenceResult LlamaEngine::PredictStream(const std::vector<ChatMessage>& messa
         body["tools"] = json::parse(params.tools_json);
     }
 
-    HttpStreamResult stream_result = HttpPostStream("/v1/chat/completions", body.dump(), on_token);
+    HttpStreamResult stream_result = HttpPostStream("/v1/chat/completions", body.dump(), on_token, on_heartbeat);
 
     auto end = std::chrono::high_resolution_clock::now();
     float duration = std::chrono::duration<float, std::milli>(end - start).count();
@@ -556,6 +757,36 @@ std::string LlamaEngine::GetModelName() const {
 
 std::string LlamaEngine::GetPrecision() const {
     return precision_;
+}
+
+void LlamaEngine::AbortActiveRequest(const std::string& reason) {
+    std::string model_path;
+    int gpu_layers = -1;
+    int context_size = 100000;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        model_path = model_path_;
+        gpu_layers = gpu_layers_;
+        context_size = context_size_;
+    }
+
+    if (model_path.empty()) {
+        Logger::Get().Warn("Cannot abort active request because no model path is loaded: " + reason);
+        return;
+    }
+
+    Logger::Get().Warn("Aborting active llama-server request by restarting backend: " + reason);
+    auto& server_mgr = LlamaServerManager::Get();
+    server_mgr.Stop();
+    if (!server_mgr.Start(model_path, gpu_layers, context_size, server_mgr.GetPort())) {
+        Logger::Get().Error("Failed to restart llama-server while aborting active request");
+        return;
+    }
+    if (!server_mgr.WaitForReady(120)) {
+        Logger::Get().Error("llama-server did not become ready after active request abort");
+        return;
+    }
+    Logger::Get().Info("llama-server restarted after active request abort");
 }
 
 void LlamaEngine::Shutdown() {

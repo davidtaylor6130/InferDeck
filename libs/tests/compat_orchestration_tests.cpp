@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include "RuntimeActivity.hpp"
 #include "routes/ChatCompletions.hpp"
 #include "routes/OllamaCompat.hpp"
 #include <httplib.h>
@@ -21,6 +22,22 @@ TEST_CASE("OpenCode tool requests force non-streaming backend", "[compat][openco
 
     request["tools"] = json::array();
     REQUIRE_FALSE(inferdeck::gateway::routes::ShouldForceNonStreamingBackend(request));
+}
+
+TEST_CASE("Plain OpenCode stream requests use true streaming backend", "[compat][opencode]") {
+    json request = {
+        {"stream", true},
+        {"messages", json::array({{{"role", "user"}, {"content", "inspect files and make a plan"}}})}
+    };
+
+    REQUIRE(inferdeck::gateway::routes::ShouldUseStreamingBackend(request));
+
+    request["tools"] = json::array({{{"type", "function"}, {"function", {{"name", "read"}}}}});
+    REQUIRE_FALSE(inferdeck::gateway::routes::ShouldUseStreamingBackend(request));
+    REQUIRE(inferdeck::gateway::routes::ShouldForceNonStreamingBackend(request));
+
+    request["stream"] = false;
+    REQUIRE_FALSE(inferdeck::gateway::routes::ShouldUseStreamingBackend(request));
 }
 
 TEST_CASE("Synthetic OpenAI SSE preserves content tool calls finish reason and done", "[compat][opencode]") {
@@ -131,6 +148,87 @@ TEST_CASE("Synthetic OpenAI SSE preserves tool calls when reasoning is present",
     REQUIRE(stream.find("\"tool_calls\"") != std::string::npos);
     REQUIRE(stream.find("\"finish_reason\":\"tool_calls\"") != std::string::npos);
     REQUIRE(stream.find("data: [DONE]") != std::string::npos);
+}
+
+TEST_CASE("Synthetic tool-call SSE emits indexed tool deltas before terminal chunk", "[compat][opencode]") {
+    json response = {
+        {"id", "chatcmpl-test"},
+        {"model", "qwen3.6-35b-a3b"},
+        {"choices", json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", "<think>inspect files</think>Reading several files."},
+                    {"tool_calls", json::array({
+                        {
+                            {"id", "call_1"},
+                            {"type", "function"},
+                            {"function", {{"name", "read"}, {"arguments", R"({"filePath":"/tmp/a/package.json"})"}}}
+                        },
+                        {
+                            {"id", "call_2"},
+                            {"type", "function"},
+                            {"function", {{"name", "read"}, {"arguments", R"({"filePath":"/tmp/b/README.md"})"}}}
+                        }
+                    })}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+
+    auto stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response);
+    auto first_tool = stream.find("\"id\":\"call_1\"");
+    auto second_tool = stream.find("\"id\":\"call_2\"");
+    auto terminal = stream.find("\"finish_reason\":\"tool_calls\"");
+
+    REQUIRE(first_tool != std::string::npos);
+    REQUIRE(second_tool != std::string::npos);
+    REQUIRE(terminal != std::string::npos);
+    REQUIRE(first_tool < terminal);
+    REQUIRE(second_tool < terminal);
+    REQUIRE(stream.find("\"index\":0") != std::string::npos);
+    REQUIRE(stream.find("\"index\":1") != std::string::npos);
+    REQUIRE(stream.find("data: [DONE]") > terminal);
+}
+
+TEST_CASE("Runtime observability exposes OpenCode response metadata and request age", "[compat][opencode][observability]") {
+    auto& activity = inferdeck::gateway::RuntimeActivity::Get();
+    auto job_id = activity.StartJob(
+        "tool_chat.completion",
+        "OpenCode",
+        "qwen3.6-35b-a3b:latest",
+        {{"stream", true}, {"tools", 11}, {"messages", 8}, {"forcedNonStreamingBackend", true}},
+        80
+    );
+
+    inferdeck::core::InferenceResult result;
+    result.http_status = 200;
+    result.prompt_tokens = 12000;
+    result.completion_tokens = 320;
+    result.total_tokens = 12320;
+    result.duration_ms = 2500.0f;
+
+    activity.CompleteJob(job_id, result, {
+        {"responseMode", "synthetic-sse"},
+        {"sseChunks", 5},
+        {"heartbeatChunks", 1},
+        {"responseBytes", 2048},
+        {"finishReason", "tool_calls"},
+        {"toolCallCount", 7}
+    });
+
+    auto obs = activity.ObservabilityJson();
+    REQUIRE(obs["lastOpenCodeRequest"]["id"] == job_id);
+    REQUIRE(obs["lastOpenCodeRequest"]["responseMode"] == "synthetic-sse");
+    REQUIRE(obs["lastOpenCodeRequest"]["sseChunks"] == 5);
+    REQUIRE(obs["lastOpenCodeRequest"]["heartbeatChunks"] == 1);
+    REQUIRE(obs["lastOpenCodeRequest"]["responseBytes"] == 2048);
+    REQUIRE(obs["lastOpenCodeRequest"]["finishReason"] == "tool_calls");
+    REQUIRE(obs["lastOpenCodeRequest"]["toolCallCount"] == 7);
+    REQUIRE(obs["lastOpenCodeRequest"]["phase"] == "completed");
+    REQUIRE(obs["lastOpenCodeRequest"]["requestAgeSeconds"].get<double>() >= 0.0);
 }
 
 TEST_CASE("OpenCode tool workflow message shape validates", "[compat][opencode]") {
@@ -254,6 +352,14 @@ TEST_CASE("Ollama chat translation preserves explicit num_predict", "[compat][ol
     REQUIRE(openai["max_tokens"] == 8192);
     REQUIRE(openai["temperature"] == 0.2);
     REQUIRE(openai["top_p"] == 0.95);
+}
+
+TEST_CASE("Ollama compatibility requests can tag Open WebUI for observability", "[compat][ollama][observability]") {
+    httplib::Request req;
+    req.headers.emplace("User-Agent", "Mozilla/5.0 WindowsPowerShell/5.1");
+    req.headers.emplace("X-InferDeck-Client", "Open WebUI");
+
+    REQUIRE(inferdeck::gateway::routes::DetectChatClientName(req) == "Open WebUI");
 }
 
 TEST_CASE("Ollama chat stream translation emits newline JSON with thinking content and done", "[compat][ollama][opencode]") {

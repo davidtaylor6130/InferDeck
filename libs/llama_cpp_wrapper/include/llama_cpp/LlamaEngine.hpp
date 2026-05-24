@@ -90,6 +90,7 @@ struct HttpStreamResult {
 };
 
 using TokenCallback = std::function<void(const std::string& token, TokenType type, int cumulative_tokens)>;
+using StreamHeartbeatCallback = std::function<void()>;
 
 class LlamaEngine {
 public:
@@ -107,10 +108,12 @@ public:
                             const InferenceParams& params = {});
     InferenceResult PredictStream(const std::vector<ChatMessage>& messages,
                                    const InferenceParams& params = {},
-                                   TokenCallback on_token = nullptr);
+                                   TokenCallback on_token = nullptr,
+                                   StreamHeartbeatCallback on_heartbeat = nullptr);
     InferenceStats GetStats() const;
     std::string GetModelName() const;
     std::string GetPrecision() const;
+    void AbortActiveRequest(const std::string& reason);
     void Shutdown();
     GpuInfo GetGpuInfo() const;
 
@@ -122,7 +125,10 @@ private:
 
     std::string role_to_string(MessageRole role) const;
     std::string HttpPostJson(const std::string& path, const std::string& json_body) const;
-    HttpStreamResult HttpPostStream(const std::string& path, const std::string& json_body, TokenCallback on_token) const;
+    HttpStreamResult HttpPostStream(const std::string& path,
+                                    const std::string& json_body,
+                                    TokenCallback on_token,
+                                    StreamHeartbeatCallback on_heartbeat) const;
 
     std::string model_path_;
     std::string precision_;

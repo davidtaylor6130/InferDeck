@@ -69,7 +69,7 @@ std::string NormalizeId(std::string id) {
         id = id.substr(0, id.size() - latest_suffix_len);
     }
     for (auto& c : id) {
-        if (c == ' ' || c == '_') c = '-';
+        if (c == ' ' || c == '_' || c == ':') c = '-';
         else c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return id;
@@ -602,6 +602,7 @@ void HandleDashboardStatus(const httplib::Request&, httplib::Response& resp, con
         {"hardware", HardwareJson()},
         {"storage", StorageJson(config)},
         {"summary", summary},
+        {"observability", activity.ObservabilityJson()},
         {"metrics", metrics},
         {"metricsSamples", activity.SamplesJson()},
         {"whisper", inferdeck::gateway::WhisperRuntime::Get().StatusJson()},

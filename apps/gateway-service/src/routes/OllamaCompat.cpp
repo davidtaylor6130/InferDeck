@@ -167,6 +167,7 @@ void HandleOllamaChat(const httplib::Request& req, httplib::Response& resp) {
         json body = BuildOpenAiChatBodyFromOllama(ollama_body);
         httplib::Request translated = req;
         translated.body = body.dump();
+        translated.headers.emplace("X-InferDeck-Client", "Open WebUI");
         HandleChatCompletions(translated, resp);
         if (stream && resp.status < 400 && resp.get_header_value("Content-Type").find("text/event-stream") != std::string::npos) {
             auto ollama_stream = BuildOllamaChatStreamFromOpenAiSse(resp.body, ollama_body.value("model", body.value("model", "")));

@@ -76,12 +76,12 @@ void Logger::Log(LogLevel level, const std::string& message) {
     }
 
     switch (level) {
-        case LogLevel::Trace:  logger->trace(message); break;
-        case LogLevel::Debug:  logger->debug(message); break;
-        case LogLevel::Info:   logger->info(message); break;
-        case LogLevel::Warn:   logger->warn(message); break;
-        case LogLevel::Error:  logger->error(message); break;
-        case LogLevel::Fatal:  logger->critical(message); break;
+        case LogLevel::Trace:  logger->trace("{}", message); break;
+        case LogLevel::Debug:  logger->debug("{}", message); break;
+        case LogLevel::Info:   logger->info("{}", message); break;
+        case LogLevel::Warn:   logger->warn("{}", message); break;
+        case LogLevel::Error:  logger->error("{}", message); break;
+        case LogLevel::Fatal:  logger->critical("{}", message); break;
     }
 }
 

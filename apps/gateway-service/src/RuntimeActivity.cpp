@@ -1,6 +1,7 @@
 #include "RuntimeActivity.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <ctime>
 #include <sstream>
 
@@ -9,6 +10,11 @@ namespace {
 
 std::string TodayPrefix() {
     return RuntimeIsoNow().substr(0, 10);
+}
+
+std::int64_t RuntimeNowMs() {
+    auto now = std::chrono::system_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 }
 
 bool IsTerminal(const std::string& status) {
@@ -77,6 +83,7 @@ std::string RuntimeActivity::StartJob(const std::string& type,
     job.client = client.empty() ? "OpenAI compatible" : client;
     job.model = model;
     job.created_at = RuntimeIsoNow();
+    job.accepted_epoch_ms = RuntimeNowMs();
     job.started_at = job.status == "running" ? job.created_at : "";
     job.payload = payload;
     AddEvent(job, "queued", "Request accepted by gateway", {{"model", model}, {"type", type}});
@@ -92,8 +99,10 @@ void RuntimeActivity::CompleteJob(const std::string& id, const inferdeck::core::
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = std::find_if(jobs_.begin(), jobs_.end(), [&](const Job& job) { return job.id == id; });
     if (it == jobs_.end()) return;
+    if (IsTerminal(it->status)) return;
     it->status = result.HasError() ? "failed" : "succeeded";
     it->completed_at = RuntimeIsoNow();
+    it->completed_epoch_ms = RuntimeNowMs();
     it->prompt_tokens = static_cast<std::uint64_t>(std::max(0, result.prompt_tokens));
     it->completion_tokens = static_cast<std::uint64_t>(std::max(0, result.completion_tokens));
     it->total_tokens = static_cast<std::uint64_t>(std::max(0, result.total_tokens));
@@ -111,8 +120,10 @@ void RuntimeActivity::FailJob(const std::string& id, const std::string& error, i
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = std::find_if(jobs_.begin(), jobs_.end(), [&](const Job& job) { return job.id == id; });
     if (it == jobs_.end()) return;
+    if (IsTerminal(it->status)) return;
     it->status = "failed";
     it->completed_at = RuntimeIsoNow();
+    it->completed_epoch_ms = RuntimeNowMs();
     it->http_status = status_code;
     it->error = error;
     AddEvent(*it, "failed", error, {{"statusCode", status_code}});
@@ -125,6 +136,7 @@ void RuntimeActivity::CancelJob(const std::string& id) {
     if (it == jobs_.end() || IsTerminal(it->status)) return;
     it->status = "cancelled";
     it->completed_at = RuntimeIsoNow();
+    it->completed_epoch_ms = RuntimeNowMs();
     AddEvent(*it, "cancelled", "Cancellation requested from dashboard");
 }
 
@@ -137,6 +149,8 @@ std::string RuntimeActivity::RetryJob(const std::string& id) {
     retry.id = MakeJobIdLocked();
     retry.status = queue_paused_ ? "paused" : "queued";
     retry.created_at = RuntimeIsoNow();
+    retry.accepted_epoch_ms = RuntimeNowMs();
+    retry.completed_epoch_ms = 0;
     retry.started_at.clear();
     retry.completed_at.clear();
     retry.error.clear();
@@ -160,6 +174,16 @@ void RuntimeActivity::ClearFailedJobs() {
 }
 
 nlohmann::json RuntimeActivity::ToJson(const Job& job, bool include_details) const {
+    const auto end_ms = job.completed_epoch_ms > 0 ? job.completed_epoch_ms : RuntimeNowMs();
+    const auto age_seconds = job.accepted_epoch_ms > 0
+        ? static_cast<double>(std::max<std::int64_t>(0, end_ms - job.accepted_epoch_ms)) / 1000.0
+        : 0.0;
+    std::string phase = "idle";
+    if (job.status == "running" || job.status == "leased") phase = "running";
+    else if (job.status == "queued" || job.status == "paused") phase = "waiting";
+    else if (job.status == "succeeded") phase = "completed";
+    else if (job.status == "failed" || job.status == "cancelled" || job.status == "dead_letter") phase = job.status;
+
     nlohmann::json out = {
         {"id", job.id},
         {"type", job.type},
@@ -176,12 +200,19 @@ nlohmann::json RuntimeActivity::ToJson(const Job& job, bool include_details) con
         {"completedAt", job.completed_at.empty() ? nullptr : nlohmann::json(job.completed_at)},
         {"completed_at", job.completed_at.empty() ? nullptr : nlohmann::json(job.completed_at)},
         {"durationMs", job.duration_ms},
+        {"requestAgeSeconds", age_seconds},
+        {"phase", phase},
         {"promptTokens", job.prompt_tokens},
         {"completionTokens", job.completion_tokens},
         {"totalTokens", job.total_tokens},
         {"httpStatus", job.http_status},
         {"error", job.error.empty() ? nullptr : nlohmann::json(job.error)}
     };
+    if (job.result.is_object()) {
+        for (const auto& key : {"responseMode", "sseChunks", "heartbeatChunks", "responseBytes", "finishReason", "toolCallCount"}) {
+            if (job.result.contains(key)) out[key] = job.result.at(key);
+        }
+    }
     if (include_details) {
         out["payload"] = job.payload;
         out["result"] = job.result;
@@ -293,6 +324,47 @@ nlohmann::json RuntimeActivity::SummaryJson() const {
         {"totalTokens", total_tokens},
         {"avgLatencyMs", latency_count == 0 ? 0 : latency_sum / latency_count},
         {"historyCount", jobs_.size()}
+    };
+}
+
+nlohmann::json RuntimeActivity::ObservabilityJson() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    nlohmann::json accepted = nlohmann::json::array();
+    nlohmann::json running = nlohmann::json::array();
+    nlohmann::json completed = nlohmann::json::array();
+    nlohmann::json last_opencode = nullptr;
+    nlohmann::json last_openwebui = nullptr;
+    std::string last_model;
+    std::string last_client;
+
+    for (const auto& job : jobs_) {
+        auto compact = ToJson(job, false);
+        if (accepted.size() < 20) accepted.push_back(compact);
+        if ((job.status == "running" || job.status == "leased") && running.size() < 20) running.push_back(compact);
+        if (IsTerminal(job.status) && completed.size() < 20) completed.push_back(compact);
+
+        auto client_lower = job.client;
+        std::transform(client_lower.begin(), client_lower.end(), client_lower.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (last_opencode.is_null() && client_lower.find("opencode") != std::string::npos) {
+            last_opencode = compact;
+        }
+        if (last_openwebui.is_null() && client_lower.find("open webui") != std::string::npos) {
+            last_openwebui = compact;
+        }
+        if (last_model.empty() && !job.model.empty()) last_model = job.model;
+        if (last_client.empty() && !job.client.empty()) last_client = job.client;
+    }
+
+    return {
+        {"recentAccepted", accepted},
+        {"recentRunning", running},
+        {"recentCompleted", completed},
+        {"lastOpenCodeRequest", last_opencode},
+        {"lastOpenWebUIRequest", last_openwebui},
+        {"lastModel", last_model.empty() ? nullptr : nlohmann::json(last_model)},
+        {"lastClient", last_client.empty() ? nullptr : nlohmann::json(last_client)}
     };
 }
 

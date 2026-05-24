@@ -34,6 +34,7 @@ public:
     nlohmann::json JobResultJson(const std::string& id) const;
     nlohmann::json QueueJson() const;
     nlohmann::json SummaryJson() const;
+    nlohmann::json ObservabilityJson() const;
     nlohmann::json SamplesJson() const;
     nlohmann::json LogsJson(std::size_t limit) const;
 
@@ -60,6 +61,8 @@ private:
         std::uint64_t completion_tokens = 0;
         std::uint64_t total_tokens = 0;
         double duration_ms = 0;
+        std::int64_t accepted_epoch_ms = 0;
+        std::int64_t completed_epoch_ms = 0;
         int http_status = 200;
         std::string error;
         nlohmann::json payload;

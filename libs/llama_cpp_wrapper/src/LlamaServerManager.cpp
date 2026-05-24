@@ -6,7 +6,10 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <winhttp.h>
+#include <iphlpapi.h>
+#include <tlhelp32.h>
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "iphlpapi.lib")
 #endif
 
 #include <chrono>
@@ -16,6 +19,7 @@
 #include <sstream>
 #include <algorithm>
 #include <vector>
+#include <cctype>
 
 namespace inferdeck::core {
 
@@ -64,6 +68,147 @@ static bool ValidateVulkanRuntime(const std::filesystem::path& runtime_dir) {
            !ContainsForbiddenBackend(runtime_dir);
 }
 
+static bool PathsEquivalent(const std::string& left, const std::string& right) {
+    if (left.empty() || right.empty()) return false;
+    try {
+        return std::filesystem::equivalent(std::filesystem::path(left), std::filesystem::path(right));
+    } catch (...) {
+        return left == right;
+    }
+}
+
+#ifdef _WIN32
+static std::string ToLowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+static std::string NormalizePathForCompare(const std::filesystem::path& path) {
+    std::error_code ec;
+    auto absolute = std::filesystem::weakly_canonical(path, ec);
+    if (ec) absolute = std::filesystem::absolute(path, ec);
+    auto text = ec ? path.string() : absolute.string();
+    std::replace(text.begin(), text.end(), '/', '\\');
+    return ToLowerCopy(text);
+}
+
+static bool QueryProcessImagePath(DWORD pid, std::string& out) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false;
+
+    std::wstring buffer(32768, L'\0');
+    DWORD size = static_cast<DWORD>(buffer.size());
+    bool ok = QueryFullProcessImageNameW(process, 0, buffer.data(), &size);
+    CloseHandle(process);
+    if (!ok || size == 0) return false;
+
+    buffer.resize(size);
+    out = std::filesystem::path(buffer).string();
+    return true;
+}
+
+static bool IsProcessAlive(DWORD pid) {
+    if (pid == 0) return false;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false;
+    DWORD exit_code = 0;
+    bool alive = GetExitCodeProcess(process, &exit_code) && exit_code == STILL_ACTIVE;
+    CloseHandle(process);
+    return alive;
+}
+
+static DWORD GetTcpPortOwner(int port) {
+    DWORD size = 0;
+    DWORD status = GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+    if (status != ERROR_INSUFFICIENT_BUFFER || size == 0) return 0;
+
+    std::vector<unsigned char> buffer(size);
+    auto* table = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(buffer.data());
+    status = GetExtendedTcpTable(table, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+    if (status != NO_ERROR) return 0;
+
+    for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+        const auto& row = table->table[i];
+        const int local_port_low = ntohs(static_cast<u_short>(row.dwLocalPort & 0xFFFF));
+        const int local_port_high = ntohs(static_cast<u_short>((row.dwLocalPort >> 16) & 0xFFFF));
+        if (local_port_low == port || local_port_high == port) return row.dwOwningPid;
+    }
+    return 0;
+}
+
+static bool TerminateAndWait(DWORD pid, std::chrono::milliseconds timeout) {
+    HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return !IsProcessAlive(pid);
+
+    DWORD exit_code = 0;
+    if (GetExitCodeProcess(process, &exit_code) && exit_code == STILL_ACTIVE) {
+        TerminateProcess(process, 0);
+        WaitForSingleObject(process, static_cast<DWORD>(timeout.count()));
+    }
+    bool stopped = !GetExitCodeProcess(process, &exit_code) || exit_code != STILL_ACTIVE;
+    CloseHandle(process);
+    return stopped;
+}
+
+static std::vector<DWORD> FindRuntimeLlamaProcesses(const std::string& expected_exe_path) {
+    std::vector<DWORD> pids;
+    const auto expected = NormalizePathForCompare(expected_exe_path);
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return pids;
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            std::string exe_name = std::filesystem::path(entry.szExeFile).string();
+            if (ToLowerCopy(exe_name) != "llama-server.exe") continue;
+
+            std::string image_path;
+            if (!QueryProcessImagePath(entry.th32ProcessID, image_path)) continue;
+            if (NormalizePathForCompare(image_path) == expected) {
+                pids.push_back(entry.th32ProcessID);
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return pids;
+}
+
+static bool CleanupStaleRuntimeProcesses(const std::string& expected_exe_path, int port, DWORD tracked_pid) {
+    bool ok = true;
+    const auto runtime_pids = FindRuntimeLlamaProcesses(expected_exe_path);
+    const DWORD port_owner = GetTcpPortOwner(port);
+
+    if (port_owner != 0 && port_owner != tracked_pid &&
+        std::find(runtime_pids.begin(), runtime_pids.end(), port_owner) == runtime_pids.end()) {
+        Logger::Get().Error("llama-server port " + std::to_string(port) +
+            " is owned by unknown PID " + std::to_string(port_owner) + "; refusing to steal it.");
+        return false;
+    }
+
+    for (DWORD pid : runtime_pids) {
+        if (pid == tracked_pid && IsProcessAlive(pid)) continue;
+        Logger::Get().Warn("Stopping stale InferDeck llama-server process PID " + std::to_string(pid));
+        if (!TerminateAndWait(pid, std::chrono::seconds(15))) {
+            Logger::Get().Error("Failed to stop stale llama-server process PID " + std::to_string(pid));
+            ok = false;
+        }
+    }
+
+    const DWORD owner_after_cleanup = GetTcpPortOwner(port);
+    if (owner_after_cleanup != 0 && owner_after_cleanup != tracked_pid) {
+        Logger::Get().Error("llama-server port " + std::to_string(port) +
+            " is still owned by PID " + std::to_string(owner_after_cleanup) + " after cleanup.");
+        return false;
+    }
+    return ok;
+}
+#endif
+
 bool LlamaServerManager::DownloadIfNeeded() const {
     auto exe_path = GetExecutablePath();
     auto runtime_dir = std::filesystem::path(GetRuntimeDirectory());
@@ -85,9 +230,26 @@ bool LlamaServerManager::DownloadBinary() const {
 bool LlamaServerManager::Start(const std::string& model_path, int gpu_layers, int context_size, int port) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (running_.load() && std::filesystem::equivalent(std::filesystem::path(current_model_path_), std::filesystem::path(model_path))) {
-        Logger::Get().Info("llama-server already running requested model; reusing PID " + std::to_string(pid_));
-        return true;
+    if (running_.load()) {
+#ifdef _WIN32
+        const DWORD port_owner = GetTcpPortOwner(port);
+        if (!IsProcessAlive(pid_) || port_owner != pid_) {
+            Logger::Get().Warn("Tracked llama-server PID is not healthy or does not own port " + std::to_string(port) + "; cleaning up before start.");
+            running_.store(false);
+            if (process_handle_) {
+                CloseHandle(process_handle_);
+                process_handle_ = nullptr;
+            }
+            pid_ = 0;
+        } else
+#endif
+        if (PathsEquivalent(current_model_path_, model_path)) {
+            Logger::Get().Info("llama-server already running requested model; reusing PID " + std::to_string(pid_));
+            return true;
+        } else {
+            KillProcess();
+            running_.store(false);
+        }
     }
 
     if (!DownloadIfNeeded()) {
@@ -101,6 +263,12 @@ bool LlamaServerManager::Start(const std::string& model_path, int gpu_layers, in
     }
 
     port_ = port;
+
+#ifdef _WIN32
+    if (!CleanupStaleRuntimeProcesses(GetExecutablePath(), port_, pid_)) {
+        return false;
+    }
+#endif
 
     if (!LaunchProcess(model_path, gpu_layers, context_size, port)) {
         Logger::Get().Error("Failed to launch llama-server");
@@ -212,11 +380,11 @@ void LlamaServerManager::Stop() {
 bool LlamaServerManager::KillProcess() {
 #ifdef _WIN32
     if (process_handle_) {
-        // Try graceful shutdown first
         DWORD exitCode = 0;
         GetExitCodeProcess(process_handle_, &exitCode);
         if (exitCode == STILL_ACTIVE) {
             TerminateProcess(process_handle_, 0);
+            WaitForSingleObject(process_handle_, 15000);
         }
         CloseHandle(process_handle_);
         process_handle_ = nullptr;
@@ -247,7 +415,7 @@ bool LlamaServerManager::WaitForReady(int timeout_seconds) const {
         if (hSession) {
             std::wstring host = L"127.0.0.1";
             std::wstring path = L"/health";
-            HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), port_, 0);
+            HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), static_cast<INTERNET_PORT>(port_), 0);
             if (hConnect) {
                 HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path.c_str(),
                     nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
@@ -262,9 +430,15 @@ bool LlamaServerManager::WaitForReady(int timeout_seconds) const {
                         WinHttpCloseHandle(hConnect);
                         WinHttpCloseHandle(hSession);
 
-                        if (statusCode == 200) {
+                        const DWORD port_owner = GetTcpPortOwner(port_);
+                        if (statusCode == 200 && port_owner == pid_) {
                             Logger::Get().Info("llama-server is ready!");
                             return true;
+                        }
+                        if (statusCode == 200 && port_owner != pid_) {
+                            Logger::Get().Warn("llama-server health check responded, but port " + std::to_string(port_) +
+                                " is owned by PID " + std::to_string(port_owner) +
+                                " instead of tracked PID " + std::to_string(pid_));
                         }
                     } else {
                         WinHttpCloseHandle(hRequest);
@@ -289,18 +463,9 @@ bool LlamaServerManager::Restart(const std::string& new_model_path, int gpu_laye
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (running_.load()) {
-        if (!current_model_path_.empty()) {
-            try {
-                if (std::filesystem::equivalent(std::filesystem::path(current_model_path_), std::filesystem::path(new_model_path))) {
-                    Logger::Get().Info("Requested model already loaded; skipping restart for: " + new_model_path);
-                    return true;
-                }
-            } catch (...) {
-                if (current_model_path_ == new_model_path) {
-                    Logger::Get().Info("Requested model already loaded; skipping restart for: " + new_model_path);
-                    return true;
-                }
-            }
+        if (PathsEquivalent(current_model_path_, new_model_path)) {
+            Logger::Get().Info("Requested model already loaded; skipping restart for: " + new_model_path);
+            return true;
         }
         KillProcess();
         running_.store(false);
@@ -315,6 +480,12 @@ bool LlamaServerManager::Restart(const std::string& new_model_path, int gpu_laye
         Logger::Get().Error("Model file not found: " + new_model_path);
         return false;
     }
+
+#ifdef _WIN32
+    if (!CleanupStaleRuntimeProcesses(GetExecutablePath(), port_, 0)) {
+        return false;
+    }
+#endif
 
     if (!LaunchProcess(new_model_path, gpu_layers, context_size, port_)) {
         Logger::Get().Error("Failed to launch llama-server");

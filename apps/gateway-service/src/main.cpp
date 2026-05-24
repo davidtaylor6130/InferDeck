@@ -2,6 +2,9 @@
 #include <string>
 #include <filesystem>
 #include <signal.h>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 
 #include "Server.hpp"
 #include "config/ConfigLoader.hpp"
@@ -25,6 +28,69 @@
 #include "routes/Dashboard.hpp"
 
 static inferdeck::gateway::GatewayServer* g_server = nullptr;
+
+std::string ReadTextFile(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) return "";
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
+std::string ExtractJsonStringValue(const std::string& text, const std::string& key) {
+    const auto key_pos = text.find("\"" + key + "\"");
+    if (key_pos == std::string::npos) return "";
+    const auto colon = text.find(':', key_pos);
+    if (colon == std::string::npos) return "";
+    const auto quote = text.find('"', colon + 1);
+    if (quote == std::string::npos) return "";
+    const auto end = text.find('"', quote + 1);
+    if (end == std::string::npos) return "";
+    return text.substr(quote + 1, end - quote - 1);
+}
+
+int ExtractUrlPort(const std::string& url) {
+    const auto scheme = url.find("://");
+    const auto host_start = scheme == std::string::npos ? 0 : scheme + 3;
+    const auto slash = url.find('/', host_start);
+    const auto host_port = url.substr(host_start, slash == std::string::npos ? std::string::npos : slash - host_start);
+    const auto colon = host_port.rfind(':');
+    if (colon == std::string::npos) return 0;
+    try {
+        return std::stoi(host_port.substr(colon + 1));
+    } catch (...) {
+        return 0;
+    }
+}
+
+void WarnIfOpenCodeTargetsDifferentPort(int api_port) {
+#ifdef _WIN32
+    char* user_profile = nullptr;
+    size_t user_profile_len = 0;
+    if (_dupenv_s(&user_profile, &user_profile_len, "USERPROFILE") != 0 || !user_profile || user_profile_len == 0) {
+        if (user_profile) free(user_profile);
+        return;
+    }
+    std::string user_profile_text(user_profile);
+    free(user_profile);
+#else
+    const char* user_profile = std::getenv("USERPROFILE");
+    if (!user_profile || std::string(user_profile).empty()) return;
+    std::string user_profile_text(user_profile);
+#endif
+
+    const auto config_path = std::filesystem::path(user_profile_text) / ".config" / "opencode" / "opencode.json";
+    const auto config = ReadTextFile(config_path);
+    if (config.empty()) return;
+
+    const auto base_url = ExtractJsonStringValue(config, "baseURL");
+    const auto configured_port = ExtractUrlPort(base_url);
+    if (configured_port != 0 && configured_port != api_port) {
+        inferdeck::core::Logger::Get().Warn(
+            "OpenCode config " + config_path.string() + " points to " + base_url +
+            ", but InferDeck API is listening on port " + std::to_string(api_port) + ".");
+    }
+}
 
 void SignalHandler(int signum) {
     if (g_server) {
@@ -81,6 +147,7 @@ int main(int argc, char* argv[]) {
     inferdeck::gateway::ServerConfig server_config;
     try {
         server_config = inferdeck::gateway::LoadConfig(config_path);
+        WarnIfOpenCodeTargetsDifferentPort(server_config.apiPort);
 
         auto& engine = inferdeck::core::LlamaEngine::Get();
         bool engine_ok = engine.Initialize(

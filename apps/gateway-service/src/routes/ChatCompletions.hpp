@@ -9,6 +9,8 @@ void HandleChatCompletionsStream(const httplib::Request& req, httplib::Response&
 std::string ValidateChatRequest(const std::string& body);
 std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response);
 bool ShouldForceNonStreamingBackend(const nlohmann::json& request);
+bool ShouldUseStreamingBackend(const nlohmann::json& request);
+std::string DetectChatClientName(const httplib::Request& req);
 std::string SanitizeAssistantContent(const std::string& content);
 std::string ExtractAssistantReasoningContent(const std::string& content);
 }
