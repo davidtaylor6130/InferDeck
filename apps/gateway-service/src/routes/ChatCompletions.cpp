@@ -289,12 +289,6 @@ bool ShouldForceNonStreamingBackend(const nlohmann::json& request) {
     return request.contains("tools") && request["tools"].is_array() && !request["tools"].empty();
 }
 
-static bool IsOpenCodeClientName(const std::string& client) {
-    std::string lower = client;
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return lower.find("opencode") != std::string::npos;
-}
-
 static std::string SafeLogText(std::string text, std::size_t limit = 120) {
     for (auto& c : text) {
         unsigned char uc = static_cast<unsigned char>(c);
@@ -677,10 +671,6 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         bool force_non_streaming_backend = ShouldForceNonStreamingBackend(body);
         if (body.contains("tools") && body["tools"].is_array()) {
             params.tools_json = body["tools"].dump();
-        }
-        if (IsOpenCodeClientName(accepted_client) && (params.max_tokens < 0 || params.max_tokens > 2048)) {
-            params.max_tokens = 2048;
-            body["max_tokens"] = params.max_tokens;
         }
         stream = client_requested_stream && !force_non_streaming_backend;
 

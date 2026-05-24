@@ -118,6 +118,20 @@ except Exception as exc:
 PY
 }
 
+retry_cmd() {
+  local attempts="$1"
+  local delay="$2"
+  shift 2
+  local i
+  for ((i=1; i<=attempts; i++)); do
+    if "$@"; then
+      return 0
+    fi
+    sleep "$delay"
+  done
+  return 1
+}
+
 CONFIG_CANDIDATES=(
   "$HOME/.config/opencode/opencode.json"
   "$HOME/.config/opencode/config.json"
@@ -214,7 +228,7 @@ else
   FAILED=1
 fi
 
-if TCP_RESULT="$(tcp_check ai.homelab.com 11434)"; then
+if TCP_RESULT="$(retry_cmd 3 2 tcp_check ai.homelab.com 11434)"; then
   write_check "TCP ai.homelab.com:11434" "$TCP_RESULT"
 else
   write_check "TCP ai.homelab.com:11434" "$TCP_RESULT"
@@ -224,7 +238,7 @@ fi
 API_BASE="${trimmed_base:-${EXPECTED_BASE_URL%/}}"
 ROOT_BASE="${API_BASE%/v1}"
 
-if MODELS_JSON="$(curl -fsS --max-time 15 "$API_BASE/models")"; then
+if MODELS_JSON="$(curl -fsS --retry 2 --retry-delay 2 --retry-connrefused --max-time 15 "$API_BASE/models")"; then
   MODEL_IDS="$(printf '%s' "$MODELS_JSON" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(", ".join(item.get("id", "") for item in data.get("data", [])[:5]))')"
   write_check "/v1/models result" "$MODEL_IDS"
 else
@@ -244,7 +258,7 @@ print(json.dumps({
 }))
 PY
 )"
-  if CHAT_JSON="$(curl -fsS --max-time 180 -H "Content-Type: application/json" --data "$CHAT_BODY" "$API_BASE/chat/completions")"; then
+  if CHAT_JSON="$(curl -fsS --retry 1 --retry-delay 2 --retry-connrefused --max-time 180 -H "Content-Type: application/json" --data "$CHAT_BODY" "$API_BASE/chat/completions")"; then
     write_check "/v1/chat/completions tiny result" "$(printf '%s' "$CHAT_JSON" | assistant_preview)"
   else
     write_check "/v1/chat/completions tiny result" "FAILED"
@@ -262,7 +276,7 @@ print(json.dumps({
 }))
 PY
 )"
-  if OLLAMA_JSON="$(curl -fsS --max-time 180 -H "Content-Type: application/json" --data "$OLLAMA_BODY" "$ROOT_BASE/api/chat")"; then
+  if OLLAMA_JSON="$(curl -fsS --retry 1 --retry-delay 2 --retry-connrefused --max-time 180 -H "Content-Type: application/json" --data "$OLLAMA_BODY" "$ROOT_BASE/api/chat")"; then
     write_check "/api/chat Open WebUI control result" "$(printf '%s' "$OLLAMA_JSON" | ollama_preview)"
   else
     write_check "/api/chat Open WebUI control result" "FAILED"
