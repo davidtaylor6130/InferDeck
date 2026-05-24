@@ -22,7 +22,9 @@ public:
                          const nlohmann::json& payload,
                          int priority = 50);
     void CompleteJob(const std::string& id, const inferdeck::core::InferenceResult& result, const nlohmann::json& response_preview);
+    void MergeJobResult(const std::string& id, const nlohmann::json& response_patch, const std::string& event_message = "");
     void FailJob(const std::string& id, const std::string& error, int status_code = 500);
+    void FailRunningClientJobs(const std::string& client, const std::string& error, int status_code = 500, const std::string& except_id = "");
     void CancelJob(const std::string& id);
     std::string RetryJob(const std::string& id);
     void SetQueuePaused(bool paused);

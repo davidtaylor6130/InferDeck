@@ -642,7 +642,10 @@ InferenceResult LlamaEngine::Predict(const std::vector<ChatMessage>& messages,
                     tool_call.type = tc.value("type", "function");
                     if (tc.contains("function") && tc["function"].is_object()) {
                         tool_call.function_name = tc["function"].value("name", "");
-                        tool_call.function_arguments = tc["function"].value("arguments", "");
+                        if (tc["function"].contains("arguments")) {
+                            const auto& arguments = tc["function"]["arguments"];
+                            tool_call.function_arguments = arguments.is_string() ? arguments.get<std::string>() : arguments.dump();
+                        }
                     }
                     result.tool_calls.push_back(tool_call);
                 }

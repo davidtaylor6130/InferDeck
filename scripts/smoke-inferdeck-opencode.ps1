@@ -79,6 +79,48 @@ if (-not $SkipGeneration) {
     $ollama = Invoke-RestMethod -Method Post -Uri "$GatewayBaseUrl/api/chat" -Body $ollamaBody -ContentType "application/json" -TimeoutSec 180
     Assert-True ($ollama.message.role -eq "assistant") "/api/chat did not return an Ollama-compatible assistant message."
 
+    $ollamaToolBody = @{
+        model = "qwen3.6-35b-a3b"
+        messages = @(@{ role = "user"; content = "Use the provided read tool if you need to inspect a TSX file." })
+        stream = $false
+        options = @{ num_predict = 64 }
+        tools = @(@{
+            type = "function"
+            function = @{
+                name = "read"
+                description = "Read a local file"
+                parameters = @{
+                    type = "object"
+                    properties = @{ filePath = @{ type = "string" } }
+                    required = @("filePath")
+                }
+            }
+        })
+    } | ConvertTo-Json -Depth 14 -Compress
+    $ollamaTool = Invoke-RestMethod -Method Post -Uri "$GatewayBaseUrl/api/chat" -Body $ollamaToolBody -ContentType "application/json" -TimeoutSec 180
+    Assert-True ($ollamaTool.message.role -eq "assistant") "/api/chat stream:false tools did not return an Ollama assistant message."
+
+    $ollamaToolStreamBody = @{
+        model = "qwen3.6-35b-a3b"
+        messages = @(@{ role = "user"; content = "Use the provided read tool if you need to inspect App.tsx and Panel.jsx." })
+        stream = $true
+        options = @{ num_predict = 64 }
+        tools = @(@{
+            type = "function"
+            function = @{
+                name = "read"
+                description = "Read a local file"
+                parameters = @{
+                    type = "object"
+                    properties = @{ filePath = @{ type = "string" } }
+                    required = @("filePath")
+                }
+            }
+        })
+    } | ConvertTo-Json -Depth 14 -Compress
+    $ollamaToolStream = $ollamaToolStreamBody | curl.exe -N -sS --max-time 180 -A "opencode/1.14.48 ai-sdk-ollama" -H "Content-Type: application/json" --data-binary "@-" "$GatewayBaseUrl/api/chat"
+    Assert-True ($ollamaToolStream -match '"done":true' -and $ollamaToolStream -notmatch 'data: ') "/api/chat stream:true tools did not emit Ollama NDJSON framing."
+
     $plainStreamBody = @{
         model = "qwen3.6-35b-a3b"
         messages = @(@{ role = "user"; content = "Reply with exactly: inferdeck stream ok" })
@@ -118,11 +160,21 @@ if (-not $SkipGeneration) {
     $statusAfterToolStream = Invoke-RestMethod -Method Get -Uri "$DashboardBaseUrl/api/status" -TimeoutSec 10
     Assert-True ($null -ne $statusAfterToolStream.observability.lastOpenCodeRequest) "Tool stream did not update lastOpenCodeRequest."
     Assert-True ($statusAfterToolStream.observability.lastOpenCodeRequest.client -eq "OpenCode") "Tool stream lastOpenCodeRequest client was $($statusAfterToolStream.observability.lastOpenCodeRequest.client), expected OpenCode."
-    Assert-True ($statusAfterToolStream.observability.lastOpenCodeRequest.responseMode -eq "synthetic-sse") "Tool stream responseMode was $($statusAfterToolStream.observability.lastOpenCodeRequest.responseMode), expected synthetic-sse."
+    Assert-True ($statusAfterToolStream.observability.lastOpenCodeRequest.responseMode -eq "guarded-synthetic-sse") "Tool stream responseMode was $($statusAfterToolStream.observability.lastOpenCodeRequest.responseMode), expected guarded-synthetic-sse."
     Assert-True ([int]$statusAfterToolStream.observability.lastOpenCodeRequest.sseChunks -gt 0) "Tool stream did not record SSE chunks."
+    Assert-True ($statusAfterToolStream.observability.openCodeWaitingOnBackendOrToolFormatting -eq $false) "OpenCode observability still shows a formatting wait after tool stream completion."
 
     Invoke-OpenAiTinyChat -Model "gpt-oss:20b" -Expected "gpt ok" | Out-Null
     Invoke-OpenAiTinyChat -Model "qwen3.6-35b-a3b" -Expected "qwen ok" | Out-Null
+
+    $webUiAfterBody = @{
+        model = "qwen3.6-35b-a3b"
+        messages = @(@{ role = "user"; content = "Reply with exactly: inferdeck webui still ok" })
+        stream = $false
+        options = @{ num_predict = 12 }
+    } | ConvertTo-Json -Depth 8
+    $webUiAfter = Invoke-RestMethod -Method Post -Uri "$GatewayBaseUrl/api/chat" -Body $webUiAfterBody -ContentType "application/json" -TimeoutSec 180
+    Assert-True ($webUiAfter.message.role -eq "assistant") "Open WebUI /api/chat control failed after OpenCode tests."
 
     if ($RunDisconnectSmoke) {
         $disconnectBody = @{

@@ -20,6 +20,7 @@
 #include <string_view>
 #include <thread>
 #include <cstdint>
+#include <cstdlib>
 using json = nlohmann::json;
 
 namespace {
@@ -260,6 +261,93 @@ static std::size_t ResponseToolCallCount(const nlohmann::json& response) {
     return message["tool_calls"].size();
 }
 
+static std::string TrimCopy(std::string text);
+
+static std::string JsonArgumentString(const nlohmann::json& value) {
+    if (value.is_string()) return value.get<std::string>();
+    if (value.is_object() || value.is_array()) return value.dump();
+    if (value.is_null()) return "{}";
+    return value.dump();
+}
+
+static std::string MakeToolCallId(std::size_t index) {
+    return "call_inferdeck_" + std::to_string(index + 1);
+}
+
+nlohmann::json NormalizeOpenAiToolCalls(const nlohmann::json& tool_calls) {
+    nlohmann::json normalized = nlohmann::json::array();
+    if (!tool_calls.is_array()) return normalized;
+
+    std::size_t index = 0;
+    for (const auto& raw : tool_calls) {
+        if (!raw.is_object()) continue;
+        nlohmann::json item;
+        item["id"] = raw.value("id", MakeToolCallId(index));
+        item["type"] = raw.value("type", "function");
+        if (!raw.contains("function") || !raw["function"].is_object()) continue;
+        const auto& function = raw["function"];
+        const auto name = function.value("name", "");
+        if (name.empty()) continue;
+        item["function"] = {
+            {"name", name},
+            {"arguments", function.contains("arguments") ? JsonArgumentString(function["arguments"]) : "{}"}
+        };
+        normalized.push_back(std::move(item));
+        ++index;
+    }
+    return normalized;
+}
+
+static nlohmann::json ExtractQwenToolCallsFromText(const std::string& text) {
+    nlohmann::json calls = nlohmann::json::array();
+    std::size_t search = 0;
+    while (true) {
+        const auto start = text.find("<tool_call>", search);
+        if (start == std::string::npos) break;
+        const auto body_start = start + std::string("<tool_call>").size();
+        const auto end = text.find("</tool_call>", body_start);
+        if (end == std::string::npos) break;
+        auto payload = TrimCopy(text.substr(body_start, end - body_start));
+        search = end + std::string("</tool_call>").size();
+        if (payload.empty()) continue;
+        try {
+            auto parsed = nlohmann::json::parse(payload);
+            nlohmann::json raw_call;
+            raw_call["id"] = MakeToolCallId(calls.size());
+            raw_call["type"] = "function";
+            if (parsed.contains("function") && parsed["function"].is_object()) {
+                raw_call["function"] = parsed["function"];
+            } else {
+                const auto name = parsed.value("name", parsed.value("function", ""));
+                if (name.empty()) continue;
+                raw_call["function"] = {
+                    {"name", name},
+                    {"arguments", parsed.contains("arguments") ? parsed["arguments"] : nlohmann::json::object()}
+                };
+            }
+            auto normalized = NormalizeOpenAiToolCalls(nlohmann::json::array({raw_call}));
+            if (!normalized.empty()) calls.push_back(normalized.front());
+        } catch (...) {
+            continue;
+        }
+    }
+    return calls;
+}
+
+static std::string RemoveQwenToolCallBlocks(std::string text) {
+    while (true) {
+        const auto start = text.find("<tool_call>");
+        if (start == std::string::npos) break;
+        const auto end = text.find("</tool_call>", start);
+        if (end == std::string::npos) {
+            text.erase(start);
+            break;
+        }
+        text.erase(start, end + std::string("</tool_call>").size() - start);
+    }
+    return TrimCopy(text);
+}
+
 std::string ValidateChatRequest(const std::string& body) {
     if (body.empty()) return "Request body is required";
 
@@ -300,6 +388,12 @@ static std::string SafeLogText(std::string text, std::size_t limit = 120) {
 
 bool ShouldUseStreamingBackend(const nlohmann::json& request) {
     return request.value("stream", false) && !ShouldForceNonStreamingBackend(request);
+}
+
+bool ShouldUseStreamingBackendForClient(const nlohmann::json& request, const std::string& client) {
+    (void)client;
+    return request.value("stream", false) &&
+           !ShouldForceNonStreamingBackend(request);
 }
 
 static void ReplaceAll(std::string& text, std::string_view from, std::string_view to) {
@@ -407,13 +501,16 @@ std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response) {
         if (choice.contains("message") && choice["message"].is_object()) {
             const auto& message = choice["message"];
             std::string reasoning_content;
+            json extracted_tool_calls = json::array();
             if (message.contains("reasoning_content") && message["reasoning_content"].is_string()) {
                 AppendReasoning(reasoning_content, message["reasoning_content"].get<std::string>());
             }
             if (message.contains("content") && message["content"].is_string() && !message["content"].get<std::string>().empty()) {
                 const auto raw_content = message["content"].get<std::string>();
-                AppendReasoning(reasoning_content, ExtractAssistantReasoningContent(raw_content));
-                const auto clean_content = SanitizeAssistantContent(raw_content);
+                extracted_tool_calls = ExtractQwenToolCallsFromText(raw_content);
+                const auto without_tool_calls = RemoveQwenToolCallBlocks(raw_content);
+                AppendReasoning(reasoning_content, ExtractAssistantReasoningContent(without_tool_calls));
+                const auto clean_content = SanitizeAssistantContent(without_tool_calls);
                 if (!reasoning_content.empty()) {
                     stream += SseDeltaChunk(id, model, json({{"reasoning_content", reasoning_content}}));
                 }
@@ -423,9 +520,11 @@ std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response) {
             } else if (!reasoning_content.empty()) {
                 stream += SseDeltaChunk(id, model, json({{"reasoning_content", reasoning_content}}));
             }
-            if (message.contains("tool_calls") && message["tool_calls"].is_array()) {
-                for (size_t i = 0; i < message["tool_calls"].size(); ++i) {
-                    json tool_call = message["tool_calls"][i];
+            auto tool_calls = NormalizeOpenAiToolCalls(message.contains("tool_calls") ? message["tool_calls"] : json::array());
+            for (const auto& tool_call : extracted_tool_calls) tool_calls.push_back(tool_call);
+            if (!tool_calls.empty()) {
+                for (size_t i = 0; i < tool_calls.size(); ++i) {
+                    json tool_call = tool_calls[i];
                     tool_call["index"] = i;
                     stream += SseDeltaChunk(id, model, json({{"tool_calls", json::array({tool_call})}}));
                 }
@@ -494,29 +593,30 @@ static json BuildChatCompletionResponse(const std::string& id,
     response["model"] = model;
 
     json message = {{"role", "assistant"}};
-    if (!result.text.empty()) {
-        message["content"] = SanitizeAssistantContent(result.text);
-    } else if (result.tool_calls.empty()) {
-        message["content"] = "";
-    }
+    auto qwen_tool_calls = ExtractQwenToolCallsFromText(result.text);
+    const auto visible_text = RemoveQwenToolCallBlocks(result.text);
+    if (!visible_text.empty()) message["content"] = SanitizeAssistantContent(visible_text);
     std::string reasoning_text = result.reasoning_text;
-    AppendReasoning(reasoning_text, ExtractAssistantReasoningContent(result.text));
+    AppendReasoning(reasoning_text, ExtractAssistantReasoningContent(visible_text));
     if (!reasoning_text.empty()) {
         message["reasoning_content"] = reasoning_text;
     }
+    json tool_calls = json::array();
     if (!result.tool_calls.empty()) {
-        json tool_calls = json::array();
         for (const auto& tc : result.tool_calls) {
             json tc_json;
             tc_json["id"] = tc.id;
             tc_json["type"] = tc.type;
-            tc_json["function"] = {{"name", tc.function_name}, {"arguments", tc.function_arguments}};
+            tc_json["function"] = {{"name", tc.function_name}, {"arguments", JsonArgumentString(tc.function_arguments)}};
             tool_calls.push_back(tc_json);
         }
-        message["tool_calls"] = tool_calls;
     }
+    for (const auto& tc : qwen_tool_calls) tool_calls.push_back(tc);
+    tool_calls = NormalizeOpenAiToolCalls(tool_calls);
+    if (!tool_calls.empty()) message["tool_calls"] = tool_calls;
+    if (!message.contains("content") && tool_calls.empty()) message["content"] = "";
 
-    std::string finish_reason = result.tool_calls.empty() ? "stop" : "tool_calls";
+    std::string finish_reason = tool_calls.empty() ? "stop" : "tool_calls";
     response["choices"] = json::array({{{"index", 0}, {"message", message}, {"finish_reason", finish_reason}}});
     response["usage"] = {{"prompt_tokens", result.prompt_tokens}, {"completion_tokens", result.completion_tokens}, {"total_tokens", result.total_tokens}};
     return response;
@@ -535,8 +635,9 @@ std::string DetectChatClientName(const httplib::Request& req) {
     return "OpenAI compatible";
 }
 
-static json BuildJobPayloadPreview(const json& body, bool stream, bool force_non_streaming_backend) {
+static json BuildJobPayloadPreview(const json& body, bool stream, bool force_non_streaming_backend, const std::string& request_protocol) {
     json preview;
+    preview["requestProtocol"] = request_protocol;
     preview["model"] = body.value("model", "");
     preview["stream"] = stream;
     preview["tools"] = body.contains("tools") && body["tools"].is_array() ? body["tools"].size() : 0;
@@ -615,6 +716,270 @@ struct StreamState {
     }
 };
 
+static int EnvIntMs(const char* name, int fallback_ms) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) return fallback_ms;
+    try {
+        int parsed = std::stoi(value);
+        return parsed > 0 ? parsed : fallback_ms;
+    } catch (...) {
+        return fallback_ms;
+    }
+}
+
+struct GuardedPredictState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+    inferdeck::core::InferenceResult result;
+    std::string exception;
+};
+
+static nlohmann::json SyntheticResultPreview(const nlohmann::json& response,
+                                             const inferdeck::core::InferenceResult& result,
+                                             const std::string& request_protocol,
+                                             const std::string& response_mode,
+                                             std::uint64_t sse_chunks,
+                                             std::uint64_t heartbeat_chunks,
+                                             std::uint64_t response_bytes,
+                                             const std::string& cause = "") {
+    nlohmann::json preview = {
+        {"requestProtocol", request_protocol},
+        {"responseProtocol", "openai.sse"},
+        {"responseMode", response_mode},
+        {"sseChunks", sse_chunks},
+        {"heartbeatChunks", heartbeat_chunks},
+        {"responseBytes", response_bytes},
+        {"finishReason", ResponseFinishReason(response)},
+        {"toolCallCount", ResponseToolCallCount(response)},
+        {"contentPreview", result.text.substr(0, 500)},
+        {"reasoningPreview", result.reasoning_text.substr(0, 500)},
+        {"waitingOnBackendOrToolFormatting", false},
+        {"backendAbortState", "none"},
+        {"syntheticStream", true}
+    };
+    if (response.contains("choices") && response["choices"].is_array() && !response["choices"].empty() &&
+        response["choices"][0].contains("message")) {
+        const auto& message = response["choices"][0]["message"];
+        preview["toolCalls"] = message.contains("tool_calls") ? message["tool_calls"] : nlohmann::json::array();
+    } else {
+        preview["toolCalls"] = nlohmann::json::array();
+    }
+    if (response.contains("usage")) preview["usage"] = response["usage"];
+    if (!cause.empty()) preview["terminalCause"] = cause;
+    return preview;
+}
+
+static bool RunGuardedSyntheticSse(inferdeck::core::LlamaEngine& engine,
+                                   const std::vector<inferdeck::core::ChatMessage>& messages,
+                                   const inferdeck::core::InferenceParams& params,
+                                   const std::string& id,
+                                   const std::string& response_model_id,
+                                   const std::string& job_id,
+                                   const std::string& log_label,
+                                   const std::string& request_protocol,
+                                   httplib::DataSink& sink) {
+    constexpr int kDefaultHeartbeatMs = 5000;
+    constexpr int kDefaultIdleTimeoutMs = 60000;
+    constexpr int kDefaultTotalTimeoutMs = 600000;
+
+    const auto heartbeat_interval = std::chrono::milliseconds(EnvIntMs("INFERDECK_OPENCODE_HEARTBEAT_MS", kDefaultHeartbeatMs));
+    const auto idle_timeout = std::chrono::milliseconds(EnvIntMs("INFERDECK_OPENCODE_IDLE_TIMEOUT_MS", kDefaultIdleTimeoutMs));
+    const auto total_timeout = std::chrono::milliseconds(EnvIntMs("INFERDECK_OPENCODE_TOTAL_TIMEOUT_MS", kDefaultTotalTimeoutMs));
+
+    auto state = std::make_shared<GuardedPredictState>();
+    auto terminal_sent = std::make_shared<std::atomic<bool>>(false);
+    std::uint64_t sse_chunks_sent = 0;
+    std::uint64_t sse_bytes_sent = 0;
+    std::uint64_t heartbeat_chunks_sent = 0;
+
+    auto mark_failed_once = [&](const std::string& cause, int status_code) {
+        bool expected = false;
+        if (!terminal_sent->compare_exchange_strong(expected, true)) return;
+        inferdeck::gateway::RuntimeActivity::Get().FailJob(job_id, cause, status_code);
+    };
+
+    auto write_chunk = [&](const std::string& chunk) {
+        sse_chunks_sent += CountSseDataChunks(chunk);
+        sse_bytes_sent += chunk.size();
+        return sink.write(chunk.data(), chunk.size());
+    };
+
+    std::thread([state, &engine, messages, params]() {
+        inferdeck::core::InferenceResult result;
+        std::string exception;
+        try {
+            std::unique_lock<std::mutex> backend_lock(g_switch_mutex);
+            result = engine.Predict(messages, params);
+        } catch (const std::exception& e) {
+            exception = e.what();
+        } catch (...) {
+            exception = "Unknown backend inference failure";
+        }
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->result = std::move(result);
+            state->exception = std::move(exception);
+            state->done = true;
+        }
+        state->cv.notify_all();
+    }).detach();
+
+    const auto start = std::chrono::steady_clock::now();
+    auto last_backend_activity = start;
+    auto next_heartbeat = start;
+
+    inferdeck::core::Logger::Get().Info("Request " + job_id + " using guarded synthetic SSE for " + log_label);
+
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(state->mutex);
+            if (state->cv.wait_until(lock, next_heartbeat, [&] { return state->done; })) {
+                break;
+            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - start >= total_timeout) {
+            const std::string cause = "OpenCode " + log_label + " totalTimeout";
+            inferdeck::gateway::RuntimeActivity::Get().MergeJobResult(job_id, nlohmann::json({
+                {"requestProtocol", request_protocol},
+                {"responseProtocol", "openai.sse"},
+                {"responseMode", "guarded-synthetic-sse-error"},
+                {"finishReason", "error"},
+                {"terminalCause", "timeout"},
+                {"backendAbortState", "aborted"},
+                {"waitingOnBackendOrToolFormatting", false}
+            }), "Guarded synthetic SSE timed out");
+            mark_failed_once(cause, 504);
+            inferdeck::gateway::RuntimeActivity::Get().FailRunningClientJobs("OpenCode", "backendAborted: " + cause, 504, job_id);
+            inferdeck::core::LlamaEngine::Get().AbortActiveRequest(cause);
+            const auto error_stream = SseErrorChunk(id, response_model_id, cause) +
+                                      SseDeltaChunk(id, response_model_id, nlohmann::json::object(), "error") +
+                                      "data: [DONE]\n\n";
+            write_chunk(error_stream);
+            sink.done();
+            return false;
+        }
+
+        if (now - last_backend_activity >= idle_timeout) {
+            const std::string cause = "OpenCode " + log_label + " idleTimeout";
+            inferdeck::gateway::RuntimeActivity::Get().MergeJobResult(job_id, nlohmann::json({
+                {"requestProtocol", request_protocol},
+                {"responseProtocol", "openai.sse"},
+                {"responseMode", "guarded-synthetic-sse-error"},
+                {"finishReason", "error"},
+                {"terminalCause", "idle-timeout"},
+                {"backendAbortState", "aborted"},
+                {"waitingOnBackendOrToolFormatting", false}
+            }), "Guarded synthetic SSE idle timed out");
+            mark_failed_once(cause, 504);
+            inferdeck::gateway::RuntimeActivity::Get().FailRunningClientJobs("OpenCode", "backendAborted: " + cause, 504, job_id);
+            inferdeck::core::LlamaEngine::Get().AbortActiveRequest(cause);
+            const auto error_stream = SseErrorChunk(id, response_model_id, cause) +
+                                      SseDeltaChunk(id, response_model_id, nlohmann::json::object(), "error") +
+                                      "data: [DONE]\n\n";
+            write_chunk(error_stream);
+            sink.done();
+            return false;
+        }
+
+        const std::string heartbeat = ": inferdeck opencode " + log_label + " backend running\n\n";
+        if (!write_chunk(heartbeat)) {
+            const std::string cause = "OpenCode " + log_label + " clientDisconnected";
+            inferdeck::gateway::RuntimeActivity::Get().MergeJobResult(job_id, nlohmann::json({
+                {"requestProtocol", request_protocol},
+                {"responseProtocol", "openai.sse"},
+                {"responseMode", "guarded-synthetic-sse-error"},
+                {"finishReason", "error"},
+                {"terminalCause", "client-disconnect"},
+                {"backendAbortState", "aborted"},
+                {"waitingOnBackendOrToolFormatting", false}
+            }), "Guarded synthetic SSE client disconnected");
+            mark_failed_once(cause, 499);
+            inferdeck::gateway::RuntimeActivity::Get().FailRunningClientJobs("OpenCode", "backendAborted: " + cause, 499, job_id);
+            inferdeck::core::LlamaEngine::Get().AbortActiveRequest(cause);
+            sink.done();
+            return false;
+        }
+        ++heartbeat_chunks_sent;
+        next_heartbeat = now + heartbeat_interval;
+    }
+
+    inferdeck::core::InferenceResult result;
+    std::string exception;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        result = state->result;
+        exception = state->exception;
+    }
+
+    if (!exception.empty()) {
+        const auto error_stream = SseErrorChunk(id, response_model_id, exception) +
+                                  SseDeltaChunk(id, response_model_id, nlohmann::json::object(), "error") +
+                                  "data: [DONE]\n\n";
+        inferdeck::gateway::RuntimeActivity::Get().MergeJobResult(job_id, nlohmann::json({
+            {"requestProtocol", request_protocol},
+            {"responseProtocol", "openai.sse"},
+            {"responseMode", "guarded-synthetic-sse-error"},
+            {"finishReason", "error"},
+            {"terminalCause", "backend-exception"},
+            {"backendAbortState", "exception"},
+            {"waitingOnBackendOrToolFormatting", false}
+        }), "Guarded synthetic SSE backend exception");
+        mark_failed_once(exception, 500);
+        write_chunk(error_stream);
+        sink.done();
+        return false;
+    }
+
+    if (result.HasError()) {
+        const auto error_stream = SseErrorChunk(id, response_model_id, result.error_message) +
+                                  SseDeltaChunk(id, response_model_id, nlohmann::json::object(), "error") +
+                                  "data: [DONE]\n\n";
+        bool expected = false;
+        if (terminal_sent->compare_exchange_strong(expected, true)) {
+            inferdeck::gateway::RuntimeActivity::Get().CompleteJob(job_id, result, nlohmann::json({
+                {"responseMode", "guarded-synthetic-sse-error"},
+                {"requestProtocol", request_protocol},
+                {"responseProtocol", "openai.sse"},
+                {"sseChunks", CountSseDataChunks(error_stream)},
+                {"heartbeatChunks", heartbeat_chunks_sent},
+                {"responseBytes", error_stream.size()},
+                {"finishReason", "error"},
+                {"toolCallCount", 0},
+                {"error", result.error_message},
+                {"terminalCause", "backendError"},
+                {"backendAbortState", "backend-error"},
+                {"waitingOnBackendOrToolFormatting", false},
+                {"syntheticStream", true}
+            }));
+        }
+        write_chunk(error_stream);
+        sink.done();
+        return false;
+    }
+
+    nlohmann::json response = BuildChatCompletionResponse(id, response_model_id, result);
+    const auto synthetic_stream = BuildSyntheticChatCompletionStream(response);
+    bool expected = false;
+    if (terminal_sent->compare_exchange_strong(expected, true)) {
+        inferdeck::gateway::RuntimeActivity::Get().CompleteJob(
+            job_id,
+            result,
+            SyntheticResultPreview(response,
+                                   result,
+                                   request_protocol,
+                                   "guarded-synthetic-sse",
+                                   CountSseDataChunks(synthetic_stream),
+                                   heartbeat_chunks_sent,
+                                   synthetic_stream.size()));
+    }
+    write_chunk(synthetic_stream);
+    sink.done();
+    return false;
+}
+
 void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp) {
     auto& engine = inferdeck::core::LlamaEngine::Get();
     if (!engine.IsInitialized()) {
@@ -668,26 +1033,32 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
             if (body["stop"].is_string()) params.stop = body["stop"].get<std::string>();
         }
         const std::string accepted_client = SafeLogText(DetectChatClientName(req), 80);
-        bool force_non_streaming_backend = ShouldForceNonStreamingBackend(body);
+        const std::string request_protocol = SafeLogText(req.get_header_value("X-InferDeck-Protocol").empty()
+            ? "/v1/chat/completions"
+            : req.get_header_value("X-InferDeck-Protocol"), 80);
+        const bool request_has_tools = ShouldForceNonStreamingBackend(body);
+        bool force_non_streaming_backend = request_has_tools;
         if (body.contains("tools") && body["tools"].is_array()) {
             params.tools_json = body["tools"].dump();
         }
-        stream = client_requested_stream && !force_non_streaming_backend;
+        stream = ShouldUseStreamingBackendForClient(body, accepted_client);
 
         auto& activity = inferdeck::gateway::RuntimeActivity::Get();
         const std::string accepted_model = body.value("model", "local-model");
         std::string job_id = activity.StartJob(
-            force_non_streaming_backend ? "tool_chat.completion" : "chat.completion",
+            request_has_tools ? "tool_chat.completion" : "chat.completion",
             accepted_client,
             accepted_model,
-            BuildJobPayloadPreview(body, client_requested_stream, force_non_streaming_backend),
-            force_non_streaming_backend ? 80 : 50
+            BuildJobPayloadPreview(body, client_requested_stream, force_non_streaming_backend, request_protocol),
+            request_has_tools ? 80 : 50
         );
+        resp.set_header("X-InferDeck-Job-Id", job_id);
         const std::string user_agent = SafeLogText(req.get_header_value("User-Agent"));
         const std::string remote_addr = SafeLogText(req.remote_addr, 64);
         inferdeck::core::Logger::Get().Info(
             "Accepted /v1/chat/completions request id=" + job_id +
             " client=" + accepted_client +
+            " protocol=" + request_protocol +
             " remote=" + remote_addr +
             " userAgent=" + user_agent +
             " model=" + accepted_model +
@@ -740,7 +1111,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
 
             resp.set_chunked_content_provider(
                 "text/event-stream",
-                [&engine, messages, params, id, response_model_id, job_id, started, lock_holder](size_t, httplib::DataSink& sink) -> bool {
+                [&engine, messages, params, id, response_model_id, job_id, started, lock_holder, request_protocol](size_t, httplib::DataSink& sink) -> bool {
                     bool expected = false;
                     if (!started->compare_exchange_strong(expected, true)) {
                         sink.done();
@@ -761,17 +1132,23 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                     auto write_heartbeat = [&]() {
                         const std::string heartbeat = ": inferdeck backend still running\n\n";
                         if (!write_chunk(heartbeat)) {
-                            inferdeck::gateway::RuntimeActivity::Get().FailJob(job_id, "OpenCode stream client disconnected", 499);
-                            inferdeck::core::LlamaEngine::Get().AbortActiveRequest("OpenCode stream client disconnected");
+                            inferdeck::gateway::RuntimeActivity::Get().FailJob(job_id, "stream client disconnected", 499);
+                            inferdeck::core::LlamaEngine::Get().AbortActiveRequest("stream client disconnected");
                             return;
                         }
                         ++heartbeat_chunks_sent;
                     };
                     try {
+                        inferdeck::gateway::RuntimeActivity::Get().MergeJobResult(job_id, json({
+                            {"requestProtocol", request_protocol},
+                            {"responseProtocol", "openai.sse"},
+                            {"responseMode", "backend-stream"},
+                            {"waitingOnBackendOrToolFormatting", true}
+                        }), "OpenAI SSE backend stream started");
                         auto role_chunk = SseDeltaChunk(id, response_model_id, json({{"role", "assistant"}}));
                         if (!write_chunk(role_chunk)) {
-                            inferdeck::gateway::RuntimeActivity::Get().FailJob(job_id, "OpenCode stream client disconnected", 499);
-                            inferdeck::core::LlamaEngine::Get().AbortActiveRequest("OpenCode stream client disconnected");
+                            inferdeck::gateway::RuntimeActivity::Get().FailJob(job_id, "stream client disconnected", 499);
+                            inferdeck::core::LlamaEngine::Get().AbortActiveRequest("stream client disconnected");
                             sink.done();
                             return false;
                         }
@@ -783,13 +1160,15 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                                 chunk = SseChunk(id, response_model_id, "", token, false);
                             }
                             if (!chunk.empty() && !write_chunk(chunk)) {
-                                inferdeck::gateway::RuntimeActivity::Get().FailJob(job_id, "OpenCode stream client disconnected", 499);
-                                inferdeck::core::LlamaEngine::Get().AbortActiveRequest("OpenCode stream client disconnected");
+                                inferdeck::gateway::RuntimeActivity::Get().FailJob(job_id, "stream client disconnected", 499);
+                                inferdeck::core::LlamaEngine::Get().AbortActiveRequest("stream client disconnected");
                             }
                         };
                         auto result = engine.PredictStream(messages, params, on_token, write_heartbeat);
                         if (lock_holder->owns_lock()) lock_holder->unlock();
                         inferdeck::gateway::RuntimeActivity::Get().CompleteJob(job_id, result, json({
+                            {"requestProtocol", request_protocol},
+                            {"responseProtocol", "openai.sse"},
                             {"responseMode", "backend-stream"},
                             {"streamed", true},
                             {"sseChunks", sse_chunks_sent},
@@ -797,6 +1176,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                             {"responseBytes", sse_bytes_sent},
                             {"finishReason", result.HasError() ? "error" : "stop"},
                             {"toolCallCount", result.tool_calls.size()},
+                            {"waitingOnBackendOrToolFormatting", false},
                             {"contentPreview", result.text.substr(0, 240)},
                             {"reasoningPreview", result.reasoning_text.substr(0, 240)}
                         }));
@@ -821,80 +1201,26 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         }
 
         if (client_requested_stream && force_non_streaming_backend) {
-            inferdeck::core::Logger::Get().Info("Request " + job_id + " using heartbeat synthetic tool SSE");
             const std::string id = MakeId();
             auto started = std::make_shared<std::atomic<bool>>(false);
-            auto lock_holder = std::make_shared<std::unique_lock<std::mutex>>(std::move(model_lock));
+            const std::string log_label = request_has_tools ? "tool request" : "plain request";
+            if (model_lock.owns_lock()) model_lock.unlock();
 
             resp.set_chunked_content_provider(
                 "text/event-stream",
-                [&engine, messages, params, id, response_model_id, job_id, started, lock_holder](size_t, httplib::DataSink& sink) -> bool {
+                [&engine, messages, params, id, response_model_id, job_id, started, log_label, request_protocol](size_t, httplib::DataSink& sink) -> bool {
                     bool expected = false;
                     if (!started->compare_exchange_strong(expected, true)) {
                         sink.done();
                         return false;
                     }
-                    std::uint64_t sse_chunks_sent = 0;
-                    std::uint64_t sse_bytes_sent = 0;
-                    auto write_chunk = [&](const std::string& chunk) {
-                        sse_chunks_sent += CountSseDataChunks(chunk);
-                        sse_bytes_sent += chunk.size();
-                        return sink.write(chunk.data(), chunk.size());
-                    };
-                    try {
-                        const std::string heartbeat = ": inferdeck tool backend running\n\n";
-                        if (!write_chunk(heartbeat)) {
-                            inferdeck::gateway::RuntimeActivity::Get().FailJob(job_id, "OpenCode tool stream client disconnected", 499);
-                            inferdeck::core::LlamaEngine::Get().AbortActiveRequest("OpenCode tool stream client disconnected");
-                            sink.done();
-                            return false;
-                        }
-                        auto result = engine.Predict(messages, params);
-                        if (lock_holder->owns_lock()) lock_holder->unlock();
-                        if (result.HasError()) {
-                            const auto error_stream = SseErrorChunk(id, response_model_id, result.error_message) +
-                                                      SseChunk(id, response_model_id, "", "", true) +
-                                                      "data: [DONE]\n\n";
-                            inferdeck::gateway::RuntimeActivity::Get().CompleteJob(job_id, result, json({
-                                {"responseMode", "synthetic-sse-error"},
-                                {"sseChunks", CountSseDataChunks(error_stream)},
-                                {"heartbeatChunks", 1},
-                                {"responseBytes", error_stream.size()},
-                                {"finishReason", "error"},
-                                {"toolCallCount", 0},
-                                {"error", result.error_message},
-                                {"syntheticStream", true}
-                            }));
-                            write_chunk(error_stream);
-                        } else {
-                            json response = BuildChatCompletionResponse(id, response_model_id, result);
-                            const auto synthetic_stream = BuildSyntheticChatCompletionStream(response);
-                            inferdeck::gateway::RuntimeActivity::Get().CompleteJob(job_id, result, json({
-                                {"responseMode", "synthetic-sse"},
-                                {"sseChunks", CountSseDataChunks(synthetic_stream)},
-                                {"heartbeatChunks", 1},
-                                {"responseBytes", synthetic_stream.size()},
-                                {"finishReason", ResponseFinishReason(response)},
-                                {"toolCallCount", ResponseToolCallCount(response)},
-                                {"contentPreview", result.text.substr(0, 500)},
-                                {"reasoningPreview", result.reasoning_text.substr(0, 500)},
-                                {"toolCalls", response["choices"][0]["message"].contains("tool_calls") ? response["choices"][0]["message"]["tool_calls"] : json::array()},
-                                {"usage", response["usage"]},
-                                {"syntheticStream", true}
-                            }));
-                            write_chunk(synthetic_stream);
-                        }
-                    } catch (const std::exception& e) {
-                        if (lock_holder->owns_lock()) lock_holder->unlock();
-                        inferdeck::gateway::RuntimeActivity::Get().FailJob(job_id, e.what());
-                        auto error_stream = SseErrorChunk(id, response_model_id, e.what()) +
-                                            SseChunk(id, response_model_id, "", "", true) +
-                                            "data: [DONE]\n\n";
-                        write_chunk(error_stream);
-                    }
-                    if (lock_holder->owns_lock()) lock_holder->unlock();
-                    sink.done();
-                    return false;
+                    inferdeck::gateway::RuntimeActivity::Get().MergeJobResult(job_id, json({
+                        {"requestProtocol", request_protocol},
+                        {"responseProtocol", "openai.sse"},
+                        {"responseMode", "guarded-synthetic-sse"},
+                        {"waitingOnBackendOrToolFormatting", true}
+                    }), "Guarded synthetic SSE waiting on backend/tool formatting");
+                    return RunGuardedSyntheticSse(engine, messages, params, id, response_model_id, job_id, log_label, request_protocol, sink);
                 }
             );
             resp.set_header("Cache-Control", "no-cache");
@@ -913,11 +1239,14 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
 
         json response = BuildChatCompletionResponse(MakeId(), response_model_id, result);
         activity.CompleteJob(job_id, result, json({
+            {"requestProtocol", request_protocol},
+            {"responseProtocol", client_requested_stream ? "openai.sse" : "openai.json"},
             {"responseMode", "json"},
             {"sseChunks", 0},
             {"responseBytes", response.dump().size()},
             {"finishReason", ResponseFinishReason(response)},
             {"toolCallCount", ResponseToolCallCount(response)},
+            {"waitingOnBackendOrToolFormatting", false},
             {"contentPreview", result.text.substr(0, 500)},
             {"reasoningPreview", result.reasoning_text.substr(0, 500)},
             {"toolCalls", response["choices"][0]["message"].contains("tool_calls") ? response["choices"][0]["message"]["tool_calls"] : json::array()},

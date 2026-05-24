@@ -116,6 +116,21 @@ void RuntimeActivity::CompleteJob(const std::string& id, const inferdeck::core::
     AddSample(*it);
 }
 
+void RuntimeActivity::MergeJobResult(const std::string& id, const nlohmann::json& response_patch, const std::string& event_message) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = std::find_if(jobs_.begin(), jobs_.end(), [&](const Job& job) { return job.id == id; });
+    if (it == jobs_.end()) return;
+    if (!it->result.is_object()) it->result = nlohmann::json::object();
+    if (response_patch.is_object()) {
+        for (auto iter = response_patch.begin(); iter != response_patch.end(); ++iter) {
+            it->result[iter.key()] = iter.value();
+        }
+    }
+    if (!event_message.empty()) {
+        AddEvent(*it, "observed", event_message, response_patch.is_object() ? response_patch : nlohmann::json::object());
+    }
+}
+
 void RuntimeActivity::FailJob(const std::string& id, const std::string& error, int status_code) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = std::find_if(jobs_.begin(), jobs_.end(), [&](const Job& job) { return job.id == id; });
@@ -128,6 +143,21 @@ void RuntimeActivity::FailJob(const std::string& id, const std::string& error, i
     it->error = error;
     AddEvent(*it, "failed", error, {{"statusCode", status_code}});
     AddSample(*it);
+}
+
+void RuntimeActivity::FailRunningClientJobs(const std::string& client, const std::string& error, int status_code, const std::string& except_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& job : jobs_) {
+        if (job.id == except_id || job.client != client || IsTerminal(job.status)) continue;
+        if (job.status != "running" && job.status != "leased" && job.status != "queued") continue;
+        job.status = "failed";
+        job.completed_at = RuntimeIsoNow();
+        job.completed_epoch_ms = RuntimeNowMs();
+        job.http_status = status_code;
+        job.error = error;
+        AddEvent(job, "failed", error, {{"statusCode", status_code}, {"client", client}});
+        AddSample(job);
+    }
 }
 
 void RuntimeActivity::CancelJob(const std::string& id) {
@@ -209,7 +239,7 @@ nlohmann::json RuntimeActivity::ToJson(const Job& job, bool include_details) con
         {"error", job.error.empty() ? nullptr : nlohmann::json(job.error)}
     };
     if (job.result.is_object()) {
-        for (const auto& key : {"responseMode", "sseChunks", "heartbeatChunks", "responseBytes", "finishReason", "toolCallCount"}) {
+        for (const auto& key : {"responseMode", "requestProtocol", "responseProtocol", "sseChunks", "ndjsonChunks", "heartbeatChunks", "responseBytes", "finishReason", "toolCallCount", "terminalCause", "backendAbortState", "waitingOnBackendOrToolFormatting"}) {
             if (job.result.contains(key)) out[key] = job.result.at(key);
         }
     }
@@ -334,6 +364,7 @@ nlohmann::json RuntimeActivity::ObservabilityJson() const {
     nlohmann::json completed = nlohmann::json::array();
     nlohmann::json last_opencode = nullptr;
     nlohmann::json last_openwebui = nullptr;
+    nlohmann::json opencode_waiting = nullptr;
     std::string last_model;
     std::string last_client;
 
@@ -350,6 +381,13 @@ nlohmann::json RuntimeActivity::ObservabilityJson() const {
         if (last_opencode.is_null() && client_lower.find("opencode") != std::string::npos) {
             last_opencode = compact;
         }
+        if (opencode_waiting.is_null() &&
+            client_lower.find("opencode") != std::string::npos &&
+            (job.status == "running" || job.status == "leased") &&
+            job.result.is_object() &&
+            job.result.value("waitingOnBackendOrToolFormatting", false)) {
+            opencode_waiting = compact;
+        }
         if (last_openwebui.is_null() && client_lower.find("open webui") != std::string::npos) {
             last_openwebui = compact;
         }
@@ -363,6 +401,8 @@ nlohmann::json RuntimeActivity::ObservabilityJson() const {
         {"recentCompleted", completed},
         {"lastOpenCodeRequest", last_opencode},
         {"lastOpenWebUIRequest", last_openwebui},
+        {"openCodeWaitingOnBackendOrToolFormatting", !opencode_waiting.is_null()},
+        {"openCodeWaitingJob", opencode_waiting},
         {"lastModel", last_model.empty() ? nullptr : nlohmann::json(last_model)},
         {"lastClient", last_client.empty() ? nullptr : nlohmann::json(last_client)}
     };

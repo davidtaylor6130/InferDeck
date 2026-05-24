@@ -1,5 +1,6 @@
 #include "routes/OllamaCompat.hpp"
 #include "routes/ChatCompletions.hpp"
+#include "RuntimeActivity.hpp"
 #include "config/ConfigLoader.hpp"
 #include "core/Config.hpp"
 
@@ -18,7 +19,7 @@ namespace {
 std::string NormalizeId(std::string id) {
     for (auto& c : id) {
         if (c == ' ' || c == '_') c = '-';
-        else c = std::tolower(static_cast<unsigned char>(c));
+        else c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     constexpr size_t latest_suffix_len = 7;
     if (id.size() > latest_suffix_len && id.compare(id.size() - latest_suffix_len, latest_suffix_len, ":latest") == 0) {
@@ -48,6 +49,31 @@ std::vector<std::filesystem::path> ScanModels() {
 
 constexpr int kDefaultOllamaNumPredict = 4096;
 
+json OllamaToolCallsFromOpenAi(const json& openai_tool_calls) {
+    json output = json::array();
+    auto normalized = NormalizeOpenAiToolCalls(openai_tool_calls);
+    for (const auto& tc : normalized) {
+        if (!tc.contains("function") || !tc["function"].is_object()) continue;
+        const auto& function = tc["function"];
+        json arguments = json::object();
+        if (function.contains("arguments")) {
+            if (function["arguments"].is_string()) {
+                const auto raw = function["arguments"].get<std::string>();
+                try {
+                    auto parsed = json::parse(raw);
+                    arguments = (parsed.is_object() || parsed.is_array()) ? parsed : json({{"value", parsed}});
+                } catch (...) {
+                    arguments = {{"raw", raw}};
+                }
+            } else if (function["arguments"].is_object() || function["arguments"].is_array()) {
+                arguments = function["arguments"];
+            }
+        }
+        output.push_back({{"function", {{"name", function.value("name", "")}, {"arguments", arguments}}}});
+    }
+    return output;
+}
+
 } // namespace
 
 json BuildOpenAiChatBodyFromOllama(const json& ollama) {
@@ -70,6 +96,66 @@ json BuildOpenAiChatBodyFromOllama(const json& ollama) {
         body["max_tokens"] = kDefaultOllamaNumPredict;
     }
     return body;
+}
+
+json BuildOllamaChatResponseFromOpenAi(const json& openai, const std::string& model) {
+    json message = {{"role", "assistant"}, {"content", ""}};
+    std::string finish_reason = "stop";
+    if (openai.contains("choices") && openai["choices"].is_array() && !openai["choices"].empty()) {
+        const auto& choice = openai["choices"][0];
+        finish_reason = choice.value("finish_reason", "stop");
+        if (choice.contains("message") && choice["message"].is_object()) {
+            const auto& openai_message = choice["message"];
+            message["role"] = openai_message.value("role", "assistant");
+            message["content"] = openai_message.value("content", "");
+            if (openai_message.contains("reasoning_content") && openai_message["reasoning_content"].is_string()) {
+                message["thinking"] = openai_message["reasoning_content"];
+            }
+            auto tool_calls = OllamaToolCallsFromOpenAi(openai_message.contains("tool_calls") ? openai_message["tool_calls"] : json::array());
+            if (!tool_calls.empty()) message["tool_calls"] = tool_calls;
+        }
+    }
+    json ollama_response = {
+        {"model", model},
+        {"created_at", "2026-05-22T00:00:00Z"},
+        {"message", message},
+        {"done_reason", finish_reason},
+        {"done", true}
+    };
+    if (openai.contains("usage")) {
+        ollama_response["prompt_eval_count"] = openai["usage"].value("prompt_tokens", 0);
+        ollama_response["eval_count"] = openai["usage"].value("completion_tokens", 0);
+    }
+    return ollama_response;
+}
+
+std::string BuildOllamaChatStreamFromOpenAiResponse(const json& openai, const std::string& model) {
+    auto ollama_response = BuildOllamaChatResponseFromOpenAi(openai, model);
+    json chunk_message = ollama_response["message"];
+    bool has_payload = false;
+    json first = {
+        {"model", ollama_response["model"]},
+        {"created_at", ollama_response["created_at"]},
+        {"message", {{"role", "assistant"}}},
+        {"done", false}
+    };
+    if (chunk_message.contains("thinking")) {
+        first["message"]["thinking"] = chunk_message["thinking"];
+        has_payload = true;
+    }
+    if (chunk_message.contains("content") && chunk_message["content"].is_string() && !chunk_message["content"].get<std::string>().empty()) {
+        first["message"]["content"] = chunk_message["content"];
+        has_payload = true;
+    }
+    if (chunk_message.contains("tool_calls") && chunk_message["tool_calls"].is_array() && !chunk_message["tool_calls"].empty()) {
+        first["message"]["tool_calls"] = chunk_message["tool_calls"];
+        has_payload = true;
+    }
+
+    std::string ndjson;
+    if (has_payload) ndjson += first.dump() + "\n";
+    ndjson += ollama_response.dump() + "\n";
+    return ndjson;
 }
 
 std::string BuildOllamaChatStreamFromOpenAiSse(const std::string& openai_sse, const std::string& model) {
@@ -109,8 +195,11 @@ std::string BuildOllamaChatStreamFromOpenAiSse(const std::string& openai_sse, co
                 has_payload = true;
             }
             if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
-                message["tool_calls"] = delta["tool_calls"];
-                has_payload = true;
+                auto tool_calls = OllamaToolCallsFromOpenAi(delta["tool_calls"]);
+                if (!tool_calls.empty()) {
+                    message["tool_calls"] = tool_calls;
+                    has_payload = true;
+                }
             }
             if (!has_payload) continue;
 
@@ -165,46 +254,48 @@ void HandleOllamaChat(const httplib::Request& req, httplib::Response& resp) {
         json ollama_body = json::parse(req.body);
         bool stream = ollama_body.value("stream", false);
         json body = BuildOpenAiChatBodyFromOllama(ollama_body);
+        body["stream"] = false;
         httplib::Request translated = req;
         translated.body = body.dump();
-        translated.headers.emplace("X-InferDeck-Client", "Open WebUI");
-        HandleChatCompletions(translated, resp);
-        if (stream && resp.status < 400 && resp.get_header_value("Content-Type").find("text/event-stream") != std::string::npos) {
-            auto ollama_stream = BuildOllamaChatStreamFromOpenAiSse(resp.body, ollama_body.value("model", body.value("model", "")));
-            resp.set_content(ollama_stream, "application/x-ndjson");
-            return;
+        translated.headers.emplace("X-InferDeck-Protocol", "/api/chat");
+        if (!translated.has_header("X-InferDeck-Client")) {
+            std::string ua = req.get_header_value("User-Agent");
+            std::string lower = ua;
+            std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            translated.headers.emplace("X-InferDeck-Client", lower.find("opencode") != std::string::npos ? "OpenCode" : "Open WebUI");
         }
+        HandleChatCompletions(translated, resp);
+        const std::string job_id = resp.get_header_value("X-InferDeck-Job-Id");
         if (!stream && resp.status < 400 && resp.get_header_value("Content-Type").find("application/json") != std::string::npos) {
             auto openai = json::parse(resp.body);
-            json message = {{"role", "assistant"}, {"content", ""}};
-            std::string finish_reason = "stop";
-            if (openai.contains("choices") && openai["choices"].is_array() && !openai["choices"].empty()) {
-                const auto& choice = openai["choices"][0];
-                finish_reason = choice.value("finish_reason", "stop");
-                if (choice.contains("message") && choice["message"].is_object()) {
-                    const auto& openai_message = choice["message"];
-                    message["role"] = openai_message.value("role", "assistant");
-                    message["content"] = openai_message.value("content", "");
-                    if (openai_message.contains("reasoning_content") && openai_message["reasoning_content"].is_string()) {
-                        message["thinking"] = openai_message["reasoning_content"];
-                    }
-                    if (openai_message.contains("tool_calls")) {
-                        message["tool_calls"] = openai_message["tool_calls"];
-                    }
-                }
-            }
-            json ollama_response = {
-                {"model", ollama_body.value("model", body.value("model", ""))},
-                {"created_at", "2026-05-22T00:00:00Z"},
-                {"message", message},
-                {"done_reason", finish_reason},
-                {"done", true}
-            };
-            if (openai.contains("usage")) {
-                ollama_response["prompt_eval_count"] = openai["usage"].value("prompt_tokens", 0);
-                ollama_response["eval_count"] = openai["usage"].value("completion_tokens", 0);
+            auto ollama_response = BuildOllamaChatResponseFromOpenAi(openai, ollama_body.value("model", body.value("model", "")));
+            if (!job_id.empty()) {
+                inferdeck::gateway::RuntimeActivity::Get().MergeJobResult(job_id, {
+                    {"requestProtocol", "/api/chat"},
+                    {"responseProtocol", "ollama.json"},
+                    {"responseMode", "ollama-json"},
+                    {"ndjsonChunks", 0},
+                    {"waitingOnBackendOrToolFormatting", false}
+                }, "Ollama JSON response shaped");
             }
             resp.set_content(ollama_response.dump(), "application/json");
+            return;
+        }
+        if (stream && resp.status < 400 && resp.get_header_value("Content-Type").find("application/json") != std::string::npos) {
+            auto openai = json::parse(resp.body);
+            auto ndjson = BuildOllamaChatStreamFromOpenAiResponse(openai, ollama_body.value("model", body.value("model", "")));
+            const auto ndjson_chunks = static_cast<int>(std::count(ndjson.begin(), ndjson.end(), '\n'));
+            if (!job_id.empty()) {
+                inferdeck::gateway::RuntimeActivity::Get().MergeJobResult(job_id, {
+                    {"requestProtocol", "/api/chat"},
+                    {"responseProtocol", "ollama.ndjson"},
+                    {"responseMode", "ollama-ndjson"},
+                    {"ndjsonChunks", ndjson_chunks},
+                    {"waitingOnBackendOrToolFormatting", false}
+                }, "Ollama NDJSON response shaped");
+            }
+            resp.set_content(ndjson, "application/x-ndjson");
+            return;
         }
     } catch (const std::exception& e) {
         resp.status = 400;
