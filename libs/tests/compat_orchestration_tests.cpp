@@ -161,6 +161,9 @@ TEST_CASE("Assistant content parser splits Qwen think blocks and GPT OSS channel
     REQUIRE(ExtractAssistantReasoningContent("<|channel|>analysis<|message|>private notes<|end|>I am OpenCode.") == "private notes");
     REQUIRE(SanitizeAssistantContent("<|channel|>analysis<|message|>notes<|end|><|channel|>final<|message|>Final text<|end|>") == "Final text");
     REQUIRE(ExtractAssistantReasoningContent("<|channel|>analysis<|message|>notes<|end|><|channel|>final<|message|>Final text<|end|>") == "notes");
+    REQUIRE(SanitizeAssistantContent("<|start|>assistantinternal-ok") == "internal-ok");
+    REQUIRE(SanitizeAssistantContent("<|channel|>analysis") == "");
+    REQUIRE(SanitizeAssistantContent("<|channel|>analysis<|message|>notes<|end|><|channel|>finalstream-ok") == "stream-ok");
 }
 
 TEST_CASE("Synthetic OpenAI SSE preserves reasoning separately from final content", "[compat][opencode]") {

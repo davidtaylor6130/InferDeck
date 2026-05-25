@@ -9,6 +9,9 @@
     "nlohmann-json",
     "fmt",
     "yaml-cpp",
-    "sqlite3"
+    "sqlite3",
+    "spirv-headers",
+    "shaderc",
+    "vulkan-loader"
   ]
 }

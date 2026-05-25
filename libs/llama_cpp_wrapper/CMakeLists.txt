@@ -16,10 +16,9 @@ target_include_directories(llama_cpp_wrapper PUBLIC
 
 target_link_libraries(llama_cpp_wrapper PUBLIC
     core
+    llama
+    ggml
     nlohmann_json::nlohmann_json
-    ws2_32
-    winhttp
-    iphlpapi
 )
 
 if(MSVC)

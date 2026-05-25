@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.27)
-project(InferDeck LANGUAGES CXX)
+project(InferDeck LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,19 +26,45 @@ if(INFERDECK_BUILD_TESTS)
     find_package(httplib CONFIG REQUIRED)
 endif()
 
-# --- llama.cpp: FetchContent for headers only ---
-# We use the official pre-built llama-server binary at runtime.
-# FetchContent gives us the headers we need for our wrapper types.
-include(FetchContent)
-FetchContent_Declare(
-    llama_cpp
-    GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
-    GIT_TAG        b9276
-    SOURCE_SUBDIR  OFF
-)
-FetchContent_GetProperties(llama_cpp)
-if(NOT llama_cpp_POPULATED)
-    FetchContent_Populate(llama_cpp)
+# --- llama.cpp: internal Vulkan runtime ---
+# InferDeck owns llama.cpp in-process; do not build or launch llama-server.exe.
+set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_UI OFF CACHE BOOL "" FORCE)
+set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+set(GGML_HIP OFF CACHE BOOL "" FORCE)
+set(GGML_SYCL OFF CACHE BOOL "" FORCE)
+set(GGML_METAL OFF CACHE BOOL "" FORCE)
+set(Vulkan_LIBRARY "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/vulkan-1.lib" CACHE FILEPATH "" FORCE)
+set(Vulkan_INCLUDE_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include" CACHE PATH "" FORCE)
+set(Vulkan_GLSLC_EXECUTABLE "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/shaderc/glslc.exe" CACHE FILEPATH "" FORCE)
+add_subdirectory(libs/third_party/llama.cpp EXCLUDE_FROM_ALL)
+set(llama_cpp_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/llama.cpp")
+if(TARGET Vulkan::Vulkan)
+    set_target_properties(Vulkan::Vulkan PROPERTIES
+        IMPORTED_LOCATION "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/vulkan-1.lib"
+        IMPORTED_IMPLIB "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/vulkan-1.lib"
+    )
+endif()
+if(TARGET llama)
+    set_target_properties(llama PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
+endif()
+if(TARGET ggml-vulkan)
+    target_include_directories(ggml-vulkan PRIVATE
+        ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/llama.cpp/ggml/include
+    )
+    set_target_properties(ggml-vulkan PROPERTIES
+        LINK_LIBRARIES "ggml-base;${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/vulkan-1.lib"
+    )
 endif()
 
 # --- Our libraries and app ---

@@ -477,9 +477,17 @@ std::string SanitizeAssistantContent(const std::string& content) {
         text.erase(channel, end + std::string("<|end|>").size() - channel);
     }
 
+    ReplaceAll(text, "<|start|>assistant", "");
+    ReplaceAll(text, "<|start|>system", "");
+    ReplaceAll(text, "<|start|>user", "");
     ReplaceAll(text, "<|channel|>final<|message|>", "");
     ReplaceAll(text, "<|channel|>commentary<|message|>", "");
+    ReplaceAll(text, "<|channel|>analysis", "");
+    ReplaceAll(text, "<|channel|>final", "");
+    ReplaceAll(text, "<|channel|>commentary", "");
     ReplaceAll(text, "<|message|>", "");
+    ReplaceAll(text, "<|start|>", "");
+    ReplaceAll(text, "<|channel|>", "");
     ReplaceAll(text, "<|end|>", "");
     return TrimCopy(text);
 }
@@ -1152,10 +1160,20 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                             sink.done();
                             return false;
                         }
+                        std::string streamed_content;
+                        std::size_t streamed_content_sent = 0;
                         auto on_token = [&](const std::string& token, inferdeck::core::TokenType type, int) {
                             std::string chunk;
                             if (type == inferdeck::core::TokenType::Content) {
-                                chunk = SseChunk(id, response_model_id, token, "", false);
+                                streamed_content += token;
+                                const auto clean_content = SanitizeAssistantContent(streamed_content);
+                                if (clean_content.size() < streamed_content_sent) {
+                                    streamed_content_sent = clean_content.size();
+                                }
+                                if (clean_content.size() > streamed_content_sent) {
+                                    chunk = SseChunk(id, response_model_id, clean_content.substr(streamed_content_sent), "", false);
+                                    streamed_content_sent = clean_content.size();
+                                }
                             } else if (type == inferdeck::core::TokenType::Reasoning) {
                                 chunk = SseChunk(id, response_model_id, "", token, false);
                             }

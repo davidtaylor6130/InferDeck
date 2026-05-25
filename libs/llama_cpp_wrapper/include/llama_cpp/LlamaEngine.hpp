@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <cstdint>
+#include <atomic>
 
 namespace inferdeck::core {
 
@@ -124,17 +125,21 @@ private:
     LlamaEngine& operator=(const LlamaEngine&) = delete;
 
     std::string role_to_string(MessageRole role) const;
-    std::string HttpPostJson(const std::string& path, const std::string& json_body) const;
-    HttpStreamResult HttpPostStream(const std::string& path,
-                                    const std::string& json_body,
-                                    TokenCallback on_token,
-                                    StreamHeartbeatCallback on_heartbeat) const;
+    InferenceResult Generate(const std::vector<ChatMessage>& messages,
+                             const InferenceParams& params,
+                             TokenCallback on_token,
+                             StreamHeartbeatCallback on_heartbeat);
+    void FreeRuntime();
 
     std::string model_path_;
     std::string precision_;
     int gpu_layers_ = -1;
     int context_size_ = 100000;
     std::string current_model_name_;
+    void* model_ = nullptr;
+    void* context_ = nullptr;
+    mutable std::mutex generation_mutex_;
+    std::atomic<bool> abort_requested_{false};
 
     InferenceStats stats_;
     mutable std::mutex mutex_;

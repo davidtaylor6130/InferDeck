@@ -372,7 +372,7 @@ bool ParseLlamaGpuLine(const std::string& line, LlamaGpuLogInfo& info) {
 
 LlamaGpuLogInfo ReadLlamaGpuLogInfo() {
     LlamaGpuLogInfo latest;
-    std::ifstream file("logs/llama-server.err.log");
+    std::ifstream file("logs/gateway.log");
     if (!file.is_open()) return latest;
     std::string line;
     while (std::getline(file, line)) {
@@ -450,16 +450,16 @@ json HardwareJson() {
 json LlamaServiceJson(const ServerConfig& config, GatewayStartTime started_at) {
     auto& manager = inferdeck::core::LlamaServerManager::Get();
     auto& engine = inferdeck::core::LlamaEngine::Get();
-    bool running = manager.IsRunning();
+    bool running = engine.IsInitialized();
     return {
-        {"id", "llama-server"},
-        {"name", "llama.cpp"},
+        {"id", "llama-runtime"},
+        {"name", "llama.cpp internal"},
         {"kind", "llama_cpp"},
         {"status", running ? "running" : "stopped"},
         {"managed", true},
-        {"pid", running ? json(manager.GetPid()) : json(nullptr)},
-        {"baseUrl", "http://127.0.0.1:" + std::to_string(manager.GetPort())},
-        {"version", "b9276-vulkan"},
+        {"pid", nullptr},
+        {"baseUrl", nullptr},
+        {"version", "internal-vulkan"},
         {"backend", "Vulkan"},
         {"currentModel", engine.GetModelName()},
         {"currentModelPath", manager.GetCurrentModelPath().empty() ? config.model_path : manager.GetCurrentModelPath()},
@@ -849,7 +849,6 @@ void HandleDashboardLogs(const httplib::Request& req, httplib::Response& resp) {
     limit = std::clamp<std::size_t>(limit, 1, 1000);
     json logs = json::array();
     for (const auto& line : ReadTail("logs/gateway.log", limit / 2 + 1)) logs.push_back(ParseLogLine(line, "gateway"));
-    for (const auto& line : ReadTail("logs/llama-server.err.log", limit / 2 + 1)) logs.push_back(ParseLogLine(line, "llama_cpp"));
     for (const auto& item : inferdeck::gateway::RuntimeActivity::Get().LogsJson(limit / 2 + 1)) logs.push_back(item);
     if (logs.size() > limit) {
         logs.erase(logs.begin(), logs.begin() + static_cast<json::difference_type>(logs.size() - limit));
