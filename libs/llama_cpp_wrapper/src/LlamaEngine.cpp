@@ -46,8 +46,10 @@ std::string RoleToTemplateRole(MessageRole role) {
 std::string BuildToolInstruction(const std::string& tools_json) {
     if (tools_json.empty()) return {};
     return
-        "Tools are available. When a tool is needed, respond with the model's native tool-call format "
-        "or with a Qwen-compatible <tool_call> JSON block. Available tools JSON: " + tools_json;
+        "Tools are available. When a tool is needed, do not write tool_calls as plain text. "
+        "Respond only with a Qwen-compatible <tool_call> JSON block such as "
+        "<tool_call>{\"name\":\"bash\",\"arguments\":{\"command\":\"git status\",\"description\":\"Check status\"}}</tool_call>. "
+        "Available tools JSON: " + tools_json;
 }
 
 std::string BuildFallbackPrompt(const std::vector<ChatMessage>& messages,
@@ -311,20 +313,62 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     result.prompt_tokens = static_cast<int>(prompt_tokens.size());
 
     llama_sampler* sampler = CreateSampler(params);
-    llama_batch batch = llama_batch_get_one(prompt_tokens.data(), static_cast<int32_t>(prompt_tokens.size()));
+    constexpr int32_t max_batch_tokens = 512;
     int generated_tokens = 0;
     int decode_status = 0;
+    int n_pos = 0;
+
+    auto eval_tokens = [&](const std::vector<llama_token>& tokens, bool encode) {
+        for (std::size_t offset = 0; offset < tokens.size() && decode_status == 0; offset += max_batch_tokens) {
+            const auto remaining = tokens.size() - offset;
+            const auto chunk_size = static_cast<int32_t>(std::min<std::size_t>(remaining, max_batch_tokens));
+            llama_batch batch = llama_batch_get_one(const_cast<llama_token*>(tokens.data() + offset), chunk_size);
+            decode_status = encode ? llama_encode(context, batch) : llama_decode(context, batch);
+            n_pos += batch.n_tokens;
+            if (on_heartbeat) on_heartbeat();
+        }
+    };
+
+    auto sample_next = [&](llama_token& token) {
+        token = llama_sampler_sample(sampler, context, -1);
+        const llama_vocab* vocab = llama_model_get_vocab(model);
+        if (llama_vocab_is_eog(vocab, token)) return false;
+
+        ++generated_tokens;
+        if (!llama_vocab_is_control(vocab, token)) {
+            std::string piece = TokenToPiece(model, token);
+            if (!piece.empty()) {
+                result.text += piece;
+                if (on_token) on_token(piece, TokenType::Content, generated_tokens);
+                if (EndsWithStop(result.text, params.stop)) return false;
+            }
+        }
+        if (on_heartbeat && generated_tokens % 32 == 0) on_heartbeat();
+        return generated_tokens < max_predict;
+    };
+
+    llama_token next_token = LLAMA_TOKEN_NULL;
+    llama_batch batch{};
 
     if (llama_model_has_encoder(model)) {
-        decode_status = llama_encode(context, batch);
+        eval_tokens(prompt_tokens, true);
         if (decode_status == 0) {
             llama_token decoder_start = llama_model_decoder_start_token(model);
             if (decoder_start == LLAMA_TOKEN_NULL) decoder_start = llama_vocab_bos(llama_model_get_vocab(model));
             batch = llama_batch_get_one(&decoder_start, 1);
         }
+    } else {
+        eval_tokens(prompt_tokens, false);
+        if (decode_status == 0) {
+            if (max_predict > 0 && sample_next(next_token)) {
+                batch = llama_batch_get_one(&next_token, 1);
+            } else {
+                generated_tokens = max_predict;
+            }
+        }
     }
 
-    for (int n_pos = 0; decode_status == 0 && generated_tokens < max_predict;) {
+    for (; decode_status == 0 && generated_tokens < max_predict;) {
         if (abort_requested_.load()) {
             result.error_message = "Generation aborted";
             break;
@@ -334,23 +378,8 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
         if (decode_status != 0) break;
         n_pos += batch.n_tokens;
 
-        llama_token token = llama_sampler_sample(sampler, context, -1);
-        const llama_vocab* vocab = llama_model_get_vocab(model);
-        if (llama_vocab_is_eog(vocab, token)) break;
-
-        ++generated_tokens;
-        if (!llama_vocab_is_control(vocab, token)) {
-            std::string piece = TokenToPiece(model, token);
-            if (!piece.empty()) {
-                result.text += piece;
-                if (on_token) on_token(piece, TokenType::Content, generated_tokens);
-                if (EndsWithStop(result.text, params.stop)) break;
-            }
-        }
-        if (on_heartbeat && generated_tokens % 32 == 0) on_heartbeat();
-
-        batch = llama_batch_get_one(&token, 1);
-        ++n_pos;
+        if (!sample_next(next_token)) break;
+        batch = llama_batch_get_one(&next_token, 1);
     }
 
     llama_sampler_free(sampler);

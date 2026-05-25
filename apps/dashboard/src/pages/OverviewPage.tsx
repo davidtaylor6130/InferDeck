@@ -7,16 +7,16 @@ import {
   ClockIcon,
   CpuChipIcon,
   CubeIcon,
+  DocumentTextIcon,
   GlobeAltIcon,
   ListBulletIcon,
   MegaphoneIcon,
   MicrophoneIcon,
   PauseIcon,
-  PhotoIcon,
+  PencilSquareIcon,
   QueueListIcon,
   ServerStackIcon,
   SparklesIcon,
-  SpeakerWaveIcon,
   Squares2X2Icon,
 } from '@heroicons/react/24/outline';
 import type { JobRecord, ModelRecord, PageProps, ServiceRecord } from '../types';
@@ -39,6 +39,27 @@ interface ServiceDatum {
   tone: Tone;
   Icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
 }
+
+interface ModelCostConfig {
+  equivalentModel: string;
+  promptPerMillion: number;
+  outputPerMillion: number;
+}
+
+interface ModelTokenUsage {
+  model: string;
+  prompt: number;
+  output: number;
+  total: number;
+}
+
+const DEFAULT_COST_CONFIG: ModelCostConfig = {
+  equivalentModel: 'Equivalent API model',
+  promptPerMillion: 0.55,
+  outputPerMillion: 1.35,
+};
+
+const COST_STORAGE_KEY = 'inferdeck:model-token-costs';
 
 export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const queue = getQueueCounts(state.statusData, state.jobsList);
@@ -69,8 +90,20 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const gpuTemp = firstNumber(gpu.temperature, gpu.tempC, gpu.temperatureC);
   const healthTone: Tone = state.connected && !getErrorCount(state.errors, state.jobsList, summary, metrics) ? 'good' : state.connected ? 'warn' : 'critical';
   const queueTone: Tone = queue.failed ? 'critical' : queue.queued > 0 ? 'info' : 'idle';
-  const tokenSeries = buildTokenSeries(totalTokens, promptTokens, outputTokens);
-  const activity = buildActivity(state.jobsList, services, state.lastUpdatedAt);
+  const modelNames = useMemo(() => getModelNames(state.jobsList, state.modelsList, activeModel), [activeModel, state.jobsList, state.modelsList]);
+  const [selectedCostModel, setSelectedCostModel] = useState(activeModel);
+  const [costConfig, setCostConfig] = useState<Record<string, ModelCostConfig>>(() => loadCostConfig());
+  useEffect(() => {
+    if (!modelNames.includes(selectedCostModel)) setSelectedCostModel(modelNames[0] || activeModel);
+  }, [activeModel, modelNames, selectedCostModel]);
+  const selectedModelCost = costConfig[selectedCostModel] || DEFAULT_COST_CONFIG;
+  const modelUsage = useMemo(
+    () => getModelTokenUsage(state.jobsList, selectedCostModel, { prompt: promptTokens, output: outputTokens, total: totalTokens }),
+    [outputTokens, promptTokens, selectedCostModel, state.jobsList, totalTokens],
+  );
+  const tokenSeries = useMemo(() => buildTokenSeries(state.jobsList, selectedCostModel, selectedModelCost), [selectedCostModel, selectedModelCost, state.jobsList]);
+  const estimatedCostAvoided = estimateCostAvoided(modelUsage, selectedModelCost);
+  const activity = buildActivity(state.jobsList, state.statusData?.observability, state.lastUpdatedAt);
   const [history, setHistory] = useState<Array<{ timestamp: string; cpu: number; ram: number; gpu: number; vram: number }>>([]);
 
   useEffect(() => {
@@ -88,20 +121,16 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
     });
   }, [cpuPercent, gpuPercent, ramPercent, state.lastUpdatedAt, telemetry.timestamp, vramPercent]);
 
-  const liveHistory = useMemo(() => fillHistory(history, {
-    cpu: cpuPercent ?? 12,
-    ram: ramPercent ?? 42,
-    gpu: gpuPercent ?? 24,
-    vram: vramPercent ?? 55,
-  }), [cpuPercent, gpuPercent, history, ramPercent, vramPercent]);
+  const backendHistory = useMemo(() => getHardwareHistory(state.statusData?.hardwareSamples), [state.statusData?.hardwareSamples]);
+  const liveHistory = useMemo(() => fillHistory(backendHistory.length ? backendHistory : history), [backendHistory, history]);
 
   const servicesMini: ServiceDatum[] = [
     { key: 'gateway', label: 'API / Gateway', status: state.connected && isOnlineStatus(gatewayService?.status) ? 'Online' : 'Offline', tone: state.connected ? 'good' : 'critical', Icon: GlobeAltIcon },
-    { key: 'llama', label: 'llama.cpp', status: isOnlineStatus(llamaService?.status) ? 'Online' : 'Offline', tone: isOnlineStatus(llamaService?.status) ? 'good' : 'critical', Icon: SpeakerWaveIcon },
+    { key: 'llama', label: 'llama.cpp', status: isOnlineStatus(llamaService?.status) ? 'Online' : 'Offline', tone: isOnlineStatus(llamaService?.status) ? 'good' : 'critical', Icon: PencilSquareIcon },
     { key: 'whisper', label: 'Whisper', status: isOnlineStatus(whisperService?.status) ? 'Ready' : whisperService?.status === 'not_configured' ? 'Config' : 'Offline', tone: isOnlineStatus(whisperService?.status) ? 'good' : whisperService?.status === 'not_configured' ? 'warn' : 'critical', Icon: MicrophoneIcon },
     { key: 'training', label: 'Training', status: 'Idle', tone: 'idle', Icon: ChartBarIcon },
     { key: 'tts', label: 'TTS', status: 'Idle', tone: 'idle', Icon: MegaphoneIcon },
-    { key: 'image', label: 'Image', status: 'Ready', tone: 'good', Icon: SparklesIcon },
+    { key: 'image', label: 'Image', status: 'Idle', tone: 'idle', Icon: SparklesIcon },
     { key: 'jobs', label: 'Jobs', status: queue.running ? `${queue.running} running` : 'Idle', tone: queue.running ? 'info' : 'idle', Icon: BriefcaseIcon },
     { key: 'queue', label: 'Queue', status: `${queue.queued} queued`, tone: queueTone, Icon: ListBulletIcon },
   ];
@@ -135,12 +164,12 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
           { label: 'CPU Usage', value: cpuPercent ?? 0, tone: threshold(cpuPercent) },
           { label: 'System RAM', value: ramPercent ?? 0, tone: threshold(ramPercent) },
           { label: 'CPU Temp', value: tempToPercent(cpuTemp), tone: temperatureTone(cpuTemp) },
-        ]} details={[cpuDetail(system), bytesPair(ramUsed, ramTotal), tempLabel(cpuTemp)]} />
+        ]} details={[cpuDetail(system), bytesPair(ramUsed, ramTotal), tempLabel(cpuTemp, telemetry.cpu?.temperatureReason)]} />
         <UsagePanel title="GPU & VRAM" metrics={[
           { label: 'GPU Utilization', value: gpuPercent ?? 0, tone: threshold(gpuPercent) },
           { label: 'VRAM Usage', value: vramPercent ?? 0, tone: threshold(vramPercent) },
           { label: 'GPU Temp', value: tempToPercent(gpuTemp), tone: temperatureTone(gpuTemp) },
-        ]} details={[gpu.name || gpu.backend || 'Vulkan device', bytesPair(vramUsed, vramTotal), tempLabel(gpuTemp)]} />
+        ]} details={[gpu.name || gpu.backend || 'Vulkan device', bytesPair(vramUsed, vramTotal), tempLabel(gpuTemp, gpu.temperatureReason)]} />
       </section>
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8">
@@ -162,13 +191,25 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
           <div className="flex flex-col gap-3 min-[1800px]:flex-row min-[1800px]:items-start min-[1800px]:justify-between">
             <SectionTitle title="Token Usage & Cost" aside="Last 6 months" />
             <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
-              <SummaryStat label="Total Tokens" value={formatTokenCount(displayTokenTotal(totalTokens, 1_230_000_000))} />
-              <SummaryStat label="Prompt" value={formatTokenCount(displayTokenTotal(promptTokens, 780_000_000))} />
-              <SummaryStat label="Output" value={formatTokenCount(displayTokenTotal(outputTokens, 450_000_000))} />
-              <SummaryStat label="Est. Cost Avoided" value={formatCurrency(estimateCostAvoided(totalTokens, outputTokens))} tone="good" />
+              <SummaryStat label="Total Tokens" value={formatTokenCount(modelUsage.total)} />
+              <SummaryStat label="Prompt" value={formatTokenCount(modelUsage.prompt)} />
+              <SummaryStat label="Output" value={formatTokenCount(modelUsage.output)} />
+              <SummaryStat label="Est. Cost Avoided" value={formatCurrency(estimatedCostAvoided)} tone="good" />
             </div>
           </div>
           <TokenUsageGraph series={tokenSeries} />
+          <TokenCostSettings
+            models={modelNames}
+            selectedModel={selectedCostModel}
+            config={selectedModelCost}
+            usage={modelUsage}
+            onSelectModel={setSelectedCostModel}
+            onChange={(next) => {
+              const merged = { ...costConfig, [selectedCostModel]: next };
+              setCostConfig(merged);
+              saveCostConfig(merged);
+            }}
+          />
         </Panel>
       </section>
 
@@ -320,25 +361,26 @@ const LineChart: React.FC<{ values: number[]; tone: Tone; height: number; yMax?:
 };
 
 const TokenUsageGraph: React.FC<{ series: ReturnType<typeof buildTokenSeries> }> = ({ series }) => {
-  const max = Math.max(...series.total, ...series.prompt, ...series.output, ...series.cost);
+  const tokenMax = Math.max(1, ...series.total, ...series.prompt, ...series.output);
+  const costMax = Math.max(1, ...series.cost);
   return (
     <div className="mt-5">
       <div className="grid grid-cols-[34px_1fr_42px] gap-2 text-xs text-text-muted">
-        <div className="flex flex-col justify-between py-2"><span>600M</span><span>300M</span><span>0</span></div>
+        <div className="flex flex-col justify-between py-2"><span>{formatTokenCount(tokenMax)}</span><span>{formatTokenCount(tokenMax / 2)}</span><span>0</span></div>
         <div>
           <svg viewBox="0 0 680 150" className="h-[150px] w-full overflow-visible" role="img" aria-label="token usage graph">
             <g stroke="rgba(148,163,184,0.14)" strokeDasharray="4 5">
               {[0, 75, 150].map(y => <line key={y} x1="0" y1={y} x2="680" y2={y} />)}
               {series.months.map((_, index) => <line key={index} x1={(680 / (series.months.length - 1)) * index} y1="0" x2={(680 / (series.months.length - 1)) * index} y2="150" />)}
             </g>
-            <path d={toPath(series.total, 680, 150, max)} fill="none" stroke="#60A5FA" strokeWidth="3" />
-            <path d={toPath(series.prompt, 680, 150, max)} fill="none" stroke="#34D399" strokeWidth="3" />
-            <path d={toPath(series.output, 680, 150, max)} fill="none" stroke="#A78BFA" strokeWidth="3" />
-            <path d={toPath(series.cost, 680, 150, max)} fill="none" stroke="#22C55E" strokeWidth="3" strokeDasharray="8 6" />
+            <path d={toPath(series.total, 680, 150, tokenMax)} fill="none" stroke="#60A5FA" strokeWidth="3" />
+            <path d={toPath(series.prompt, 680, 150, tokenMax)} fill="none" stroke="#34D399" strokeWidth="3" />
+            <path d={toPath(series.output, 680, 150, tokenMax)} fill="none" stroke="#A78BFA" strokeWidth="3" />
+            <path d={toPath(series.cost, 680, 150, costMax)} fill="none" stroke="#22C55E" strokeWidth="3" strokeDasharray="8 6" />
           </svg>
           <div className="mt-1 flex justify-between text-xs text-text-muted">{series.months.map(month => <span key={month}>{month}</span>)}</div>
         </div>
-        <div className="flex flex-col justify-between py-2 text-right"><span>$900</span><span>$450</span><span>$0</span></div>
+        <div className="flex flex-col justify-between py-2 text-right"><span>{formatCurrency(costMax)}</span><span>{formatCurrency(costMax / 2)}</span><span>$0</span></div>
       </div>
       <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-text-secondary">
         <Legend color="#60A5FA" label="Total Tokens" />
@@ -349,6 +391,61 @@ const TokenUsageGraph: React.FC<{ series: ReturnType<typeof buildTokenSeries> }>
     </div>
   );
 };
+
+const TokenCostSettings: React.FC<{
+  models: string[];
+  selectedModel: string;
+  config: ModelCostConfig;
+  usage: ModelTokenUsage;
+  onSelectModel: (model: string) => void;
+  onChange: (config: ModelCostConfig) => void;
+}> = ({ models, selectedModel, config, usage, onSelectModel, onChange }) => (
+  <div className="mt-4 grid gap-3 rounded-lg border border-white/10 bg-[#07101d] p-3 lg:grid-cols-[1.15fr_1fr_1fr_1fr]">
+    <label className="min-w-0 text-xs text-text-secondary">
+      <span className="mb-1 block text-text-muted">Model</span>
+      <select
+        className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
+        value={selectedModel}
+        onChange={event => onSelectModel(event.target.value)}
+      >
+        {models.map(model => <option key={model} value={model}>{model}</option>)}
+      </select>
+    </label>
+    <label className="min-w-0 text-xs text-text-secondary">
+      <span className="mb-1 block text-text-muted">Equivalent API Model</span>
+      <input
+        className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
+        value={config.equivalentModel}
+        onChange={event => onChange({ ...config, equivalentModel: event.target.value })}
+      />
+    </label>
+    <label className="min-w-0 text-xs text-text-secondary">
+      <span className="mb-1 block text-text-muted">Prompt $/1M</span>
+      <input
+        className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
+        type="number"
+        min="0"
+        step="0.01"
+        value={config.promptPerMillion}
+        onChange={event => onChange({ ...config, promptPerMillion: Number(event.target.value) || 0 })}
+      />
+    </label>
+    <label className="min-w-0 text-xs text-text-secondary">
+      <span className="mb-1 block text-text-muted">Output $/1M</span>
+      <input
+        className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
+        type="number"
+        min="0"
+        step="0.01"
+        value={config.outputPerMillion}
+        onChange={event => onChange({ ...config, outputPerMillion: Number(event.target.value) || 0 })}
+      />
+    </label>
+    <p className="lg:col-span-4 text-xs text-text-muted">
+      Cost avoided for {compactModel(usage.model)} uses this model's recorded prompt/output tokens and your saved equivalent API prices.
+    </p>
+  </div>
+);
 
 const SummaryStat: React.FC<{ label: string; value: string; tone?: Tone }> = ({ label, value, tone = 'idle' }) => (
   <div className="min-w-0">
@@ -407,42 +504,78 @@ function normalizeServices(services: ServiceRecord[], connected: boolean): Servi
   return fallback.map(item => services.find(service => service.kind === item.kind || service.id === item.id) || item);
 }
 
-function fillHistory(history: Array<{ cpu: number; ram: number; gpu: number; vram: number }>, fallback: { cpu: number; ram: number; gpu: number; vram: number }) {
-  if (history.length >= 10) return history.slice(-60);
-  return Array.from({ length: 60 }, (_, index) => {
-    const wave = Math.sin(index / 6) * 4;
-    const bump = index % 13 === 0 ? 8 : 0;
-    return {
-      cpu: clamp(fallback.cpu + wave + bump - 6, 0, 100),
-      ram: clamp(fallback.ram + Math.sin(index / 9) * 3 + (index % 17 === 0 ? 5 : 0), 0, 100),
-      gpu: clamp(fallback.gpu + Math.sin(index / 5) * 5 + (index % 19 === 0 ? 10 : 0), 0, 100),
-      vram: clamp(fallback.vram + Math.sin(index / 10) * 4, 0, 100),
-    };
-  });
+function fillHistory(history: Array<{ cpu: number; ram: number; gpu: number; vram: number }>) {
+  const samples = history.slice(-60);
+  if (samples.length >= 2) return samples;
+  const latest = samples[0] || { cpu: 0, ram: 0, gpu: 0, vram: 0 };
+  return Array.from({ length: 60 }, () => latest);
 }
 
-function buildTokenSeries(total: number, prompt: number, output: number) {
-  const fallbackTotal = displayTokenTotal(total, 1_230_000_000);
-  const fallbackPrompt = displayTokenTotal(prompt, 780_000_000);
-  const fallbackOutput = displayTokenTotal(output, 450_000_000);
-  const shape = [0.18, 0.28, 0.49, 0.24, 0.29, 0.45];
+function getHardwareHistory(samples: unknown): Array<{ timestamp: string; cpu: number; ram: number; gpu: number; vram: number }> {
+  if (!Array.isArray(samples)) return [];
+  return samples
+    .map(sample => {
+      const row = sample as Record<string, unknown>;
+      return {
+        timestamp: String(row.timestamp || ''),
+        cpu: firstPercent(row.cpu, row.cpuPercent) ?? 0,
+        ram: firstPercent(row.ram, row.ramPercent) ?? 0,
+        gpu: firstPercent(row.gpu, row.gpuPercent) ?? 0,
+        vram: firstPercent(row.vram, row.vramPercent) ?? 0,
+      };
+    })
+    .filter(sample => sample.timestamp)
+    .slice(-60);
+}
+
+function buildTokenSeries(jobs: JobRecord[], model: string, cost: ModelCostConfig) {
+  const months = lastSixMonths();
+  const byMonth = new Map(months.map(month => [month.key, { prompt: 0, output: 0, total: 0, cost: 0 }]));
+  for (const job of jobs) {
+    if ((job.model || 'Unknown model') !== model) continue;
+    const date = parseJobDate(job);
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+    const bucket = byMonth.get(key);
+    if (!bucket) continue;
+    const prompt = Number(job.promptTokens ?? 0);
+    const output = Number(job.completionTokens ?? 0);
+    bucket.prompt += prompt;
+    bucket.output += output;
+    bucket.total += Number(job.totalTokens ?? prompt + output);
+    bucket.cost += estimateCostAvoided({ model, prompt, output, total: prompt + output }, cost);
+  }
+  const values = months.map(month => byMonth.get(month.key) || { prompt: 0, output: 0, total: 0, cost: 0 });
   return {
-    months: ['Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May'],
-    total: shape.map(value => fallbackTotal * value),
-    prompt: shape.map(value => fallbackPrompt * value),
-    output: shape.map(value => fallbackOutput * value),
-    cost: shape.map(value => estimateCostAvoided(fallbackTotal, fallbackOutput) * 600_000 * value),
+    months: months.map(month => month.label),
+    total: values.map(value => value.total),
+    prompt: values.map(value => value.prompt),
+    output: values.map(value => value.output),
+    cost: values.map(value => value.cost),
   };
 }
 
-function buildActivity(jobs: JobRecord[], services: ServiceRecord[], lastUpdatedAt: Date | null) {
-  const latestJob = jobs[0];
-  return [
-    { Icon: CubeIcon, label: latestJob?.model ? `Model request: ${compactModel(latestJob.model)}` : 'Model loaded: local llama.cpp backend', source: latestJob?.client || 'llama.cpp', time: latestJob ? timeAgo(latestJob.createdAt || latestJob.created_at) : timeAgo(lastUpdatedAt), tone: 'good' as Tone },
-    { Icon: MicrophoneIcon, label: 'Whisper model configured', source: 'whisper.cpp', time: '1m ago', tone: 'warn' as Tone },
-    { Icon: ListBulletIcon, label: jobs.length ? `${jobs.length} workload records synced` : 'Queue cleared', source: 'system', time: '2m ago', tone: 'info' as Tone },
-    { Icon: GlobeAltIcon, label: isOnlineStatus(services[0]?.status) ? 'API / Gateway health check passed' : 'Gateway health check pending', source: 'gateway', time: '3m ago', tone: isOnlineStatus(services[0]?.status) ? 'good' as Tone : 'warn' as Tone },
+function buildActivity(jobs: JobRecord[], observability: any, lastUpdatedAt: Date | null) {
+  const rows: Array<{ Icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; label: string; source: string; time: string; tone: Tone }> = [];
+  const recent = [
+    ...(Array.isArray(observability?.recentRunning) ? observability.recentRunning : []),
+    ...(Array.isArray(observability?.recentCompleted) ? observability.recentCompleted : []),
+    ...(Array.isArray(observability?.recentAccepted) ? observability.recentAccepted : []),
+    ...jobs,
   ];
+  const seen = new Set<string>();
+  for (const job of recent) {
+    if (!job?.id || seen.has(job.id)) continue;
+    seen.add(job.id);
+    rows.push({
+      Icon: job.status === 'failed' ? ListBulletIcon : DocumentTextIcon,
+      label: `${job.status || 'observed'}: ${compactModel(job.model || job.type || 'AI request')}`,
+      source: job.client || job.resourceClass || 'runtime',
+      time: timeAgo(job.completedAt || job.completed_at || job.startedAt || job.started_at || job.createdAt || job.created_at),
+      tone: job.status === 'failed' ? 'critical' : job.status === 'running' || job.status === 'leased' ? 'info' : 'good',
+    });
+    if (rows.length >= 4) return rows;
+  }
+  return [{ Icon: ClockIcon, label: 'No runtime activity recorded yet', source: 'system', time: timeAgo(lastUpdatedAt), tone: 'idle' as Tone }];
 }
 
 function toPath(values: number[], width: number, height: number, max: number): string {
@@ -483,8 +616,12 @@ function tempDisplay(value: string): string {
   return match ? `${match[0]}C` : 'N/A';
 }
 
-function tempLabel(value?: number | null): string {
-  return value == null ? 'N/A' : `${Math.round(value)} C`;
+function tempLabel(value?: number | null, reason?: string | null): string {
+  if (value != null) return `${Math.round(value)} C`;
+  if (!reason) return 'N/A';
+  const cleaned = reason.replace(/\.$/, '');
+  if (cleaned.includes('No ADLX helper is installed')) return 'ADLX helper missing';
+  return cleaned;
 }
 
 function bytesPair(used?: number | null, total?: number | null): string {
@@ -492,18 +629,68 @@ function bytesPair(used?: number | null, total?: number | null): string {
   return `${formatBytes(used)} / ${formatBytes(total)}`;
 }
 
-function displayTokenTotal(value: number, fallback: number): number {
-  return value > 0 ? value : fallback;
+function getModelNames(jobs: JobRecord[], models: ModelRecord[], activeModel: string): string[] {
+  const names = new Set<string>();
+  if (activeModel && activeModel !== 'No model loaded') names.add(activeModel);
+  for (const job of jobs) names.add(job.model || 'Unknown model');
+  for (const model of models) names.add(model.name);
+  return Array.from(names).filter(Boolean);
 }
 
-function estimateCostAvoided(total: number, output: number): number {
-  const totalValue = displayTokenTotal(total, 1_230_000_000);
-  const outputValue = displayTokenTotal(output, 450_000_000);
-  return Math.round((totalValue / 1_000_000) * 0.55 + (outputValue / 1_000_000) * 1.35);
+function getModelTokenUsage(jobs: JobRecord[], model: string, fallback: { prompt: number; output: number; total: number }): ModelTokenUsage {
+  const usage = jobs.reduce<ModelTokenUsage>((current, job) => {
+    if ((job.model || 'Unknown model') !== model) return current;
+    const prompt = Number(job.promptTokens ?? 0);
+    const output = Number(job.completionTokens ?? 0);
+    current.prompt += prompt;
+    current.output += output;
+    current.total += Number(job.totalTokens ?? prompt + output);
+    return current;
+  }, { model, prompt: 0, output: 0, total: 0 });
+  if (usage.total === 0 && fallback.total > 0) {
+    return { model, ...fallback };
+  }
+  return usage;
+}
+
+function loadCostConfig(): Record<string, ModelCostConfig> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(COST_STORAGE_KEY) || '{}') as Record<string, ModelCostConfig>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCostConfig(config: Record<string, ModelCostConfig>) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(COST_STORAGE_KEY, JSON.stringify(config));
+}
+
+function estimateCostAvoided(usage: ModelTokenUsage, cost: ModelCostConfig): number {
+  return (usage.prompt / 1_000_000) * cost.promptPerMillion + (usage.output / 1_000_000) * cost.outputPerMillion;
+}
+
+function lastSixMonths(): Array<{ key: string; label: string }> {
+  const now = new Date();
+  return Array.from({ length: 6 }, (_, index) => {
+    const date = new Date(now.getFullYear(), now.getMonth() - (5 - index), 1);
+    return {
+      key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
+      label: date.toLocaleString([], { month: 'short' }),
+    };
+  });
+}
+
+function parseJobDate(job: JobRecord): Date {
+  const value = job.completedAt || job.completed_at || job.startedAt || job.started_at || job.createdAt || job.created_at;
+  const date = value ? new Date(value) : new Date();
+  return Number.isNaN(date.getTime()) ? new Date() : date;
 }
 
 function formatCurrency(value: number): string {
-  return `$${value.toLocaleString()}`;
+  return `$${value.toLocaleString(undefined, { maximumFractionDigits: value < 10 ? 2 : 0 })}`;
 }
 
 function formatTokenCount(value?: number | null): string {

@@ -125,7 +125,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     let closed = false;
-    let pollId: number | undefined;
+    const pollId = window.setInterval(refreshAll, 4000);
 
     try {
       const source = new EventSource('/api/events/stream');
@@ -137,20 +137,16 @@ const App: React.FC = () => {
       });
       source.onerror = () => {
         source.close();
-        if (!closed && !pollId) {
-          pollId = window.setInterval(refreshAll, 4000);
-        }
       };
       return () => {
         closed = true;
         source.close();
-        if (pollId) window.clearInterval(pollId);
+        window.clearInterval(pollId);
       };
     } catch {
-      pollId = window.setInterval(refreshAll, 4000);
       return () => {
         closed = true;
-        if (pollId) window.clearInterval(pollId);
+        window.clearInterval(pollId);
       };
     }
   }, [refreshAll]);

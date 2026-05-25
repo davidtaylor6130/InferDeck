@@ -9,10 +9,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cctype>
 #include <ctime>
 #include <fstream>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <unordered_set>
@@ -21,6 +23,7 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <dxgi.h>
 #include <pdh.h>
 #include <pdhmsg.h>
 #endif
@@ -57,6 +60,105 @@ std::string IsoNow() {
     char buffer[32]{};
     std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &tm);
     return buffer;
+}
+
+std::optional<double> JsonNumberAt(const json& object, std::initializer_list<const char*> path) {
+    const json* current = &object;
+    for (const auto* key : path) {
+        if (!current->is_object() || !current->contains(key)) return std::nullopt;
+        current = &current->at(key);
+    }
+    if (!current->is_number()) return std::nullopt;
+    return current->get<double>();
+}
+
+std::optional<json> ReadAdlxTelemetryJson() {
+#ifdef _WIN32
+    std::vector<std::filesystem::path> candidates;
+    candidates.push_back(std::filesystem::current_path() / "bin" / "inferdeck-adlx-helper.exe");
+
+    char module_path[MAX_PATH]{};
+    if (GetModuleFileNameA(nullptr, module_path, static_cast<DWORD>(sizeof(module_path))) > 0) {
+        candidates.push_back(std::filesystem::path(module_path).parent_path() / "bin" / "inferdeck-adlx-helper.exe");
+    }
+    candidates.push_back(std::filesystem::path("C:/InferDeck/bin/inferdeck-adlx-helper.exe"));
+
+    std::filesystem::path helper;
+    for (const auto& candidate : candidates) {
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec)) {
+            helper = candidate;
+            break;
+        }
+    }
+    if (helper.empty()) return std::nullopt;
+    const auto command = "cmd /c \"\"" + helper.string() + "\" --json\"";
+    std::string output;
+    FILE* pipe = _popen(command.c_str(), "r");
+    if (!pipe) return std::nullopt;
+    char buffer[512];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        output += buffer;
+        if (output.size() > 16 * 1024) break;
+    }
+    _pclose(pipe);
+    if (output.empty()) return std::nullopt;
+    try {
+        return json::parse(output);
+    } catch (...) {
+        return std::nullopt;
+    }
+#else
+    return std::nullopt;
+#endif
+}
+
+struct HardwareSample {
+    std::string timestamp;
+    std::int64_t epoch_ms = 0;
+    double cpu = 0.0;
+    double ram = 0.0;
+    double gpu = 0.0;
+    double vram = 0.0;
+};
+
+json RecordHardwareSample(const json& hardware) {
+    static std::mutex mutex;
+    static std::vector<HardwareSample> samples;
+
+    HardwareSample sample;
+    sample.timestamp = hardware.value("timestamp", IsoNow());
+    sample.epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    sample.cpu = std::clamp(JsonNumberAt(hardware, {"cpu", "utilization"}).value_or(0.0), 0.0, 100.0);
+    sample.ram = std::clamp(JsonNumberAt(hardware, {"memory", "percentage"}).value_or(0.0), 0.0, 100.0);
+    sample.gpu = std::clamp(JsonNumberAt(hardware, {"gpu", "utilization"}).value_or(0.0), 0.0, 100.0);
+    sample.vram = std::clamp(JsonNumberAt(hardware, {"gpu", "memoryPercent"}).value_or(0.0), 0.0, 100.0);
+
+    std::lock_guard<std::mutex> lock(mutex);
+    if (samples.empty() || samples.back().timestamp != sample.timestamp) {
+        samples.push_back(sample);
+        const auto cutoff = sample.epoch_ms - 60'000;
+        samples.erase(std::remove_if(samples.begin(), samples.end(), [&](const HardwareSample& item) {
+            return item.epoch_ms < cutoff;
+        }), samples.end());
+    }
+
+    json out = json::array();
+    for (const auto& item : samples) {
+        out.push_back({
+            {"timestamp", item.timestamp},
+            {"cpu", item.cpu},
+            {"ram", item.ram},
+            {"gpu", item.gpu},
+            {"vram", item.vram},
+            {"cpuPercent", item.cpu},
+            {"ramPercent", item.ram},
+            {"gpuPercent", item.gpu},
+            {"vramPercent", item.vram}
+        });
+    }
+    return out;
 }
 
 std::int64_t UptimeSeconds(GatewayStartTime started_at) {
@@ -304,6 +406,99 @@ std::optional<std::uint64_t> ReadDedicatedGpuMemoryBytes() {
     static PdhLargeSumCounter counter(L"\\GPU Adapter Memory(*)\\Dedicated Usage");
     return counter.Read();
 }
+
+std::optional<std::uint64_t> ReadLocalGpuMemoryBytes() {
+    static PdhLargeSumCounter counter(L"\\GPU Local Adapter Memory(*)\\Local Usage");
+    return counter.Read();
+}
+
+struct DxgiGpuInfo {
+    std::string name;
+    std::uint64_t dedicated_video_memory = 0;
+};
+
+std::optional<DxgiGpuInfo> ReadRegistryGpuMemoryInfo() {
+    constexpr const char* class_key = "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}";
+    HKEY root = nullptr;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, class_key, 0, KEY_READ, &root) != ERROR_SUCCESS) {
+        return std::nullopt;
+    }
+
+    std::optional<DxgiGpuInfo> best;
+    for (DWORD index = 0;; ++index) {
+        char subkey_name[256]{};
+        DWORD subkey_name_size = static_cast<DWORD>(sizeof(subkey_name));
+        if (RegEnumKeyExA(root, index, subkey_name, &subkey_name_size, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
+            break;
+        }
+
+        HKEY adapter_key = nullptr;
+        if (RegOpenKeyExA(root, subkey_name, 0, KEY_READ, &adapter_key) != ERROR_SUCCESS) {
+            continue;
+        }
+
+        char driver_desc[256]{};
+        DWORD driver_desc_size = static_cast<DWORD>(sizeof(driver_desc));
+        DWORD driver_desc_type = 0;
+        const bool has_desc = RegQueryValueExA(adapter_key, "DriverDesc", nullptr, &driver_desc_type,
+                                               reinterpret_cast<LPBYTE>(driver_desc), &driver_desc_size) == ERROR_SUCCESS &&
+                              driver_desc_type == REG_SZ;
+
+        DWORD memory_type = 0;
+        std::uint64_t memory_size = 0;
+        DWORD memory_size_len = static_cast<DWORD>(sizeof(memory_size));
+        const bool has_memory = RegQueryValueExA(adapter_key, "HardwareInformation.qwMemorySize", nullptr, &memory_type,
+                                                 reinterpret_cast<LPBYTE>(&memory_size), &memory_size_len) == ERROR_SUCCESS &&
+                                memory_type == REG_QWORD && memory_size > 0;
+
+        if (has_memory) {
+            DxgiGpuInfo candidate{
+                has_desc && driver_desc[0] != '\0' ? std::string(driver_desc) : "GPU Adapter",
+                memory_size
+            };
+            const bool prefer_amd = candidate.name.find("AMD") != std::string::npos &&
+                                    (!best || best->dedicated_video_memory <= candidate.dedicated_video_memory);
+            if (!best || prefer_amd || candidate.dedicated_video_memory > best->dedicated_video_memory) {
+                best = candidate;
+            }
+        }
+
+        RegCloseKey(adapter_key);
+    }
+
+    RegCloseKey(root);
+    return best;
+}
+
+std::optional<DxgiGpuInfo> ReadDxgiGpuInfo() {
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) || !factory) {
+        return std::nullopt;
+    }
+
+    std::optional<DxgiGpuInfo> best;
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT index = 0; factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index) {
+        DXGI_ADAPTER_DESC1 desc{};
+        if (SUCCEEDED(adapter->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && desc.DedicatedVideoMemory > 0) {
+            char name[128]{};
+            WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, name, static_cast<int>(sizeof(name)), nullptr, nullptr);
+            DxgiGpuInfo candidate{
+                name[0] == '\0' ? "GPU Adapter" : std::string(name),
+                static_cast<std::uint64_t>(desc.DedicatedVideoMemory)
+            };
+            const bool prefer_amd = desc.VendorId == 0x1002 && (!best || best->dedicated_video_memory <= candidate.dedicated_video_memory);
+            if (!best || prefer_amd || candidate.dedicated_video_memory > best->dedicated_video_memory) {
+                best = candidate;
+            }
+        }
+        adapter->Release();
+        adapter = nullptr;
+    }
+
+    factory->Release();
+    return best;
+}
 #endif
 
 json DiskJson() {
@@ -393,13 +588,33 @@ json HardwareJson() {
     }
 #ifdef _WIN32
     const auto gpu_utilization = ReadGpuUtilizationPercent();
+    const auto registry_gpu_info = ReadRegistryGpuMemoryInfo();
+    const auto dxgi_gpu_info = registry_gpu_info ? registry_gpu_info : ReadDxgiGpuInfo();
+    if (dxgi_gpu_info && dxgi_gpu_info->dedicated_video_memory > 0) {
+        const auto used = gpu_info.memory_total > gpu_info.memory_free ? gpu_info.memory_total - gpu_info.memory_free : 0;
+        gpu_info.name = dxgi_gpu_info->name;
+        gpu_info.memory_total = dxgi_gpu_info->dedicated_video_memory;
+        gpu_info.memory_free = gpu_info.memory_total > used ? gpu_info.memory_total - used : 0;
+    }
+    const auto local_memory = ReadLocalGpuMemoryBytes();
     const auto dedicated_memory = ReadDedicatedGpuMemoryBytes();
-    if (dedicated_memory && *dedicated_memory > 0) {
-        gpu_info.memory_total = gpu_info.memory_total == 0 ? *dedicated_memory : gpu_info.memory_total;
-        const auto used = std::min(*dedicated_memory, gpu_info.memory_total);
+    const auto gpu_memory_used = local_memory && *local_memory > 0 ? local_memory : dedicated_memory;
+    if (gpu_memory_used && *gpu_memory_used > 0) {
+        gpu_info.memory_total = gpu_info.memory_total == 0 ? *gpu_memory_used : gpu_info.memory_total;
+        const auto used = std::min(*gpu_memory_used, gpu_info.memory_total);
         gpu_info.memory_free = gpu_info.memory_total > used ? gpu_info.memory_total - used : 0;
     }
 #endif
+    const auto adlx = ReadAdlxTelemetryJson();
+    const auto adlx_available = adlx && adlx->value("available", false);
+    const auto adlx_gpu_temp = adlx ? JsonNumberAt(*adlx, {"gpu", "temperature"}) : std::nullopt;
+    const auto adlx_gpu_hotspot = adlx ? JsonNumberAt(*adlx, {"gpu", "hotspotTemperature"}) : std::nullopt;
+    const auto adlx_cpu_temp = adlx ? JsonNumberAt(*adlx, {"cpu", "temperature"}) : std::nullopt;
+    const auto adlx_gpu_power = adlx ? JsonNumberAt(*adlx, {"gpu", "power"}) : std::nullopt;
+    const auto adlx_gpu_fan = adlx ? JsonNumberAt(*adlx, {"gpu", "fanSpeed"}) : std::nullopt;
+    const auto temperature_reason = adlx
+        ? (adlx_available ? "ADLX helper did not return this sensor." : "ADLX helper reported: " + adlx->value("reason", "unavailable"))
+        : "No ADLX helper is installed at bin/inferdeck-adlx-helper.exe.";
     json hardware;
     hardware["available"] = true;
     hardware["provider"] = "windows";
@@ -415,9 +630,13 @@ json HardwareJson() {
             nullptr
 #endif
         },
-        {"temperature", nullptr},
-        {"power", nullptr},
-        {"fanSpeed", nullptr},
+        {"temperature", adlx_gpu_temp ? json(*adlx_gpu_temp) : json(nullptr)},
+        {"hotspotTemperature", adlx_gpu_hotspot ? json(*adlx_gpu_hotspot) : json(nullptr)},
+        {"temperatureAvailable", adlx_gpu_temp.has_value()},
+        {"temperatureSource", adlx_gpu_temp ? json("amd_adlx_helper") : json(nullptr)},
+        {"temperatureReason", adlx_gpu_temp ? json(nullptr) : json(temperature_reason)},
+        {"power", adlx_gpu_power ? json(*adlx_gpu_power) : json(nullptr)},
+        {"fanSpeed", adlx_gpu_fan ? json(*adlx_gpu_fan) : json(nullptr)},
         {"memoryTotal", gpu_info.memory_total == 0 ? json(nullptr) : json(gpu_info.memory_total)},
         {"memoryFree", gpu_info.memory_free == 0 ? json(nullptr) : json(gpu_info.memory_free)},
         {"memoryUsed", gpu_info.memory_total > gpu_info.memory_free ? json(gpu_info.memory_total - gpu_info.memory_free) : json(nullptr)},
@@ -440,9 +659,32 @@ json HardwareJson() {
 #endif
 #ifdef _WIN32
     hardware["cpu"] = CpuUsageJson();
+    hardware["cpu"]["temperature"] = adlx_cpu_temp ? json(*adlx_cpu_temp) : json(nullptr);
+    hardware["cpu"]["temperatureAvailable"] = adlx_cpu_temp.has_value();
+    hardware["cpu"]["temperatureSource"] = adlx_cpu_temp ? json("amd_adlx_helper") : json(nullptr);
+    hardware["cpu"]["temperatureReason"] = adlx_cpu_temp ? json(nullptr) : json(temperature_reason);
 #else
     hardware["cpu"] = {{"utilization", nullptr}, {"name", "Host CPU"}};
 #endif
+    hardware["temperatureProvider"] = {
+        {"name", adlx ? adlx->value("provider", "amd_adlx") : "amd_adlx_helper"},
+        {"available", adlx_available},
+        {"reason", adlx_available ? json(nullptr) : json(temperature_reason)}
+    };
+    hardware["temperatureSensors"] = {
+        {"cpu", {
+            {"available", adlx_cpu_temp.has_value()},
+            {"value", adlx_cpu_temp ? json(*adlx_cpu_temp) : json(nullptr)},
+            {"source", adlx_cpu_temp ? json("amd_adlx_helper") : json(nullptr)},
+            {"reason", adlx_cpu_temp ? json(nullptr) : json(temperature_reason)}
+        }},
+        {"gpu", {
+            {"available", adlx_gpu_temp.has_value()},
+            {"value", adlx_gpu_temp ? json(*adlx_gpu_temp) : json(nullptr)},
+            {"source", adlx_gpu_temp ? json("amd_adlx_helper") : json(nullptr)},
+            {"reason", adlx_gpu_temp ? json(nullptr) : json(temperature_reason)}
+        }}
+    };
     hardware["disk"] = DiskJson();
     return hardware;
 }
@@ -595,16 +837,19 @@ void HandleDashboardStatus(const httplib::Request&, httplib::Response& resp, con
     auto& activity = inferdeck::gateway::RuntimeActivity::Get();
     auto queue = activity.QueueJson();
     auto summary = activity.SummaryJson();
+    auto hardware = HardwareJson();
+    auto hardware_samples = RecordHardwareSample(hardware);
     JsonResponse(resp, {
         {"status", "ok"},
         {"mode", {{"mode", "ai"}, {"queuePaused", queue["pausedByAdmin"]}}},
         {"queue", queue},
-        {"hardware", HardwareJson()},
+        {"hardware", hardware},
         {"storage", StorageJson(config)},
         {"summary", summary},
         {"observability", activity.ObservabilityJson()},
         {"metrics", metrics},
         {"metricsSamples", activity.SamplesJson()},
+        {"hardwareSamples", hardware_samples},
         {"whisper", inferdeck::gateway::WhisperRuntime::Get().StatusJson()},
         {"services", json::array({GatewayServiceJson(config, started_at), LlamaServiceJson(config, started_at), inferdeck::gateway::WhisperRuntime::Get().StatusJson()})}
     });

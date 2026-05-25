@@ -127,6 +127,57 @@ TEST_CASE("Synthetic OpenAI SSE converts raw Qwen tool-call text into structured
     REQUIRE(stream.find("\"finish_reason\":\"tool_calls\"") != std::string::npos);
 }
 
+TEST_CASE("Synthetic OpenAI SSE converts bare OpenCode command tool_calls text", "[compat][opencode][tools]") {
+    json response = {
+        {"id", "chatcmpl-test"},
+        {"model", "qwen3.6-35b-a3b"},
+        {"choices", json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", R"(tool_calls: {"command":"git status","description":"Check git status before commit"})"}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+
+    auto stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response);
+
+    REQUIRE(stream.find("\"tool_calls\"") != std::string::npos);
+    REQUIRE(stream.find("\"name\":\"bash\"") != std::string::npos);
+    REQUIRE(stream.find("\"arguments\":\"{\\\"command\\\":\\\"git status\\\",\\\"description\\\":\\\"Check git status before commit\\\"}\"") != std::string::npos);
+    REQUIRE(stream.find("tool_calls:") == std::string::npos);
+    REQUIRE(stream.find("\"finish_reason\":\"tool_calls\"") != std::string::npos);
+}
+
+TEST_CASE("Synthetic OpenAI SSE recovers malformed OpenCode commit command tool_calls text", "[compat][opencode][tools]") {
+    json response = {
+        {"id", "chatcmpl-test"},
+        {"model", "qwen3.6-35b-a3b"},
+        {"choices", json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", "tool_calls: [{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"git commit -m \\\"optimize: compress public images\\n\\n- Compress assets\\\"\",\"description\":\"Commit local changes with summary\"}"}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+
+    auto stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response);
+
+    REQUIRE(stream.find("\"tool_calls\"") != std::string::npos);
+    REQUIRE(stream.find("\"name\":\"bash\"") != std::string::npos);
+    REQUIRE(stream.find("git commit -m") != std::string::npos);
+    REQUIRE(stream.find("Commit local changes with summary") != std::string::npos);
+    REQUIRE(stream.find("tool_calls:") == std::string::npos);
+    REQUIRE(stream.find("\"finish_reason\":\"tool_calls\"") != std::string::npos);
+}
+
 TEST_CASE("Malformed raw Qwen tool-call text is not emitted as partial tool calls", "[compat][opencode][tools]") {
     json response = {
         {"id", "chatcmpl-test"},

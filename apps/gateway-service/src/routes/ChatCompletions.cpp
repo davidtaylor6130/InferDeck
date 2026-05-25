@@ -5,6 +5,7 @@
 #include "core/Config.hpp"
 #include "core/Logger.hpp"
 #include <nlohmann/json.hpp>
+#include <array>
 #include <sstream>
 #include <chrono>
 #include <queue>
@@ -298,6 +299,195 @@ nlohmann::json NormalizeOpenAiToolCalls(const nlohmann::json& tool_calls) {
     return normalized;
 }
 
+static nlohmann::json RawToolCallFromPayload(const nlohmann::json& parsed, std::size_t index) {
+    nlohmann::json raw_call;
+    raw_call["id"] = MakeToolCallId(index);
+    raw_call["type"] = "function";
+
+    if (parsed.contains("function") && parsed["function"].is_object()) {
+        raw_call["function"] = parsed["function"];
+        return raw_call;
+    }
+
+    const auto name = parsed.value("name", parsed.value("function", ""));
+    if (!name.empty()) {
+        raw_call["function"] = {
+            {"name", name},
+            {"arguments", parsed.contains("arguments") ? parsed["arguments"] : nlohmann::json::object()}
+        };
+        return raw_call;
+    }
+
+    if (parsed.contains("command") && parsed["command"].is_string()) {
+        // OpenCode's shell tool is named "bash"; some local models emit only
+        // the argument object as `tool_calls: {"command": ...}`.
+        raw_call["function"] = {
+            {"name", "bash"},
+            {"arguments", parsed}
+        };
+        return raw_call;
+    }
+
+    return nlohmann::json::object();
+}
+
+static nlohmann::json NormalizeToolCallPayload(const nlohmann::json& parsed, std::size_t start_index = 0) {
+    nlohmann::json raw_calls = nlohmann::json::array();
+
+    if (parsed.is_array()) {
+        for (const auto& item : parsed) {
+            auto raw_call = RawToolCallFromPayload(item, start_index + raw_calls.size());
+            if (!raw_call.empty()) raw_calls.push_back(std::move(raw_call));
+        }
+    } else if (parsed.is_object()) {
+        if (parsed.contains("tool_calls")) {
+            return NormalizeToolCallPayload(parsed["tool_calls"], start_index);
+        }
+        auto raw_call = RawToolCallFromPayload(parsed, start_index);
+        if (!raw_call.empty()) raw_calls.push_back(std::move(raw_call));
+    }
+
+    return NormalizeOpenAiToolCalls(raw_calls);
+}
+
+static std::optional<std::pair<std::string, std::pair<std::size_t, std::size_t>>> FindLabeledJsonPayload(
+    const std::string& text,
+    std::size_t search_from) {
+    const std::array<std::string_view, 2> labels = {"tool_calls:", "tool_call:"};
+
+    std::size_t label_pos = std::string::npos;
+    std::string_view matched_label;
+    for (const auto label : labels) {
+        const auto pos = text.find(label, search_from);
+        if (pos != std::string::npos && (label_pos == std::string::npos || pos < label_pos)) {
+            label_pos = pos;
+            matched_label = label;
+        }
+    }
+    if (label_pos == std::string::npos) return std::nullopt;
+
+    auto payload_start = label_pos + matched_label.size();
+    while (payload_start < text.size() && std::isspace(static_cast<unsigned char>(text[payload_start]))) ++payload_start;
+    if (payload_start >= text.size() || (text[payload_start] != '{' && text[payload_start] != '[')) return std::nullopt;
+
+    std::vector<char> stack;
+    bool in_string = false;
+    bool escaped = false;
+    for (std::size_t i = payload_start; i < text.size(); ++i) {
+        const char c = text[i];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '{') {
+            stack.push_back('}');
+        } else if (c == '[') {
+            stack.push_back(']');
+        } else if ((c == '}' || c == ']') && !stack.empty() && stack.back() == c) {
+            stack.pop_back();
+            if (stack.empty()) {
+                const auto payload_end = i + 1;
+                return std::make_pair(text.substr(payload_start, payload_end - payload_start),
+                                      std::make_pair(label_pos, payload_end));
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+static std::string UnescapeLooseJsonString(std::string value) {
+    std::string output;
+    output.reserve(value.size());
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '\\' && i + 1 < value.size()) {
+            const char next = value[++i];
+            if (next == 'n') output += '\n';
+            else if (next == 'r') output += '\r';
+            else if (next == 't') output += '\t';
+            else output += next;
+        } else {
+            output += value[i];
+        }
+    }
+    return TrimCopy(output);
+}
+
+static std::optional<std::string> ExtractLooseField(const std::string& text, std::string_view key) {
+    const std::array<std::string, 2> patterns = {
+        "\"" + std::string(key) + "\":",
+        "\\\"" + std::string(key) + "\\\":"
+    };
+
+    std::size_t key_pos = std::string::npos;
+    std::string matched;
+    for (const auto& pattern : patterns) {
+        const auto pos = text.find(pattern);
+        if (pos != std::string::npos && (key_pos == std::string::npos || pos < key_pos)) {
+            key_pos = pos;
+            matched = pattern;
+        }
+    }
+    if (key_pos == std::string::npos) return std::nullopt;
+
+    auto value_start = key_pos + matched.size();
+    while (value_start < text.size() && std::isspace(static_cast<unsigned char>(text[value_start]))) ++value_start;
+    if (value_start >= text.size()) return std::nullopt;
+    if (text.compare(value_start, 2, "\\\"") == 0) value_start += 2;
+    else if (text[value_start] == '"') ++value_start;
+
+    const std::array<std::string, 8> delimiters = {
+        "\\\",\\\"description\\\"", "\",\"description\"",
+        "\\\",\\\"name\\\"", "\",\"name\"",
+        "\\\",\\\"arguments\\\"", "\",\"arguments\"",
+        "\\\"}", "\"}"
+    };
+    std::size_t value_end = std::string::npos;
+    for (const auto& delimiter : delimiters) {
+        const auto pos = text.find(delimiter, value_start);
+        if (pos != std::string::npos && (value_end == std::string::npos || pos < value_end)) {
+            value_end = pos;
+        }
+    }
+    if (value_end == std::string::npos) {
+        value_end = text.find('\n', value_start);
+        if (value_end == std::string::npos) value_end = text.size();
+    }
+
+    auto value = UnescapeLooseJsonString(text.substr(value_start, value_end - value_start));
+    if (value.empty()) return std::nullopt;
+    return value;
+}
+
+static nlohmann::json ExtractLooseCommandToolCall(const std::string& text, std::size_t start_index = 0) {
+    if (text.find("tool_calls:") == std::string::npos && text.find("tool_call:") == std::string::npos) {
+        return nlohmann::json::array();
+    }
+    auto command = ExtractLooseField(text, "command");
+    if (!command || command->empty()) return nlohmann::json::array();
+
+    nlohmann::json arguments = {{"command", *command}};
+    if (auto description = ExtractLooseField(text, "description")) {
+        arguments["description"] = *description;
+    }
+
+    nlohmann::json raw_call = {
+        {"id", MakeToolCallId(start_index)},
+        {"type", "function"},
+        {"function", {{"name", "bash"}, {"arguments", arguments}}}
+    };
+    return NormalizeOpenAiToolCalls(nlohmann::json::array({raw_call}));
+}
+
 static nlohmann::json ExtractQwenToolCallsFromText(const std::string& text) {
     nlohmann::json calls = nlohmann::json::array();
     std::size_t search = 0;
@@ -312,24 +502,27 @@ static nlohmann::json ExtractQwenToolCallsFromText(const std::string& text) {
         if (payload.empty()) continue;
         try {
             auto parsed = nlohmann::json::parse(payload);
-            nlohmann::json raw_call;
-            raw_call["id"] = MakeToolCallId(calls.size());
-            raw_call["type"] = "function";
-            if (parsed.contains("function") && parsed["function"].is_object()) {
-                raw_call["function"] = parsed["function"];
-            } else {
-                const auto name = parsed.value("name", parsed.value("function", ""));
-                if (name.empty()) continue;
-                raw_call["function"] = {
-                    {"name", name},
-                    {"arguments", parsed.contains("arguments") ? parsed["arguments"] : nlohmann::json::object()}
-                };
-            }
-            auto normalized = NormalizeOpenAiToolCalls(nlohmann::json::array({raw_call}));
-            if (!normalized.empty()) calls.push_back(normalized.front());
+            auto normalized = NormalizeToolCallPayload(parsed, calls.size());
+            for (const auto& call : normalized) calls.push_back(call);
         } catch (...) {
             continue;
         }
+    }
+
+    search = 0;
+    while (auto found = FindLabeledJsonPayload(text, search)) {
+        search = found->second.second;
+        try {
+            auto parsed = nlohmann::json::parse(found->first);
+            auto normalized = NormalizeToolCallPayload(parsed, calls.size());
+            for (const auto& call : normalized) calls.push_back(call);
+        } catch (...) {
+            continue;
+        }
+    }
+    if (calls.empty()) {
+        auto loose = ExtractLooseCommandToolCall(text, calls.size());
+        for (const auto& call : loose) calls.push_back(call);
     }
     return calls;
 }
@@ -344,6 +537,16 @@ static std::string RemoveQwenToolCallBlocks(std::string text) {
             break;
         }
         text.erase(start, end + std::string("</tool_call>").size() - start);
+    }
+    std::size_t search = 0;
+    while (auto found = FindLabeledJsonPayload(text, search)) {
+        text.erase(found->second.first, found->second.second - found->second.first);
+        search = found->second.first;
+    }
+    if (!ExtractLooseCommandToolCall(text).empty()) {
+        auto pos = text.find("tool_calls:");
+        if (pos == std::string::npos) pos = text.find("tool_call:");
+        if (pos != std::string::npos) text.erase(pos);
     }
     return TrimCopy(text);
 }
