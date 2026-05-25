@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AppShell } from './components/AppShell';
 import type { DashboardActions, DashboardState, JobRecord, ModelRecord, PageId, PageProps, ServiceRecord } from './types';
 import { HardwarePage } from './pages/HardwarePage';
-import { JobsPage } from './pages/JobsPage';
 import { LogsPage } from './pages/LogsPage';
 import { ModelsPage } from './pages/ModelsPage';
 import { OverviewPage } from './pages/OverviewPage';
@@ -12,7 +11,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { formatError } from './utils';
 
 const API = '/api';
-const pages: PageId[] = ['overview', 'queue', 'jobs', 'models', 'services', 'hardware', 'logs', 'settings'];
+const pages: PageId[] = ['overview', 'workloads', 'models', 'services', 'hardware', 'logs', 'settings'];
 
 interface Toast {
   id: number;
@@ -384,15 +383,15 @@ const App: React.FC = () => {
 };
 
 function getHashPage(): PageId {
-  const value = window.location.hash.replace('#', '') as PageId;
+  const raw = window.location.hash.replace('#', '');
+  const value = (raw === 'queue' || raw === 'jobs' ? 'workloads' : raw) as PageId;
   return pages.includes(value) ? value : 'overview';
 }
 
 function getPage(page: PageId): React.FC<PageProps> {
   const map: Record<PageId, React.FC<PageProps>> = {
     overview: OverviewPage,
-    queue: QueuePage,
-    jobs: JobsPage,
+    workloads: QueuePage,
     models: ModelsPage,
     services: ServicesPage,
     hardware: HardwarePage,

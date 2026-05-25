@@ -5,26 +5,31 @@ import { OverviewPage } from './OverviewPage';
 import type { DashboardActions, DashboardState } from '../types';
 
 describe('OverviewPage', () => {
-  it('renders the icon-led dashboard with hot telemetry and compact controls', () => {
+  it('renders the cleaner overview dashboard with grouped telemetry and status-first chrome', () => {
     const html = renderToStaticMarkup(<OverviewPage state={state} actions={actions} />);
 
     expect(html).toContain('InferDeck Overview');
-    expect(html).toContain('API healthy');
-    expect(html).toContain('llama.cpp ready');
-    expect(html).toContain('Whisper ready');
+    expect(html).toContain('Current Mode');
+    expect(html).toContain('API / Gateway');
+    expect(html).toContain('llama.cpp');
+    expect(html).toContain('Whisper');
     expect(html).toContain('18 queued');
+    expect(html).toContain('CPU &amp; System');
+    expect(html).toContain('GPU &amp; VRAM');
+    expect(html).toContain('Live Load');
+    expect(html).toContain('Token Usage &amp; Cost');
+    expect(html).toContain('Active Model');
+    expect(html).toContain('Service Health');
+    expect(html).toContain('Recent Activity');
     expect(html).toContain('96%');
     expect(html).toContain('84%');
     expect(html).toContain('97%');
     expect(html).toContain('14.7 GB / 16.0 GB');
-    expect(html).toContain('88 C');
+    expect(html).toContain('88C');
     expect(html).toContain('384.2K');
-    expect(html).toContain('aria-label="Start llama.cpp"');
-    expect(html).toContain('aria-label="Stop llama.cpp"');
-    expect(html).toContain('aria-label="Restart llama.cpp"');
-    expect(html).toContain('aria-label="Rescan models"');
-    expect(html).toContain('aria-label="Record dictation"');
-    expect(html).toContain('aria-label="View logs"');
+    expect(html).toContain('Pause Queue');
+    expect(html).toContain('Restart llama.cpp');
+    expect(html).toContain('Refresh');
     expect(html).toContain('text-danger-rose');
     expect(html).toContain('text-warning-amber');
     expect(html).toContain('text-success-green');

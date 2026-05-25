@@ -1,6 +1,5 @@
 import React from 'react';
-import { timeAgo } from '../utils';
-import { CommandButton } from './CommandButton';
+import { Bars3Icon } from '@heroicons/react/24/outline';
 
 interface TopBarProps {
   onMenu: () => void;
@@ -11,28 +10,15 @@ interface TopBarProps {
   connected: boolean;
 }
 
-export const TopBar: React.FC<TopBarProps> = ({ onMenu, onMode, onPauseQueue, onRestartBackend, lastUpdatedAt, connected }) => (
-  <header className="border-b border-border-slate bg-void-black/70 px-4 py-5 backdrop-blur xl:px-8">
-    <div className="flex min-w-0 flex-col gap-4 2xl:flex-row 2xl:items-center 2xl:justify-between">
-      <div className="flex min-w-0 items-start gap-3">
-        <button className="mt-1 rounded-md border border-border-slate bg-panel-slate px-3 py-2 text-sm text-text-primary lg:hidden" onClick={onMenu}>
-          Menu
-        </button>
-        <div className="min-w-0">
-          <h2 className="truncate text-3xl font-bold leading-tight text-text-primary md:text-4xl">Operations Deck</h2>
-          <p className="truncate text-base text-text-secondary">One GPU. Every AI workload.</p>
-        </div>
-      </div>
-      <div className="flex min-w-0 flex-wrap items-center gap-3">
-        <CommandButton tone="violet" onClick={() => onMode('ai')}>AI Mode</CommandButton>
-        <CommandButton tone="orange" onClick={() => onMode('gaming')}>Gaming</CommandButton>
-        <CommandButton tone="amber" onClick={() => onMode('maintenance')}>Maint.</CommandButton>
-        <CommandButton tone="blue" onClick={onPauseQueue}>Pause Queue</CommandButton>
-        <CommandButton tone="neutral" onClick={onRestartBackend}>Restart llama.cpp</CommandButton>
-        <div className="flex min-w-0 items-center gap-3 pl-1 text-sm text-text-secondary">
-          <span className="truncate">Updated {timeAgo(lastUpdatedAt)}</span>
-          <span className={`h-3 w-3 shrink-0 rounded-full ${connected ? 'bg-success-green' : 'bg-danger-rose'}`} title={connected ? 'Online' : 'Offline'} />
-        </div>
+export const TopBar: React.FC<TopBarProps> = ({ onMenu, connected }) => (
+  <header className="border-b border-white/10 bg-[#050b14]/80 px-4 py-3 backdrop-blur xl:px-7 lg:hidden">
+    <div className="flex items-center justify-between gap-3">
+      <button className="rounded-lg border border-white/10 bg-white/[0.04] p-2 text-text-primary" onClick={onMenu} aria-label="Open navigation">
+        <Bars3Icon className="h-5 w-5" />
+      </button>
+      <div className="flex items-center gap-2 text-xs text-text-secondary">
+        <span>{connected ? 'Connected' : 'Offline'}</span>
+        <span className={`h-2.5 w-2.5 rounded-full ${connected ? 'bg-success-green' : 'bg-danger-rose'}`} />
       </div>
     </div>
   </header>

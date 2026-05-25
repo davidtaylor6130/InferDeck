@@ -41,7 +41,7 @@ export const AppShell: React.FC<AppShellProps> = ({ activePage, onNavigate, chil
             lastUpdatedAt={lastUpdatedAt}
             connected={connected}
           />
-          <main className="min-w-0 flex-1 px-4 py-5 xl:px-8">{children}</main>
+          <main className="min-w-0 flex-1 px-4 py-5 xl:px-7">{children}</main>
         </div>
       </div>
     </div>

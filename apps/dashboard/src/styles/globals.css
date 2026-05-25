@@ -68,7 +68,6 @@ button, input, select {
 
 .deck-grid-bg {
   background:
-    radial-gradient(circle at 15% 0%, rgba(139, 92, 246, 0.18), transparent 28rem),
-    radial-gradient(circle at 90% 5%, rgba(34, 211, 238, 0.12), transparent 24rem),
+    linear-gradient(180deg, rgba(8, 17, 31, 0.96), rgba(5, 8, 20, 1)),
     var(--void-black);
 }

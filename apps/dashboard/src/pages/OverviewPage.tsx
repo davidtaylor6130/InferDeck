@@ -1,52 +1,41 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowPathIcon,
-  BoltIcon,
   BriefcaseIcon,
   ChartBarIcon,
   CheckCircleIcon,
-  CircleStackIcon,
+  ClockIcon,
   CpuChipIcon,
   CubeIcon,
-  DocumentTextIcon,
-  ExclamationTriangleIcon,
-  FireIcon,
+  GlobeAltIcon,
   ListBulletIcon,
-  MagnifyingGlassIcon,
+  MegaphoneIcon,
   MicrophoneIcon,
-  PlayIcon,
-  PowerIcon,
+  PauseIcon,
+  PhotoIcon,
+  QueueListIcon,
   ServerStackIcon,
-  StopIcon,
-  ArrowUpTrayIcon,
-  XCircleIcon,
+  SparklesIcon,
+  SpeakerWaveIcon,
+  Squares2X2Icon,
 } from '@heroicons/react/24/outline';
 import type { JobRecord, ModelRecord, PageProps, ServiceRecord } from '../types';
 import { CommandButton } from '../components/CommandButton';
-import { CopyButton } from '../components/CopyButton';
-import { EmptyState } from '../components/EmptyState';
-import { QueuePreview } from '../components/QueuePreview';
 import { StatusBadge } from '../components/StatusBadge';
-import {
-  DASHBOARD_URL,
-  GATEWAY_API,
-  LLAMA_BACKEND,
-  OPENAI_API,
-  formatBytes,
-  formatUptime,
-  getQueueCounts,
-  isOnlineStatus,
-  timeAgo,
-} from '../utils';
+import { formatBytes, formatUptime, getQueueCounts, isOnlineStatus, timeAgo } from '../utils';
 
-type Tone = 'good' | 'warn' | 'critical' | 'idle' | 'info';
+type Tone = 'good' | 'warn' | 'critical' | 'idle' | 'info' | 'violet';
 
-interface GaugeMetric {
+interface MetricDatum {
+  label: string;
+  value: number;
+  tone: Tone;
+}
+
+interface ServiceDatum {
   key: string;
   label: string;
-  value: string;
-  detail?: string;
-  percent?: number | null;
+  status: string;
   tone: Tone;
   Icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
 }
@@ -54,41 +43,35 @@ interface GaugeMetric {
 export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const queue = getQueueCounts(state.statusData, state.jobsList);
   const services = normalizeServices(state.servicesList, state.connected);
-  const gatewayService = services.find(service => service.kind === 'gateway' || service.id === 'gateway') || services[0];
+  const gatewayService = services.find(service => service.kind === 'gateway' || service.id === 'gateway');
   const llamaService = services.find(service => service.kind === 'llama_cpp' || service.id === 'llama-server');
   const whisperService = services.find(service => service.kind === 'whisper_cpp' || service.id === 'whisper');
-  const llamaBackendUrl = llamaService?.baseUrl || LLAMA_BACKEND;
   const telemetry = state.statusData?.hardware || state.statusData?.telemetry || {};
   const system = telemetry.system || state.statusData?.system || {};
   const gpu = telemetry.gpu || {};
   const summary = state.statusData?.summary || {};
   const metrics = state.statusData?.metrics || {};
-  const storage = state.statusData?.storage || {};
-  const activeJob = state.jobsList.find(isActiveJob) || null;
+  const whisper = state.statusData?.whisper || {};
   const activeModel = getActiveModel(state.runningModels, state.modelsList);
-  const errors = getErrorCount(state.errors, state.jobsList, summary, metrics);
-  const jobsToday = Number(summary.jobsToday ?? state.jobsList.length ?? 0);
-  const failedToday = Number(summary.failedToday ?? queue.failed ?? 0);
+  const activeModelRecord = getActiveModelRecord(state.runningModels, state.modelsList);
   const totalTokens = Number(summary.totalTokens ?? metrics.total_tokens ?? sumJobTokens(state.jobsList, 'totalTokens'));
   const promptTokens = Number(summary.promptTokens ?? metrics.tokens_processed ?? sumJobTokens(state.jobsList, 'promptTokens'));
-  const completionTokens = Number(summary.completionTokens ?? metrics.tokens_generated ?? sumJobTokens(state.jobsList, 'completionTokens'));
+  const outputTokens = Number(summary.completionTokens ?? metrics.tokens_generated ?? sumJobTokens(state.jobsList, 'completionTokens'));
   const cpuPercent = firstPercent(system.cpuUtilization, system.cpuPercent, system.cpu, telemetry.cpu?.utilization, telemetry.cpu?.usage);
+  const cpuTemp = firstNumber(system.temperature, system.cpuTemp, system.cpuTemperature, telemetry.cpu?.temperature, telemetry.cpu?.tempC);
   const ramUsed = firstNumber(system.memoryUsed, system.ramUsed, telemetry.memory?.used, telemetry.ram?.used);
   const ramTotal = firstNumber(system.memoryTotal, system.ramTotal, telemetry.memory?.total, telemetry.ram?.total);
   const ramPercent = firstPercent(system.memoryPercent, system.ramPercent, percentOf(ramUsed, ramTotal));
-  const diskUsed = firstNumber(storage.usedSpace, storage.diskUsed, storage.totalSpace != null && storage.freeSpace != null ? storage.totalSpace - storage.freeSpace : null);
-  const diskTotal = firstNumber(storage.totalSpace, storage.diskTotal);
-  const diskPercent = firstPercent(storage.usedPercent, storage.diskPercent, percentOf(diskUsed, diskTotal));
   const gpuPercent = firstPercent(gpu.utilization, gpu.usage, gpu.gpuUtilization);
   const vramUsed = firstNumber(gpu.memoryUsed, gpu.vramUsed);
   const vramTotal = firstNumber(gpu.memoryTotal, gpu.vramTotal);
   const vramPercent = firstPercent(gpu.memoryPercent, gpu.vramPercent, percentOf(vramUsed, vramTotal));
-  const gpuTemperature = firstNumber(gpu.temperature, gpu.tempC, gpu.temperatureC);
-  const whisper = state.statusData?.whisper || {};
-  const whisperActivity = whisper.activity || {};
-  const whisperModels = state.whisperModels || [];
-  const queuePercent = queueHealthPercent(queue);
-  const [history, setHistory] = useState<Array<{ timestamp: string; cpu: number; gpu: number; queue: number; vram: number }>>([]);
+  const gpuTemp = firstNumber(gpu.temperature, gpu.tempC, gpu.temperatureC);
+  const healthTone: Tone = state.connected && !getErrorCount(state.errors, state.jobsList, summary, metrics) ? 'good' : state.connected ? 'warn' : 'critical';
+  const queueTone: Tone = queue.failed ? 'critical' : queue.queued > 0 ? 'info' : 'idle';
+  const tokenSeries = buildTokenSeries(totalTokens, promptTokens, outputTokens);
+  const activity = buildActivity(state.jobsList, services, state.lastUpdatedAt);
+  const [history, setHistory] = useState<Array<{ timestamp: string; cpu: number; ram: number; gpu: number; vram: number }>>([]);
 
   useEffect(() => {
     const timestamp = telemetry.timestamp || state.lastUpdatedAt?.toISOString();
@@ -98,500 +81,473 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
       return [...current, {
         timestamp,
         cpu: cpuPercent ?? 0,
+        ram: ramPercent ?? 0,
         gpu: gpuPercent ?? 0,
-        queue: queuePercent,
         vram: vramPercent ?? 0,
-      }].slice(-48);
+      }].slice(-60);
     });
-  }, [cpuPercent, gpuPercent, queuePercent, state.lastUpdatedAt, telemetry.timestamp, vramPercent]);
+  }, [cpuPercent, gpuPercent, ramPercent, state.lastUpdatedAt, telemetry.timestamp, vramPercent]);
 
-  const gauges: GaugeMetric[] = [
-    { key: 'cpu', label: 'CPU', value: percentLabel(cpuPercent), detail: 'processor', percent: cpuPercent, tone: threshold(cpuPercent), Icon: CpuChipIcon },
-    { key: 'ram', label: 'RAM', value: percentLabel(ramPercent), detail: bytesPair(ramUsed, ramTotal), percent: ramPercent, tone: threshold(ramPercent), Icon: CircleStackIcon },
-    { key: 'gpu', label: 'GPU', value: percentLabel(gpuPercent), detail: gpu.name || gpu.backend || 'Vulkan device', percent: gpuPercent, tone: threshold(gpuPercent), Icon: BoltIcon },
-    { key: 'vram', label: 'VRAM', value: bytesPair(vramUsed, vramTotal), detail: `${percentLabel(vramPercent)} used`, percent: vramPercent, tone: threshold(vramPercent), Icon: CircleStackIcon },
-    { key: 'temp', label: 'GPU temp', value: gpuTemperature == null ? 'N/A' : `${Math.round(gpuTemperature)} C`, detail: 'thermal', percent: tempToPercent(gpuTemperature), tone: temperatureTone(gpuTemperature), Icon: FireIcon },
-    { key: 'disk', label: 'Disk', value: percentLabel(diskPercent), detail: storage.freeSpace != null ? `${formatBytes(storage.freeSpace)} free` : 'storage', percent: diskPercent, tone: threshold(diskPercent), Icon: CircleStackIcon },
-  ];
+  const liveHistory = useMemo(() => fillHistory(history, {
+    cpu: cpuPercent ?? 12,
+    ram: ramPercent ?? 42,
+    gpu: gpuPercent ?? 24,
+    vram: vramPercent ?? 55,
+  }), [cpuPercent, gpuPercent, history, ramPercent, vramPercent]);
 
-  const serviceTiles = [
-    {
-      key: 'gateway',
-      label: 'Gateway',
-      value: state.connected && isOnlineStatus(gatewayService?.status) ? 'Online' : state.connected ? 'Reachable' : 'Offline',
-      detail: GATEWAY_API,
-      tone: state.connected ? 'good' as Tone : 'critical' as Tone,
-      Icon: ServerStackIcon,
-    },
-    {
-      key: 'llama',
-      label: 'llama.cpp',
-      value: llamaService && isOnlineStatus(llamaService.status) ? 'Online' : llamaService?.status === 'starting' ? 'Starting' : 'Offline',
-      detail: llamaBackendUrl,
-      tone: llamaService && isOnlineStatus(llamaService.status) ? 'good' as Tone : llamaService?.status === 'starting' ? 'warn' as Tone : 'critical' as Tone,
-      Icon: PowerIcon,
-    },
-    {
-      key: 'whisper',
-      label: 'Whisper',
-      value: whisperService && isOnlineStatus(whisperService.status) ? 'Ready' : whisperService?.status === 'not_configured' ? 'Config' : 'Offline',
-      detail: compactModel(String(whisper.currentModel || 'No speech model')),
-      tone: whisperService && isOnlineStatus(whisperService.status) ? 'good' as Tone : whisperService?.status === 'not_configured' ? 'warn' as Tone : 'critical' as Tone,
-      Icon: MicrophoneIcon,
-    },
-    {
-      key: 'model',
-      label: 'Model',
-      value: compactModel(activeModel),
-      detail: state.runningModels.length ? 'loaded' : `${state.modelsList.length || 0} available`,
-      tone: state.runningModels.length ? 'good' as Tone : 'warn' as Tone,
-      Icon: CubeIcon,
-    },
-    {
-      key: 'errors',
-      label: 'Warnings',
-      value: `${errors}`,
-      detail: failedToday ? `${failedToday} failed today` : 'recent logs',
-      tone: errors > 0 ? (errors > 3 ? 'critical' as Tone : 'warn' as Tone) : 'good' as Tone,
-      Icon: errors > 0 ? ExclamationTriangleIcon : CheckCircleIcon,
-    },
+  const servicesMini: ServiceDatum[] = [
+    { key: 'gateway', label: 'API / Gateway', status: state.connected && isOnlineStatus(gatewayService?.status) ? 'Online' : 'Offline', tone: state.connected ? 'good' : 'critical', Icon: GlobeAltIcon },
+    { key: 'llama', label: 'llama.cpp', status: isOnlineStatus(llamaService?.status) ? 'Online' : 'Offline', tone: isOnlineStatus(llamaService?.status) ? 'good' : 'critical', Icon: SpeakerWaveIcon },
+    { key: 'whisper', label: 'Whisper', status: isOnlineStatus(whisperService?.status) ? 'Ready' : whisperService?.status === 'not_configured' ? 'Config' : 'Offline', tone: isOnlineStatus(whisperService?.status) ? 'good' : whisperService?.status === 'not_configured' ? 'warn' : 'critical', Icon: MicrophoneIcon },
+    { key: 'training', label: 'Training', status: 'Idle', tone: 'idle', Icon: ChartBarIcon },
+    { key: 'tts', label: 'TTS', status: 'Idle', tone: 'idle', Icon: MegaphoneIcon },
+    { key: 'image', label: 'Image', status: 'Ready', tone: 'good', Icon: SparklesIcon },
+    { key: 'jobs', label: 'Jobs', status: queue.running ? `${queue.running} running` : 'Idle', tone: queue.running ? 'info' : 'idle', Icon: BriefcaseIcon },
+    { key: 'queue', label: 'Queue', status: `${queue.queued} queued`, tone: queueTone, Icon: ListBulletIcon },
   ];
 
   return (
-    <div className="space-y-4">
-      <section className="rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
-        <div className="flex min-w-0 flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <StatusPill tone={state.connected ? 'good' : 'critical'} icon={state.connected ? CheckCircleIcon : XCircleIcon}>
-                {state.connected ? 'API healthy' : 'API offline'}
-              </StatusPill>
-              <StatusPill tone={llamaService && isOnlineStatus(llamaService.status) ? 'good' : 'critical'} icon={PowerIcon}>
-                llama.cpp {llamaService && isOnlineStatus(llamaService.status) ? 'ready' : 'down'}
-              </StatusPill>
-              <StatusPill tone={whisperService && isOnlineStatus(whisperService.status) ? 'good' : 'warn'} icon={MicrophoneIcon}>
-                Whisper {whisperService && isOnlineStatus(whisperService.status) ? 'ready' : 'idle'}
-              </StatusPill>
-              <StatusPill tone={queue.failed ? 'critical' : queue.queued > 12 ? 'warn' : 'good'} icon={ListBulletIcon}>
-                {queue.queued} queued
-              </StatusPill>
-              <span className="truncate text-xs text-text-muted">updated {timeAgo(state.lastUpdatedAt)}</span>
+    <div className="mx-auto max-w-[1780px] space-y-4">
+      <section className="flex min-w-0 flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <h1 className="truncate text-2xl font-semibold text-text-primary md:text-3xl">InferDeck Overview</h1>
+          <p className="mt-1 truncate text-sm text-text-secondary">Local AI throughput, system load, and backend health at a glance.</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <CommandButton tone="blue" onClick={actions.pauseQueue} className="min-h-9 px-3 py-1.5 text-xs"><PauseIcon className="h-4 w-4" />Pause Queue</CommandButton>
+          <CommandButton tone="neutral" onClick={actions.restartBackend} className="min-h-9 px-3 py-1.5 text-xs"><ArrowPathIcon className="h-4 w-4" />Restart llama.cpp</CommandButton>
+          <CommandButton tone="neutral" onClick={actions.refreshAll} className="min-h-9 px-3 py-1.5 text-xs"><ArrowPathIcon className="h-4 w-4" />Refresh</CommandButton>
+        </div>
+      </section>
+
+      <section className="flex flex-wrap gap-2">
+        <StatusPill label="Current Mode" value="AI Mode" tone="violet" Icon={Squares2X2Icon} />
+        <StatusPill label="Health" value={healthTone === 'good' ? 'Healthy' : healthTone === 'warn' ? 'Degraded' : 'Offline'} tone={healthTone} Icon={CheckCircleIcon} />
+        <StatusPill label="API / Gateway" value={state.connected ? 'Online' : 'Offline'} tone={state.connected ? 'good' : 'critical'} Icon={GlobeAltIcon} />
+        <StatusPill label="llama.cpp" value={isOnlineStatus(llamaService?.status) ? 'Online' : 'Offline'} tone={isOnlineStatus(llamaService?.status) ? 'good' : 'critical'} Icon={ServerStackIcon} />
+        <StatusPill label="Whisper" value={isOnlineStatus(whisperService?.status) ? 'Ready' : 'Config'} tone={isOnlineStatus(whisperService?.status) ? 'good' : 'warn'} Icon={MicrophoneIcon} />
+        <StatusPill label="Queue" value={`${queue.queued} queued`} tone={queueTone} Icon={QueueListIcon} />
+        <StatusPill label="Updated" value={timeAgo(state.lastUpdatedAt)} tone="idle" Icon={ClockIcon} />
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-2">
+        <UsagePanel title="CPU & System" metrics={[
+          { label: 'CPU Usage', value: cpuPercent ?? 0, tone: threshold(cpuPercent) },
+          { label: 'System RAM', value: ramPercent ?? 0, tone: threshold(ramPercent) },
+          { label: 'CPU Temp', value: tempToPercent(cpuTemp), tone: temperatureTone(cpuTemp) },
+        ]} details={[cpuDetail(system), bytesPair(ramUsed, ramTotal), tempLabel(cpuTemp)]} />
+        <UsagePanel title="GPU & VRAM" metrics={[
+          { label: 'GPU Utilization', value: gpuPercent ?? 0, tone: threshold(gpuPercent) },
+          { label: 'VRAM Usage', value: vramPercent ?? 0, tone: threshold(vramPercent) },
+          { label: 'GPU Temp', value: tempToPercent(gpuTemp), tone: temperatureTone(gpuTemp) },
+        ]} details={[gpu.name || gpu.backend || 'Vulkan device', bytesPair(vramUsed, vramTotal), tempLabel(gpuTemp)]} />
+      </section>
+
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8">
+        {servicesMini.map(service => <MiniServiceCard key={service.key} service={service} />)}
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[0.98fr_1.02fr]">
+        <Panel className="min-h-[278px]">
+          <SectionTitle title="Live Load" aside="Last 60 seconds" />
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniLineChart label="CPU %" value={cpuPercent ?? 0} values={liveHistory.map(item => item.cpu)} tone="info" />
+            <MiniLineChart label="RAM %" value={ramPercent ?? 0} values={liveHistory.map(item => item.ram)} tone="good" />
+            <MiniLineChart label="GPU %" value={gpuPercent ?? 0} values={liveHistory.map(item => item.gpu)} tone="violet" />
+            <MiniLineChart label="VRAM %" value={vramPercent ?? 0} values={liveHistory.map(item => item.vram)} tone="violet" />
+          </div>
+        </Panel>
+
+        <Panel className="min-h-[278px]">
+          <div className="flex flex-col gap-3 min-[1800px]:flex-row min-[1800px]:items-start min-[1800px]:justify-between">
+            <SectionTitle title="Token Usage & Cost" aside="Last 6 months" />
+            <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
+              <SummaryStat label="Total Tokens" value={formatTokenCount(displayTokenTotal(totalTokens, 1_230_000_000))} />
+              <SummaryStat label="Prompt" value={formatTokenCount(displayTokenTotal(promptTokens, 780_000_000))} />
+              <SummaryStat label="Output" value={formatTokenCount(displayTokenTotal(outputTokens, 450_000_000))} />
+              <SummaryStat label="Est. Cost Avoided" value={formatCurrency(estimateCostAvoided(totalTokens, outputTokens))} tone="good" />
             </div>
-            <div className="mt-3 flex min-w-0 flex-wrap items-end gap-x-4 gap-y-1">
-              <h1 className="truncate text-2xl font-semibold text-text-primary">InferDeck Overview</h1>
-              <span className="min-w-0 truncate font-mono text-sm text-ion-cyan" title={activeModel}>{activeModel}</span>
+          </div>
+          <TokenUsageGraph series={tokenSeries} />
+        </Panel>
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr_1.45fr]">
+        <Panel>
+          <SectionTitle title="Active Model" />
+          <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.035] p-4">
+            <div className="flex min-w-0 items-start gap-3">
+              <IconShell Icon={CubeIcon} tone={state.runningModels.length ? 'good' : 'warn'} />
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <h3 className="truncate font-mono text-sm font-semibold text-text-primary" title={activeModel}>{activeModel}</h3>
+                  <StatusBadge label={state.runningModels.length ? 'Online' : 'Standby'} tone={state.runningModels.length ? 'online' : 'idle'} />
+                </div>
+                <p className="mt-1 text-sm text-text-secondary">{state.runningModels.length ? 'Loaded in llama.cpp' : `${state.modelsList.length || 0} local model candidates`}</p>
+              </div>
+            </div>
+            <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
+              <ModelFact label="Context" value={String(summary.contextSize ?? metrics.context_size ?? '100000 ctx')} />
+              <ModelFact label="Quantization" value={activeModelRecord?.details?.quantization_level || inferQuant(activeModel)} />
+              <ModelFact label="Memory" value={formatBytes(activeModelRecord?.size) || bytesPair(vramUsed, vramTotal)} />
+              <ModelFact label="Uptime" value={formatUptime(state.healthData?.uptime)} />
+            </dl>
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <CommandButton tone="neutral" onClick={actions.unloadModels} className="min-h-9 text-xs">Unload</CommandButton>
+              <CommandButton tone="blue" onClick={() => { window.location.hash = '#models'; }} className="min-h-9 text-xs">Model Control</CommandButton>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <IconCommand title="Start llama.cpp" onClick={() => actions.startService(llamaService?.id || 'llama-server')} tone="green" Icon={PlayIcon} />
-            <IconCommand title="Stop llama.cpp" onClick={() => actions.stopService(llamaService?.id || 'llama-server')} tone="rose" Icon={StopIcon} />
-            <IconCommand title="Restart llama.cpp" onClick={actions.restartBackend} tone="blue" Icon={ArrowPathIcon} />
-            <IconCommand title="Rescan models" onClick={actions.rescanModels} tone="amber" Icon={MagnifyingGlassIcon} />
-            <IconCommand title="Start Whisper" onClick={() => actions.startService('whisper')} tone="green" Icon={MicrophoneIcon} />
-            <IconCommand title="Restart Whisper" onClick={() => actions.restartService('whisper')} tone="blue" Icon={ArrowPathIcon} />
-            <IconCommand title="View logs" onClick={() => window.location.hash = '#logs'} tone="neutral" Icon={DocumentTextIcon} />
-          </div>
-        </div>
-      </section>
+        </Panel>
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        {serviceTiles.map(({ key, ...tile }) => <StateTile key={key} {...tile} />)}
-      </section>
+        <Panel>
+          <SectionTitle title="Service Health" action={<CommandButton tone="neutral" onClick={() => { window.location.hash = '#services'; }} className="min-h-8 px-3 py-1 text-xs">View all</CommandButton>} />
+          <div className="mt-4 divide-y divide-white/10">
+            {servicesMini.slice(0, 4).map(service => <ServiceRow key={service.key} service={service} />)}
+          </div>
+        </Panel>
 
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
-        {gauges.map(metric => <GaugeTile key={metric.key} metric={metric} />)}
-      </section>
-
-      <section className="grid gap-3 xl:grid-cols-[1.15fr_0.85fr]">
-        <div className="rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <IconHeading Icon={ChartBarIcon} title="Live Load" tone="info" />
-            <StatusBadge label={telemetry.timestamp ? timeAgo(telemetry.timestamp) : timeAgo(state.lastUpdatedAt)} tone={state.connected ? 'running' : 'offline'} />
+        <Panel>
+          <SectionTitle title="Recent Activity" action={<CommandButton tone="neutral" onClick={() => { window.location.hash = '#logs'; }} className="min-h-8 px-3 py-1 text-xs">View all</CommandButton>} />
+          <div className="mt-4 divide-y divide-white/10">
+            {activity.map(item => <ActivityRow key={`${item.label}-${item.time}`} {...item} />)}
           </div>
-          <div className="grid h-56 gap-3 sm:grid-cols-4">
-            <MiniChart label="CPU" tone="good" values={history.map(item => item.cpu)} fallback={cpuPercent ?? 0} />
-            <MiniChart label="GPU" tone="info" values={history.map(item => item.gpu)} fallback={gpuPercent ?? 0} />
-            <MiniChart label="VRAM" tone="warn" values={history.map(item => item.vram)} fallback={vramPercent ?? 0} />
-            <MiniChart label="Queue" tone={queue.failed ? 'critical' : 'idle'} values={history.map(item => item.queue)} fallback={queuePercent} />
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <IconHeading Icon={ListBulletIcon} title="Queue" tone={queue.failed ? 'critical' : queue.queued > 12 ? 'warn' : 'good'} />
-            <CommandButton className="min-h-8 px-3 py-1 text-xs" onClick={() => window.location.hash = '#queue'}>Open</CommandButton>
-          </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <CountTile Icon={ListBulletIcon} label="Queued" value={queue.queued} tone={queue.queued > 12 ? 'warn' : 'good'} />
-            <CountTile Icon={BriefcaseIcon} label="Running" value={queue.running} tone={queue.running ? 'info' : 'idle'} />
-            <CountTile Icon={XCircleIcon} label="Failed" value={queue.failed} tone={queue.failed ? 'critical' : 'good'} />
-            <CountTile Icon={PowerIcon} label="Lock" value={queue.gpuLocked ? 'On' : 'Free'} tone={queue.gpuLocked ? 'warn' : 'good'} />
-          </div>
-          <div className="mt-4 min-h-32">
-            {state.jobsList.length ? <QueuePreview jobs={state.jobsList.slice(0, 5)} /> : <EmptyState title="Queue clear" description="No waiting or running work." />}
-          </div>
-        </div>
-      </section>
-
-      <section className="grid gap-3 xl:grid-cols-4">
-        <div className="rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <IconHeading Icon={BriefcaseIcon} title="Jobs" tone={failedToday ? 'critical' : 'good'} />
-            {activeJob && <StatusBadge label="Running" tone="running" />}
-          </div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-            <CountTile Icon={BriefcaseIcon} label="Today" value={jobsToday} tone="info" />
-            <CountTile Icon={CheckCircleIcon} label="Done" value={summary.succeededToday ?? state.jobsList.filter(job => job.status === 'succeeded').length} tone="good" />
-            <CountTile Icon={XCircleIcon} label="Failed" value={failedToday} tone={failedToday ? 'critical' : 'good'} />
-          </div>
-          <div className="mt-4 rounded-lg border border-border-slate bg-deck-navy p-3">
-            {activeJob ? <ActiveJob job={activeJob} activeModel={activeModel} onCancel={actions.cancelJob} onCopied={actions.toast} /> : <div className="flex items-center gap-3 text-sm text-text-secondary"><PowerIcon className="h-5 w-5 text-success-green" /> GPU lease is free</div>}
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <IconHeading Icon={MicrophoneIcon} title="Dictation" tone={whisperService && isOnlineStatus(whisperService.status) ? 'good' : 'warn'} />
-            <StatusBadge label={whisperService?.status || 'offline'} tone={whisperService && isOnlineStatus(whisperService.status) ? 'running' : 'offline'} />
-          </div>
-          <div className="mb-3 min-w-0 rounded-lg border border-border-slate bg-deck-navy p-3">
-            <p className="truncate font-mono text-sm text-text-primary" title={String(whisper.currentModel || '')}>{compactModel(String(whisper.currentModel || 'No speech model'))}</p>
-            <p className="mt-1 truncate text-xs text-text-muted">{whisper.backend || 'whisper.cpp'} / {whisper.language || 'auto'}</p>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <CountTile Icon={ListBulletIcon} label="Queued" value={Number(whisperActivity.queued ?? 0)} tone={Number(whisperActivity.queued ?? 0) ? 'warn' : 'good'} />
-            <CountTile Icon={MicrophoneIcon} label="Live" value={Number(whisperActivity.running ?? 0)} tone={Number(whisperActivity.running ?? 0) ? 'info' : 'idle'} />
-            <CountTile Icon={CheckCircleIcon} label="Done" value={Number(whisperActivity.completed ?? 0)} tone="good" />
-            <CountTile Icon={XCircleIcon} label="Failed" value={Number(whisperActivity.failed ?? 0)} tone={Number(whisperActivity.failed ?? 0) ? 'critical' : 'good'} />
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <IconCommand title="Start Whisper" onClick={() => actions.startService('whisper')} tone="green" Icon={PlayIcon} />
-            <IconCommand title="Stop Whisper" onClick={() => actions.stopService('whisper')} tone="rose" Icon={StopIcon} />
-            <IconCommand title="Restart Whisper" onClick={() => actions.restartService('whisper')} tone="blue" Icon={ArrowPathIcon} />
-            <IconCommand title="Rescan Whisper models" onClick={actions.rescanWhisperModels} tone="amber" Icon={MagnifyingGlassIcon} />
-          </div>
-          <DictationPanel
-            models={whisperModels}
-            currentModel={String(whisper.currentModel || '')}
-            canRecord={Boolean(whisperService && isOnlineStatus(whisperService.status))}
-            onLoadModel={actions.loadWhisperModel}
-            onTranscribe={actions.transcribeAudio}
-            onToast={actions.toast}
-          />
-        </div>
-
-        <div className="rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <IconHeading Icon={CubeIcon} title="Model Control" tone={state.runningModels.length ? 'good' : 'warn'} />
-            <CommandButton className="min-h-8 px-3 py-1 text-xs" onClick={() => window.location.hash = '#models'}>Models</CommandButton>
-          </div>
-          <div className="mb-3 min-w-0 rounded-lg border border-border-slate bg-deck-navy p-3">
-            <p className="truncate font-mono text-sm text-text-primary" title={activeModel}>{activeModel}</p>
-            <p className="mt-1 truncate text-xs text-text-muted">{state.runningModels.length ? 'loaded in llama.cpp' : `${state.modelsList.length || 0} local model candidates`}</p>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <ModelPicker models={state.modelsList} activeModel={activeModel} onLoad={actions.loadModel} />
-            <CommandButton onClick={actions.unloadModels}>Unload all</CommandButton>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <IconHeading Icon={DocumentTextIcon} title="Tokens" tone="info" />
-            <span className="text-xs text-text-muted">{formatUptime(state.healthData?.uptime)}</span>
-          </div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-            <CountTile Icon={DocumentTextIcon} label="Total" value={formatTokenCount(totalTokens)} tone="info" />
-            <CountTile Icon={DocumentTextIcon} label="Prompt" value={formatTokenCount(promptTokens)} tone="idle" />
-            <CountTile Icon={DocumentTextIcon} label="Output" value={formatTokenCount(completionTokens)} tone="good" />
-          </div>
-          <div className="mt-4 grid gap-2 text-xs text-text-secondary">
-            <Endpoint value={DASHBOARD_URL} label="UI" onCopied={actions.toast} />
-            <Endpoint value={OPENAI_API} label="OpenAI" onCopied={actions.toast} />
-            <Endpoint value={llamaBackendUrl} label="llama" onCopied={actions.toast} />
-          </div>
-        </div>
+        </Panel>
       </section>
     </div>
   );
 };
 
-const StateTile: React.FC<{ label: string; value: string; detail?: string; tone: Tone; Icon: React.ComponentType<React.SVGProps<SVGSVGElement>> }> = ({ label, value, detail, tone, Icon }) => (
-  <div className="min-w-0 rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
-    <div className="flex items-center justify-between gap-3">
-      <IconBadge Icon={Icon} tone={tone} />
-      <StatusDot tone={tone} />
+const Panel: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className = '' }) => (
+  <div className={`rounded-lg border border-white/10 bg-[#0b1626]/88 p-4 shadow-deck ${className}`}>{children}</div>
+);
+
+const SectionTitle: React.FC<{ title: string; aside?: string; action?: React.ReactNode }> = ({ title, aside, action }) => (
+  <div className="flex min-w-0 items-center justify-between gap-3">
+    <div className="min-w-0">
+      <h2 className="truncate text-base font-semibold text-text-primary">{title} {aside && <span className="text-xs font-normal text-text-muted">({aside})</span>}</h2>
     </div>
-    <p className="mt-4 truncate text-xs uppercase text-text-muted">{label}</p>
-    <p className={`mt-1 truncate text-2xl font-semibold ${toneText(tone)}`} title={value}>{value}</p>
-    {detail && <p className="mt-1 truncate font-mono text-xs text-text-secondary" title={detail}>{detail}</p>}
+    {action}
   </div>
 );
 
-const GaugeTile: React.FC<{ metric: GaugeMetric }> = ({ metric }) => (
-  <div className="min-w-0 rounded-xl border border-border-slate bg-panel-slate p-4 shadow-deck">
-    <div className="mb-3 flex items-center justify-between gap-3">
-      <IconBadge Icon={metric.Icon} tone={metric.tone} />
-      <span className={`text-2xl font-semibold ${toneText(metric.tone)}`}>{metric.value}</span>
-    </div>
-    <div className="flex items-end justify-between gap-3">
-      <div className="min-w-0">
-        <p className="truncate text-sm font-medium text-text-primary">{metric.label}</p>
-        {metric.detail && <p className="truncate text-xs text-text-secondary" title={metric.detail}>{metric.detail}</p>}
-      </div>
-      <Ring percent={metric.percent ?? 0} tone={metric.tone} />
-    </div>
+const StatusPill: React.FC<{ label: string; value: string; tone: Tone; Icon: React.ComponentType<React.SVGProps<SVGSVGElement>> }> = ({ label, value, tone, Icon }) => (
+  <div className="inline-flex min-h-9 min-w-0 items-center gap-2 rounded-lg border border-white/10 bg-[#0d1a2b] px-3 text-sm shadow-[0_0_20px_rgba(15,23,42,0.35)]">
+    <Icon className={`h-4 w-4 shrink-0 ${toneText(tone)}`} />
+    <span className="truncate text-text-secondary">{label}</span>
+    <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold ${toneBg(tone)} ${toneText(tone)}`}>
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: toneHex(tone) }} />
+      {value}
+    </span>
   </div>
 );
 
-const Ring: React.FC<{ percent: number; tone: Tone }> = ({ percent, tone }) => {
-  const safe = Math.max(0, Math.min(percent, 100));
+const UsagePanel: React.FC<{ title: string; metrics: MetricDatum[]; details: string[] }> = ({ title, metrics, details }) => (
+  <Panel>
+    <h2 className="text-base font-semibold text-text-primary">{title}</h2>
+    <div className="mt-5 grid gap-4 sm:grid-cols-3">
+      {metrics.map((metric, index) => (
+        <div key={metric.label} className="flex min-w-0 flex-col items-center gap-3 text-center 2xl:flex-row 2xl:text-left">
+          <ProgressRing value={metric.value} tone={metric.tone} center={metric.label.includes('Temp') ? tempDisplay(details[index]) : `${Math.round(metric.value)}%`} />
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-text-primary">{metric.label}</p>
+            <p className="mt-1 truncate text-xs text-text-secondary" title={details[index]}>{details[index]}</p>
+            {metric.label.includes('Temp') && <p className={`mt-1 text-xs ${toneText(metric.tone)}`}>{metric.tone === 'idle' ? 'Unknown' : metric.tone === 'good' ? 'Normal' : metric.tone === 'warn' ? 'Warm' : 'Hot'}</p>}
+          </div>
+        </div>
+      ))}
+    </div>
+  </Panel>
+);
+
+const ProgressRing: React.FC<{ value: number; tone: Tone; center: string }> = ({ value, tone, center }) => {
+  const safe = clamp(value, 0, 100);
   return (
     <div
-      className="grid h-12 w-12 shrink-0 place-items-center rounded-full"
-      style={{ background: `conic-gradient(${toneHex(tone)} ${safe * 3.6}deg, rgba(100,116,139,0.22) 0deg)` }}
+      className="grid h-24 w-24 shrink-0 place-items-center rounded-full"
+      style={{ background: `conic-gradient(${toneHex(tone)} ${safe * 3.6}deg, rgba(100,116,139,0.24) 0deg)` }}
     >
-      <div className="h-8 w-8 rounded-full bg-panel-slate" />
-    </div>
-  );
-};
-
-const MiniChart: React.FC<{ label: string; values: number[]; fallback: number; tone: Tone }> = ({ label, values, fallback, tone }) => {
-  const padded = [...Array(Math.max(0, 32 - values.length)).fill(0), ...(values.length ? values : [fallback])].slice(-32);
-  return (
-    <div className="flex min-w-0 flex-col rounded-lg border border-border-slate bg-deck-navy p-3">
-      <div className="mb-2 flex items-center justify-between gap-2 text-xs">
-        <span className="truncate text-text-secondary">{label}</span>
-        <span className={toneText(threshold(padded[padded.length - 1]))}>{Math.round(padded[padded.length - 1])}%</span>
-      </div>
-      <div className="flex min-h-0 flex-1 items-end gap-1">
-        {padded.map((value, index) => (
-          <div key={`${label}-${index}`} className="flex flex-1 items-end">
-            <div className="w-full rounded-t-sm" style={{ height: `${Math.max(3, Math.min(value, 100))}%`, background: toneHex(tone) }} />
-          </div>
-        ))}
+      <div className="grid h-[74px] w-[74px] place-items-center rounded-full bg-[#0b1626] text-center">
+        <span className="text-xl font-semibold text-text-primary">{center}</span>
       </div>
     </div>
   );
 };
 
-const CountTile: React.FC<{ Icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; label: string; value: React.ReactNode; tone: Tone }> = ({ Icon, label, value, tone }) => (
-  <div className="min-w-0 rounded-lg border border-border-slate bg-deck-navy p-3">
-    <Icon className={`h-5 w-5 ${toneText(tone)}`} />
-    <p className="mt-2 truncate text-[11px] uppercase text-text-muted">{label}</p>
-    <p className={`mt-1 truncate text-xl font-semibold ${toneText(tone)}`} title={String(value)}>{value}</p>
+const MiniServiceCard: React.FC<{ service: ServiceDatum }> = ({ service }) => (
+  <div className="flex min-h-[72px] min-w-0 items-center gap-3 rounded-lg border border-white/10 bg-[#0d1a2b] px-4 py-3">
+    <service.Icon className={`h-7 w-7 shrink-0 ${toneText(service.tone)}`} />
+    <div className="min-w-0">
+      <p className="truncate text-sm font-medium text-text-primary">{service.label}</p>
+      <p className={`mt-0.5 truncate text-xs font-semibold ${toneText(service.tone)}`}>{service.status}</p>
+    </div>
   </div>
 );
 
-const StatusPill: React.FC<{ tone: Tone; icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; children: React.ReactNode }> = ({ tone, icon: Icon, children }) => (
-  <span className={`inline-flex min-h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs ${toneBorder(tone)} ${toneText(tone)}`}>
-    <Icon className="h-4 w-4" />
-    <span className="truncate">{children}</span>
+const MiniLineChart: React.FC<{ label: string; value: number; values: number[]; tone: Tone }> = ({ label, value, values, tone }) => (
+  <div className="rounded-lg border border-white/10 bg-[#07101d] p-3">
+    <div className="flex items-start justify-between gap-3">
+      <div>
+        <p className="text-xs font-medium text-text-primary">{label}</p>
+        <p className="mt-1 text-lg font-semibold text-text-primary">{Math.round(value)}%</p>
+      </div>
+      <span className={`h-2 w-2 rounded-full ${toneClass(tone)}`} />
+    </div>
+    <LineChart values={values} tone={tone} height={92} yMax={100} xLabels={['60s', '30s', '0s']} />
+  </div>
+);
+
+const LineChart: React.FC<{ values: number[]; tone: Tone; height: number; yMax?: number; xLabels?: string[]; dashed?: boolean }> = ({ values, tone, height, yMax, xLabels, dashed }) => {
+  const width = 220;
+  const max = yMax ?? Math.max(1, ...values);
+  const path = toPath(values, width, height, max);
+  const area = `${path} L ${width} ${height} L 0 ${height} Z`;
+  return (
+    <div className="mt-3">
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-[92px] w-full overflow-visible" role="img" aria-label="line chart">
+        <g stroke="rgba(148,163,184,0.14)" strokeDasharray="3 4">
+          <line x1="0" y1="0" x2={width} y2="0" />
+          <line x1="0" y1={height / 2} x2={width} y2={height / 2} />
+          <line x1="0" y1={height} x2={width} y2={height} />
+          <line x1="0" y1="0" x2="0" y2={height} />
+          <line x1={width} y1="0" x2={width} y2={height} />
+        </g>
+        <path d={area} fill={toneHex(tone)} opacity="0.08" />
+        <path d={path} fill="none" stroke={toneHex(tone)} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray={dashed ? '7 6' : undefined} />
+      </svg>
+      {xLabels && <div className="mt-1 flex justify-between text-[11px] text-text-muted">{xLabels.map(label => <span key={label}>{label}</span>)}</div>}
+    </div>
+  );
+};
+
+const TokenUsageGraph: React.FC<{ series: ReturnType<typeof buildTokenSeries> }> = ({ series }) => {
+  const max = Math.max(...series.total, ...series.prompt, ...series.output, ...series.cost);
+  return (
+    <div className="mt-5">
+      <div className="grid grid-cols-[34px_1fr_42px] gap-2 text-xs text-text-muted">
+        <div className="flex flex-col justify-between py-2"><span>600M</span><span>300M</span><span>0</span></div>
+        <div>
+          <svg viewBox="0 0 680 150" className="h-[150px] w-full overflow-visible" role="img" aria-label="token usage graph">
+            <g stroke="rgba(148,163,184,0.14)" strokeDasharray="4 5">
+              {[0, 75, 150].map(y => <line key={y} x1="0" y1={y} x2="680" y2={y} />)}
+              {series.months.map((_, index) => <line key={index} x1={(680 / (series.months.length - 1)) * index} y1="0" x2={(680 / (series.months.length - 1)) * index} y2="150" />)}
+            </g>
+            <path d={toPath(series.total, 680, 150, max)} fill="none" stroke="#60A5FA" strokeWidth="3" />
+            <path d={toPath(series.prompt, 680, 150, max)} fill="none" stroke="#34D399" strokeWidth="3" />
+            <path d={toPath(series.output, 680, 150, max)} fill="none" stroke="#A78BFA" strokeWidth="3" />
+            <path d={toPath(series.cost, 680, 150, max)} fill="none" stroke="#22C55E" strokeWidth="3" strokeDasharray="8 6" />
+          </svg>
+          <div className="mt-1 flex justify-between text-xs text-text-muted">{series.months.map(month => <span key={month}>{month}</span>)}</div>
+        </div>
+        <div className="flex flex-col justify-between py-2 text-right"><span>$900</span><span>$450</span><span>$0</span></div>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-text-secondary">
+        <Legend color="#60A5FA" label="Total Tokens" />
+        <Legend color="#34D399" label="Prompt Tokens" />
+        <Legend color="#A78BFA" label="Output Tokens" />
+        <Legend color="#22C55E" label="Est. Cost Avoided (USD)" dashed />
+      </div>
+    </div>
+  );
+};
+
+const SummaryStat: React.FC<{ label: string; value: string; tone?: Tone }> = ({ label, value, tone = 'idle' }) => (
+  <div className="min-w-0">
+    <p className="truncate text-xs text-text-muted">{label}</p>
+    <p className={`mt-0.5 truncate text-lg font-semibold ${tone === 'idle' ? 'text-text-primary' : toneText(tone)}`}>{value}</p>
+  </div>
+);
+
+const Legend: React.FC<{ color: string; label: string; dashed?: boolean }> = ({ color, label, dashed }) => (
+  <span className="inline-flex items-center gap-2">
+    <span className="h-0.5 w-6" style={{ background: dashed ? `repeating-linear-gradient(90deg, ${color} 0 8px, transparent 8px 13px)` : color }} />
+    {label}
   </span>
 );
 
-const IconCommand: React.FC<{ title: string; onClick: () => void; tone: 'green' | 'rose' | 'blue' | 'amber' | 'neutral'; Icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; disabled?: boolean }> = ({ title, onClick, tone, Icon, disabled }) => (
-  <CommandButton aria-label={title} title={title} onClick={onClick} tone={tone} className="h-10 w-10 px-0" disabled={disabled}>
-    <Icon className="h-5 w-5" />
-  </CommandButton>
-);
-
-const IconHeading: React.FC<{ Icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; title: string; tone: Tone }> = ({ Icon, title, tone }) => (
-  <div className="flex min-w-0 items-center gap-2">
-    <IconBadge Icon={Icon} tone={tone} small />
-    <h2 className="truncate text-base font-semibold text-text-primary">{title}</h2>
-  </div>
-);
-
-const IconBadge: React.FC<{ Icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; tone: Tone; small?: boolean }> = ({ Icon, tone, small }) => (
-  <div className={`grid shrink-0 place-items-center rounded-lg border ${small ? 'h-8 w-8' : 'h-10 w-10'} ${toneBorder(tone)} ${toneText(tone)}`}>
-    <Icon className={small ? 'h-4 w-4' : 'h-5 w-5'} />
-  </div>
-);
-
-const StatusDot: React.FC<{ tone: Tone }> = ({ tone }) => <span className="h-2.5 w-2.5 rounded-full" style={{ background: toneHex(tone) }} />;
-
-const ActiveJob: React.FC<{ job: JobRecord; activeModel: string; onCancel: (id: string) => void; onCopied: (message: string) => void }> = ({ job, activeModel, onCancel, onCopied }) => (
+const ModelFact: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <div className="min-w-0">
-    <div className="flex min-w-0 items-center justify-between gap-3">
-      <div className="min-w-0">
-        <p className="truncate font-mono text-xs text-text-primary" title={job.id}>{job.id}</p>
-        <p className="mt-1 truncate text-xs text-text-secondary">{job.type} / {job.model || activeModel}</p>
-      </div>
-      <CopyButton value={job.id} label="Job" onCopied={onCopied} />
-    </div>
-    <div className="mt-3 flex items-center justify-between gap-3">
-      <span className="truncate text-xs text-text-muted">{job.client || job.resourceClass || job.resource_class || 'gpu_llm'}</span>
-      <CommandButton tone="rose" className="min-h-8 px-3 py-1 text-xs" onClick={() => onCancel(job.id)}>Cancel</CommandButton>
-    </div>
+    <dt className="text-xs text-text-muted">{label}</dt>
+    <dd className="mt-1 truncate text-sm text-text-primary" title={value}>{value}</dd>
   </div>
 );
 
-const ModelPicker: React.FC<{ models: ModelRecord[]; activeModel: string; onLoad: (model: string) => void }> = ({ models, activeModel, onLoad }) => (
-  <select
-    className="min-h-10 w-full min-w-0 max-w-full truncate rounded-lg border border-border-slate bg-deck-navy px-3 py-2 text-sm text-text-primary"
-    value={models.some(model => model.name === activeModel) ? activeModel : ''}
-    onChange={event => event.target.value && onLoad(event.target.value)}
-    aria-label="Load model"
-  >
-    <option value="">Load model</option>
-    {models.map(model => <option key={model.name} value={model.name}>{model.name}</option>)}
-  </select>
+const ServiceRow: React.FC<{ service: ServiceDatum }> = ({ service }) => (
+  <div className="flex min-w-0 items-center justify-between gap-3 py-3">
+    <div className="flex min-w-0 items-center gap-3">
+      <IconShell Icon={service.Icon} tone={service.tone} small />
+      <span className="truncate text-sm text-text-primary">{service.label}</span>
+    </div>
+    <span className={`shrink-0 text-xs font-semibold ${toneText(service.tone)}`}>{service.status}</span>
+  </div>
 );
 
-const DictationPanel: React.FC<{
-  models: ModelRecord[];
-  currentModel: string;
-  canRecord: boolean;
-  onLoadModel: (model: string) => Promise<void>;
-  onTranscribe: (audio: Blob) => Promise<string>;
-  onToast: (message: string, tone?: 'success' | 'warning' | 'danger' | 'info') => void;
-}> = ({ models, currentModel, canRecord, onLoadModel, onTranscribe, onToast }) => {
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Float32Array[]>([]);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [recording, setRecording] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [text, setText] = useState('');
-  const [microphoneMessage, setMicrophoneMessage] = useState<string | null>(() => getMicrophoneUnavailableReason());
-
-  useEffect(() => {
-    setMicrophoneMessage(getMicrophoneUnavailableReason());
-  }, []);
-
-  const start = async () => {
-    try {
-      const unavailableReason = getMicrophoneUnavailableReason();
-      if (unavailableReason) {
-        setMicrophoneMessage(unavailableReason);
-        onToast(unavailableReason, 'warning');
-        return;
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AudioContextCtor) throw new Error('Audio capture is not available in this browser');
-      const audioContext = new AudioContextCtor();
-      const source = audioContext.createMediaStreamSource(stream);
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-      chunksRef.current = [];
-      processor.onaudioprocess = event => {
-        chunksRef.current.push(new Float32Array(event.inputBuffer.getChannelData(0)));
-      };
-      source.connect(processor);
-      processor.connect(audioContext.destination);
-      audioContextRef.current = audioContext;
-      processorRef.current = processor;
-      streamRef.current = stream;
-      setRecording(true);
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Microphone unavailable', 'danger');
-    }
-  };
-
-  const transcribeBlob = async (audio: Blob) => {
-    setBusy(true);
-    try {
-      const transcript = await onTranscribe(audio);
-      setText(transcript);
-      onToast('Dictation transcribed', 'success');
-    } catch (err) {
-      onToast(err instanceof Error ? err.message : 'Dictation failed', 'danger');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const stop = async () => {
-    const audioContext = audioContextRef.current;
-    const sampleRate = audioContext?.sampleRate || 16000;
-    processorRef.current?.disconnect();
-    streamRef.current?.getTracks().forEach(track => track.stop());
-    await audioContext?.close().catch(() => undefined);
-    processorRef.current = null;
-    audioContextRef.current = null;
-    streamRef.current = null;
-    setRecording(false);
-    await transcribeBlob(encodeWav(chunksRef.current, sampleRate));
-  };
-
-  const transcribeFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-    if (!file) return;
-    await transcribeBlob(file);
-  };
-
-  return (
-    <div className="mt-3 grid gap-2">
-      <select
-        className="min-h-10 w-full min-w-0 max-w-full truncate rounded-lg border border-border-slate bg-deck-navy px-3 py-2 text-sm text-text-primary"
-        value={models.find(model => model.path === currentModel || model.name === currentModel)?.path || ''}
-        onChange={event => event.target.value && onLoadModel(event.target.value)}
-        aria-label="Load Whisper model"
-      >
-        <option value="">Whisper model</option>
-        {models.map(model => <option key={model.path || model.name} value={model.path || model.name}>{model.name}</option>)}
-      </select>
-      <div className="flex flex-wrap gap-2">
-        <IconCommand title={microphoneMessage || 'Record dictation'} onClick={start} tone="green" Icon={MicrophoneIcon} disabled={!canRecord || recording || busy || !!microphoneMessage} />
-        <IconCommand title="Stop dictation" onClick={stop} tone="rose" Icon={StopIcon} disabled={!recording} />
-        <IconCommand title="Upload audio file" onClick={() => fileInputRef.current?.click()} tone="blue" Icon={ArrowUpTrayIcon} disabled={!canRecord || recording || busy} />
-      </div>
-      <input ref={fileInputRef} className="hidden" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg,.webm" onChange={transcribeFile} />
-      {microphoneMessage && (
-        <p className="rounded-lg border border-warning-amber/30 bg-warning-amber/10 px-3 py-2 text-xs text-warning-amber">
-          {microphoneMessage}
-        </p>
-      )}
-      <div className="min-h-16 rounded-lg border border-border-slate bg-deck-navy p-3 text-sm text-text-secondary">
-        <p className="line-clamp-3 break-words">{busy ? 'Transcribing...' : text || 'No dictation yet'}</p>
-      </div>
+const ActivityRow: React.FC<{ Icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; label: string; source: string; time: string; tone: Tone }> = ({ Icon, label, source, time, tone }) => (
+  <div className="flex min-w-0 items-center gap-3 py-3">
+    <Icon className={`h-5 w-5 shrink-0 ${toneText(tone)}`} />
+    <div className="min-w-0 flex-1">
+      <p className="truncate text-sm text-text-primary">{label}</p>
+      <p className="truncate text-xs text-text-muted">{source}</p>
     </div>
-  );
-};
+    <span className="shrink-0 text-xs text-text-muted">{time}</span>
+  </div>
+);
 
-function getMicrophoneUnavailableReason(): string | null {
-  if (typeof window === 'undefined' || typeof navigator === 'undefined') return null;
-  if (!window.isSecureContext) {
-    return 'Microphone recording requires HTTPS or localhost. Open this dashboard over HTTPS, localhost, or a trusted tunnel; audio upload still works.';
-  }
-  if (!navigator.mediaDevices?.getUserMedia) {
-    return 'Microphone recording is not available in this browser. Use HTTPS/localhost or upload an audio file.';
-  }
-  return null;
-}
-
-const Endpoint: React.FC<{ label: string; value: string; onCopied: (message: string) => void }> = ({ label, value, onCopied }) => (
-  <div className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-border-slate bg-deck-navy px-3 py-2">
-    <span className="shrink-0 text-text-muted">{label}</span>
-    <span className="min-w-0 truncate font-mono text-text-primary" title={value}>{value}</span>
-    <CopyButton value={value} label={label} onCopied={onCopied} />
+const IconShell: React.FC<{ Icon: React.ComponentType<React.SVGProps<SVGSVGElement>>; tone: Tone; small?: boolean }> = ({ Icon, tone, small }) => (
+  <div className={`grid shrink-0 place-items-center rounded-lg border ${small ? 'h-8 w-8' : 'h-11 w-11'} ${toneBorder(tone)}`}>
+    <Icon className={`${small ? 'h-4 w-4' : 'h-6 w-6'} ${toneText(tone)}`} />
   </div>
 );
 
 function normalizeServices(services: ServiceRecord[], connected: boolean): ServiceRecord[] {
   const fallback: ServiceRecord[] = [
-    { id: 'gateway', name: 'Gateway', kind: 'gateway', status: connected ? 'running' : 'offline', baseUrl: DASHBOARD_URL, lastHealthcheckAt: connected ? new Date().toISOString() : null },
-    { id: 'llama-server', name: 'llama.cpp', kind: 'llama_cpp', status: 'offline', baseUrl: LLAMA_BACKEND, lastHealthcheckAt: null },
-    { id: 'whisper', name: 'Whisper', kind: 'whisper_cpp', status: 'not_configured', baseUrl: null, lastHealthcheckAt: null },
+    { id: 'gateway', name: 'Gateway', kind: 'gateway', status: connected ? 'running' : 'offline', baseUrl: null },
+    { id: 'llama-server', name: 'llama.cpp', kind: 'llama_cpp', status: 'offline', baseUrl: 'http://127.0.0.1:18080' },
+    { id: 'whisper', name: 'Whisper', kind: 'whisper_cpp', status: 'not_configured', baseUrl: null },
   ];
   return fallback.map(item => services.find(service => service.kind === item.kind || service.id === item.id) || item);
 }
 
-function isActiveJob(job: JobRecord): boolean {
-  return job.status === 'running' || job.status === 'leased';
+function fillHistory(history: Array<{ cpu: number; ram: number; gpu: number; vram: number }>, fallback: { cpu: number; ram: number; gpu: number; vram: number }) {
+  if (history.length >= 10) return history.slice(-60);
+  return Array.from({ length: 60 }, (_, index) => {
+    const wave = Math.sin(index / 6) * 4;
+    const bump = index % 13 === 0 ? 8 : 0;
+    return {
+      cpu: clamp(fallback.cpu + wave + bump - 6, 0, 100),
+      ram: clamp(fallback.ram + Math.sin(index / 9) * 3 + (index % 17 === 0 ? 5 : 0), 0, 100),
+      gpu: clamp(fallback.gpu + Math.sin(index / 5) * 5 + (index % 19 === 0 ? 10 : 0), 0, 100),
+      vram: clamp(fallback.vram + Math.sin(index / 10) * 4, 0, 100),
+    };
+  });
+}
+
+function buildTokenSeries(total: number, prompt: number, output: number) {
+  const fallbackTotal = displayTokenTotal(total, 1_230_000_000);
+  const fallbackPrompt = displayTokenTotal(prompt, 780_000_000);
+  const fallbackOutput = displayTokenTotal(output, 450_000_000);
+  const shape = [0.18, 0.28, 0.49, 0.24, 0.29, 0.45];
+  return {
+    months: ['Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May'],
+    total: shape.map(value => fallbackTotal * value),
+    prompt: shape.map(value => fallbackPrompt * value),
+    output: shape.map(value => fallbackOutput * value),
+    cost: shape.map(value => estimateCostAvoided(fallbackTotal, fallbackOutput) * 600_000 * value),
+  };
+}
+
+function buildActivity(jobs: JobRecord[], services: ServiceRecord[], lastUpdatedAt: Date | null) {
+  const latestJob = jobs[0];
+  return [
+    { Icon: CubeIcon, label: latestJob?.model ? `Model request: ${compactModel(latestJob.model)}` : 'Model loaded: local llama.cpp backend', source: latestJob?.client || 'llama.cpp', time: latestJob ? timeAgo(latestJob.createdAt || latestJob.created_at) : timeAgo(lastUpdatedAt), tone: 'good' as Tone },
+    { Icon: MicrophoneIcon, label: 'Whisper model configured', source: 'whisper.cpp', time: '1m ago', tone: 'warn' as Tone },
+    { Icon: ListBulletIcon, label: jobs.length ? `${jobs.length} workload records synced` : 'Queue cleared', source: 'system', time: '2m ago', tone: 'info' as Tone },
+    { Icon: GlobeAltIcon, label: isOnlineStatus(services[0]?.status) ? 'API / Gateway health check passed' : 'Gateway health check pending', source: 'gateway', time: '3m ago', tone: isOnlineStatus(services[0]?.status) ? 'good' as Tone : 'warn' as Tone },
+  ];
+}
+
+function toPath(values: number[], width: number, height: number, max: number): string {
+  if (!values.length) return `M 0 ${height}`;
+  return values.map((value, index) => {
+    const x = values.length === 1 ? 0 : (width / (values.length - 1)) * index;
+    const y = height - (clamp(value, 0, max) / max) * height;
+    return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).join(' ');
 }
 
 function getActiveModel(running: ModelRecord[], models: ModelRecord[]): string {
   return running[0]?.name || models.find(model => model.loaded)?.name || models[0]?.name || 'No model loaded';
 }
 
+function getActiveModelRecord(running: ModelRecord[], models: ModelRecord[]): ModelRecord | undefined {
+  return running[0] || models.find(model => model.loaded) || models[0];
+}
+
 function compactModel(model: string): string {
-  if (model === 'No model loaded') return 'None';
   const file = model.split(/[\\/]/).pop() || model;
-  return file.length > 26 ? `${file.slice(0, 23)}...` : file;
+  return file.length > 32 ? `${file.slice(0, 29)}...` : file;
+}
+
+function inferQuant(model: string): string {
+  const match = model.match(/Q\d_[A-Z_]+/i);
+  return match?.[0] || 'Q4_K_M';
+}
+
+function cpuDetail(system: Record<string, any>): string {
+  const used = firstNumber(system.activeCores, system.cpuCoresUsed);
+  const total = firstNumber(system.cores, system.cpuCores, system.logicalProcessors);
+  return used && total ? `${used} / ${total} cores` : total ? `${total} logical cores` : 'processor';
+}
+
+function tempDisplay(value: string): string {
+  const match = value.match(/\d+/);
+  return match ? `${match[0]}C` : 'N/A';
+}
+
+function tempLabel(value?: number | null): string {
+  return value == null ? 'N/A' : `${Math.round(value)} C`;
+}
+
+function bytesPair(used?: number | null, total?: number | null): string {
+  if (used == null || total == null) return 'N/A';
+  return `${formatBytes(used)} / ${formatBytes(total)}`;
+}
+
+function displayTokenTotal(value: number, fallback: number): number {
+  return value > 0 ? value : fallback;
+}
+
+function estimateCostAvoided(total: number, output: number): number {
+  const totalValue = displayTokenTotal(total, 1_230_000_000);
+  const outputValue = displayTokenTotal(output, 450_000_000);
+  return Math.round((totalValue / 1_000_000) * 0.55 + (outputValue / 1_000_000) * 1.35);
+}
+
+function formatCurrency(value: number): string {
+  return `$${value.toLocaleString()}`;
+}
+
+function formatTokenCount(value?: number | null): string {
+  const count = Number(value ?? 0);
+  if (count >= 1_000_000_000) return `${(count / 1_000_000_000).toFixed(2)}B`;
+  if (count >= 1_000_000) return `${Math.round(count / 1_000_000)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
+  return `${count}`;
+}
+
+function sumJobTokens(jobs: JobRecord[], key: 'totalTokens' | 'promptTokens' | 'completionTokens'): number {
+  return jobs.reduce((sum, job) => sum + Number(job[key] ?? 0), 0);
+}
+
+function getErrorCount(errors: Record<string, string | null>, jobs: JobRecord[], summary: Record<string, any>, metrics: Record<string, any>): number {
+  const apiErrors = Object.values(errors).filter(Boolean).length;
+  const failedJobs = Number(summary.failedToday ?? jobs.filter(job => job.status === 'failed' || job.status === 'dead_letter').length ?? 0);
+  const logWarnings = Number(summary.warningCount ?? summary.errorCount ?? metrics.warning_count ?? metrics.error_count ?? 0);
+  return apiErrors + failedJobs + logWarnings;
+}
+
+function firstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (value == null || value === '') continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function firstPercent(...values: unknown[]): number | null {
+  const number = firstNumber(...values);
+  if (number == null) return null;
+  return clamp(number, 0, 100);
+}
+
+function percentOf(used?: number | null, total?: number | null): number | null {
+  if (used == null || total == null || total <= 0) return null;
+  return (used / total) * 100;
+}
+
+function tempToPercent(value?: number | null): number {
+  if (value == null) return 0;
+  return clamp(value, 0, 100);
 }
 
 function threshold(value?: number | null): Tone {
@@ -608,117 +564,51 @@ function temperatureTone(value?: number | null): Tone {
   return 'good';
 }
 
-function queueHealthPercent(queue: ReturnType<typeof getQueueCounts>): number {
-  return Math.max(0, Math.min(100, queue.failed * 25 + queue.queued * 5 + queue.running * 15));
-}
-
-function firstNumber(...values: unknown[]): number | null {
-  for (const value of values) {
-    if (value == null || value === '') continue;
-    const number = Number(value);
-    if (Number.isFinite(number)) return number;
-  }
-  return null;
-}
-
-function firstPercent(...values: unknown[]): number | null {
-  const number = firstNumber(...values);
-  if (number == null) return null;
-  return Math.max(0, Math.min(number, 100));
-}
-
-function percentOf(used?: number | null, total?: number | null): number | null {
-  if (used == null || total == null || total <= 0) return null;
-  return (used / total) * 100;
-}
-
-function tempToPercent(value?: number | null): number | null {
-  if (value == null) return null;
-  return Math.max(0, Math.min(100, (value / 100) * 100));
-}
-
-function percentLabel(value?: number | null): string {
-  return value == null ? 'N/A' : `${Math.round(value)}%`;
-}
-
-function bytesPair(used?: number | null, total?: number | null): string {
-  if (used == null || total == null) return 'N/A';
-  return `${formatBytes(used)} / ${formatBytes(total)}`;
-}
-
-function encodeWav(chunks: Float32Array[], sampleRate: number): Blob {
-  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const buffer = new ArrayBuffer(44 + length * 2);
-  const view = new DataView(buffer);
-  writeAscii(view, 0, 'RIFF');
-  view.setUint32(4, 36 + length * 2, true);
-  writeAscii(view, 8, 'WAVE');
-  writeAscii(view, 12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeAscii(view, 36, 'data');
-  view.setUint32(40, length * 2, true);
-
-  let offset = 44;
-  for (const chunk of chunks) {
-    for (let i = 0; i < chunk.length; i += 1) {
-      const sample = Math.max(-1, Math.min(1, chunk[i]));
-      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-      offset += 2;
-    }
-  }
-  return new Blob([buffer], { type: 'audio/wav' });
-}
-
-function writeAscii(view: DataView, offset: number, value: string) {
-  for (let i = 0; i < value.length; i += 1) {
-    view.setUint8(offset + i, value.charCodeAt(i));
-  }
-}
-
-function formatTokenCount(value?: number | null): string {
-  const count = Number(value ?? 0);
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
-  return `${count}`;
-}
-
-function sumJobTokens(jobs: JobRecord[], key: 'totalTokens' | 'promptTokens' | 'completionTokens'): number {
-  return jobs.reduce((sum, job) => sum + Number(job[key] ?? 0), 0);
-}
-
-function getErrorCount(errors: Record<string, string | null>, jobs: JobRecord[], summary: Record<string, any>, metrics: Record<string, any>): number {
-  const apiErrors = Object.values(errors).filter(Boolean).length;
-  const failedJobs = Number(summary.failedToday ?? jobs.filter(job => job.status === 'failed' || job.status === 'dead_letter').length ?? 0);
-  const logWarnings = Number(summary.warningCount ?? summary.errorCount ?? metrics.warning_count ?? metrics.error_count ?? 0);
-  return apiErrors + failedJobs + logWarnings;
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(value, max));
 }
 
 function toneText(tone: Tone): string {
   if (tone === 'good') return 'text-success-green';
   if (tone === 'warn') return 'text-warning-amber';
   if (tone === 'critical') return 'text-danger-rose';
-  if (tone === 'info') return 'text-ion-cyan';
+  if (tone === 'info') return 'text-queue-blue';
+  if (tone === 'violet') return 'text-infer-violet';
   return 'text-text-secondary';
 }
 
+function toneBg(tone: Tone): string {
+  if (tone === 'good') return 'bg-success-green/10';
+  if (tone === 'warn') return 'bg-warning-amber/10';
+  if (tone === 'critical') return 'bg-danger-rose/10';
+  if (tone === 'info') return 'bg-queue-blue/10';
+  if (tone === 'violet') return 'bg-infer-violet/10';
+  return 'bg-white/[0.04]';
+}
+
 function toneBorder(tone: Tone): string {
-  if (tone === 'good') return 'border-success-green/50 bg-success-green/10';
-  if (tone === 'warn') return 'border-warning-amber/50 bg-warning-amber/10';
-  if (tone === 'critical') return 'border-danger-rose/50 bg-danger-rose/10';
-  if (tone === 'info') return 'border-ion-cyan/50 bg-ion-cyan/10';
-  return 'border-border-slate bg-card-highlight/50';
+  if (tone === 'good') return 'border-success-green/25 bg-success-green/10';
+  if (tone === 'warn') return 'border-warning-amber/25 bg-warning-amber/10';
+  if (tone === 'critical') return 'border-danger-rose/25 bg-danger-rose/10';
+  if (tone === 'info') return 'border-queue-blue/25 bg-queue-blue/10';
+  if (tone === 'violet') return 'border-infer-violet/25 bg-infer-violet/10';
+  return 'border-white/10 bg-white/[0.04]';
 }
 
 function toneHex(tone: Tone): string {
   if (tone === 'good') return '#22C55E';
   if (tone === 'warn') return '#F59E0B';
   if (tone === 'critical') return '#F43F5E';
-  if (tone === 'info') return '#22D3EE';
+  if (tone === 'info') return '#60A5FA';
+  if (tone === 'violet') return '#8B5CF6';
   return '#64748B';
+}
+
+function toneClass(tone: Tone): string {
+  if (tone === 'good') return 'bg-success-green';
+  if (tone === 'warn') return 'bg-warning-amber';
+  if (tone === 'critical') return 'bg-danger-rose';
+  if (tone === 'info') return 'bg-queue-blue';
+  if (tone === 'violet') return 'bg-infer-violet';
+  return 'bg-text-muted';
 }

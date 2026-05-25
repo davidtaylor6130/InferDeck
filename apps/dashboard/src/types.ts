@@ -1,4 +1,4 @@
-export type PageId = 'overview' | 'queue' | 'jobs' | 'models' | 'services' | 'hardware' | 'logs' | 'settings';
+export type PageId = 'overview' | 'workloads' | 'models' | 'services' | 'hardware' | 'logs' | 'settings';
 
 export type ServiceStatus = 'unknown' | 'not_configured' | 'starting' | 'ready' | 'running' | 'healthy' | 'stopped' | 'error' | 'unhealthy' | 'offline';
 

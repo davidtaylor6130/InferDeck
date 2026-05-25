@@ -8,6 +8,7 @@ export default defineConfig({
     extensions: ['.tsx', '.ts', '.js']
   },
   server: {
+    allowedHosts: ['ai.homelab.com'],
     proxy: {
       '/api': 'http://127.0.0.1:11434',
       '/v1': 'http://127.0.0.1:11434',
