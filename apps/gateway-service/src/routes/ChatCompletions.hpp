@@ -8,6 +8,7 @@ void HandleChatCompletionsStream(const httplib::Request& req, httplib::Response&
 
 std::string ValidateChatRequest(const std::string& body);
 std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response);
+std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response, const nlohmann::json& request_tools);
 nlohmann::json NormalizeOpenAiToolCalls(const nlohmann::json& tool_calls);
 bool ShouldForceNonStreamingBackend(const nlohmann::json& request);
 bool ShouldUseStreamingBackend(const nlohmann::json& request);

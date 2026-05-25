@@ -18,6 +18,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <optional>
 #include <string_view>
 #include <thread>
 #include <cstdint>
@@ -263,6 +264,7 @@ static std::size_t ResponseToolCallCount(const nlohmann::json& response) {
 }
 
 static std::string TrimCopy(std::string text);
+static std::string SafeLogText(std::string text, std::size_t limit);
 
 static std::string JsonArgumentString(const nlohmann::json& value) {
     if (value.is_string()) return value.get<std::string>();
@@ -271,11 +273,114 @@ static std::string JsonArgumentString(const nlohmann::json& value) {
     return value.dump();
 }
 
+struct ToolNameRegistry {
+    std::vector<std::string> names;
+    bool has_tools = false;
+};
+
+static std::string LowerCopy(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return text;
+}
+
+static std::string BaseToolName(std::string name) {
+    name = LowerCopy(TrimCopy(std::move(name)));
+    if (name.rfind("tool.", 0) == 0) name = name.substr(5);
+    const auto pos = name.find_last_of("./:-");
+    if (pos != std::string::npos && pos + 1 < name.size()) name = name.substr(pos + 1);
+    return name;
+}
+
+static void AddToolName(ToolNameRegistry& registry, const nlohmann::json& value) {
+    if (!value.is_string()) return;
+    auto name = TrimCopy(value.get<std::string>());
+    if (name.empty()) return;
+    registry.names.push_back(std::move(name));
+    registry.has_tools = true;
+}
+
+static ToolNameRegistry BuildToolNameRegistry(const nlohmann::json& tools) {
+    ToolNameRegistry registry;
+    if (!tools.is_array()) return registry;
+    for (const auto& tool : tools) {
+        if (tool.is_string()) {
+            AddToolName(registry, tool);
+        } else if (tool.is_object()) {
+            if (tool.contains("function") && tool["function"].is_object()) {
+                AddToolName(registry, tool["function"].value("name", ""));
+            }
+            AddToolName(registry, tool.value("name", ""));
+        }
+    }
+    return registry;
+}
+
+static std::string ResolveToolName(const ToolNameRegistry& registry,
+                                   const std::string& requested_name,
+                                   const nlohmann::json& arguments) {
+    const auto requested = TrimCopy(requested_name);
+    const auto requested_base = BaseToolName(requested);
+    if (!registry.has_tools) {
+        if (!requested_base.empty()) return requested_base;
+        if (arguments.is_object() && arguments.contains("command")) return "bash";
+        return requested;
+    }
+
+    auto find_by = [&](const std::vector<std::string>& candidates) -> std::string {
+        for (const auto& candidate : candidates) {
+            const auto candidate_lower = LowerCopy(candidate);
+            const auto candidate_base = BaseToolName(candidate);
+            for (const auto& actual : registry.names) {
+                const auto actual_lower = LowerCopy(actual);
+                const auto actual_base = BaseToolName(actual);
+                if (actual_lower == candidate_lower || actual_base == candidate_lower ||
+                    actual_lower == candidate_base || actual_base == candidate_base) {
+                    return actual;
+                }
+            }
+        }
+        return "";
+    };
+
+    if (!requested.empty()) {
+        if (auto exact = find_by({requested}); !exact.empty()) return exact;
+    }
+
+    std::vector<std::string> aliases;
+    const bool command_args = arguments.is_object() && arguments.contains("command");
+    if (command_args || requested_base == "bash" || requested_base == "shell" ||
+        requested_base == "command" || requested_base == "terminal" ||
+        requested_base == "exec" || requested_base == "run_command") {
+        aliases = {"bash", "shell", "run_command", "terminal", "command", "exec"};
+    } else if (requested_base == "glob") {
+        aliases = {"glob", "file_glob", "list_files"};
+    } else if (requested_base == "read") {
+        aliases = {"read", "read_file", "file_read"};
+    } else if (requested_base == "grep" || requested_base == "search") {
+        aliases = {"grep", "search", "rg"};
+    } else if (requested_base == "write") {
+        aliases = {"write", "write_file"};
+    } else if (requested_base == "edit") {
+        aliases = {"edit", "apply_patch"};
+    } else if (!requested_base.empty()) {
+        aliases = {requested_base};
+    }
+
+    if (!aliases.empty()) {
+        if (auto resolved = find_by(aliases); !resolved.empty()) return resolved;
+    }
+
+    return "";
+}
+
 static std::string MakeToolCallId(std::size_t index) {
     return "call_inferdeck_" + std::to_string(index + 1);
 }
 
-nlohmann::json NormalizeOpenAiToolCalls(const nlohmann::json& tool_calls) {
+static nlohmann::json NormalizeOpenAiToolCallsWithRegistry(const nlohmann::json& tool_calls,
+                                                           const ToolNameRegistry& registry) {
     nlohmann::json normalized = nlohmann::json::array();
     if (!tool_calls.is_array()) return normalized;
 
@@ -288,9 +393,10 @@ nlohmann::json NormalizeOpenAiToolCalls(const nlohmann::json& tool_calls) {
         if (!raw.contains("function") || !raw["function"].is_object()) continue;
         const auto& function = raw["function"];
         const auto name = function.value("name", "");
-        if (name.empty()) continue;
+        const auto resolved = ResolveToolName(registry, name, function.contains("arguments") ? function["arguments"] : nlohmann::json::object());
+        if (resolved.empty()) continue;
         item["function"] = {
-            {"name", name},
+            {"name", resolved},
             {"arguments", function.contains("arguments") ? JsonArgumentString(function["arguments"]) : "{}"}
         };
         normalized.push_back(std::move(item));
@@ -299,30 +405,47 @@ nlohmann::json NormalizeOpenAiToolCalls(const nlohmann::json& tool_calls) {
     return normalized;
 }
 
-static nlohmann::json RawToolCallFromPayload(const nlohmann::json& parsed, std::size_t index) {
+nlohmann::json NormalizeOpenAiToolCalls(const nlohmann::json& tool_calls) {
+    return NormalizeOpenAiToolCallsWithRegistry(tool_calls, ToolNameRegistry{});
+}
+
+static nlohmann::json RawToolCallFromPayload(const nlohmann::json& parsed,
+                                             std::size_t index,
+                                             const ToolNameRegistry& registry,
+                                             const std::string& requested_override = "") {
     nlohmann::json raw_call;
     raw_call["id"] = MakeToolCallId(index);
     raw_call["type"] = "function";
 
     if (parsed.contains("function") && parsed["function"].is_object()) {
-        raw_call["function"] = parsed["function"];
+        auto function = parsed["function"];
+        const auto requested = !requested_override.empty() ? requested_override : function.value("name", "");
+        const auto resolved = ResolveToolName(registry, requested, function.contains("arguments") ? function["arguments"] : nlohmann::json::object());
+        if (resolved.empty()) return nlohmann::json::object();
+        function["name"] = resolved;
+        raw_call["function"] = std::move(function);
         return raw_call;
     }
 
-    const auto name = parsed.value("name", parsed.value("function", ""));
+    const auto name = !requested_override.empty() ? requested_override : parsed.value("name", parsed.value("function", ""));
     if (!name.empty()) {
+        const auto arguments = parsed.contains("arguments")
+            ? parsed["arguments"]
+            : (!requested_override.empty() ? parsed : nlohmann::json::object());
+        const auto resolved = ResolveToolName(registry, name, arguments);
+        if (resolved.empty()) return nlohmann::json::object();
         raw_call["function"] = {
-            {"name", name},
-            {"arguments", parsed.contains("arguments") ? parsed["arguments"] : nlohmann::json::object()}
+            {"name", resolved},
+            {"arguments", arguments}
         };
         return raw_call;
     }
 
     if (parsed.contains("command") && parsed["command"].is_string()) {
-        // OpenCode's shell tool is named "bash"; some local models emit only
-        // the argument object as `tool_calls: {"command": ...}`.
+        const auto resolved = ResolveToolName(registry, "bash", parsed);
+        if (resolved.empty()) return nlohmann::json::object();
         raw_call["function"] = {
-            {"name", "bash"},
+            {"name", resolved},
             {"arguments", parsed}
         };
         return raw_call;
@@ -331,29 +454,32 @@ static nlohmann::json RawToolCallFromPayload(const nlohmann::json& parsed, std::
     return nlohmann::json::object();
 }
 
-static nlohmann::json NormalizeToolCallPayload(const nlohmann::json& parsed, std::size_t start_index = 0) {
+static nlohmann::json NormalizeToolCallPayload(const nlohmann::json& parsed,
+                                               std::size_t start_index,
+                                               const ToolNameRegistry& registry,
+                                               const std::string& requested_override = "") {
     nlohmann::json raw_calls = nlohmann::json::array();
 
     if (parsed.is_array()) {
         for (const auto& item : parsed) {
-            auto raw_call = RawToolCallFromPayload(item, start_index + raw_calls.size());
+            auto raw_call = RawToolCallFromPayload(item, start_index + raw_calls.size(), registry, requested_override);
             if (!raw_call.empty()) raw_calls.push_back(std::move(raw_call));
         }
     } else if (parsed.is_object()) {
         if (parsed.contains("tool_calls")) {
-            return NormalizeToolCallPayload(parsed["tool_calls"], start_index);
+            return NormalizeToolCallPayload(parsed["tool_calls"], start_index, registry, requested_override);
         }
-        auto raw_call = RawToolCallFromPayload(parsed, start_index);
+        auto raw_call = RawToolCallFromPayload(parsed, start_index, registry, requested_override);
         if (!raw_call.empty()) raw_calls.push_back(std::move(raw_call));
     }
 
-    return NormalizeOpenAiToolCalls(raw_calls);
+    return NormalizeOpenAiToolCallsWithRegistry(raw_calls, registry);
 }
 
 static std::optional<std::pair<std::string, std::pair<std::size_t, std::size_t>>> FindLabeledJsonPayload(
     const std::string& text,
     std::size_t search_from) {
-    const std::array<std::string_view, 2> labels = {"tool_calls:", "tool_call:"};
+    const std::array<std::string_view, 3> labels = {"assistant_tool_calls_json:", "tool_calls:", "tool_call:"};
 
     std::size_t label_pos = std::string::npos;
     std::string_view matched_label;
@@ -398,6 +524,40 @@ static std::optional<std::pair<std::string, std::pair<std::size_t, std::size_t>>
                 const auto payload_end = i + 1;
                 return std::make_pair(text.substr(payload_start, payload_end - payload_start),
                                       std::make_pair(label_pos, payload_end));
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+static std::optional<std::pair<std::string, std::pair<std::size_t, std::size_t>>> FindJsonPayloadAt(
+    const std::string& text,
+    std::size_t payload_start) {
+    while (payload_start < text.size() && std::isspace(static_cast<unsigned char>(text[payload_start]))) ++payload_start;
+    if (payload_start >= text.size() || (text[payload_start] != '{' && text[payload_start] != '[')) return std::nullopt;
+
+    std::vector<char> stack;
+    bool in_string = false;
+    bool escaped = false;
+    for (std::size_t i = payload_start; i < text.size(); ++i) {
+        const char c = text[i];
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') in_string = false;
+            continue;
+        }
+
+        if (c == '"') in_string = true;
+        else if (c == '{') stack.push_back('}');
+        else if (c == '[') stack.push_back(']');
+        else if ((c == '}' || c == ']') && !stack.empty() && stack.back() == c) {
+            stack.pop_back();
+            if (stack.empty()) {
+                const auto payload_end = i + 1;
+                return std::make_pair(text.substr(payload_start, payload_end - payload_start),
+                                      std::make_pair(payload_start, payload_end));
             }
         }
     }
@@ -468,7 +628,9 @@ static std::optional<std::string> ExtractLooseField(const std::string& text, std
     return value;
 }
 
-static nlohmann::json ExtractLooseCommandToolCall(const std::string& text, std::size_t start_index = 0) {
+static nlohmann::json ExtractLooseCommandToolCall(const std::string& text,
+                                                  std::size_t start_index,
+                                                  const ToolNameRegistry& registry) {
     if (text.find("tool_calls:") == std::string::npos && text.find("tool_call:") == std::string::npos) {
         return nlohmann::json::array();
     }
@@ -483,12 +645,91 @@ static nlohmann::json ExtractLooseCommandToolCall(const std::string& text, std::
     nlohmann::json raw_call = {
         {"id", MakeToolCallId(start_index)},
         {"type", "function"},
-        {"function", {{"name", "bash"}, {"arguments", arguments}}}
+        {"function", {{"name", ResolveToolName(registry, "bash", arguments)}, {"arguments", arguments}}}
     };
-    return NormalizeOpenAiToolCalls(nlohmann::json::array({raw_call}));
+    if (raw_call["function"]["name"].get<std::string>().empty()) return nlohmann::json::array();
+    return NormalizeOpenAiToolCallsWithRegistry(nlohmann::json::array({raw_call}), registry);
 }
 
-static nlohmann::json ExtractQwenToolCallsFromText(const std::string& text) {
+static std::optional<std::pair<std::string, std::pair<std::size_t, std::size_t>>> FindHarmonyToolPayload(
+    const std::string& text,
+    std::size_t search_from) {
+    const auto to_pos = text.find("to=", search_from);
+    if (to_pos == std::string::npos) return std::nullopt;
+
+    auto name_start = to_pos + 3;
+    while (name_start < text.size() && std::isspace(static_cast<unsigned char>(text[name_start]))) ++name_start;
+    auto name_end = name_start;
+    while (name_end < text.size() && !std::isspace(static_cast<unsigned char>(text[name_end]))) ++name_end;
+    if (name_end <= name_start) return std::nullopt;
+    const auto requested_name = text.substr(name_start, name_end - name_start);
+    const auto requested_base = BaseToolName(requested_name);
+    if (requested_base.empty()) return std::nullopt;
+
+    const auto json_marker = text.find("<|constrain|>json", name_end);
+    if (json_marker == std::string::npos) return std::nullopt;
+    auto payload_start = json_marker + std::string("<|constrain|>json").size();
+    const auto message_marker = text.find("<|message|>", payload_start);
+    if (message_marker != std::string::npos) {
+        const auto first_json = text.find_first_of("{[", payload_start);
+        if (first_json == std::string::npos || message_marker < first_json) {
+            payload_start = message_marker + std::string("<|message|>").size();
+        }
+    }
+    while (payload_start < text.size() && std::isspace(static_cast<unsigned char>(text[payload_start]))) ++payload_start;
+    if (payload_start >= text.size() || (text[payload_start] != '{' && text[payload_start] != '[')) return std::nullopt;
+
+    std::vector<char> stack;
+    bool in_string = false;
+    bool escaped = false;
+    for (std::size_t i = payload_start; i < text.size(); ++i) {
+        const char c = text[i];
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') in_string = false;
+            continue;
+        }
+        if (c == '"') in_string = true;
+        else if (c == '{') stack.push_back('}');
+        else if (c == '[') stack.push_back(']');
+        else if ((c == '}' || c == ']') && !stack.empty() && stack.back() == c) {
+            stack.pop_back();
+            if (stack.empty()) {
+                auto payload_end = i + 1;
+                auto span_end = payload_end;
+                while (span_end < text.size() && std::isspace(static_cast<unsigned char>(text[span_end]))) ++span_end;
+                if (text.compare(span_end, std::string("<|call|>").size(), "<|call|>") == 0) {
+                    span_end += std::string("<|call|>").size();
+                }
+                return std::make_pair(requested_name + "\n" + text.substr(payload_start, payload_end - payload_start),
+                                      std::make_pair(to_pos, span_end));
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+struct ToolExtractionResult {
+    nlohmann::json calls = nlohmann::json::array();
+    std::string format = "none";
+    std::string raw_preview;
+    std::string error;
+};
+
+static bool LooksLikeToolIntent(const std::string& text) {
+    return text.find("<tool_call>") != std::string::npos ||
+           text.find("assistant_tool_calls_json:") != std::string::npos ||
+           text.find("tool_calls:") != std::string::npos ||
+           text.find("tool_call:") != std::string::npos ||
+           text.find("to=tool.") != std::string::npos ||
+           text.find("to=tool_") != std::string::npos ||
+           text.find("<|constrain|>json") != std::string::npos;
+}
+
+static ToolExtractionResult ExtractToolCallsFromText(const std::string& text, const ToolNameRegistry& registry) {
+    ToolExtractionResult result;
     nlohmann::json calls = nlohmann::json::array();
     std::size_t search = 0;
     while (true) {
@@ -502,8 +743,9 @@ static nlohmann::json ExtractQwenToolCallsFromText(const std::string& text) {
         if (payload.empty()) continue;
         try {
             auto parsed = nlohmann::json::parse(payload);
-            auto normalized = NormalizeToolCallPayload(parsed, calls.size());
+            auto normalized = NormalizeToolCallPayload(parsed, calls.size(), registry);
             for (const auto& call : normalized) calls.push_back(call);
+            if (!normalized.empty() && result.format == "none") result.format = "qwen_xml";
         } catch (...) {
             continue;
         }
@@ -514,17 +756,64 @@ static nlohmann::json ExtractQwenToolCallsFromText(const std::string& text) {
         search = found->second.second;
         try {
             auto parsed = nlohmann::json::parse(found->first);
-            auto normalized = NormalizeToolCallPayload(parsed, calls.size());
+            auto normalized = NormalizeToolCallPayload(parsed, calls.size(), registry);
             for (const auto& call : normalized) calls.push_back(call);
+            if (!normalized.empty() && result.format == "none") result.format = "raw_tool_calls";
+        } catch (...) {
+            continue;
+        }
+
+        std::size_t sibling_search = found->second.second;
+        while (sibling_search < text.size()) {
+            while (sibling_search < text.size() && std::isspace(static_cast<unsigned char>(text[sibling_search]))) ++sibling_search;
+            if (sibling_search >= text.size() || text[sibling_search] != ',') break;
+            ++sibling_search;
+            auto sibling = FindJsonPayloadAt(text, sibling_search);
+            if (!sibling) break;
+            try {
+                auto parsed = nlohmann::json::parse(sibling->first);
+                auto normalized = NormalizeToolCallPayload(parsed, calls.size(), registry);
+                for (const auto& call : normalized) calls.push_back(call);
+                if (!normalized.empty() && result.format == "none") result.format = "raw_tool_calls";
+                sibling_search = sibling->second.second;
+                search = sibling_search;
+            } catch (...) {
+                break;
+            }
+        }
+    }
+
+    search = 0;
+    while (auto found = FindHarmonyToolPayload(text, search)) {
+        search = found->second.second;
+        const auto separator = found->first.find('\n');
+        if (separator == std::string::npos) continue;
+        const auto requested_name = found->first.substr(0, separator);
+        const auto payload = found->first.substr(separator + 1);
+        try {
+            auto parsed = nlohmann::json::parse(payload);
+            auto normalized = NormalizeToolCallPayload(parsed, calls.size(), registry, requested_name);
+            for (const auto& call : normalized) calls.push_back(call);
+            if (!normalized.empty() && result.format == "none") result.format = "gpt_oss_harmony";
         } catch (...) {
             continue;
         }
     }
+
     if (calls.empty()) {
-        auto loose = ExtractLooseCommandToolCall(text, calls.size());
+        auto loose = ExtractLooseCommandToolCall(text, calls.size(), registry);
         for (const auto& call : loose) calls.push_back(call);
+        if (!loose.empty() && result.format == "none") result.format = "raw_tool_calls";
     }
-    return calls;
+    if (!calls.empty()) {
+        result.calls = std::move(calls);
+    } else if (LooksLikeToolIntent(text)) {
+        result.error = "tool intent was present but no valid advertised tool call could be extracted";
+    }
+    if (LooksLikeToolIntent(text)) {
+        result.raw_preview = SafeLogText(text, 240);
+    }
+    return result;
 }
 
 static std::string RemoveQwenToolCallBlocks(std::string text) {
@@ -540,10 +829,25 @@ static std::string RemoveQwenToolCallBlocks(std::string text) {
     }
     std::size_t search = 0;
     while (auto found = FindLabeledJsonPayload(text, search)) {
+        std::size_t erase_end = found->second.second;
+        std::size_t sibling_search = erase_end;
+        while (sibling_search < text.size()) {
+            while (sibling_search < text.size() && std::isspace(static_cast<unsigned char>(text[sibling_search]))) ++sibling_search;
+            if (sibling_search >= text.size() || text[sibling_search] != ',') break;
+            auto sibling = FindJsonPayloadAt(text, sibling_search + 1);
+            if (!sibling) break;
+            erase_end = sibling->second.second;
+            sibling_search = erase_end;
+        }
+        text.erase(found->second.first, erase_end - found->second.first);
+        search = found->second.first;
+    }
+    search = 0;
+    while (auto found = FindHarmonyToolPayload(text, search)) {
         text.erase(found->second.first, found->second.second - found->second.first);
         search = found->second.first;
     }
-    if (!ExtractLooseCommandToolCall(text).empty()) {
+    if (!ExtractLooseCommandToolCall(text, 0, ToolNameRegistry{}).empty()) {
         auto pos = text.find("tool_calls:");
         if (pos == std::string::npos) pos = text.find("tool_call:");
         if (pos != std::string::npos) text.erase(pos);
@@ -695,7 +999,8 @@ std::string SanitizeAssistantContent(const std::string& content) {
     return TrimCopy(text);
 }
 
-std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response) {
+static std::string BuildSyntheticChatCompletionStreamWithRegistry(const nlohmann::json& response,
+                                                                  const ToolNameRegistry& registry) {
     std::string id = response.value("id", MakeId());
     std::string model = response.value("model", "local-model");
     std::string stream;
@@ -718,7 +1023,7 @@ std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response) {
             }
             if (message.contains("content") && message["content"].is_string() && !message["content"].get<std::string>().empty()) {
                 const auto raw_content = message["content"].get<std::string>();
-                extracted_tool_calls = ExtractQwenToolCallsFromText(raw_content);
+                extracted_tool_calls = ExtractToolCallsFromText(raw_content, registry).calls;
                 const auto without_tool_calls = RemoveQwenToolCallBlocks(raw_content);
                 AppendReasoning(reasoning_content, ExtractAssistantReasoningContent(without_tool_calls));
                 const auto clean_content = SanitizeAssistantContent(without_tool_calls);
@@ -731,7 +1036,7 @@ std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response) {
             } else if (!reasoning_content.empty()) {
                 stream += SseDeltaChunk(id, model, json({{"reasoning_content", reasoning_content}}));
             }
-            auto tool_calls = NormalizeOpenAiToolCalls(message.contains("tool_calls") ? message["tool_calls"] : json::array());
+            auto tool_calls = NormalizeOpenAiToolCallsWithRegistry(message.contains("tool_calls") ? message["tool_calls"] : json::array(), registry);
             for (const auto& tool_call : extracted_tool_calls) tool_calls.push_back(tool_call);
             if (!tool_calls.empty()) {
                 for (size_t i = 0; i < tool_calls.size(); ++i) {
@@ -746,6 +1051,14 @@ std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response) {
     stream += SseDeltaChunk(id, model, json::object(), finish_reason);
     stream += "data: [DONE]\n\n";
     return stream;
+}
+
+std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response) {
+    return BuildSyntheticChatCompletionStreamWithRegistry(response, ToolNameRegistry{});
+}
+
+std::string BuildSyntheticChatCompletionStream(const nlohmann::json& response, const nlohmann::json& request_tools) {
+    return BuildSyntheticChatCompletionStreamWithRegistry(response, BuildToolNameRegistry(request_tools));
 }
 
 static std::string SseChunk(const std::string& id, const std::string& model, const std::string& content, const std::string& reasoning_content, bool done) {
@@ -796,7 +1109,8 @@ static std::string SseErrorChunk(const std::string& id, const std::string& model
 
 static json BuildChatCompletionResponse(const std::string& id,
                                         const std::string& model,
-                                        const inferdeck::core::InferenceResult& result) {
+                                        const inferdeck::core::InferenceResult& result,
+                                        const ToolNameRegistry& registry = ToolNameRegistry{}) {
     json response;
     response["id"] = id;
     response["object"] = "chat.completion";
@@ -804,7 +1118,8 @@ static json BuildChatCompletionResponse(const std::string& id,
     response["model"] = model;
 
     json message = {{"role", "assistant"}};
-    auto qwen_tool_calls = ExtractQwenToolCallsFromText(result.text);
+    auto extracted = ExtractToolCallsFromText(result.text, registry);
+    auto qwen_tool_calls = extracted.calls;
     const auto visible_text = RemoveQwenToolCallBlocks(result.text);
     if (!visible_text.empty()) message["content"] = SanitizeAssistantContent(visible_text);
     std::string reasoning_text = result.reasoning_text;
@@ -823,11 +1138,20 @@ static json BuildChatCompletionResponse(const std::string& id,
         }
     }
     for (const auto& tc : qwen_tool_calls) tool_calls.push_back(tc);
-    tool_calls = NormalizeOpenAiToolCalls(tool_calls);
+    tool_calls = NormalizeOpenAiToolCallsWithRegistry(tool_calls, registry);
     if (!tool_calls.empty()) message["tool_calls"] = tool_calls;
     if (!message.contains("content") && tool_calls.empty()) message["content"] = "";
 
     std::string finish_reason = tool_calls.empty() ? "stop" : "tool_calls";
+    if (tool_calls.empty() && registry.has_tools && !extracted.error.empty()) {
+        finish_reason = "error";
+        response["error"] = {
+            {"message", extracted.error},
+            {"type", "tool_extraction_error"},
+            {"code", "tool_extraction_failed"},
+            {"rawToolTextPreview", extracted.raw_preview}
+        };
+    }
     response["choices"] = json::array({{{"index", 0}, {"message", message}, {"finish_reason", finish_reason}}});
     response["usage"] = {{"prompt_tokens", result.prompt_tokens}, {"completion_tokens", result.completion_tokens}, {"total_tokens", result.total_tokens}};
     return response;
@@ -953,7 +1277,9 @@ static nlohmann::json SyntheticResultPreview(const nlohmann::json& response,
                                              std::uint64_t sse_chunks,
                                              std::uint64_t heartbeat_chunks,
                                              std::uint64_t response_bytes,
+                                             const ToolNameRegistry& registry,
                                              const std::string& cause = "") {
+    const auto extraction = ExtractToolCallsFromText(result.text, registry);
     nlohmann::json preview = {
         {"requestProtocol", request_protocol},
         {"responseProtocol", "openai.sse"},
@@ -963,6 +1289,10 @@ static nlohmann::json SyntheticResultPreview(const nlohmann::json& response,
         {"responseBytes", response_bytes},
         {"finishReason", ResponseFinishReason(response)},
         {"toolCallCount", ResponseToolCallCount(response)},
+        {"rawToolTextPreview", extraction.raw_preview},
+        {"extractedToolCallCount", extraction.calls.size()},
+        {"toolExtractionFormat", extraction.format},
+        {"toolExtractionError", extraction.error},
         {"contentPreview", result.text.substr(0, 500)},
         {"reasoningPreview", result.reasoning_text.substr(0, 500)},
         {"waitingOnBackendOrToolFormatting", false},
@@ -989,6 +1319,7 @@ static bool RunGuardedSyntheticSse(inferdeck::core::LlamaEngine& engine,
                                    const std::string& job_id,
                                    const std::string& log_label,
                                    const std::string& request_protocol,
+                                   const ToolNameRegistry& tool_registry,
                                    httplib::DataSink& sink) {
     constexpr int kDefaultHeartbeatMs = 5000;
     constexpr int kDefaultIdleTimeoutMs = 60000;
@@ -1171,8 +1502,8 @@ static bool RunGuardedSyntheticSse(inferdeck::core::LlamaEngine& engine,
         return false;
     }
 
-    nlohmann::json response = BuildChatCompletionResponse(id, response_model_id, result);
-    const auto synthetic_stream = BuildSyntheticChatCompletionStream(response);
+    nlohmann::json response = BuildChatCompletionResponse(id, response_model_id, result, tool_registry);
+    const auto synthetic_stream = BuildSyntheticChatCompletionStreamWithRegistry(response, tool_registry);
     bool expected = false;
     if (terminal_sent->compare_exchange_strong(expected, true)) {
         inferdeck::gateway::RuntimeActivity::Get().CompleteJob(
@@ -1184,7 +1515,8 @@ static bool RunGuardedSyntheticSse(inferdeck::core::LlamaEngine& engine,
                                    "guarded-synthetic-sse",
                                    CountSseDataChunks(synthetic_stream),
                                    heartbeat_chunks_sent,
-                                   synthetic_stream.size()));
+                                   synthetic_stream.size(),
+                                   tool_registry));
     }
     write_chunk(synthetic_stream);
     sink.done();
@@ -1249,6 +1581,8 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
             : req.get_header_value("X-InferDeck-Protocol"), 80);
         const bool request_has_tools = ShouldForceNonStreamingBackend(body);
         bool force_non_streaming_backend = request_has_tools;
+        const nlohmann::json request_tools = body.contains("tools") ? body["tools"] : nlohmann::json::array();
+        const auto tool_registry = BuildToolNameRegistry(request_tools);
         if (body.contains("tools") && body["tools"].is_array()) {
             params.tools_json = body["tools"].dump();
         }
@@ -1429,7 +1763,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
 
             resp.set_chunked_content_provider(
                 "text/event-stream",
-                [&engine, messages, params, id, response_model_id, job_id, started, log_label, request_protocol](size_t, httplib::DataSink& sink) -> bool {
+                [&engine, messages, params, id, response_model_id, job_id, started, log_label, request_protocol, tool_registry](size_t, httplib::DataSink& sink) -> bool {
                     bool expected = false;
                     if (!started->compare_exchange_strong(expected, true)) {
                         sink.done();
@@ -1441,7 +1775,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                         {"responseMode", "guarded-synthetic-sse"},
                         {"waitingOnBackendOrToolFormatting", true}
                     }), "Guarded synthetic SSE waiting on backend/tool formatting");
-                    return RunGuardedSyntheticSse(engine, messages, params, id, response_model_id, job_id, log_label, request_protocol, sink);
+                    return RunGuardedSyntheticSse(engine, messages, params, id, response_model_id, job_id, log_label, request_protocol, tool_registry, sink);
                 }
             );
             resp.set_header("Cache-Control", "no-cache");
@@ -1458,7 +1792,8 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
             return;
         }
 
-        json response = BuildChatCompletionResponse(MakeId(), response_model_id, result);
+        json response = BuildChatCompletionResponse(MakeId(), response_model_id, result, tool_registry);
+        const auto extraction = ExtractToolCallsFromText(result.text, tool_registry);
         activity.CompleteJob(job_id, result, json({
             {"requestProtocol", request_protocol},
             {"responseProtocol", client_requested_stream ? "openai.sse" : "openai.json"},
@@ -1467,6 +1802,10 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
             {"responseBytes", response.dump().size()},
             {"finishReason", ResponseFinishReason(response)},
             {"toolCallCount", ResponseToolCallCount(response)},
+            {"rawToolTextPreview", extraction.raw_preview},
+            {"extractedToolCallCount", extraction.calls.size()},
+            {"toolExtractionFormat", extraction.format},
+            {"toolExtractionError", extraction.error},
             {"waitingOnBackendOrToolFormatting", false},
             {"contentPreview", result.text.substr(0, 500)},
             {"reasoningPreview", result.reasoning_text.substr(0, 500)},
@@ -1476,7 +1815,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         if (client_requested_stream) {
             resp.set_header("Cache-Control", "no-cache");
             resp.set_header("Connection", "keep-alive");
-            resp.set_content(BuildSyntheticChatCompletionStream(response), "text/event-stream");
+            resp.set_content(BuildSyntheticChatCompletionStreamWithRegistry(response, tool_registry), "text/event-stream");
             return;
         }
 

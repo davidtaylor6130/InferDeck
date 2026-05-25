@@ -239,7 +239,24 @@ nlohmann::json RuntimeActivity::ToJson(const Job& job, bool include_details) con
         {"error", job.error.empty() ? nullptr : nlohmann::json(job.error)}
     };
     if (job.result.is_object()) {
-        for (const auto& key : {"responseMode", "requestProtocol", "responseProtocol", "sseChunks", "ndjsonChunks", "heartbeatChunks", "responseBytes", "finishReason", "toolCallCount", "terminalCause", "backendAbortState", "waitingOnBackendOrToolFormatting"}) {
+        for (const auto& key : {
+            "responseMode",
+            "requestProtocol",
+            "responseProtocol",
+            "sseChunks",
+            "ndjsonChunks",
+            "heartbeatChunks",
+            "responseBytes",
+            "finishReason",
+            "toolCallCount",
+            "rawToolTextPreview",
+            "extractedToolCallCount",
+            "toolExtractionFormat",
+            "toolExtractionError",
+            "terminalCause",
+            "backendAbortState",
+            "waitingOnBackendOrToolFormatting"
+        }) {
             if (job.result.contains(key)) out[key] = job.result.at(key);
         }
     }

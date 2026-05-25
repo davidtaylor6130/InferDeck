@@ -46,9 +46,10 @@ std::string RoleToTemplateRole(MessageRole role) {
 std::string BuildToolInstruction(const std::string& tools_json) {
     if (tools_json.empty()) return {};
     return
-        "Tools are available. When a tool is needed, do not write tool_calls as plain text. "
-        "Respond only with a Qwen-compatible <tool_call> JSON block such as "
-        "<tool_call>{\"name\":\"bash\",\"arguments\":{\"command\":\"git status\",\"description\":\"Check status\"}}</tool_call>. "
+        "Tools are available. When a tool is needed, emit exactly one machine-readable tool call and no explanatory text. "
+        "For Qwen-style models, use <tool_call>{\"name\":\"read\",\"arguments\":{\"filePath\":\"src/app/page.tsx\"}}</tool_call>. "
+        "For GPT-OSS/Harmony-style models, use <|channel|>commentary to=tool.read <|constrain|>json<|message|>{\"filePath\":\"src/app/page.tsx\"}<|call|>. "
+        "Do not write plans, markdown, literal 'tool_calls:' prose, or assistant_tool_calls_json text when a tool is needed. "
         "Available tools JSON: " + tools_json;
 }
 
@@ -63,7 +64,6 @@ std::string BuildFallbackPrompt(const std::vector<ChatMessage>& messages,
         prompt << "<|" << RoleToTemplateRole(msg.role) << "|>\n";
         if (!msg.name.empty()) prompt << "name: " << msg.name << "\n";
         if (!msg.tool_call_id.empty()) prompt << "tool_call_id: " << msg.tool_call_id << "\n";
-        if (!msg.tool_calls_json.empty()) prompt << "tool_calls: " << msg.tool_calls_json << "\n";
         prompt << msg.content << "\n";
     }
     prompt << "<|assistant|>\n";
@@ -89,7 +89,6 @@ std::string BuildChatPrompt(llama_model* model,
         std::string content;
         if (!msg.name.empty()) content += "name: " + msg.name + "\n";
         if (!msg.tool_call_id.empty()) content += "tool_call_id: " + msg.tool_call_id + "\n";
-        if (!msg.tool_calls_json.empty()) content += "tool_calls: " + msg.tool_calls_json + "\n";
         content += msg.content;
         contents.push_back(std::move(content));
     }

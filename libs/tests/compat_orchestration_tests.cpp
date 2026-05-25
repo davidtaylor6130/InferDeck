@@ -178,6 +178,193 @@ TEST_CASE("Synthetic OpenAI SSE recovers malformed OpenCode commit command tool_
     REQUIRE(stream.find("\"finish_reason\":\"tool_calls\"") != std::string::npos);
 }
 
+TEST_CASE("Synthetic OpenAI SSE maps GPT OSS Harmony glob calls to advertised tools", "[compat][opencode][tools][gpt-oss]") {
+    json response = {
+        {"id", "chatcmpl-test"},
+        {"model", "openai-gpt-oss-20b"},
+        {"choices", json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", R"(to=tool.glob <|constrain|>json{"pattern":"*/.tsx"})"}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+    json tools = json::array({{{"type", "function"}, {"function", {{"name", "glob"}}}}});
+
+    auto stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response, tools);
+
+    REQUIRE(stream.find("\"tool_calls\"") != std::string::npos);
+    REQUIRE(stream.find("\"name\":\"glob\"") != std::string::npos);
+    REQUIRE(stream.find("\"arguments\":\"{\\\"pattern\\\":\\\"*/.tsx\\\"}\"") != std::string::npos);
+    REQUIRE(stream.find("to=tool.glob") == std::string::npos);
+    REQUIRE(stream.find("\"finish_reason\":\"tool_calls\"") != std::string::npos);
+}
+
+TEST_CASE("Synthetic OpenAI SSE maps GPT OSS Harmony read calls to advertised tools", "[compat][opencode][tools][gpt-oss]") {
+    json response = {
+        {"id", "chatcmpl-test"},
+        {"model", "openai-gpt-oss-20b"},
+        {"choices", json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", R"(to=tool.read <|constrain|>json{"filePath":"src/app/page.tsx"})"}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+    json tools = json::array({{{"type", "function"}, {"function", {{"name", "read"}}}}});
+
+    auto stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response, tools);
+
+    REQUIRE(stream.find("\"tool_calls\"") != std::string::npos);
+    REQUIRE(stream.find("\"name\":\"read\"") != std::string::npos);
+    REQUIRE(stream.find("\"arguments\":\"{\\\"filePath\\\":\\\"src/app/page.tsx\\\"}\"") != std::string::npos);
+    REQUIRE(stream.find("to=tool.read") == std::string::npos);
+}
+
+TEST_CASE("Synthetic OpenAI SSE maps official GPT OSS Harmony message calls", "[compat][opencode][tools][gpt-oss]") {
+    json response = {
+        {"id", "chatcmpl-test"},
+        {"model", "openai-gpt-oss-20b"},
+        {"choices", json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", R"(<|channel|>commentary to=tool.read <|constrain|>json<|message|>{"filePath":"src/app/page.tsx"}<|call|>)"}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+    json tools = json::array({{{"type", "function"}, {"function", {{"name", "read"}}}}});
+
+    auto stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response, tools);
+
+    REQUIRE(stream.find("\"tool_calls\"") != std::string::npos);
+    REQUIRE(stream.find("\"name\":\"read\"") != std::string::npos);
+    REQUIRE(stream.find("\"arguments\":\"{\\\"filePath\\\":\\\"src/app/page.tsx\\\"}\"") != std::string::npos);
+    REQUIRE(stream.find("<|channel|>") == std::string::npos);
+    REQUIRE(stream.find("<|call|>") == std::string::npos);
+}
+
+TEST_CASE("Synthetic OpenAI SSE recovers leaked assistant tool-call history label", "[compat][opencode][tools]") {
+    json response = {
+        {"id", "chatcmpl-test"},
+        {"model", "openai-gpt-oss-20b"},
+        {"choices", json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", R"(Continue reading.assistant_tool_calls_json: {"function":{"arguments":"{\"filePath\":\"/tmp/src/ServiceSummary.tsx\",\"offset\":201,\"limit\":200}","name":"read"},"id":"call_inferdeck_1","type":"function"})"}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+    json tools = json::array({{{"type", "function"}, {"function", {{"name", "read"}}}}});
+
+    auto stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response, tools);
+
+    REQUIRE(stream.find("\"tool_calls\"") != std::string::npos);
+    REQUIRE(stream.find("\"name\":\"read\"") != std::string::npos);
+    REQUIRE(stream.find("/tmp/src/ServiceSummary.tsx") != std::string::npos);
+    REQUIRE(stream.find("assistant_tool_calls_json") == std::string::npos);
+}
+
+TEST_CASE("Synthetic OpenAI SSE recovers comma-separated leaked assistant tool calls", "[compat][opencode][tools]") {
+    json response = {
+        {"id", "chatcmpl-test"},
+        {"model", "qwen3.6-35b-a3b"},
+        {"choices", json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", R"(assistant_tool_calls_json: {"function":{"arguments":{"filePath":"src/app/layout.tsx"},"name":"read"},"id":"call_1","type":"function"},{"function":{"arguments":{"filePath":"src/app/page.tsx"},"name":"read"},"id":"call_2","type":"function"})"}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+    json tools = json::array({{{"type", "function"}, {"function", {{"name", "read"}}}}});
+
+    auto stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response, tools);
+
+    REQUIRE(stream.find("src/app/layout.tsx") != std::string::npos);
+    REQUIRE(stream.find("src/app/page.tsx") != std::string::npos);
+    REQUIRE(stream.find("\"index\":0") != std::string::npos);
+    REQUIRE(stream.find("\"index\":1") != std::string::npos);
+    REQUIRE(stream.find("assistant_tool_calls_json") == std::string::npos);
+}
+
+TEST_CASE("Synthetic OpenAI SSE maps shell command text to advertised shell alias", "[compat][opencode][tools]") {
+    json response = {
+        {"id", "chatcmpl-test"},
+        {"model", "qwen3.6-35b-a3b"},
+        {"choices", json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", R"(tool_calls: {"command":"git status","description":"Check status"})"}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+    json tools = json::array({{{"type", "function"}, {"function", {{"name", "shell"}}}}});
+
+    auto stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response, tools);
+
+    REQUIRE(stream.find("\"tool_calls\"") != std::string::npos);
+    REQUIRE(stream.find("\"name\":\"shell\"") != std::string::npos);
+    REQUIRE(stream.find("\"name\":\"bash\"") == std::string::npos);
+    REQUIRE(stream.find("tool_calls:") == std::string::npos);
+}
+
+TEST_CASE("Synthetic OpenAI SSE extracts multiple sequential text tool calls", "[compat][opencode][tools]") {
+    json response = {
+        {"id", "chatcmpl-test"},
+        {"model", "qwen3.6-35b-a3b"},
+        {"choices", json::array({
+            {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", R"(<tool_call>{"name":"read","arguments":{"filePath":"src/app/page.tsx"}}</tool_call>
+to=tool.glob <|constrain|>json{"pattern":"src/**/*.tsx"})"}
+                }},
+                {"finish_reason", "tool_calls"}
+            }
+        })}
+    };
+    json tools = json::array({
+        {{"type", "function"}, {"function", {{"name", "read"}}}},
+        {{"type", "function"}, {"function", {{"name", "glob"}}}}
+    });
+
+    auto stream = inferdeck::gateway::routes::BuildSyntheticChatCompletionStream(response, tools);
+    auto read_pos = stream.find("\"name\":\"read\"");
+    auto glob_pos = stream.find("\"name\":\"glob\"");
+
+    REQUIRE(read_pos != std::string::npos);
+    REQUIRE(glob_pos != std::string::npos);
+    REQUIRE(read_pos < glob_pos);
+    REQUIRE(stream.find("\"index\":0") != std::string::npos);
+    REQUIRE(stream.find("\"index\":1") != std::string::npos);
+    REQUIRE(stream.find("<tool_call>") == std::string::npos);
+    REQUIRE(stream.find("to=tool.glob") == std::string::npos);
+}
+
 TEST_CASE("Malformed raw Qwen tool-call text is not emitted as partial tool calls", "[compat][opencode][tools]") {
     json response = {
         {"id", "chatcmpl-test"},
