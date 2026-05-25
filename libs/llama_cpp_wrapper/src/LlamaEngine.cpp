@@ -49,6 +49,8 @@ std::string BuildToolInstruction(const std::string& tools_json) {
         "Tools are available. When a tool is needed, emit exactly one machine-readable tool call and no explanatory text. "
         "For Qwen-style models, use <tool_call>{\"name\":\"read\",\"arguments\":{\"filePath\":\"src/app/page.tsx\"}}</tool_call>. "
         "For GPT-OSS/Harmony-style models, use <|channel|>commentary to=tool.read <|constrain|>json<|message|>{\"filePath\":\"src/app/page.tsx\"}<|call|>. "
+        "After receiving tool output, either emit the next tool call or provide the final answer. "
+        "Do not narrate future tool use such as 'I'll read', 'let me inspect', or 'continue reading'; call the tool instead. "
         "Do not write plans, markdown, literal 'tool_calls:' prose, or assistant_tool_calls_json text when a tool is needed. "
         "Available tools JSON: " + tools_json;
 }

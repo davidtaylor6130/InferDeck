@@ -103,6 +103,26 @@ TEST_CASE("OpenAI tool-call compatibility normalizes arguments and strips empty 
     REQUIRE(normalized[0]["function"]["arguments"] == R"({"filePath":"/tmp/App.tsx"})");
 }
 
+TEST_CASE("OpenAI tool-call compatibility removes duplicate function calls", "[compat][opencode][tools]") {
+    json calls = json::array({
+        {
+            {"id", "call_1"},
+            {"type", "function"},
+            {"function", {{"name", "read"}, {"arguments", {{"filePath", "src/app/page.tsx"}}}}}
+        },
+        {
+            {"id", "call_2"},
+            {"type", "function"},
+            {"function", {{"name", "read"}, {"arguments", {{"filePath", "src/app/page.tsx"}}}}}
+        }
+    });
+
+    auto normalized = inferdeck::gateway::routes::NormalizeOpenAiToolCalls(calls);
+    REQUIRE(normalized.size() == 1);
+    REQUIRE(normalized[0]["id"] == "call_1");
+    REQUIRE(normalized[0]["function"]["name"] == "read");
+}
+
 TEST_CASE("Synthetic OpenAI SSE converts raw Qwen tool-call text into structured tool calls", "[compat][opencode][tools]") {
     json response = {
         {"id", "chatcmpl-test"},
@@ -386,6 +406,104 @@ TEST_CASE("Malformed raw Qwen tool-call text is not emitted as partial tool call
     REQUIRE(stream.find("\"tool_calls\"") == std::string::npos);
     REQUIRE(stream.find("<tool_call>") == std::string::npos);
     REQUIRE(stream.find("\"finish_reason\":\"stop\"") != std::string::npos);
+}
+
+TEST_CASE("Narrated tool intent becomes explicit error instead of clean stop", "[compat][opencode][tools]") {
+    json tools = json::array({
+        {{"type", "function"}, {"function", {{"name", "read"}}}},
+        {{"type", "function"}, {"function", {{"name", "glob"}}}}
+    });
+
+    auto response = inferdeck::gateway::routes::BuildChatCompletionResponseForTest(
+        "chatcmpl-test",
+        "qwen3.6-35b-a3b",
+        "Let me explore the key source directories to understand the codebase in more detail.",
+        tools
+    );
+
+    REQUIRE(response["choices"][0]["finish_reason"] == "error");
+    REQUIRE(response["error"]["code"] == "tool_intent_narrated");
+    REQUIRE(response["error"]["toolExtractionFormat"] == "narrated_intent");
+    REQUIRE(response["choices"][0]["message"]["content"].get<std::string>().find("Let me explore") != std::string::npos);
+}
+
+TEST_CASE("Narrated tool intent in reasoning becomes explicit error", "[compat][opencode][tools]") {
+    json tools = json::array({{{"type", "function"}, {"function", {{"name", "read"}}}}});
+
+    auto response = inferdeck::gateway::routes::BuildChatCompletionResponseForTest(
+        "chatcmpl-test",
+        "qwen3.6-35b-a3b",
+        "",
+        "I should read the project files next to continue the review.",
+        tools
+    );
+
+    REQUIRE(response["choices"][0]["finish_reason"] == "error");
+    REQUIRE(response["error"]["code"] == "tool_intent_narrated");
+    REQUIRE(response["error"]["toolExtractionFormat"] == "narrated_intent");
+}
+
+TEST_CASE("Long narrated reasoning about tools becomes explicit error", "[compat][opencode][tools]") {
+    json tools = json::array({
+        {{"type", "function"}, {"function", {{"name", "glob"}}}},
+        {{"type", "function"}, {"function", {{"name", "read"}}}}
+    });
+    std::string reasoning =
+        "The user wants a full portfolio review. I need to inspect the project files first. "
+        "The available tools are glob and read. First, I should understand the structure. ";
+    while (reasoning.size() < 1200) {
+        reasoning += "I can use glob to list files, then use read to inspect the important page components. ";
+    }
+
+    auto response = inferdeck::gateway::routes::BuildChatCompletionResponseForTest(
+        "chatcmpl-test",
+        "qwen3.6-35b-a3b",
+        "",
+        reasoning,
+        tools
+    );
+
+    REQUIRE(response["choices"][0]["finish_reason"] == "error");
+    REQUIRE(response["error"]["code"] == "tool_intent_narrated");
+    REQUIRE(response["error"]["toolExtractionFormat"] == "narrated_intent");
+}
+
+TEST_CASE("Narrated tool intent extracted from raw think content becomes explicit error", "[compat][opencode][tools]") {
+    json tools = json::array({
+        {{"type", "function"}, {"function", {{"name", "glob"}}}},
+        {{"type", "function"}, {"function", {{"name", "read"}}}}
+    });
+    const std::string content =
+        "<think>The first step is to inspect the project files using the available tools. "
+        "I have access to glob and read. I should use glob to list the source tree first.";
+
+    auto response = inferdeck::gateway::routes::BuildChatCompletionResponseForTest(
+        "chatcmpl-test",
+        "qwen3.6-35b-a3b",
+        content,
+        tools
+    );
+
+    REQUIRE(response["choices"][0]["finish_reason"] == "error");
+    REQUIRE(response["error"]["code"] == "tool_intent_narrated");
+    REQUIRE(response["error"]["toolExtractionFormat"] == "narrated_intent");
+    REQUIRE(response["choices"][0]["message"]["reasoning_content"].get<std::string>().find("I should use glob") != std::string::npos);
+}
+
+TEST_CASE("Large tool results are compacted before model continuation", "[compat][opencode][tools]") {
+    std::string content = "<path>C:/repo</path>\n<entries>\n";
+    for (int i = 0; i < 900; ++i) {
+        content += "file-" + std::to_string(i) + ".tsx\n";
+    }
+    content += "</entries>";
+
+    auto compact = inferdeck::gateway::routes::CompactToolResultContentForTest(content);
+
+    REQUIRE(compact.size() < content.size());
+    REQUIRE(compact.find("inferdeck_tool_result_truncated") != std::string::npos);
+    REQUIRE(compact.find("original_chars=") != std::string::npos);
+    REQUIRE(compact.find("file-0.tsx") != std::string::npos);
+    REQUIRE(compact.find("file-899.tsx") != std::string::npos);
 }
 
 TEST_CASE("Assistant content parser splits Qwen think blocks and GPT OSS channel blocks", "[compat][opencode]") {

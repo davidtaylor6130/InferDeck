@@ -265,6 +265,8 @@ static std::size_t ResponseToolCallCount(const nlohmann::json& response) {
 
 static std::string TrimCopy(std::string text);
 static std::string SafeLogText(std::string text, std::size_t limit);
+static std::string RemoveQwenToolCallBlocks(std::string text);
+std::string ExtractAssistantReasoningContent(const std::string& content);
 
 static std::string JsonArgumentString(const nlohmann::json& value) {
     if (value.is_string()) return value.get<std::string>();
@@ -385,6 +387,7 @@ static nlohmann::json NormalizeOpenAiToolCallsWithRegistry(const nlohmann::json&
     if (!tool_calls.is_array()) return normalized;
 
     std::size_t index = 0;
+    std::vector<std::string> seen;
     for (const auto& raw : tool_calls) {
         if (!raw.is_object()) continue;
         nlohmann::json item;
@@ -395,9 +398,13 @@ static nlohmann::json NormalizeOpenAiToolCallsWithRegistry(const nlohmann::json&
         const auto name = function.value("name", "");
         const auto resolved = ResolveToolName(registry, name, function.contains("arguments") ? function["arguments"] : nlohmann::json::object());
         if (resolved.empty()) continue;
+        const auto arguments = function.contains("arguments") ? JsonArgumentString(function["arguments"]) : "{}";
+        const auto dedupe_key = resolved + "\n" + arguments;
+        if (std::find(seen.begin(), seen.end(), dedupe_key) != seen.end()) continue;
+        seen.push_back(dedupe_key);
         item["function"] = {
             {"name", resolved},
-            {"arguments", function.contains("arguments") ? JsonArgumentString(function["arguments"]) : "{}"}
+            {"arguments", arguments}
         };
         normalized.push_back(std::move(item));
         ++index;
@@ -718,6 +725,85 @@ struct ToolExtractionResult {
     std::string error;
 };
 
+static bool LooksLikeNarratedToolIntent(const std::string& content) {
+    auto text = LowerCopy(SanitizeAssistantContent(RemoveQwenToolCallBlocks(content)));
+    text = TrimCopy(std::move(text));
+    if (text.empty() || text.size() > 600) return false;
+
+    const bool has_future_action =
+        text.find("i'll ") != std::string::npos ||
+        text.find("i will ") != std::string::npos ||
+        text.find("let me ") != std::string::npos ||
+        text.find("i need to ") != std::string::npos ||
+        text.find("i should ") != std::string::npos ||
+        text.find("i'm going to ") != std::string::npos ||
+        text.find("now let me ") != std::string::npos;
+
+    const bool has_toolish_verb =
+        text.find("read") != std::string::npos ||
+        text.find("inspect") != std::string::npos ||
+        text.find("explore") != std::string::npos ||
+        text.find("search") != std::string::npos ||
+        text.find("grep") != std::string::npos ||
+        text.find("glob") != std::string::npos ||
+        text.find("look at") != std::string::npos ||
+        text.find("open ") != std::string::npos ||
+        text.find("check ") != std::string::npos;
+
+    const bool sounds_final =
+        text.find("recommend") != std::string::npos ||
+        text.find("summary") != std::string::npos ||
+        text.find("findings") != std::string::npos ||
+        text.find("conclusion") != std::string::npos ||
+        text.find("overall") != std::string::npos;
+
+    return has_future_action && has_toolish_verb && !sounds_final;
+}
+
+static bool LooksLikeReasoningToolIntent(const std::string& reasoning) {
+    auto text = LowerCopy(SanitizeAssistantContent(RemoveQwenToolCallBlocks(reasoning)));
+    text = TrimCopy(std::move(text));
+    if (text.empty()) return false;
+    if (text.size() > 8000) text.resize(8000);
+
+    const bool has_future_action =
+        text.find("i'll ") != std::string::npos ||
+        text.find("i will ") != std::string::npos ||
+        text.find("let me ") != std::string::npos ||
+        text.find("let's ") != std::string::npos ||
+        text.find("i need to ") != std::string::npos ||
+        text.find("i should ") != std::string::npos ||
+        text.find("i can use") != std::string::npos ||
+        text.find("i'm going to ") != std::string::npos ||
+        text.find("start by ") != std::string::npos ||
+        text.find("first, ") != std::string::npos ||
+        text.find("next, ") != std::string::npos ||
+        text.find("step 1") != std::string::npos;
+
+    const bool mentions_tool_protocol =
+        text.find("available tools") != std::string::npos ||
+        text.find("tool call") != std::string::npos ||
+        text.find("use `glob`") != std::string::npos ||
+        text.find("use glob") != std::string::npos ||
+        text.find("use `read`") != std::string::npos ||
+        text.find("use read") != std::string::npos ||
+        text.find("call glob") != std::string::npos ||
+        text.find("call read") != std::string::npos;
+
+    const bool has_toolish_verb =
+        text.find("read") != std::string::npos ||
+        text.find("inspect") != std::string::npos ||
+        text.find("explore") != std::string::npos ||
+        text.find("search") != std::string::npos ||
+        text.find("grep") != std::string::npos ||
+        text.find("glob") != std::string::npos ||
+        text.find("look at") != std::string::npos ||
+        text.find("open ") != std::string::npos ||
+        text.find("check ") != std::string::npos;
+
+    return has_future_action && (mentions_tool_protocol || has_toolish_verb);
+}
+
 static bool LooksLikeToolIntent(const std::string& text) {
     return text.find("<tool_call>") != std::string::npos ||
            text.find("assistant_tool_calls_json:") != std::string::npos ||
@@ -809,8 +895,11 @@ static ToolExtractionResult ExtractToolCallsFromText(const std::string& text, co
         result.calls = std::move(calls);
     } else if (LooksLikeToolIntent(text)) {
         result.error = "tool intent was present but no valid advertised tool call could be extracted";
+    } else if (registry.has_tools && LooksLikeNarratedToolIntent(text)) {
+        result.format = "narrated_intent";
+        result.error = "assistant narrated a future tool action instead of emitting a structured tool call";
     }
-    if (LooksLikeToolIntent(text)) {
+    if (LooksLikeToolIntent(text) || result.format == "narrated_intent") {
         result.raw_preview = SafeLogText(text, 240);
     }
     return result;
@@ -924,6 +1013,103 @@ static void AppendReasoning(std::string& reasoning, const std::string& text) {
     if (clean.empty()) return;
     if (!reasoning.empty()) reasoning += "\n";
     reasoning += clean;
+}
+
+static std::string CompactToolResultContent(const std::string& content) {
+    constexpr std::size_t kMaxToolContentChars = 6000;
+    constexpr std::size_t kHeadChars = 4200;
+    constexpr std::size_t kTailChars = 1200;
+    if (content.size() <= kMaxToolContentChars) return content;
+
+    std::string compact;
+    compact.reserve(kHeadChars + kTailChars + 512);
+    compact += content.substr(0, kHeadChars);
+    compact += "\n\n<inferdeck_tool_result_truncated original_chars=\"";
+    compact += std::to_string(content.size());
+    compact += "\" preserved=\"head_and_tail\" reason=\"tool output too large for reliable continuation\" />\n\n";
+    compact += content.substr(content.size() - kTailChars);
+    return compact;
+}
+
+static std::string CombinedReasoningText(const inferdeck::core::InferenceResult& result) {
+    std::string reasoning = result.reasoning_text;
+    AppendReasoning(reasoning, ExtractAssistantReasoningContent(RemoveQwenToolCallBlocks(result.text)));
+    return reasoning;
+}
+
+static ToolExtractionResult AnalyzeInferenceToolExtraction(const inferdeck::core::InferenceResult& result,
+                                                           const ToolNameRegistry& registry) {
+    auto extraction = ExtractToolCallsFromText(result.text, registry);
+    const auto reasoning = CombinedReasoningText(result);
+    if (extraction.calls.empty() && extraction.error.empty() && registry.has_tools &&
+        LooksLikeReasoningToolIntent(reasoning)) {
+        extraction.format = "narrated_intent";
+        extraction.error = "assistant narrated a future tool action in reasoning instead of emitting a structured tool call";
+        extraction.raw_preview = SafeLogText(reasoning, 240);
+    }
+    return extraction;
+}
+
+static bool ShouldAttemptToolIntentRepair(const inferdeck::core::InferenceResult& result,
+                                          const ToolNameRegistry& registry) {
+    if (result.HasError() || !registry.has_tools) return false;
+    const auto extraction = AnalyzeInferenceToolExtraction(result, registry);
+    return extraction.calls.empty() && extraction.format == "narrated_intent";
+}
+
+static std::string ToolNamesSummary(const ToolNameRegistry& registry) {
+    std::string names;
+    for (const auto& name : registry.names) {
+        if (!names.empty()) names += ", ";
+        names += name;
+    }
+    return names;
+}
+
+static std::string RepairPreviewText(const inferdeck::core::InferenceResult& result) {
+    std::string text;
+    const auto reasoning = CombinedReasoningText(result);
+    if (!reasoning.empty()) {
+        text += "Reasoning:\n";
+        text += reasoning.substr(0, 800);
+        text += "\n\n";
+    }
+    if (!result.text.empty()) {
+        text += "Assistant content:\n";
+        text += result.text.substr(0, 800);
+    }
+    return text.empty() ? "(empty assistant response)" : text;
+}
+
+static std::vector<inferdeck::core::ChatMessage> BuildToolIntentRepairMessages(
+    const std::vector<inferdeck::core::ChatMessage>& messages,
+    const inferdeck::core::InferenceResult& invalid_result,
+    const ToolNameRegistry& registry) {
+    auto repair_messages = messages;
+    std::string prompt =
+        "The previous assistant response was invalid for this tool-capable OpenCode request. "
+        "It narrated future tool use instead of emitting a structured tool call.\n\n"
+        "Available tool names: " + ToolNamesSummary(registry) + "\n\n"
+        "Invalid previous assistant response:\n" + RepairPreviewText(invalid_result) + "\n\n"
+        "Repair now. If a tool is needed, emit exactly one machine-readable tool call and no prose. "
+        "For Qwen use <tool_call>{\"name\":\"read\",\"arguments\":{\"filePath\":\"src/app/page.tsx\"}}</tool_call>. "
+        "For GPT-OSS/Harmony use <|channel|>commentary to=tool.read <|constrain|>json<|message|>{\"filePath\":\"src/app/page.tsx\"}<|call|>. "
+        "If no tool is needed, provide the final answer only.";
+    repair_messages.push_back({inferdeck::core::MessageRole::User, prompt, "", "", ""});
+    return repair_messages;
+}
+
+static inferdeck::core::InferenceParams BuildToolIntentRepairParams(inferdeck::core::InferenceParams params) {
+    params.max_tokens = 768;
+    params.temperature = 0.0f;
+    params.top_p = 1.0f;
+    return params;
+}
+
+static bool HasStructuredToolCall(const inferdeck::core::InferenceResult& result,
+                                  const ToolNameRegistry& registry) {
+    if (!result.tool_calls.empty()) return true;
+    return !ExtractToolCallsFromText(result.text, registry).calls.empty();
 }
 
 std::string ExtractAssistantReasoningContent(const std::string& content) {
@@ -1118,7 +1304,7 @@ static json BuildChatCompletionResponse(const std::string& id,
     response["model"] = model;
 
     json message = {{"role", "assistant"}};
-    auto extracted = ExtractToolCallsFromText(result.text, registry);
+    auto extracted = AnalyzeInferenceToolExtraction(result, registry);
     auto qwen_tool_calls = extracted.calls;
     const auto visible_text = RemoveQwenToolCallBlocks(result.text);
     if (!visible_text.empty()) message["content"] = SanitizeAssistantContent(visible_text);
@@ -1147,14 +1333,43 @@ static json BuildChatCompletionResponse(const std::string& id,
         finish_reason = "error";
         response["error"] = {
             {"message", extracted.error},
-            {"type", "tool_extraction_error"},
-            {"code", "tool_extraction_failed"},
+            {"type", extracted.format == "narrated_intent" ? "tool_intent_error" : "tool_extraction_error"},
+            {"code", extracted.format == "narrated_intent" ? "tool_intent_narrated" : "tool_extraction_failed"},
+            {"toolExtractionFormat", extracted.format},
             {"rawToolTextPreview", extracted.raw_preview}
         };
     }
     response["choices"] = json::array({{{"index", 0}, {"message", message}, {"finish_reason", finish_reason}}});
     response["usage"] = {{"prompt_tokens", result.prompt_tokens}, {"completion_tokens", result.completion_tokens}, {"total_tokens", result.total_tokens}};
     return response;
+}
+
+nlohmann::json BuildChatCompletionResponseForTest(const std::string& id,
+                                                  const std::string& model,
+                                                  const std::string& content,
+                                                  const nlohmann::json& request_tools) {
+    inferdeck::core::InferenceResult result;
+    result.text = content;
+    result.completion_tokens = static_cast<int>(content.size());
+    result.total_tokens = result.completion_tokens;
+    return BuildChatCompletionResponse(id, model, result, BuildToolNameRegistry(request_tools));
+}
+
+nlohmann::json BuildChatCompletionResponseForTest(const std::string& id,
+                                                  const std::string& model,
+                                                  const std::string& content,
+                                                  const std::string& reasoning,
+                                                  const nlohmann::json& request_tools) {
+    inferdeck::core::InferenceResult result;
+    result.text = content;
+    result.reasoning_text = reasoning;
+    result.completion_tokens = static_cast<int>(content.size() + reasoning.size());
+    result.total_tokens = result.completion_tokens;
+    return BuildChatCompletionResponse(id, model, result, BuildToolNameRegistry(request_tools));
+}
+
+std::string CompactToolResultContentForTest(const std::string& content) {
+    return CompactToolResultContent(content);
 }
 
 std::string DetectChatClientName(const httplib::Request& req) {
@@ -1279,7 +1494,7 @@ static nlohmann::json SyntheticResultPreview(const nlohmann::json& response,
                                              std::uint64_t response_bytes,
                                              const ToolNameRegistry& registry,
                                              const std::string& cause = "") {
-    const auto extraction = ExtractToolCallsFromText(result.text, registry);
+    auto extraction = AnalyzeInferenceToolExtraction(result, registry);
     nlohmann::json preview = {
         {"requestProtocol", request_protocol},
         {"responseProtocol", "openai.sse"},
@@ -1502,21 +1717,57 @@ static bool RunGuardedSyntheticSse(inferdeck::core::LlamaEngine& engine,
         return false;
     }
 
+    bool tool_repair_attempted = false;
+    bool tool_repair_succeeded = false;
+    std::string tool_repair_error;
+    if (ShouldAttemptToolIntentRepair(result, tool_registry)) {
+        tool_repair_attempted = true;
+        inferdeck::core::Logger::Get().Warn("Request " + job_id + " attempting tool-intent repair after narrated assistant response");
+        auto repair_messages = BuildToolIntentRepairMessages(messages, result, tool_registry);
+        auto repair_params = BuildToolIntentRepairParams(params);
+        inferdeck::core::InferenceResult repair_result;
+        try {
+            std::unique_lock<std::mutex> repair_lock(g_switch_mutex);
+            repair_result = engine.Predict(repair_messages, repair_params);
+        } catch (const std::exception& e) {
+            tool_repair_error = e.what();
+        } catch (...) {
+            tool_repair_error = "Unknown tool-intent repair failure";
+        }
+        if (tool_repair_error.empty() && !repair_result.HasError() && HasStructuredToolCall(repair_result, tool_registry)) {
+            repair_result.prompt_tokens += result.prompt_tokens;
+            repair_result.completion_tokens += result.completion_tokens;
+            repair_result.total_tokens += result.total_tokens;
+            result = std::move(repair_result);
+            tool_repair_succeeded = true;
+            inferdeck::core::Logger::Get().Info("Request " + job_id + " tool-intent repair succeeded");
+        } else if (tool_repair_error.empty()) {
+            tool_repair_error = repair_result.HasError()
+                ? repair_result.error_message
+                : "repair response did not contain a structured tool call";
+            inferdeck::core::Logger::Get().Warn("Request " + job_id + " tool-intent repair failed: " + tool_repair_error);
+        }
+    }
+
     nlohmann::json response = BuildChatCompletionResponse(id, response_model_id, result, tool_registry);
     const auto synthetic_stream = BuildSyntheticChatCompletionStreamWithRegistry(response, tool_registry);
     bool expected = false;
     if (terminal_sent->compare_exchange_strong(expected, true)) {
+        auto preview = SyntheticResultPreview(response,
+                                              result,
+                                              request_protocol,
+                                              "guarded-synthetic-sse",
+                                              CountSseDataChunks(synthetic_stream),
+                                              heartbeat_chunks_sent,
+                                              synthetic_stream.size(),
+                                              tool_registry);
+        preview["toolRepairAttempted"] = tool_repair_attempted;
+        preview["toolRepairSucceeded"] = tool_repair_succeeded;
+        if (!tool_repair_error.empty()) preview["toolRepairError"] = tool_repair_error;
         inferdeck::gateway::RuntimeActivity::Get().CompleteJob(
             job_id,
             result,
-            SyntheticResultPreview(response,
-                                   result,
-                                   request_protocol,
-                                   "guarded-synthetic-sse",
-                                   CountSseDataChunks(synthetic_stream),
-                                   heartbeat_chunks_sent,
-                                   synthetic_stream.size(),
-                                   tool_registry));
+            preview);
     }
     write_chunk(synthetic_stream);
     sink.done();
@@ -1563,6 +1814,9 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                 std::string tool_calls_json;
                 if (role == inferdeck::core::MessageRole::Assistant && msg.contains("tool_calls") && msg["tool_calls"].is_array()) {
                     tool_calls_json = msg["tool_calls"].dump();
+                }
+                if (role == inferdeck::core::MessageRole::Tool) {
+                    content = CompactToolResultContent(content);
                 }
                 messages.push_back({role, content, tool_call_id, name, tool_calls_json});
             }
@@ -1784,6 +2038,29 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         }
 
         auto result = engine.Predict(messages, params);
+        bool tool_repair_attempted = false;
+        bool tool_repair_succeeded = false;
+        std::string tool_repair_error;
+        if (ShouldAttemptToolIntentRepair(result, tool_registry)) {
+            tool_repair_attempted = true;
+            inferdeck::core::Logger::Get().Warn("Request " + job_id + " attempting tool-intent repair after narrated assistant response");
+            auto repair_messages = BuildToolIntentRepairMessages(messages, result, tool_registry);
+            auto repair_params = BuildToolIntentRepairParams(params);
+            auto repair_result = engine.Predict(repair_messages, repair_params);
+            if (!repair_result.HasError() && HasStructuredToolCall(repair_result, tool_registry)) {
+                repair_result.prompt_tokens += result.prompt_tokens;
+                repair_result.completion_tokens += result.completion_tokens;
+                repair_result.total_tokens += result.total_tokens;
+                result = std::move(repair_result);
+                tool_repair_succeeded = true;
+                inferdeck::core::Logger::Get().Info("Request " + job_id + " tool-intent repair succeeded");
+            } else {
+                tool_repair_error = repair_result.HasError()
+                    ? repair_result.error_message
+                    : "repair response did not contain a structured tool call";
+                inferdeck::core::Logger::Get().Warn("Request " + job_id + " tool-intent repair failed: " + tool_repair_error);
+            }
+        }
         inferdeck::core::Logger::Get().Info("Request " + job_id + " backend non-streaming completed");
         model_lock.unlock();
         if (result.HasError()) {
@@ -1793,7 +2070,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         }
 
         json response = BuildChatCompletionResponse(MakeId(), response_model_id, result, tool_registry);
-        const auto extraction = ExtractToolCallsFromText(result.text, tool_registry);
+        auto extraction = AnalyzeInferenceToolExtraction(result, tool_registry);
         activity.CompleteJob(job_id, result, json({
             {"requestProtocol", request_protocol},
             {"responseProtocol", client_requested_stream ? "openai.sse" : "openai.json"},
@@ -1806,6 +2083,9 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
             {"extractedToolCallCount", extraction.calls.size()},
             {"toolExtractionFormat", extraction.format},
             {"toolExtractionError", extraction.error},
+            {"toolRepairAttempted", tool_repair_attempted},
+            {"toolRepairSucceeded", tool_repair_succeeded},
+            {"toolRepairError", tool_repair_error},
             {"waitingOnBackendOrToolFormatting", false},
             {"contentPreview", result.text.substr(0, 500)},
             {"reasoningPreview", result.reasoning_text.substr(0, 500)},

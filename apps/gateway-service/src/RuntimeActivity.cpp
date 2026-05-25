@@ -253,6 +253,9 @@ nlohmann::json RuntimeActivity::ToJson(const Job& job, bool include_details) con
             "extractedToolCallCount",
             "toolExtractionFormat",
             "toolExtractionError",
+            "toolRepairAttempted",
+            "toolRepairSucceeded",
+            "toolRepairError",
             "terminalCause",
             "backendAbortState",
             "waitingOnBackendOrToolFormatting"
