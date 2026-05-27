@@ -41,6 +41,7 @@ export const configSchema = z.object({
     flashAttn: z.boolean().default(true),
     cacheTypeK: z.string().default("q8_0"),
     cacheTypeV: z.string().default("q8_0"),
+    reasoningFormat: z.enum(["none", "deepthink", ""]).optional().default(""),
     mmap: z.boolean().default(false),
     healthcheckIntervalMs: z.number().default(10000),
     restartOnFailure: z.boolean().default(true),

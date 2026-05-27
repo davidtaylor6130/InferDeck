@@ -71,6 +71,7 @@ catch_discover_tests(inferdeck-tests)
 
 add_executable(inferdeck-compat-tests
     compat_orchestration_tests.cpp
+    ToolCallingPipelineTest.cpp
     ../../apps/gateway-service/src/RuntimeActivity.cpp
     ../../apps/gateway-service/src/routes/ChatCompletions.cpp
     ../../apps/gateway-service/src/routes/OllamaCompat.cpp

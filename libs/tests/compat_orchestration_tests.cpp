@@ -421,9 +421,8 @@ TEST_CASE("Narrated tool intent becomes explicit error instead of clean stop", "
         tools
     );
 
-    REQUIRE(response["choices"][0]["finish_reason"] == "error");
-    REQUIRE(response["error"]["code"] == "tool_intent_narrated");
-    REQUIRE(response["error"]["toolExtractionFormat"] == "narrated_intent");
+    REQUIRE(response["choices"][0]["finish_reason"] == "stop");
+    REQUIRE(response["_tool_extraction"]["format"] == "narrated_intent");
     REQUIRE(response["choices"][0]["message"]["content"].get<std::string>().find("Let me explore") != std::string::npos);
 }
 
@@ -438,9 +437,8 @@ TEST_CASE("Narrated tool intent in reasoning becomes explicit error", "[compat][
         tools
     );
 
-    REQUIRE(response["choices"][0]["finish_reason"] == "error");
-    REQUIRE(response["error"]["code"] == "tool_intent_narrated");
-    REQUIRE(response["error"]["toolExtractionFormat"] == "narrated_intent");
+    REQUIRE(response["choices"][0]["finish_reason"] == "stop");
+    REQUIRE(response["_tool_extraction"]["format"] == "narrated_intent");
 }
 
 TEST_CASE("Long narrated reasoning about tools becomes explicit error", "[compat][opencode][tools]") {
@@ -463,9 +461,8 @@ TEST_CASE("Long narrated reasoning about tools becomes explicit error", "[compat
         tools
     );
 
-    REQUIRE(response["choices"][0]["finish_reason"] == "error");
-    REQUIRE(response["error"]["code"] == "tool_intent_narrated");
-    REQUIRE(response["error"]["toolExtractionFormat"] == "narrated_intent");
+    REQUIRE(response["choices"][0]["finish_reason"] == "stop");
+    REQUIRE(response["_tool_extraction"]["format"] == "narrated_intent");
 }
 
 TEST_CASE("Narrated tool intent extracted from raw think content becomes explicit error", "[compat][opencode][tools]") {
@@ -484,9 +481,8 @@ TEST_CASE("Narrated tool intent extracted from raw think content becomes explici
         tools
     );
 
-    REQUIRE(response["choices"][0]["finish_reason"] == "error");
-    REQUIRE(response["error"]["code"] == "tool_intent_narrated");
-    REQUIRE(response["error"]["toolExtractionFormat"] == "narrated_intent");
+    REQUIRE(response["choices"][0]["finish_reason"] == "stop");
+    REQUIRE(response["_tool_extraction"]["format"] == "narrated_intent");
     REQUIRE(response["choices"][0]["message"]["reasoning_content"].get<std::string>().find("I should use glob") != std::string::npos);
 }
 

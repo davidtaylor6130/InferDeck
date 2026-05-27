@@ -59,6 +59,8 @@ void Logger::Initialize(LogLevel level, const std::string& log_file, bool consol
         case LogLevel::Fatal:  logger->set_level(spdlog::level::critical); break;
     }
 
+    logger->flush_on(spdlog::level::info);
+
     spdlog::register_logger(logger);
     spdlog::set_default_logger(logger);
 

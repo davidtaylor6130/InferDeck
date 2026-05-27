@@ -42,6 +42,7 @@ public:
         std::string cache_type_k = "q8_0";
         std::string cache_type_v = "q8_0";
         std::string split_mode = "none";
+        std::string reasoning_format = "";
         int fit_target = 512;
         int parallel = 1;
         bool kv_unified = true;

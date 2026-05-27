@@ -100,6 +100,7 @@ namespace {
                 else if (lower_key == "cache_type_k") config.model.cache_type_k = raw_value;
                 else if (lower_key == "cache_type_v") config.model.cache_type_v = raw_value;
                 else if (lower_key == "split_mode") config.model.split_mode = raw_value;
+                else if (lower_key == "reasoning_format") config.model.reasoning_format = raw_value;
                 else if (lower_key == "fit_target") config.model.fit_target = std::stoi(raw_value);
                 else if (lower_key == "parallel") config.model.parallel = std::stoi(raw_value);
                 else if (lower_key == "kv_unified") config.model.kv_unified = (raw_value == "true" || raw_value == "1");
@@ -174,6 +175,8 @@ void Config::Save(const std::filesystem::path& config_path, const FullConfig& co
     file << "  cache_type_v: \"" << config.model.cache_type_v << "\"\n";
     file << "  split_mode: \"" << config.model.split_mode << "\"\n";
     file << "  fit_target: " << config.model.fit_target << "\n";
+    if (!config.model.reasoning_format.empty())
+        file << "  reasoning_format: \"" << config.model.reasoning_format << "\"\n";
     file << "  parallel: " << config.model.parallel << "\n";
     file << "  kv_unified: " << (config.model.kv_unified ? "true" : "false") << "\n\n";
 
