@@ -43,48 +43,215 @@ std::string RoleToTemplateRole(MessageRole role) {
     }
 }
 
-std::string BuildToolInstruction(const std::string& tools_json) {
+std::string DetectModelFamily(const std::string& model_name) {
+    auto lower = model_name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (lower.find("qwen") != std::string::npos) return "qwen";
+    if (lower.find("gpt-oss") != std::string::npos || lower.find("harmony") != std::string::npos) return "harmony";
+    return "universal";
+}
+
+std::string BuildToolInstruction(const std::string& tools_json, const std::string& model_family) {
     if (tools_json.empty()) return {};
+    std::string family = model_family.empty() ? "universal" : model_family;
+    if (family == "qwen") {
+        return
+            "# Tools\n\n"
+            "You have access to the following functions:\n\n"
+            "<tools>\n"
+            + tools_json + "\n"
+            "</tools>\n\n"
+            "If you choose to call a function ONLY reply in the following format with NO suffix:\n\n"
+            "<tool_call>\n"
+            "<function=example_function_name>\n"
+            "<parameter=example_parameter_1>\n"
+            "value_1\n"
+            "</parameter>\n"
+            "<parameter=example_parameter_2>\n"
+            "This is the value for the second parameter\n"
+            "that can span\n"
+            "multiple lines\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n\n"
+            "<IMPORTANT>\n"
+            "Reminder:\n"
+            "- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n"
+            "- Required parameters MUST be specified\n"
+            "- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n"
+            "- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n"
+            "</IMPORTANT>";
+    }
+    if (family == "harmony") {
+        return
+            "Tools are available. When a tool is needed, emit exactly one machine-readable tool call in Harmony format. "
+            "Format: <|channel|>commentary to=tool_name <|constrain|>json<|message|>{\"arg\":\"value\"}<|call|>. "
+            "After receiving tool output, either emit the next tool call or provide the final answer. "
+            "Do not narrate future tool use such as 'I'll read', 'let me inspect', or 'continue reading'; call the tool instead. "
+            "Do not write plans, markdown, literal 'tool_calls:' prose, or assistant_tool_calls_json text when a tool is needed. "
+            "Available tools JSON: " + tools_json;
+    }
     return
         "Tools are available. When a tool is needed, emit exactly one machine-readable tool call and no explanatory text. "
-        "For Qwen-style models, use <tool_call>{\"name\":\"read\",\"arguments\":{\"filePath\":\"src/app/page.tsx\"}}</tool_call>. "
-        "For GPT-OSS/Harmony-style models, use <|channel|>commentary to=tool.read <|constrain|>json<|message|>{\"filePath\":\"src/app/page.tsx\"}<|call|>. "
+        "Use <tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call> format. "
         "After receiving tool output, either emit the next tool call or provide the final answer. "
         "Do not narrate future tool use such as 'I'll read', 'let me inspect', or 'continue reading'; call the tool instead. "
         "Do not write plans, markdown, literal 'tool_calls:' prose, or assistant_tool_calls_json text when a tool is needed. "
         "Available tools JSON: " + tools_json;
 }
 
+std::string RenderQwenToolCalls(const std::string& tool_calls_json) {
+    if (tool_calls_json.empty()) return {};
+    try {
+        auto calls = nlohmann::json::parse(tool_calls_json);
+        if (!calls.is_array() || calls.empty()) return {};
+
+        std::string rendered;
+        for (const auto& call : calls) {
+            std::string name;
+            nlohmann::json args;
+            if (call.contains("function")) {
+                const auto& fn = call["function"];
+                name = fn.value("name", "");
+                if (fn.contains("arguments")) {
+                    const auto& a = fn["arguments"];
+                    if (a.is_string()) {
+                        try { args = nlohmann::json::parse(a.get<std::string>()); }
+                        catch (...) { args = a; }
+                    } else {
+                        args = a;
+                    }
+                }
+            } else if (call.contains("name")) {
+                name = call.value("name", "");
+                if (call.contains("arguments")) args = call["arguments"];
+            }
+            if (name.empty()) continue;
+
+            rendered += "<tool_call>\n<function=" + name + ">\n";
+            if (args.is_object()) {
+                for (auto it = args.begin(); it != args.end(); ++it) {
+                    rendered += "<parameter=" + it.key() + ">\n";
+                    std::string val;
+                    if (it.value().is_string()) {
+                        val = it.value().get<std::string>();
+                    } else {
+                        val = it.value().dump();
+                    }
+                    rendered += val + "\n</parameter>\n";
+                }
+            }
+            rendered += "</function>\n</tool_call>";
+        }
+        return rendered;
+    } catch (...) {
+        return {};
+    }
+}
+
 std::string BuildFallbackPrompt(const std::vector<ChatMessage>& messages,
-                                const InferenceParams& params) {
+                                const InferenceParams& params,
+                                const std::string& model_family) {
+    std::string family = model_family.empty() ? "universal" : model_family;
+    bool is_qwen = (family == "qwen");
+    bool has_tools = !params.tools_json.empty();
     std::ostringstream prompt;
-    auto tool_instruction = BuildToolInstruction(params.tools_json);
-    if (!tool_instruction.empty()) {
-        prompt << "<|system|>\n" << tool_instruction << "\n";
+    if (is_qwen && has_tools) {
+        auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
+        if (!tool_instruction.empty()) {
+            prompt << "<|system|>\n" << tool_instruction << "\n";
+        }
+        for (const auto& msg : messages) {
+            if (msg.role == MessageRole::Tool) {
+                prompt << "<|user|>\n<tool_response>\n" << msg.content << "\n</tool_response>\n";
+            } else {
+                prompt << "<|" << RoleToTemplateRole(msg.role) << "|>\n";
+                if (!msg.name.empty()) prompt << "name: " << msg.name << "\n";
+                if (!msg.tool_call_id.empty()) prompt << "tool_call_id: " << msg.tool_call_id << "\n";
+                prompt << msg.content;
+                if (msg.role == MessageRole::Assistant && !msg.tool_calls_json.empty()) {
+                    auto rendered = RenderQwenToolCalls(msg.tool_calls_json);
+                    if (!rendered.empty()) prompt << "\n" << rendered;
+                }
+                prompt << "\n";
+            }
+        }
+        prompt << "<|assistant|>\n<think>\n";
+    } else {
+        auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
+        if (!tool_instruction.empty()) {
+            prompt << "<|system|>\n" << tool_instruction << "\n";
+        }
+        for (const auto& msg : messages) {
+            prompt << "<|" << RoleToTemplateRole(msg.role) << "|>\n";
+            if (!msg.name.empty()) prompt << "name: " << msg.name << "\n";
+            if (!msg.tool_call_id.empty()) prompt << "tool_call_id: " << msg.tool_call_id << "\n";
+            prompt << msg.content << "\n";
+        }
+        prompt << "<|assistant|>\n";
     }
-    for (const auto& msg : messages) {
-        prompt << "<|" << RoleToTemplateRole(msg.role) << "|>\n";
-        if (!msg.name.empty()) prompt << "name: " << msg.name << "\n";
-        if (!msg.tool_call_id.empty()) prompt << "tool_call_id: " << msg.tool_call_id << "\n";
-        prompt << msg.content << "\n";
-    }
-    prompt << "<|assistant|>\n";
     return prompt.str();
 }
 
 std::string BuildChatPrompt(llama_model* model,
                             const std::vector<ChatMessage>& messages,
-                            const InferenceParams& params) {
+                            const InferenceParams& params,
+                            const std::string& model_family) {
+    std::string family = model_family.empty() ? "universal" : model_family;
+    bool is_qwen = (family == "qwen");
+    bool has_tools = !params.tools_json.empty();
+
+    if (is_qwen && has_tools) {
+        std::vector<std::string> roles;
+        std::vector<std::string> contents;
+
+        auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
+        if (!tool_instruction.empty()) {
+            roles.push_back("system");
+            contents.push_back(tool_instruction);
+        }
+
+        for (const auto& msg : messages) {
+            if (msg.role == MessageRole::Tool) {
+                roles.push_back("user");
+                contents.push_back("<tool_response>\n" + msg.content + "\n</tool_response>");
+            } else {
+                roles.push_back(RoleToTemplateRole(msg.role));
+                std::string content;
+                if (!msg.name.empty()) content += "name: " + msg.name + "\n";
+                if (!msg.tool_call_id.empty()) content += "tool_call_id: " + msg.tool_call_id + "\n";
+                content += msg.content;
+                if (msg.role == MessageRole::Assistant && !msg.tool_calls_json.empty()) {
+                    auto rendered = RenderQwenToolCalls(msg.tool_calls_json);
+                    if (!rendered.empty()) content += "\n" + rendered;
+                }
+                contents.push_back(std::move(content));
+            }
+        }
+
+        std::vector<llama_chat_message> chat;
+        chat.reserve(roles.size());
+        for (std::size_t i = 0; i < roles.size(); ++i) {
+            chat.push_back({roles[i].c_str(), contents[i].c_str()});
+        }
+
+        const char* tmpl = model ? llama_model_chat_template(model, nullptr) : nullptr;
+        int32_t needed = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, nullptr, 0);
+        if (needed <= 0) return BuildFallbackPrompt(messages, params, model_family);
+
+        std::string prompt(static_cast<std::size_t>(needed), '\0');
+        int32_t written = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, prompt.data(), needed);
+        if (written < 0) return BuildFallbackPrompt(messages, params, model_family);
+        prompt.resize(static_cast<std::size_t>(written));
+        return prompt;
+    }
+
     std::vector<std::string> roles;
     std::vector<std::string> contents;
     roles.reserve(messages.size() + 1);
     contents.reserve(messages.size() + 1);
-
-    auto tool_instruction = BuildToolInstruction(params.tools_json);
-    if (!tool_instruction.empty()) {
-        roles.push_back("system");
-        contents.push_back(tool_instruction);
-    }
 
     for (const auto& msg : messages) {
         roles.push_back(RoleToTemplateRole(msg.role));
@@ -95,6 +262,12 @@ std::string BuildChatPrompt(llama_model* model,
         contents.push_back(std::move(content));
     }
 
+    auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
+    if (!tool_instruction.empty()) {
+        roles.push_back("system");
+        contents.push_back(tool_instruction);
+    }
+
     std::vector<llama_chat_message> chat;
     chat.reserve(roles.size());
     for (std::size_t i = 0; i < roles.size(); ++i) {
@@ -103,11 +276,11 @@ std::string BuildChatPrompt(llama_model* model,
 
     const char* tmpl = model ? llama_model_chat_template(model, nullptr) : nullptr;
     int32_t needed = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, nullptr, 0);
-    if (needed <= 0) return BuildFallbackPrompt(messages, params);
+    if (needed <= 0) return BuildFallbackPrompt(messages, params, model_family);
 
     std::string prompt(static_cast<std::size_t>(needed), '\0');
     int32_t written = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, prompt.data(), needed);
-    if (written < 0) return BuildFallbackPrompt(messages, params);
+    if (written < 0) return BuildFallbackPrompt(messages, params, model_family);
     prompt.resize(static_cast<std::size_t>(written));
     return prompt;
 }
@@ -302,7 +475,15 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     abort_requested_.store(false);
     llama_memory_clear(llama_get_memory(context), true);
 
-    const std::string prompt = BuildChatPrompt(model, messages, params);
+    std::string model_family;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        model_family = DetectModelFamily(current_model_name_);
+    }
+    if (!params.tool_format_override.empty()) {
+        model_family = params.tool_format_override;
+    }
+    const std::string prompt = BuildChatPrompt(model, messages, params, model_family);
     auto prompt_tokens = Tokenize(model, prompt, true);
     if (prompt_tokens.empty()) {
         result.http_status = 500;
@@ -441,6 +622,11 @@ InferenceStats LlamaEngine::GetStats() const {
 std::string LlamaEngine::GetModelName() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return current_model_name_;
+}
+
+std::string LlamaEngine::GetModelFamily() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return DetectModelFamily(current_model_name_);
 }
 
 std::string LlamaEngine::GetPrecision() const {

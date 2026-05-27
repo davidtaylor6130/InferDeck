@@ -35,6 +35,7 @@ struct InferenceParams {
     std::vector<float> presence_penalty;
     std::string user;
     std::string tools_json;
+    std::string tool_format_override;
 };
 
 enum class TokenType {
@@ -113,6 +114,7 @@ public:
                                    StreamHeartbeatCallback on_heartbeat = nullptr);
     InferenceStats GetStats() const;
     std::string GetModelName() const;
+    std::string GetModelFamily() const;
     std::string GetPrecision() const;
     void AbortActiveRequest(const std::string& reason);
     void Shutdown();
