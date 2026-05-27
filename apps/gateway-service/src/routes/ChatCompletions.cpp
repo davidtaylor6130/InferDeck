@@ -590,9 +590,10 @@ static std::string UnescapeLooseJsonString(std::string value) {
 }
 
 static std::optional<std::string> ExtractLooseField(const std::string& text, std::string_view key) {
-    const std::array<std::string, 2> patterns = {
+    const std::array<std::string, 3> patterns = {
         "\"" + std::string(key) + "\":",
-        "\\\"" + std::string(key) + "\\\":"
+        "\\\"" + std::string(key) + "\\\":",
+        std::string(key) + ":"
     };
 
     std::size_t key_pos = std::string::npos;
@@ -728,7 +729,7 @@ struct ToolExtractionResult {
 static bool LooksLikeNarratedToolIntent(const std::string& content) {
     auto text = LowerCopy(SanitizeAssistantContent(RemoveQwenToolCallBlocks(content)));
     text = TrimCopy(std::move(text));
-    if (text.empty() || text.size() > 600) return false;
+    if (text.empty() || text.size() > 400 || text.size() < 20) return false;
 
     const bool has_future_action =
         text.find("i'll ") != std::string::npos ||
@@ -738,6 +739,14 @@ static bool LooksLikeNarratedToolIntent(const std::string& content) {
         text.find("i should ") != std::string::npos ||
         text.find("i'm going to ") != std::string::npos ||
         text.find("now let me ") != std::string::npos;
+
+    const bool mentions_tool_protocol =
+        text.find("tool call") != std::string::npos ||
+        text.find("available tools") != std::string::npos ||
+        text.find("use the ") != std::string::npos ||
+        text.find("the `glob`") != std::string::npos ||
+        text.find("the `read`") != std::string::npos ||
+        text.find("the `grep`") != std::string::npos;
 
     const bool has_toolish_verb =
         text.find("read") != std::string::npos ||
@@ -757,7 +766,7 @@ static bool LooksLikeNarratedToolIntent(const std::string& content) {
         text.find("conclusion") != std::string::npos ||
         text.find("overall") != std::string::npos;
 
-    return has_future_action && has_toolish_verb && !sounds_final;
+    return has_future_action && (mentions_tool_protocol || has_toolish_verb) && !sounds_final;
 }
 
 static bool LooksLikeReasoningToolIntent(const std::string& reasoning) {
@@ -814,27 +823,167 @@ static bool LooksLikeToolIntent(const std::string& text) {
            text.find("<|constrain|>json") != std::string::npos;
 }
 
+static std::size_t FlexibleFindTag(const std::string& text, const std::string& tag, std::size_t search_from) {
+    std::string flexible;
+    flexible.reserve(tag.size() + 4);
+    flexible += '<';
+    for (std::size_t i = 1; i < tag.size() - 1; ++i) {
+        flexible += tag[i];
+        if (tag[i] != ' ' && tag[i] != '_' && tag[i] != '-') {
+            flexible += ' ';
+        }
+    }
+    flexible += tag.back();
+    auto pos = text.find(tag, search_from);
+    if (pos != std::string::npos) return pos;
+    pos = text.find(flexible, search_from);
+    if (pos != std::string::npos) return pos;
+    for (std::size_t i = search_from; i < text.size(); ++i) {
+        if (text[i] == '<') {
+            auto end_brace = text.find('>', i);
+            if (end_brace == std::string::npos) break;
+            auto inner = text.substr(i + 1, end_brace - i - 1);
+            inner = TrimCopy(inner);
+            if (inner == std::string(tag.begin() + 1, tag.end() - 1)) return i;
+        }
+    }
+    return std::string::npos;
+}
+
+static std::optional<std::pair<std::string, std::size_t>> ExtractQwenXmlToolCall(const std::string& text, std::size_t search) {
+    constexpr const char* open_tag = "<tool_call>";
+    constexpr const char* close_tag = "</tool_call>";
+    const auto start = FlexibleFindTag(text, open_tag, search);
+    if (start == std::string::npos) return std::nullopt;
+    const auto body_start = text.find('>', start);
+    if (body_start == std::string::npos) return std::nullopt;
+    const auto body_begin = body_start + 1;
+    const auto end = text.find(close_tag, body_begin);
+    if (end == std::string::npos) return std::nullopt;
+    auto payload = TrimCopy(text.substr(body_begin, end - body_begin));
+    if (payload.empty()) {
+        return ExtractQwenXmlToolCall(text, end + std::string(close_tag).size());
+    }
+    return std::make_pair(payload, end + std::string(close_tag).size());
+}
+
+static nlohmann::json TryParseQwenXmlFunctionToolCall(const std::string& payload, std::size_t calls_size, const ToolNameRegistry& registry) {
+    static constexpr const char* func_open = "<function=";
+    auto fstart = payload.find(func_open);
+    if (fstart == std::string::npos) return nlohmann::json::array();
+    auto fname_start = fstart + std::string(func_open).size();
+    auto fname_end = payload.find('>', fname_start);
+    if (fname_end == std::string::npos) return nlohmann::json::array();
+    std::string name = TrimCopy(payload.substr(fname_start, fname_end - fname_start));
+    if (name.empty()) return nlohmann::json::array();
+
+    static constexpr const char* func_close = "</function>";
+    auto fclose = payload.find(func_close, fname_end);
+    if (fclose == std::string::npos) return nlohmann::json::array();
+    auto params_body = payload.substr(fname_end + 1, fclose - fname_end - 1);
+
+    nlohmann::json args = nlohmann::json::object();
+    static constexpr const char* param_open = "<parameter=";
+    std::size_t psearch = 0;
+    while (true) {
+        auto pstart = params_body.find(param_open, psearch);
+        if (pstart == std::string::npos) break;
+        auto pname_start = pstart + std::string(param_open).size();
+        auto pname_end = params_body.find('>', pname_start);
+        if (pname_end == std::string::npos) break;
+        std::string pname = TrimCopy(params_body.substr(pname_start, pname_end - pname_start));
+        if (pname.empty()) { psearch = pname_end + 1; continue; }
+        static constexpr const char* pclose_tag = "</parameter>";
+        auto pclose = params_body.find(pclose_tag, pname_end);
+        if (pclose == std::string::npos) break;
+        auto pval_start = pname_end + 1;
+        std::string pvalue = TrimCopy(params_body.substr(pval_start, pclose - pval_start));
+        if (!pvalue.empty()) {
+            try {
+                auto parsed = nlohmann::json::parse(pvalue);
+                args[pname] = parsed;
+            } catch (...) {
+                args[pname] = pvalue;
+            }
+        } else {
+            args[pname] = "";
+        }
+        psearch = pclose + std::string(pclose_tag).size();
+    }
+
+    nlohmann::json result = nlohmann::json::object();
+    result["id"] = "call_" + std::to_string(calls_size);
+    result["type"] = "function";
+    result["function"] = {{"name", name}, {"arguments", args.dump()}};
+    nlohmann::json arr = nlohmann::json::array();
+    arr.push_back(result);
+    return arr;
+}
+
+static nlohmann::json TryParseToolCallJson(const std::string& payload, std::size_t calls_size, const ToolNameRegistry& registry) {
+    try {
+        auto parsed = nlohmann::json::parse(payload);
+        return NormalizeToolCallPayload(parsed, calls_size, registry);
+    } catch (...) {
+        return nlohmann::json::array();
+    }
+}
+
+static nlohmann::json FindBareJsonToolCalls(const std::string& text, const ToolNameRegistry& registry) {
+    const auto name_key = text.find("\"name\"");
+    if (name_key == std::string::npos) return nlohmann::json::array();
+    const auto args_key = text.find("\"arguments\"");
+    if (args_key == std::string::npos) return nlohmann::json::array();
+    auto json_start = text.find_first_of("{[", 0);
+    while (json_start != std::string::npos) {
+        auto found = FindJsonPayloadAt(text, json_start);
+        if (!found) break;
+        try {
+            auto parsed = nlohmann::json::parse(found->first);
+            if (parsed.is_object() && parsed.contains("name") && parsed.contains("arguments")) {
+                auto normalized = NormalizeToolCallPayload(parsed, 0, registry);
+                if (!normalized.empty()) return normalized;
+            }
+        } catch (...) {}
+        json_start = text.find_first_of("{[", found->second.second);
+    }
+    return nlohmann::json::array();
+}
+
+static ToolExtractionResult ExtractToolCallsFromText(const std::string& text, const ToolNameRegistry& registry);
+
+static void ExtractToolsFromThinkBlock(const std::string& text, nlohmann::json& calls, const ToolNameRegistry& registry, std::string& format) {
+    std::size_t think_start = 0;
+    while (true) {
+        const auto open = text.find("<think>", think_start);
+        if (open == std::string::npos) break;
+        const auto close = text.find("</think>", open);
+        if (close == std::string::npos) break;
+        auto think_content = text.substr(open + 7, close - open - 7);
+        auto inner_extraction = ExtractToolCallsFromText(think_content, registry);
+        for (const auto& call : inner_extraction.calls) calls.push_back(call);
+        if (!inner_extraction.calls.empty() && format == "none") format = "qwen_think_block";
+        think_start = close + 8;
+    }
+}
+
 static ToolExtractionResult ExtractToolCallsFromText(const std::string& text, const ToolNameRegistry& registry) {
     ToolExtractionResult result;
     nlohmann::json calls = nlohmann::json::array();
+
+    inferdeck::core::Logger::Get().Debug("ExtractToolCallsFromText input: " + SafeLogText(text, 2048));
+
     std::size_t search = 0;
     while (true) {
-        const auto start = text.find("<tool_call>", search);
-        if (start == std::string::npos) break;
-        const auto body_start = start + std::string("<tool_call>").size();
-        const auto end = text.find("</tool_call>", body_start);
-        if (end == std::string::npos) break;
-        auto payload = TrimCopy(text.substr(body_start, end - body_start));
-        search = end + std::string("</tool_call>").size();
-        if (payload.empty()) continue;
-        try {
-            auto parsed = nlohmann::json::parse(payload);
-            auto normalized = NormalizeToolCallPayload(parsed, calls.size(), registry);
-            for (const auto& call : normalized) calls.push_back(call);
-            if (!normalized.empty() && result.format == "none") result.format = "qwen_xml";
-        } catch (...) {
-            continue;
+        auto found = ExtractQwenXmlToolCall(text, search);
+        if (!found) break;
+        search = found->second;
+        auto normalized = TryParseToolCallJson(found->first, calls.size(), registry);
+        if (normalized.empty()) {
+            normalized = TryParseQwenXmlFunctionToolCall(found->first, calls.size(), registry);
         }
+        for (const auto& call : normalized) calls.push_back(call);
+        if (!normalized.empty() && result.format == "none") result.format = "qwen_xml";
     }
 
     search = 0;
@@ -884,6 +1033,16 @@ static ToolExtractionResult ExtractToolCallsFromText(const std::string& text, co
         } catch (...) {
             continue;
         }
+    }
+
+    if (calls.empty()) {
+        ExtractToolsFromThinkBlock(text, calls, registry, result.format);
+    }
+
+    if (calls.empty()) {
+        auto bare = FindBareJsonToolCalls(text, registry);
+        for (const auto& call : bare) calls.push_back(call);
+        if (!bare.empty() && result.format == "none") result.format = "bare_json";
     }
 
     if (calls.empty()) {
@@ -1081,6 +1240,21 @@ static std::string RepairPreviewText(const inferdeck::core::InferenceResult& res
     return text.empty() ? "(empty assistant response)" : text;
 }
 
+static std::string BuildToolInstructionForRepair(const ToolNameRegistry& registry) {
+    auto family = inferdeck::core::LlamaEngine::Get().GetModelFamily();
+    auto names = ToolNamesSummary(registry);
+    if (family == "qwen" || family == "universal") {
+        return
+            "You must emit exactly one tool call in this format:\n"
+            "<tool_call>{\"name\":\"" + (names.empty() ? std::string("tool_name") : names.substr(0, names.find(','))) + "\",\"arguments\":{...}}</tool_call>\n"
+            "Do not include any other text. Available tools: " + names;
+    }
+    return
+        "You must emit exactly one tool call in this format:\n"
+        "<|channel|>commentary to=" + (names.empty() ? std::string("tool_name") : names.substr(0, names.find(','))) + " <|constrain|>json<|message|>{...}<|call|>\n"
+        "Do not include any other text. Available tools: " + names;
+}
+
 static std::vector<inferdeck::core::ChatMessage> BuildToolIntentRepairMessages(
     const std::vector<inferdeck::core::ChatMessage>& messages,
     const inferdeck::core::InferenceResult& invalid_result,
@@ -1092,15 +1266,14 @@ static std::vector<inferdeck::core::ChatMessage> BuildToolIntentRepairMessages(
         "Available tool names: " + ToolNamesSummary(registry) + "\n\n"
         "Invalid previous assistant response:\n" + RepairPreviewText(invalid_result) + "\n\n"
         "Repair now. If a tool is needed, emit exactly one machine-readable tool call and no prose. "
-        "For Qwen use <tool_call>{\"name\":\"read\",\"arguments\":{\"filePath\":\"src/app/page.tsx\"}}</tool_call>. "
-        "For GPT-OSS/Harmony use <|channel|>commentary to=tool.read <|constrain|>json<|message|>{\"filePath\":\"src/app/page.tsx\"}<|call|>. "
+        + BuildToolInstructionForRepair(registry) + " "
         "If no tool is needed, provide the final answer only.";
     repair_messages.push_back({inferdeck::core::MessageRole::User, prompt, "", "", ""});
     return repair_messages;
 }
 
 static inferdeck::core::InferenceParams BuildToolIntentRepairParams(inferdeck::core::InferenceParams params) {
-    params.max_tokens = 768;
+    params.max_tokens = 1024;
     params.temperature = 0.0f;
     params.top_p = 1.0f;
     return params;
@@ -1330,14 +1503,17 @@ static json BuildChatCompletionResponse(const std::string& id,
 
     std::string finish_reason = tool_calls.empty() ? "stop" : "tool_calls";
     if (tool_calls.empty() && registry.has_tools && !extracted.error.empty()) {
-        finish_reason = "error";
-        response["error"] = {
-            {"message", extracted.error},
-            {"type", extracted.format == "narrated_intent" ? "tool_intent_error" : "tool_extraction_error"},
-            {"code", extracted.format == "narrated_intent" ? "tool_intent_narrated" : "tool_extraction_failed"},
-            {"toolExtractionFormat", extracted.format},
-            {"rawToolTextPreview", extracted.raw_preview}
+        response["_tool_extraction"] = {
+            {"error", extracted.error},
+            {"format", extracted.format},
+            {"raw_preview", extracted.raw_preview}
         };
+        if (!visible_text.empty()) {
+            message["content"] = SanitizeAssistantContent(visible_text);
+        } else {
+            message["content"] = "(I attempted to use a tool but encountered an issue. Please rephrase your request.)";
+        }
+        finish_reason = "stop";
     }
     response["choices"] = json::array({{{"index", 0}, {"message", message}, {"finish_reason", finish_reason}}});
     response["usage"] = {{"prompt_tokens", result.prompt_tokens}, {"completion_tokens", result.completion_tokens}, {"total_tokens", result.total_tokens}};
@@ -1526,6 +1702,7 @@ static nlohmann::json SyntheticResultPreview(const nlohmann::json& response,
     return preview;
 }
 
+/*
 static bool RunGuardedSyntheticSse(inferdeck::core::LlamaEngine& engine,
                                    const std::vector<inferdeck::core::ChatMessage>& messages,
                                    const inferdeck::core::InferenceParams& params,
@@ -1537,7 +1714,7 @@ static bool RunGuardedSyntheticSse(inferdeck::core::LlamaEngine& engine,
                                    const ToolNameRegistry& tool_registry,
                                    httplib::DataSink& sink) {
     constexpr int kDefaultHeartbeatMs = 5000;
-    constexpr int kDefaultIdleTimeoutMs = 60000;
+    constexpr int kDefaultIdleTimeoutMs = 300000;
     constexpr int kDefaultTotalTimeoutMs = 600000;
 
     const auto heartbeat_interval = std::chrono::milliseconds(EnvIntMs("INFERDECK_OPENCODE_HEARTBEAT_MS", kDefaultHeartbeatMs));
@@ -1660,6 +1837,7 @@ static bool RunGuardedSyntheticSse(inferdeck::core::LlamaEngine& engine,
             return false;
         }
         ++heartbeat_chunks_sent;
+        last_backend_activity = now;
         next_heartbeat = now + heartbeat_interval;
     }
 
@@ -1773,6 +1951,7 @@ static bool RunGuardedSyntheticSse(inferdeck::core::LlamaEngine& engine,
     sink.done();
     return false;
 }
+*/
 
 void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp) {
     auto& engine = inferdeck::core::LlamaEngine::Get();
@@ -1839,6 +2018,13 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         const auto tool_registry = BuildToolNameRegistry(request_tools);
         if (body.contains("tools") && body["tools"].is_array()) {
             params.tools_json = body["tools"].dump();
+        }
+        std::string tool_format_header = req.get_header_value("X-InferDeck-Tool-Format");
+        if (!tool_format_header.empty()) {
+            auto hdr = LowerCopy(tool_format_header);
+            if (hdr == "qwen" || hdr == "harmony" || hdr == "universal") {
+                params.tool_format_override = hdr;
+            }
         }
         stream = ShouldUseStreamingBackendForClient(body, accepted_client);
 
@@ -2026,10 +2212,55 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                     inferdeck::gateway::RuntimeActivity::Get().MergeJobResult(job_id, json({
                         {"requestProtocol", request_protocol},
                         {"responseProtocol", "openai.sse"},
-                        {"responseMode", "guarded-synthetic-sse"},
+                        {"responseMode", "non-streaming-sse"},
                         {"waitingOnBackendOrToolFormatting", true}
-                    }), "Guarded synthetic SSE waiting on backend/tool formatting");
-                    return RunGuardedSyntheticSse(engine, messages, params, id, response_model_id, job_id, log_label, request_protocol, tool_registry, sink);
+                    }), "Non-streaming SSE waiting on backend");
+
+                    auto result_ptr = std::make_shared<inferdeck::core::InferenceResult>();
+                    auto error_ptr = std::make_shared<std::string>();
+                    auto done_flag = std::make_shared<std::atomic<bool>>(false);
+                    std::thread([&engine, messages, params, result_ptr, error_ptr, done_flag]() {
+                        try {
+                            std::unique_lock<std::mutex> backend_lock(g_switch_mutex);
+                            *result_ptr = engine.Predict(messages, params);
+                        } catch (const std::exception& e) { *error_ptr = e.what(); }
+                        catch (...) { *error_ptr = "Unknown inference failure"; }
+                        done_flag->store(true);
+                    }).detach();
+
+                    while (!done_flag->load()) {
+                        static constexpr std::chrono::milliseconds kHeartbeatMs(5000);
+                        const std::string heartbeat = ": inferdeck " + log_label + " running\n\n";
+                        if (!sink.write(heartbeat.data(), heartbeat.size())) {
+                            sink.done();
+                            return false;
+                        }
+                        std::this_thread::sleep_for(kHeartbeatMs);
+                    }
+
+                    if (!error_ptr->empty()) {
+                        const std::string error_stream = SseErrorChunk(id, response_model_id, *error_ptr) +
+                                   SseDeltaChunk(id, response_model_id, nlohmann::json::object(), "error") +
+                                   "data: [DONE]\n\n";
+                        sink.write(error_stream.data(), error_stream.size());
+                        sink.done();
+                        return false;
+                    }
+
+                    if (result_ptr->HasError()) {
+                        const std::string error_stream = SseErrorChunk(id, response_model_id, result_ptr->error_message) +
+                                   SseDeltaChunk(id, response_model_id, nlohmann::json::object(), "error") +
+                                   "data: [DONE]\n\n";
+                        sink.write(error_stream.data(), error_stream.size());
+                        sink.done();
+                        return false;
+                    }
+
+                    nlohmann::json response = BuildChatCompletionResponse(id, response_model_id, *result_ptr, tool_registry);
+                    const std::string synthetic_stream = BuildSyntheticChatCompletionStreamWithRegistry(response, tool_registry);
+                    sink.write(synthetic_stream.data(), synthetic_stream.size());
+                    sink.done();
+                    return false;
                 }
             );
             resp.set_header("Cache-Control", "no-cache");
@@ -2041,6 +2272,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         bool tool_repair_attempted = false;
         bool tool_repair_succeeded = false;
         std::string tool_repair_error;
+        /*
         if (ShouldAttemptToolIntentRepair(result, tool_registry)) {
             tool_repair_attempted = true;
             inferdeck::core::Logger::Get().Warn("Request " + job_id + " attempting tool-intent repair after narrated assistant response");
@@ -2061,6 +2293,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                 inferdeck::core::Logger::Get().Warn("Request " + job_id + " tool-intent repair failed: " + tool_repair_error);
             }
         }
+        */
         inferdeck::core::Logger::Get().Info("Request " + job_id + " backend non-streaming completed");
         model_lock.unlock();
         if (result.HasError()) {
