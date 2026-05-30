@@ -161,13 +161,13 @@ std::string BuildFallbackPrompt(const std::vector<ChatMessage>& messages,
     if (is_qwen && has_tools) {
         auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
         if (!tool_instruction.empty()) {
-            prompt << "<|system|>\n" << tool_instruction << "\n";
+            prompt << "<|im_start|>system\n" << tool_instruction << "<|im_end|>\n";
         }
         for (const auto& msg : messages) {
             if (msg.role == MessageRole::Tool) {
-                prompt << "<|user|>\n<tool_response>\n" << msg.content << "\n</tool_response>\n";
+                prompt << "<|im_start|>user\n<tool_response>\n" << msg.content << "\n</tool_response><|im_end|>\n";
             } else {
-                prompt << "<|" << RoleToTemplateRole(msg.role) << "|>\n";
+                prompt << "<|im_start|>" << RoleToTemplateRole(msg.role) << "\n";
                 if (!msg.name.empty()) prompt << "name: " << msg.name << "\n";
                 if (!msg.tool_call_id.empty()) prompt << "tool_call_id: " << msg.tool_call_id << "\n";
                 prompt << msg.content;
@@ -175,22 +175,22 @@ std::string BuildFallbackPrompt(const std::vector<ChatMessage>& messages,
                     auto rendered = RenderQwenToolCalls(msg.tool_calls_json);
                     if (!rendered.empty()) prompt << "\n" << rendered;
                 }
-                prompt << "\n";
+                prompt << "<|im_end|>\n";
             }
         }
-        prompt << "<|assistant|>\n<think>\n";
+        prompt << "<|im_start|>assistant\n<think>\n\n</think>\n\n";
     } else {
         auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
         if (!tool_instruction.empty()) {
-            prompt << "<|system|>\n" << tool_instruction << "\n";
+            prompt << "<|im_start|>system\n" << tool_instruction << "<|im_end|>\n";
         }
         for (const auto& msg : messages) {
-            prompt << "<|" << RoleToTemplateRole(msg.role) << "|>\n";
+            prompt << "<|im_start|>" << RoleToTemplateRole(msg.role) << "\n";
             if (!msg.name.empty()) prompt << "name: " << msg.name << "\n";
             if (!msg.tool_call_id.empty()) prompt << "tool_call_id: " << msg.tool_call_id << "\n";
-            prompt << msg.content << "\n";
+            prompt << msg.content << "<|im_end|>\n";
         }
-        prompt << "<|assistant|>\n";
+        prompt << "<|im_start|>assistant\n";
     }
     return prompt.str();
 }
@@ -264,8 +264,8 @@ std::string BuildChatPrompt(llama_model* model,
 
     auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
     if (!tool_instruction.empty()) {
-        roles.push_back("system");
-        contents.push_back(tool_instruction);
+        roles.insert(roles.begin(), "system");
+        contents.insert(contents.begin(), std::move(tool_instruction));
     }
 
     std::vector<llama_chat_message> chat;
@@ -483,7 +483,13 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     if (!params.tool_format_override.empty()) {
         model_family = params.tool_format_override;
     }
-    const std::string prompt = BuildChatPrompt(model, messages, params, model_family);
+    std::string prompt = BuildChatPrompt(model, messages, params, model_family);
+    const std::string think_suffix = "<|im_start|>assistant\n<think>\n";
+    const std::string no_think_suffix = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    if (prompt.size() >= think_suffix.size() &&
+        prompt.compare(prompt.size() - think_suffix.size(), think_suffix.size(), think_suffix) == 0) {
+        prompt.replace(prompt.size() - think_suffix.size(), think_suffix.size(), no_think_suffix);
+    }
     auto prompt_tokens = Tokenize(model, prompt, true);
     if (prompt_tokens.empty()) {
         result.http_status = 500;
@@ -491,7 +497,9 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
         return result;
     }
 
-    const int max_predict = params.max_tokens > 0 ? params.max_tokens : 1024;
+    const int32_t model_max_ctx = llama_model_n_ctx_train(model);
+    const int max_predict = params.max_tokens > 0 ? params.max_tokens : model_max_ctx;
+    Logger::Get().Info("max_predict: " + std::to_string(max_predict) + " (client requested: " + std::to_string(params.max_tokens) + ")");
     result.prompt_tokens = static_cast<int>(prompt_tokens.size());
 
     llama_sampler* sampler = CreateSampler(params);
