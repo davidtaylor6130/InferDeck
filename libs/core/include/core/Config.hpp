@@ -46,6 +46,7 @@ public:
         int fit_target = 512;
         int parallel = 1;
         bool kv_unified = true;
+        std::string mmproj_path;
     };
 
     /// Whisper speech-to-text runtime settings.

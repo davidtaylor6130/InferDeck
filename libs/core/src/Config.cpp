@@ -104,6 +104,7 @@ namespace {
                 else if (lower_key == "fit_target") config.model.fit_target = std::stoi(raw_value);
                 else if (lower_key == "parallel") config.model.parallel = std::stoi(raw_value);
                 else if (lower_key == "kv_unified") config.model.kv_unified = (raw_value == "true" || raw_value == "1");
+                else if (lower_key == "mmproj_path") config.model.mmproj_path = raw_value;
             } else if (current_section == "whisper") {
                 if (lower_key == "enabled") config.whisper.enabled = (raw_value == "true" || raw_value == "1");
                 else if (lower_key == "executable" || lower_key == "executable_path") config.whisper.executable = raw_value;
@@ -178,7 +179,12 @@ void Config::Save(const std::filesystem::path& config_path, const FullConfig& co
     if (!config.model.reasoning_format.empty())
         file << "  reasoning_format: \"" << config.model.reasoning_format << "\"\n";
     file << "  parallel: " << config.model.parallel << "\n";
-    file << "  kv_unified: " << (config.model.kv_unified ? "true" : "false") << "\n\n";
+    file << "  kv_unified: " << (config.model.kv_unified ? "true" : "false") << "\n";
+    if (!config.model.mmproj_path.empty())
+        file << "  mmproj_path: \"" << config.model.mmproj_path << "\"\n";
+    else
+        file << "  mmproj_path: \"\"\n";
+    file << "\n";
 
     file << "gpu:\n";
     file << "  device_id: " << config.gpu.device_id << "\n\n";

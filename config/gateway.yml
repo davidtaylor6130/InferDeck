@@ -22,6 +22,7 @@ model:
   fit_target: 512
   parallel: 1
   kv_unified: true
+  mmproj_path: ""
 
 whisper:
   enabled: true
