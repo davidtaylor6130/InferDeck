@@ -79,7 +79,28 @@ json OllamaToolCallsFromOpenAi(const json& openai_tool_calls) {
 json BuildOpenAiChatBodyFromOllama(const json& ollama) {
     json body;
     body["model"] = ollama.value("model", "");
-    body["messages"] = ollama.value("messages", json::array());
+
+    json messages = ollama.value("messages", json::array());
+    for (auto& msg : messages) {
+        if (msg.contains("images") && msg["images"].is_array() && !msg["images"].empty()) {
+            json content_parts = json::array();
+            std::string text = msg.value("content", "");
+            if (!text.empty()) {
+                content_parts.push_back({{"type", "text"}, {"text", text}});
+            }
+            for (const auto& img_b64 : msg["images"]) {
+                if (img_b64.is_string()) {
+                    content_parts.push_back({
+                        {"type", "image_url"},
+                        {"image_url", {{"url", "data:image/png;base64," + img_b64.get<std::string>()}}}
+                    });
+                }
+            }
+            msg["content"] = content_parts;
+            msg.erase("images");
+        }
+    }
+    body["messages"] = std::move(messages);
     body["stream"] = ollama.value("stream", false);
     if (ollama.contains("tools")) body["tools"] = ollama["tools"];
     bool has_num_predict = false;
