@@ -23,6 +23,7 @@ struct ChatMessage {
     std::string tool_call_id;
     std::string name;
     std::string tool_calls_json;
+    std::vector<std::vector<uint8_t>> images;
 };
 
 struct InferenceParams {
@@ -139,6 +140,8 @@ private:
     int gpu_layers_ = -1;
     int context_size_ = 100000;
     std::string mmproj_path_;
+    void* mmproj_ctx_ = nullptr;
+    bool has_vision_ = false;
     std::string current_model_name_;
     void* model_ = nullptr;
     void* context_ = nullptr;
