@@ -507,9 +507,11 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
         if (!m.images.empty()) { has_images = true; break; }
     }
 
+    bool multimodal_used = false;
     std::vector<llama_token> prompt_tokens;
     std::vector<mtmd_bitmap*> owned_bitmaps;
     mtmd_input_chunks* mm_chunks = nullptr;
+    int n_past = 0;
 
     if (has_vision_ && has_images) {
         std::string prompt = BuildChatPrompt(model, messages, params, model_family);
@@ -545,6 +547,22 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
                 }
                 Logger::Get().Info("Multimodal prompt tokenized: " + std::to_string(total_tokens) + " tokens in " +
                                    std::to_string(mtmd_input_chunks_size(mm_chunks)) + " chunks");
+
+                llama_pos mm_n_past = 0;
+                int eval_res = mtmd_helper_eval_chunks(
+                    static_cast<mtmd_context*>(mmproj_ctx_),
+                    context,
+                    mm_chunks,
+                    mm_n_past,
+                    0, 512, true, &mm_n_past);
+                if (eval_res == 0) {
+                    multimodal_used = true;
+                    result.prompt_tokens = static_cast<int>(total_tokens);
+                    n_past = static_cast<int>(mm_n_past);
+                    Logger::Get().Info("Multimodal prompt evaluated into KV cache, n_past=" + std::to_string(mm_n_past));
+                } else {
+                    Logger::Get().Error("mtmd_helper_eval_chunks failed: " + std::to_string(eval_res));
+                }
             } else {
                 Logger::Get().Warn("mtmd_tokenize failed with code " + std::to_string(tz_res));
             }
@@ -559,8 +577,10 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
         }
         owned_bitmaps.clear();
 
-        prompt = BuildChatPrompt(model, messages, params, model_family);
-        prompt_tokens = Tokenize(model, prompt, true);
+        if (!multimodal_used) {
+            prompt = BuildChatPrompt(model, messages, params, model_family);
+            prompt_tokens = Tokenize(model, prompt, true);
+        }
     } else {
         std::string prompt = BuildChatPrompt(model, messages, params, model_family);
         const std::string think_suffix = "<|im_start|>assistant\n<think>\n";
@@ -571,7 +591,7 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
         }
         prompt_tokens = Tokenize(model, prompt, true);
     }
-    if (prompt_tokens.empty()) {
+    if (prompt_tokens.empty() && !multimodal_used) {
         result.http_status = 500;
         result.error_message = "Failed to tokenize prompt";
         return result;
@@ -580,21 +600,21 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     const int32_t model_max_ctx = llama_model_n_ctx_train(model);
     const int max_predict = params.max_tokens > 0 ? params.max_tokens : model_max_ctx;
     Logger::Get().Info("max_predict: " + std::to_string(max_predict) + " (client requested: " + std::to_string(params.max_tokens) + ")");
-    result.prompt_tokens = static_cast<int>(prompt_tokens.size());
+    if (!multimodal_used) {
+        result.prompt_tokens = static_cast<int>(prompt_tokens.size());
+    }
 
     llama_sampler* sampler = CreateSampler(params);
     constexpr int32_t max_batch_tokens = 512;
     int generated_tokens = 0;
     int decode_status = 0;
-    int n_pos = 0;
-
     auto eval_tokens = [&](const std::vector<llama_token>& tokens, bool encode) {
         for (std::size_t offset = 0; offset < tokens.size() && decode_status == 0; offset += max_batch_tokens) {
             const auto remaining = tokens.size() - offset;
             const auto chunk_size = static_cast<int32_t>(std::min<std::size_t>(remaining, max_batch_tokens));
             llama_batch batch = llama_batch_get_one(const_cast<llama_token*>(tokens.data() + offset), chunk_size);
             decode_status = encode ? llama_encode(context, batch) : llama_decode(context, batch);
-            n_pos += batch.n_tokens;
+            n_past += batch.n_tokens;
             if (on_heartbeat) on_heartbeat();
         }
     };
@@ -646,7 +666,7 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
 
         decode_status = llama_decode(context, batch);
         if (decode_status != 0) break;
-        n_pos += batch.n_tokens;
+        n_past += batch.n_tokens;
 
         if (!sample_next(next_token)) break;
         batch = llama_batch_get_one(&next_token, 1);
