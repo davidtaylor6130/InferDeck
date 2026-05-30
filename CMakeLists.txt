@@ -67,6 +67,10 @@ if(TARGET ggml-vulkan)
     )
 endif()
 
+# --- mtmd multimodal library (from llama.cpp) ---
+set(LLAMA_INSTALL_VERSION "0.0.0" CACHE STRING "llama.cpp version")
+add_subdirectory(${llama_cpp_SOURCE_DIR}/tools/mtmd EXCLUDE_FROM_ALL)
+
 # --- Our libraries and app ---
 add_subdirectory(libs/core)
 add_subdirectory(libs/llama_cpp_wrapper)
