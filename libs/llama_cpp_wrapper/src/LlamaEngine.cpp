@@ -4,6 +4,7 @@
 
 #include "llama.h"
 #include "ggml-backend.h"
+#include "mtmd.h"
 
 #include <algorithm>
 #include <chrono>
@@ -407,6 +408,19 @@ bool LlamaEngine::Initialize(const std::string& model_path,
     model_ = model;
     context_ = context;
     initialized_ = true;
+
+    if (!mmproj_path_.empty()) {
+        auto mmproj_params = mtmd_context_params_default();
+        mmproj_params.use_gpu = true;
+        mmproj_ctx_ = mtmd_init_from_file(mmproj_path_.c_str(), static_cast<llama_model*>(model), mmproj_params);
+        if (mmproj_ctx_) {
+            has_vision_ = true;
+            Logger::Get().Info("Vision model initialized with mmproj: " + mmproj_path_);
+        } else {
+            Logger::Get().Warn("Failed to initialize vision model from mmproj: " + mmproj_path_);
+        }
+    }
+
     LlamaServerManager::Get().Start(model_path, gpu_layers, context_size, 0);
     Logger::Get().Info("LlamaEngine initialized with in-process llama.cpp runtime");
     return true;
@@ -652,6 +666,11 @@ void LlamaEngine::AbortActiveRequest(const std::string& reason) {
 }
 
 void LlamaEngine::FreeRuntime() {
+    if (mmproj_ctx_) {
+        mtmd_free(static_cast<mtmd_context*>(mmproj_ctx_));
+        mmproj_ctx_ = nullptr;
+        has_vision_ = false;
+    }
     if (context_) {
         llama_free(AsContext(context_));
         context_ = nullptr;
