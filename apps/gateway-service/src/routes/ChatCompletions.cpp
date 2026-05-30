@@ -1993,6 +1993,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                                 if (comma != std::string::npos) {
                                     auto b64 = url.substr(comma + 1);
                                     images.push_back(inferdeck::core::Base64Decode(b64));
+                                    content += " <__media__> ";
                                 }
                             }
                         } else if (part.is_string()) {

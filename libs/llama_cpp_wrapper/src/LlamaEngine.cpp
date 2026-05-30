@@ -5,6 +5,7 @@
 #include "llama.h"
 #include "ggml-backend.h"
 #include "mtmd.h"
+#include "mtmd-helper.h"
 
 #include <algorithm>
 #include <chrono>
@@ -501,14 +502,75 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     if (!params.tool_format_override.empty()) {
         model_family = params.tool_format_override;
     }
-    std::string prompt = BuildChatPrompt(model, messages, params, model_family);
-    const std::string think_suffix = "<|im_start|>assistant\n<think>\n";
-    const std::string no_think_suffix = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
-    if (prompt.size() >= think_suffix.size() &&
-        prompt.compare(prompt.size() - think_suffix.size(), think_suffix.size(), think_suffix) == 0) {
-        prompt.replace(prompt.size() - think_suffix.size(), think_suffix.size(), no_think_suffix);
+    bool has_images = false;
+    for (const auto& m : messages) {
+        if (!m.images.empty()) { has_images = true; break; }
     }
-    auto prompt_tokens = Tokenize(model, prompt, true);
+
+    std::vector<llama_token> prompt_tokens;
+    std::vector<mtmd_bitmap*> owned_bitmaps;
+    mtmd_input_chunks* mm_chunks = nullptr;
+
+    if (has_vision_ && has_images) {
+        std::string prompt = BuildChatPrompt(model, messages, params, model_family);
+        Logger::Get().Info("Building multimodal prompt with " + std::to_string(messages.size()) + " messages");
+
+        std::vector<const mtmd_bitmap*> bitmaps;
+        for (const auto& m : messages) {
+            for (const auto& img : m.images) {
+                auto* bmp = mtmd_helper_bitmap_init_from_buf(
+                    static_cast<mtmd_context*>(mmproj_ctx_),
+                    img.data(), img.size());
+                if (bmp) {
+                    bitmaps.push_back(bmp);
+                    owned_bitmaps.push_back(bmp);
+                }
+            }
+        }
+
+        if (!bitmaps.empty()) {
+            mm_chunks = mtmd_input_chunks_init();
+            mtmd_input_text mm_text;
+            mm_text.text = prompt.c_str();
+            mm_text.add_special = true;
+            mm_text.parse_special = false;
+
+            int32_t tz_res = mtmd_tokenize(static_cast<mtmd_context*>(mmproj_ctx_),
+                                          mm_chunks, &mm_text,
+                                          bitmaps.data(), bitmaps.size());
+            if (tz_res == 0) {
+                size_t total_tokens = 0;
+                for (size_t i = 0; i < mtmd_input_chunks_size(mm_chunks); ++i) {
+                    total_tokens += mtmd_input_chunk_get_n_tokens(mtmd_input_chunks_get(mm_chunks, i));
+                }
+                Logger::Get().Info("Multimodal prompt tokenized: " + std::to_string(total_tokens) + " tokens in " +
+                                   std::to_string(mtmd_input_chunks_size(mm_chunks)) + " chunks");
+            } else {
+                Logger::Get().Warn("mtmd_tokenize failed with code " + std::to_string(tz_res));
+            }
+        }
+
+        if (mm_chunks) {
+            mtmd_input_chunks_free(mm_chunks);
+            mm_chunks = nullptr;
+        }
+        for (auto* bmp : owned_bitmaps) {
+            mtmd_bitmap_free(bmp);
+        }
+        owned_bitmaps.clear();
+
+        prompt = BuildChatPrompt(model, messages, params, model_family);
+        prompt_tokens = Tokenize(model, prompt, true);
+    } else {
+        std::string prompt = BuildChatPrompt(model, messages, params, model_family);
+        const std::string think_suffix = "<|im_start|>assistant\n<think>\n";
+        const std::string no_think_suffix = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+        if (prompt.size() >= think_suffix.size() &&
+            prompt.compare(prompt.size() - think_suffix.size(), think_suffix.size(), think_suffix) == 0) {
+            prompt.replace(prompt.size() - think_suffix.size(), think_suffix.size(), no_think_suffix);
+        }
+        prompt_tokens = Tokenize(model, prompt, true);
+    }
     if (prompt_tokens.empty()) {
         result.http_status = 500;
         result.error_message = "Failed to tokenize prompt";
