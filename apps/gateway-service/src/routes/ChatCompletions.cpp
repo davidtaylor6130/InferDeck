@@ -2,6 +2,7 @@
 #include "RuntimeActivity.hpp"
 #include "llama_cpp/LlamaEngine.hpp"
 #include "config/ConfigLoader.hpp"
+#include "core/Base64.hpp"
 #include "core/Config.hpp"
 #include "core/Logger.hpp"
 #include <nlohmann/json.hpp>
@@ -1976,6 +1977,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                     else if (r == "tool") role = inferdeck::core::MessageRole::Tool;
                 }
                 std::string content;
+                std::vector<std::vector<uint8_t>> images;
                 auto& c = msg["content"];
                 if (c.is_string()) {
                     content = c.get<std::string>();
@@ -1983,6 +1985,16 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                     for (const auto& part : c) {
                         if (part.contains("type") && part["type"] == "text" && part.contains("text")) {
                             content += part["text"].get<std::string>();
+                        } else if (part.contains("type") && part["type"] == "image_url" && part.contains("image_url")) {
+                            const auto& iu = part["image_url"];
+                            std::string url = iu.is_string() ? iu.get<std::string>() : iu.value("url", "");
+                            if (url.find("data:image/") == 0) {
+                                auto comma = url.find(",", url.find(";base64,"));
+                                if (comma != std::string::npos) {
+                                    auto b64 = url.substr(comma + 1);
+                                    images.push_back(inferdeck::core::Base64Decode(b64));
+                                }
+                            }
                         } else if (part.is_string()) {
                             content += part.get<std::string>();
                         }
@@ -1997,7 +2009,7 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
                 if (role == inferdeck::core::MessageRole::Tool) {
                     content = CompactToolResultContent(content);
                 }
-                messages.push_back({role, content, tool_call_id, name, tool_calls_json});
+                messages.push_back({role, content, tool_call_id, name, tool_calls_json, std::move(images)});
             }
         }
 
