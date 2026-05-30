@@ -154,7 +154,8 @@ int main(int argc, char* argv[]) {
             server_config.model_path,
             server_config.precision,
             server_config.n_gpu_layers,
-            server_config.context_size
+            server_config.context_size,
+            server_config.mmproj_path
         );
 
         if (!engine_ok) {

@@ -344,7 +344,8 @@ LlamaEngine::~LlamaEngine() {
 bool LlamaEngine::Initialize(const std::string& model_path,
                              const std::string& precision,
                              int gpu_layers,
-                             int context_size) {
+                             int context_size,
+                             const std::string& mmproj_path) {
     std::lock_guard<std::mutex> generation_lock(generation_mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -364,6 +365,7 @@ bool LlamaEngine::Initialize(const std::string& model_path,
     precision_ = precision;
     gpu_layers_ = gpu_layers;
     context_size_ = context_size;
+    mmproj_path_ = mmproj_path;
     abort_requested_.store(false);
 
     std::filesystem::path p(model_path);
@@ -419,6 +421,7 @@ bool LlamaEngine::SwitchModel(const std::string& model_path) {
     std::string precision;
     int gpu_layers = -1;
     int context_size = 100000;
+    std::string mmproj_path;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (initialized_ && !model_path_.empty()) {
@@ -438,8 +441,9 @@ bool LlamaEngine::SwitchModel(const std::string& model_path) {
         precision = precision_.empty() ? "auto" : precision_;
         gpu_layers = gpu_layers_;
         context_size = context_size_;
+        mmproj_path = mmproj_path_;
     }
-    return Initialize(model_path, precision, gpu_layers, context_size);
+    return Initialize(model_path, precision, gpu_layers, context_size, mmproj_path);
 }
 
 bool LlamaEngine::LoadModel(const std::string& model_path) {

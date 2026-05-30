@@ -24,6 +24,7 @@ struct ServerConfig {
     std::string precision = "auto";
     int n_gpu_layers = -1;
     int context_size = 100000;
+    std::string mmproj_path;
     bool whisper_enabled = false;
     std::string whisper_executable;
     std::string whisper_model_directory;

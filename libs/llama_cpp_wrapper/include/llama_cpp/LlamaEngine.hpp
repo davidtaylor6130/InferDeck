@@ -99,7 +99,8 @@ public:
     bool Initialize(const std::string& model_path,
                     const std::string& precision = "auto",
                     int gpu_layers = -1,
-                    int context_size = 100000);
+                    int context_size = 100000,
+                    const std::string& mmproj_path = "");
 
     bool SwitchModel(const std::string& model_path);
     bool LoadModel(const std::string& model_path);
@@ -137,6 +138,7 @@ private:
     std::string precision_;
     int gpu_layers_ = -1;
     int context_size_ = 100000;
+    std::string mmproj_path_;
     std::string current_model_name_;
     void* model_ = nullptr;
     void* context_ = nullptr;
