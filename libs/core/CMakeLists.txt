@@ -7,6 +7,7 @@ add_library(core STATIC
     src/Config.cpp
     src/JobQueue.cpp
     src/WorkerPool.cpp
+    src/Base64.cpp
 )
 
 target_include_directories(core PUBLIC
