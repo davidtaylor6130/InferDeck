@@ -898,7 +898,7 @@ void HandleDashboardLoadModel(const httplib::Request& req, httplib::Response& re
         auto& engine = inferdeck::core::LlamaEngine::Get();
         bool ok = engine.IsInitialized()
             ? engine.SwitchModel(model_path)
-            : engine.Initialize(model_path, config.precision, config.n_gpu_layers, config.context_size);
+            : engine.Initialize(model_path, config.precision, config.n_gpu_layers, config.context_size, config.mmproj_path);
         if (!ok) {
             JsonError(resp, 500, "model_load_failed", "llama.cpp could not load the requested model.");
             return;
@@ -934,7 +934,7 @@ void HandleDashboardStartService(const httplib::Request& req, httplib::Response&
         HandleDashboardWhisperStart(req, resp);
         return;
     }
-    if (!inferdeck::core::LlamaEngine::Get().Initialize(config.model_path, config.precision, config.n_gpu_layers, config.context_size)) {
+    if (!inferdeck::core::LlamaEngine::Get().Initialize(config.model_path, config.precision, config.n_gpu_layers, config.context_size, config.mmproj_path)) {
         JsonError(resp, 500, "start_failed", "llama.cpp failed to start.");
         return;
     }

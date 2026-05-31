@@ -104,7 +104,7 @@ namespace {
                 else if (lower_key == "fit_target") config.model.fit_target = std::stoi(raw_value);
                 else if (lower_key == "parallel") config.model.parallel = std::stoi(raw_value);
                 else if (lower_key == "kv_unified") config.model.kv_unified = (raw_value == "true" || raw_value == "1");
-                else if (lower_key == "mmproj_path") config.model.mmproj_path = raw_value;
+                else if (lower_key == "mmproj_path" || lower_key == "mmproj") config.model.mmproj_path = raw_value;
             } else if (current_section == "whisper") {
                 if (lower_key == "enabled") config.whisper.enabled = (raw_value == "true" || raw_value == "1");
                 else if (lower_key == "executable" || lower_key == "executable_path") config.whisper.executable = raw_value;
