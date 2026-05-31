@@ -24,6 +24,9 @@ ServerConfig LoadConfig(const std::filesystem::path& config_path) {
     config.precision = full.model.precision;
     config.n_gpu_layers = full.model.n_gpu_layers;
     config.context_size = full.model.context_size;
+    config.batch_size = full.model.batch_size;
+    config.cache_type_k = full.model.cache_type_k;
+    config.cache_type_v = full.model.cache_type_v;
     config.mmproj_path = full.model.mmproj_path;
     config.whisper_enabled = full.whisper.enabled;
     config.whisper_executable = full.whisper.executable;

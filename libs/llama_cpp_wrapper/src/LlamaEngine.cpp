@@ -314,9 +314,26 @@ std::string TokenToPiece(llama_model* model, llama_token token) {
     return std::string(buffer.data(), static_cast<std::size_t>(written));
 }
 
+ggml_type CacheTypeFromString(const std::string& type) {
+    if (type == "f32")  return GGML_TYPE_F32;
+    if (type == "f16")  return GGML_TYPE_F16;
+    if (type == "q8_0") return GGML_TYPE_Q8_0;
+    if (type == "q4_0") return GGML_TYPE_Q4_0;
+    if (type == "q4_1") return GGML_TYPE_Q4_1;
+    if (type == "q5_0") return GGML_TYPE_Q5_0;
+    if (type == "q5_1") return GGML_TYPE_Q5_1;
+    if (type == "q2_K") return GGML_TYPE_Q2_K;
+    if (type == "q3_K") return GGML_TYPE_Q3_K;
+    if (type == "q4_K") return GGML_TYPE_Q4_K;
+    if (type == "q5_K") return GGML_TYPE_Q5_K;
+    if (type == "q6_K") return GGML_TYPE_Q6_K;
+    if (type == "q8_K") return GGML_TYPE_Q8_K;
+    return GGML_TYPE_F16;
+}
+
 llama_sampler* CreateSampler(const InferenceParams& params) {
     auto sparams = llama_sampler_chain_default_params();
-    sparams.no_perf = false;
+    sparams.no_perf = true;
     llama_sampler* sampler = llama_sampler_chain_init(sparams);
     llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
     llama_sampler_chain_add(sampler, llama_sampler_init_top_p(std::clamp(params.top_p, 0.0f, 1.0f), 1));
@@ -348,6 +365,16 @@ bool LlamaEngine::Initialize(const std::string& model_path,
                              int gpu_layers,
                              int context_size,
                              const std::string& mmproj_path) {
+    EngineParams params;
+    params.model_path = model_path;
+    params.precision = precision;
+    params.gpu_layers = gpu_layers;
+    params.context_size = context_size;
+    params.mmproj_path = mmproj_path;
+    return Initialize(params);
+}
+
+bool LlamaEngine::Initialize(const EngineParams& params) {
     std::lock_guard<std::mutex> generation_lock(generation_mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -356,48 +383,66 @@ bool LlamaEngine::Initialize(const std::string& model_path,
         ggml_backend_load_all();
     });
 
-    if (!std::filesystem::exists(model_path)) {
-        Logger::Get().Error("Model file not found: " + model_path);
+    if (!std::filesystem::exists(params.model_path)) {
+        Logger::Get().Error("Model file not found: " + params.model_path);
         return false;
     }
 
     FreeRuntime();
 
-    model_path_ = model_path;
-    precision_ = precision;
-    gpu_layers_ = gpu_layers;
-    context_size_ = context_size;
-    mmproj_path_ = mmproj_path;
+    last_message_count_ = 0;
+    last_prompt_token_count_ = 0;
+    last_n_past_ = 0;
+    cache_valid_ = false;
+
+    engine_params_ = params;
     abort_requested_.store(false);
 
-    std::filesystem::path p(model_path);
+    std::filesystem::path p(params.model_path);
     current_model_name_ = p.stem().string();
 
-    Logger::Get().Info("Loading internal llama.cpp Vulkan runtime with model: " + model_path);
-    Logger::Get().Info("GPU layers: " + std::string(gpu_layers < 0 ? "all" : std::to_string(gpu_layers)));
-    Logger::Get().Info("Context size: " + std::to_string(context_size));
+    Logger::Get().Info("Loading internal llama.cpp Vulkan runtime with model: " + params.model_path);
+    Logger::Get().Info("GPU layers: " + std::string(params.gpu_layers < 0 ? "all" : std::to_string(params.gpu_layers)));
+    Logger::Get().Info("Context size: " + std::to_string(params.context_size));
+
+    if (params.n_threads > 0) {
+        Logger::Get().Info("Threads: " + std::to_string(params.n_threads) + " (gen) / " +
+                           std::to_string(params.n_threads_batch > 0 ? params.n_threads_batch : params.n_threads) + " (batch)");
+    }
 
     llama_model_params model_params = llama_model_default_params();
-    model_params.n_gpu_layers = gpu_layers < 0 ? 999 : gpu_layers;
+    model_params.n_gpu_layers = params.gpu_layers < 0 ? 999 : params.gpu_layers;
     model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
     model_params.main_gpu = 0;
     model_params.use_mmap = false;
 
-    llama_model* model = llama_model_load_from_file(model_path.c_str(), model_params);
+    llama_model* model = llama_model_load_from_file(params.model_path.c_str(), model_params);
     if (!model) {
         Logger::Get().Error("Failed to load model through internal llama.cpp runtime");
         return false;
     }
 
     llama_context_params ctx_params = llama_context_default_params();
-    ctx_params.n_ctx = static_cast<uint32_t>(std::max(512, context_size));
-    ctx_params.n_batch = 512;
-    ctx_params.n_ubatch = 512;
+    ctx_params.n_ctx = static_cast<uint32_t>(std::max(512, params.context_size));
+    ctx_params.n_batch = static_cast<uint32_t>(params.batch_size);
+    ctx_params.n_ubatch = static_cast<uint32_t>(params.batch_size);
     ctx_params.n_seq_max = 1;
     ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     ctx_params.offload_kqv = true;
     ctx_params.kv_unified = true;
-    ctx_params.no_perf = false;
+    ctx_params.swa_full = params.swa_full;
+    ctx_params.op_offload = params.op_offload;
+    ctx_params.no_perf = params.no_perf;
+    if (params.n_threads > 0) {
+        ctx_params.n_threads = params.n_threads;
+    }
+    if (params.n_threads_batch > 0) {
+        ctx_params.n_threads_batch = params.n_threads_batch;
+    } else if (params.n_threads > 0) {
+        ctx_params.n_threads_batch = params.n_threads;
+    }
+    ctx_params.type_k = CacheTypeFromString(params.cache_type_k);
+    ctx_params.type_v = CacheTypeFromString(params.cache_type_v);
 
     llama_context* context = llama_init_from_model(model, ctx_params);
     if (!context) {
@@ -410,19 +455,19 @@ bool LlamaEngine::Initialize(const std::string& model_path,
     context_ = context;
     initialized_ = true;
 
-    if (!mmproj_path_.empty()) {
+    if (!params.mmproj_path.empty()) {
         auto mmproj_params = mtmd_context_params_default();
         mmproj_params.use_gpu = true;
-        mmproj_ctx_ = mtmd_init_from_file(mmproj_path_.c_str(), static_cast<llama_model*>(model), mmproj_params);
+        mmproj_ctx_ = mtmd_init_from_file(params.mmproj_path.c_str(), static_cast<llama_model*>(model), mmproj_params);
         if (mmproj_ctx_) {
             has_vision_ = true;
-            Logger::Get().Info("Vision model initialized with mmproj: " + mmproj_path_);
+            Logger::Get().Info("Vision model initialized with mmproj: " + params.mmproj_path);
         } else {
-            Logger::Get().Warn("Failed to initialize vision model from mmproj: " + mmproj_path_);
+            Logger::Get().Warn("Failed to initialize vision model from mmproj: " + params.mmproj_path);
         }
     }
 
-    LlamaServerManager::Get().Start(model_path, gpu_layers, context_size, 0);
+    LlamaServerManager::Get().Start(params.model_path, params.gpu_layers, params.context_size, 0);
     Logger::Get().Info("LlamaEngine initialized with in-process llama.cpp runtime");
     return true;
 }
@@ -433,17 +478,14 @@ bool LlamaEngine::IsInitialized() const {
 }
 
 bool LlamaEngine::SwitchModel(const std::string& model_path) {
-    std::string precision;
-    int gpu_layers = -1;
-    int context_size = 100000;
-    std::string mmproj_path;
+    EngineParams params;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (initialized_ && !model_path_.empty()) {
-            bool same_model = model_path_ == model_path;
+        if (initialized_ && !engine_params_.model_path.empty()) {
+            bool same_model = engine_params_.model_path == model_path;
             if (!same_model) {
                 try {
-                    same_model = std::filesystem::equivalent(model_path_, model_path);
+                    same_model = std::filesystem::equivalent(engine_params_.model_path, model_path);
                 } catch (...) {
                     same_model = false;
                 }
@@ -453,12 +495,10 @@ bool LlamaEngine::SwitchModel(const std::string& model_path) {
                 return true;
             }
         }
-        precision = precision_.empty() ? "auto" : precision_;
-        gpu_layers = gpu_layers_;
-        context_size = context_size_;
-        mmproj_path = mmproj_path_;
+        params = engine_params_;
     }
-    return Initialize(model_path, precision, gpu_layers, context_size, mmproj_path);
+    params.model_path = model_path;
+    return Initialize(params);
 }
 
 bool LlamaEngine::LoadModel(const std::string& model_path) {
@@ -492,7 +532,10 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     }
 
     abort_requested_.store(false);
-    llama_memory_clear(llama_get_memory(context), true);
+
+    bool reuse_cache = cache_valid_ &&
+                       messages.size() > last_message_count_ &&
+                       last_message_count_ > 0;
 
     std::string model_family;
     {
@@ -514,6 +557,11 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     int n_past = 0;
 
     if (has_vision_ && has_images) {
+        if (reuse_cache) {
+            llama_memory_clear(llama_get_memory(context), true);
+            n_past = 0;
+            reuse_cache = false;
+        }
         std::string prompt = BuildChatPrompt(model, messages, params, model_family);
         Logger::Get().Info("Building multimodal prompt with " + std::to_string(messages.size()) + " messages");
 
@@ -604,12 +652,25 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
         result.prompt_tokens = static_cast<int>(prompt_tokens.size());
     }
 
+    int start_offset = 0;
+    if (!multimodal_used) {
+        if (reuse_cache && prompt_tokens.size() >= static_cast<std::size_t>(last_prompt_token_count_)) {
+            start_offset = last_prompt_token_count_;
+            llama_memory_seq_rm(llama_get_memory(context), 0, start_offset, -1);
+            n_past = start_offset;
+        } else {
+            llama_memory_clear(llama_get_memory(context), true);
+            start_offset = 0;
+            n_past = 0;
+        }
+    }
+
     llama_sampler* sampler = CreateSampler(params);
     constexpr int32_t max_batch_tokens = 512;
     int generated_tokens = 0;
     int decode_status = 0;
-    auto eval_tokens = [&](const std::vector<llama_token>& tokens, bool encode) {
-        for (std::size_t offset = 0; offset < tokens.size() && decode_status == 0; offset += max_batch_tokens) {
+    auto eval_tokens = [&](const std::vector<llama_token>& tokens, bool encode, std::size_t start_offset = 0) {
+        for (std::size_t offset = start_offset; offset < tokens.size() && decode_status == 0; offset += max_batch_tokens) {
             const auto remaining = tokens.size() - offset;
             const auto chunk_size = static_cast<int32_t>(std::min<std::size_t>(remaining, max_batch_tokens));
             llama_batch batch = llama_batch_get_one(const_cast<llama_token*>(tokens.data() + offset), chunk_size);
@@ -641,14 +702,14 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     llama_batch batch{};
 
     if (llama_model_has_encoder(model)) {
-        eval_tokens(prompt_tokens, true);
+        eval_tokens(prompt_tokens, true, start_offset);
         if (decode_status == 0) {
             llama_token decoder_start = llama_model_decoder_start_token(model);
             if (decoder_start == LLAMA_TOKEN_NULL) decoder_start = llama_vocab_bos(llama_model_get_vocab(model));
             batch = llama_batch_get_one(&decoder_start, 1);
         }
     } else {
-        eval_tokens(prompt_tokens, false);
+        eval_tokens(prompt_tokens, false, start_offset);
         if (decode_status == 0) {
             if (max_predict > 0 && sample_next(next_token)) {
                 batch = llama_batch_get_one(&next_token, 1);
@@ -699,6 +760,11 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
         stats_.min_latency_ms = std::min(stats_.min_latency_ms, result.duration_ms);
     }
 
+    last_message_count_ = messages.size();
+    last_n_past_ = n_past;
+    last_prompt_token_count_ = static_cast<int>(prompt_tokens.size());
+    cache_valid_ = !result.HasError();
+
     return result;
 }
 
@@ -739,7 +805,7 @@ std::string LlamaEngine::GetModelFamily() const {
 
 std::string LlamaEngine::GetPrecision() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return precision_;
+    return engine_params_.precision;
 }
 
 void LlamaEngine::AbortActiveRequest(const std::string& reason) {

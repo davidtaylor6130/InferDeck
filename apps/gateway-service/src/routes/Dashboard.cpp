@@ -896,9 +896,23 @@ void HandleDashboardLoadModel(const httplib::Request& req, httplib::Response& re
             return;
         }
         auto& engine = inferdeck::core::LlamaEngine::Get();
-        bool ok = engine.IsInitialized()
-            ? engine.SwitchModel(model_path)
-            : engine.Initialize(model_path, config.precision, config.n_gpu_layers, config.context_size, config.mmproj_path);
+        bool ok;
+        if (engine.IsInitialized()) {
+            ok = engine.SwitchModel(model_path);
+        } else {
+            inferdeck::core::EngineParams ep;
+            ep.model_path = model_path;
+            ep.precision = config.precision;
+            ep.gpu_layers = config.n_gpu_layers;
+            ep.context_size = config.context_size;
+            ep.mmproj_path = config.mmproj_path;
+            ep.batch_size = config.batch_size;
+            ep.cache_type_k = config.cache_type_k;
+            ep.cache_type_v = config.cache_type_v;
+            ep.n_threads = config.n_threads;
+            ep.n_threads_batch = config.n_threads_batch;
+            ok = engine.Initialize(ep);
+        }
         if (!ok) {
             JsonError(resp, 500, "model_load_failed", "llama.cpp could not load the requested model.");
             return;
@@ -971,7 +985,18 @@ void HandleDashboardRestartService(const httplib::Request& req, httplib::Respons
     if (engine.IsInitialized()) {
         engine.Shutdown();
     }
-    bool ok = engine.Initialize(current, config.precision, config.n_gpu_layers, config.context_size);
+    inferdeck::core::EngineParams ep;
+    ep.model_path = current;
+    ep.precision = config.precision;
+    ep.gpu_layers = config.n_gpu_layers;
+    ep.context_size = config.context_size;
+    ep.mmproj_path = config.mmproj_path;
+    ep.batch_size = config.batch_size;
+    ep.cache_type_k = config.cache_type_k;
+    ep.cache_type_v = config.cache_type_v;
+    ep.n_threads = config.n_threads;
+    ep.n_threads_batch = config.n_threads_batch;
+    bool ok = engine.Initialize(ep);
     if (!ok) {
         JsonError(resp, 500, "restart_failed", "llama.cpp failed to restart.");
         return;

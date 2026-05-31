@@ -92,11 +92,29 @@ struct HttpStreamResult {
     std::string error_message;
 };
 
+struct EngineParams {
+    std::string model_path;
+    std::string precision = "auto";
+    int gpu_layers = -1;
+    int context_size = 100000;
+    std::string mmproj_path;
+    int batch_size = 512;
+    int n_threads = 0;
+    int n_threads_batch = 0;
+    std::string cache_type_k = "f16";
+    std::string cache_type_v = "f16";
+    bool swa_full = true;
+    bool op_offload = true;
+    bool no_perf = true;
+};
+
 using TokenCallback = std::function<void(const std::string& token, TokenType type, int cumulative_tokens)>;
 using StreamHeartbeatCallback = std::function<void()>;
 
 class LlamaEngine {
 public:
+    bool Initialize(const EngineParams& params);
+
     bool Initialize(const std::string& model_path,
                     const std::string& precision = "auto",
                     int gpu_layers = -1,
@@ -135,11 +153,7 @@ private:
                              StreamHeartbeatCallback on_heartbeat);
     void FreeRuntime();
 
-    std::string model_path_;
-    std::string precision_;
-    int gpu_layers_ = -1;
-    int context_size_ = 100000;
-    std::string mmproj_path_;
+    EngineParams engine_params_;
     void* mmproj_ctx_ = nullptr;
     bool has_vision_ = false;
     std::string current_model_name_;
@@ -151,6 +165,11 @@ private:
     InferenceStats stats_;
     mutable std::mutex mutex_;
     bool initialized_ = false;
+
+    size_t last_message_count_ = 0;
+    int last_prompt_token_count_ = 0;
+    int last_n_past_ = 0;
+    bool cache_valid_ = false;
 };
 
 } // namespace inferdeck::core

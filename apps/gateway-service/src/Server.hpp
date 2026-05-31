@@ -24,6 +24,11 @@ struct ServerConfig {
     std::string precision = "auto";
     int n_gpu_layers = -1;
     int context_size = 100000;
+    int batch_size = 512;
+    std::string cache_type_k = "q4_0";
+    std::string cache_type_v = "q4_0";
+    int n_threads = 16;
+    int n_threads_batch = 32;
     std::string mmproj_path;
     bool whisper_enabled = false;
     std::string whisper_executable;

@@ -150,13 +150,18 @@ int main(int argc, char* argv[]) {
         WarnIfOpenCodeTargetsDifferentPort(server_config.apiPort);
 
         auto& engine = inferdeck::core::LlamaEngine::Get();
-        bool engine_ok = engine.Initialize(
-            server_config.model_path,
-            server_config.precision,
-            server_config.n_gpu_layers,
-            server_config.context_size,
-            server_config.mmproj_path
-        );
+        inferdeck::core::EngineParams engine_params;
+        engine_params.model_path = server_config.model_path;
+        engine_params.precision = server_config.precision;
+        engine_params.gpu_layers = server_config.n_gpu_layers;
+        engine_params.context_size = server_config.context_size;
+        engine_params.mmproj_path = server_config.mmproj_path;
+        engine_params.batch_size = server_config.batch_size;
+        engine_params.cache_type_k = server_config.cache_type_k;
+        engine_params.cache_type_v = server_config.cache_type_v;
+        engine_params.n_threads = server_config.n_threads;
+        engine_params.n_threads_batch = server_config.n_threads_batch;
+        bool engine_ok = engine.Initialize(engine_params);
 
         if (!engine_ok) {
             inferdeck::core::Logger::Get().Error("Failed to initialize LlamaEngine");
