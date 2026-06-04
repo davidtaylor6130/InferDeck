@@ -28,12 +28,21 @@ struct ChatMessage {
 
 struct InferenceParams {
     int max_tokens = -1;
-    float temperature = 0.7f;
-    float top_p = 0.9f;
-    float repetition_penalty = 1.0f;
+    float temperature = 0.8f;
+    float top_p = 0.95f;
+    float top_k = 40;
+    float repetition_penalty = 1.1f;
+    float frequency_penalty = 0.0f;
+    float presence_penalty = 0.0f;
+    float min_p = 0.05f;
+    float dry_multiplier = 0.0f;
+    float dry_base = 1.75f;
+    int dry_allowed_length = 2;
+    int dry_penalty_last_n = 512;
+    int penalty_last_n = 64;
     bool stream = false;
-    std::string stop;
-    std::vector<float> presence_penalty;
+    int seed = -1;
+    std::vector<std::string> stop;
     std::string user;
     std::string tools_json;
     std::string tool_format_override;
@@ -98,12 +107,12 @@ struct EngineParams {
     int gpu_layers = -1;
     int context_size = 100000;
     std::string mmproj_path;
-    int batch_size = 512;
+    int batch_size = 2048;
     int n_threads = 0;
     int n_threads_batch = 0;
     std::string cache_type_k = "f16";
     std::string cache_type_v = "f16";
-    bool swa_full = true;
+    bool swa_full = false;
     bool op_offload = true;
     bool no_perf = true;
 };
@@ -154,6 +163,7 @@ private:
     void FreeRuntime();
 
     EngineParams engine_params_;
+    void* chat_templates_ = nullptr;
     void* mmproj_ctx_ = nullptr;
     bool has_vision_ = false;
     std::string current_model_name_;

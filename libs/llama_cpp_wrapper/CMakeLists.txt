@@ -18,6 +18,7 @@ target_include_directories(llama_cpp_wrapper PUBLIC
 target_link_libraries(llama_cpp_wrapper PUBLIC
     core
     llama
+    llama-common
     ggml
     mtmd
     nlohmann_json::nlohmann_json

@@ -14,15 +14,15 @@ model:
   mmproj: "C:/Users/david/Documents/00_Models/Qwen3.6-35B-A3B-GGUF/mmproj-Qwen3.6-35B-A3B-BF16.gguf"
   precision: "auto"
   n_gpu_layers: -1
-  context_size: 262144
-  batch_size: 512
+  context_size: 131072
+  batch_size: 2048
   flash_attn: true
-  cache_type_k: "q4_0"
-  cache_type_v: "q4_0"
+  cache_type_k: "q8_0"
+  cache_type_v: "q8_0"
   split_mode: "none"
   fit_target: 512
   parallel: 1
-  kv_unified: true
+  kv_unified: false
 
 whisper:
   enabled: true

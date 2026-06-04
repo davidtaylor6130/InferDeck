@@ -1347,6 +1347,10 @@ std::string SanitizeAssistantContent(const std::string& content) {
     ReplaceAll(text, "<|start|>assistant", "");
     ReplaceAll(text, "<|start|>system", "");
     ReplaceAll(text, "<|start|>user", "");
+    ReplaceAll(text, "<|im_start|>assistant", "");
+    ReplaceAll(text, "<|im_start|>system", "");
+    ReplaceAll(text, "<|im_start|>user", "");
+    ReplaceAll(text, "<|im_start|>", "");
     ReplaceAll(text, "<|channel|>final<|message|>", "");
     ReplaceAll(text, "<|channel|>commentary<|message|>", "");
     ReplaceAll(text, "<|channel|>analysis", "");
@@ -2018,8 +2022,26 @@ void HandleChatCompletions(const httplib::Request& req, httplib::Response& resp)
         params.max_tokens = body.value("max_tokens", -1);
         if (body.contains("temperature")) params.temperature = body["temperature"].get<float>();
         if (body.contains("top_p")) params.top_p = body["top_p"].get<float>();
+        if (body.contains("top_k")) params.top_k = static_cast<float>(body["top_k"].get<int>());
+        if (body.contains("repetition_penalty")) params.repetition_penalty = body["repetition_penalty"].get<float>();
+        if (body.contains("frequency_penalty")) params.frequency_penalty = body["frequency_penalty"].get<float>();
+        if (body.contains("presence_penalty")) params.presence_penalty = body["presence_penalty"].get<float>();
+        if (body.contains("min_p")) params.min_p = body["min_p"].get<float>();
+        if (body.contains("dry_multiplier")) params.dry_multiplier = body["dry_multiplier"].get<float>();
+        if (body.contains("dry_base")) params.dry_base = body["dry_base"].get<float>();
+        if (body.contains("dry_allowed_length")) params.dry_allowed_length = body["dry_allowed_length"].get<int>();
+        if (body.contains("dry_penalty_last_n")) params.dry_penalty_last_n = body["dry_penalty_last_n"].get<int>();
+        if (body.contains("penalty_last_n")) params.penalty_last_n = body["penalty_last_n"].get<int>();
+        if (body.contains("seed")) params.seed = body["seed"].get<int>();
         if (body.contains("stop")) {
-            if (body["stop"].is_string()) params.stop = body["stop"].get<std::string>();
+            if (body["stop"].is_string()) {
+                params.stop = {body["stop"].get<std::string>()};
+            } else if (body["stop"].is_array() && !body["stop"].empty()) {
+                params.stop.reserve(body["stop"].size());
+                for (const auto& s : body["stop"]) {
+                    params.stop.push_back(s.get<std::string>());
+                }
+            }
         }
         const std::string accepted_client = SafeLogText(DetectChatClientName(req), 80);
         const std::string request_protocol = SafeLogText(req.get_header_value("X-InferDeck-Protocol").empty()

@@ -4,6 +4,7 @@
 
 #include "llama.h"
 #include "ggml-backend.h"
+#include "chat.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
@@ -19,8 +20,6 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-
-using json = nlohmann::json;
 
 namespace inferdeck::core {
 namespace {
@@ -55,236 +54,73 @@ std::string DetectModelFamily(const std::string& model_name) {
     return "universal";
 }
 
-std::string BuildToolInstruction(const std::string& tools_json, const std::string& model_family) {
-    if (tools_json.empty()) return {};
-    std::string family = model_family.empty() ? "universal" : model_family;
-    if (family == "qwen") {
-        return
-            "# Tools\n\n"
-            "You have access to the following functions:\n\n"
-            "<tools>\n"
-            + tools_json + "\n"
-            "</tools>\n\n"
-            "If you choose to call a function ONLY reply in the following format with NO suffix:\n\n"
-            "<tool_call>\n"
-            "<function=example_function_name>\n"
-            "<parameter=example_parameter_1>\n"
-            "value_1\n"
-            "</parameter>\n"
-            "<parameter=example_parameter_2>\n"
-            "This is the value for the second parameter\n"
-            "that can span\n"
-            "multiple lines\n"
-            "</parameter>\n"
-            "</function>\n"
-            "</tool_call>\n\n"
-            "<IMPORTANT>\n"
-            "Reminder:\n"
-            "- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n"
-            "- Required parameters MUST be specified\n"
-            "- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n"
-            "- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n"
-            "</IMPORTANT>";
+common_chat_msg ToCommonChatMsg(const ChatMessage& msg) {
+    common_chat_msg cmsg;
+    cmsg.role = RoleToTemplateRole(msg.role);
+    cmsg.content = msg.content;
+    cmsg.tool_call_id = msg.tool_call_id;
+
+    if (msg.role == MessageRole::Assistant && !msg.tool_calls_json.empty()) {
+        try {
+            auto calls = nlohmann::json::parse(msg.tool_calls_json);
+            if (calls.is_array()) {
+                for (const auto& call : calls) {
+                    common_chat_tool_call tc;
+                    if (call.contains("function")) {
+                        const auto& fn = call["function"];
+                        tc.name = fn.value("name", "");
+                        if (fn.contains("arguments")) {
+                            const auto& a = fn["arguments"];
+                            tc.arguments = a.is_string() ? a.get<std::string>() : a.dump();
+                        }
+                    } else if (call.contains("name")) {
+                        tc.name = call.value("name", "");
+                        if (call.contains("arguments")) {
+                            const auto& a = call["arguments"];
+                            tc.arguments = a.is_string() ? a.get<std::string>() : a.dump();
+                        }
+                    }
+                    tc.id = call.value("id", "");
+                    if (!tc.name.empty()) cmsg.tool_calls.push_back(std::move(tc));
+                }
+            }
+        } catch (...) {}
     }
-    if (family == "harmony") {
-        return
-            "Tools are available. When a tool is needed, emit exactly one machine-readable tool call in Harmony format. "
-            "Format: <|channel|>commentary to=tool_name <|constrain|>json<|message|>{\"arg\":\"value\"}<|call|>. "
-            "After receiving tool output, either emit the next tool call or provide the final answer. "
-            "Do not narrate future tool use such as 'I'll read', 'let me inspect', or 'continue reading'; call the tool instead. "
-            "Do not write plans, markdown, literal 'tool_calls:' prose, or assistant_tool_calls_json text when a tool is needed. "
-            "Available tools JSON: " + tools_json;
+
+    if (msg.role == MessageRole::Tool) {
+        cmsg.content = msg.content;
+        cmsg.tool_call_id = msg.tool_call_id;
     }
-    return
-        "Tools are available. When a tool is needed, emit exactly one machine-readable tool call and no explanatory text. "
-        "Use <tool_call>{\"name\":\"tool_name\",\"arguments\":{...}}</tool_call> format. "
-        "After receiving tool output, either emit the next tool call or provide the final answer. "
-        "Do not narrate future tool use such as 'I'll read', 'let me inspect', or 'continue reading'; call the tool instead. "
-        "Do not write plans, markdown, literal 'tool_calls:' prose, or assistant_tool_calls_json text when a tool is needed. "
-        "Available tools JSON: " + tools_json;
+
+    return cmsg;
 }
 
-std::string RenderQwenToolCalls(const std::string& tool_calls_json) {
-    if (tool_calls_json.empty()) return {};
+std::vector<common_chat_tool> ParseToolsJson(const std::string& tools_json) {
+    std::vector<common_chat_tool> tools;
+    if (tools_json.empty()) return tools;
     try {
-        auto calls = nlohmann::json::parse(tool_calls_json);
-        if (!calls.is_array() || calls.empty()) return {};
-
-        std::string rendered;
-        for (const auto& call : calls) {
-            std::string name;
-            nlohmann::json args;
-            if (call.contains("function")) {
-                const auto& fn = call["function"];
-                name = fn.value("name", "");
-                if (fn.contains("arguments")) {
-                    const auto& a = fn["arguments"];
-                    if (a.is_string()) {
-                        try { args = nlohmann::json::parse(a.get<std::string>()); }
-                        catch (...) { args = a; }
-                    } else {
-                        args = a;
-                    }
+        auto j = nlohmann::json::parse(tools_json);
+        if (!j.is_array()) return tools;
+        for (const auto& item : j) {
+            common_chat_tool tool;
+            if (item.contains("function")) {
+                const auto& fn = item["function"];
+                tool.name = fn.value("name", "");
+                tool.description = fn.value("description", "");
+                if (fn.contains("parameters")) {
+                    tool.parameters = fn["parameters"].dump();
                 }
-            } else if (call.contains("name")) {
-                name = call.value("name", "");
-                if (call.contains("arguments")) args = call["arguments"];
-            }
-            if (name.empty()) continue;
-
-            rendered += "<tool_call>\n<function=" + name + ">\n";
-            if (args.is_object()) {
-                for (auto it = args.begin(); it != args.end(); ++it) {
-                    rendered += "<parameter=" + it.key() + ">\n";
-                    std::string val;
-                    if (it.value().is_string()) {
-                        val = it.value().get<std::string>();
-                    } else {
-                        val = it.value().dump();
-                    }
-                    rendered += val + "\n</parameter>\n";
-                }
-            }
-            rendered += "</function>\n</tool_call>";
-        }
-        return rendered;
-    } catch (...) {
-        return {};
-    }
-}
-
-std::string BuildFallbackPrompt(const std::vector<ChatMessage>& messages,
-                                const InferenceParams& params,
-                                const std::string& model_family) {
-    std::string family = model_family.empty() ? "universal" : model_family;
-    bool is_qwen = (family == "qwen");
-    bool has_tools = !params.tools_json.empty();
-    std::ostringstream prompt;
-    if (is_qwen && has_tools) {
-        auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
-        if (!tool_instruction.empty()) {
-            prompt << "<|im_start|>system\n" << tool_instruction << "<|im_end|>\n";
-        }
-        for (const auto& msg : messages) {
-            if (msg.role == MessageRole::Tool) {
-                prompt << "<|im_start|>user\n<tool_response>\n" << msg.content << "\n</tool_response><|im_end|>\n";
             } else {
-                prompt << "<|im_start|>" << RoleToTemplateRole(msg.role) << "\n";
-                if (!msg.name.empty()) prompt << "name: " << msg.name << "\n";
-                if (!msg.tool_call_id.empty()) prompt << "tool_call_id: " << msg.tool_call_id << "\n";
-                prompt << msg.content;
-                if (msg.role == MessageRole::Assistant && !msg.tool_calls_json.empty()) {
-                    auto rendered = RenderQwenToolCalls(msg.tool_calls_json);
-                    if (!rendered.empty()) prompt << "\n" << rendered;
+                tool.name = item.value("name", "");
+                tool.description = item.value("description", "");
+                if (item.contains("parameters")) {
+                    tool.parameters = item["parameters"].dump();
                 }
-                prompt << "<|im_end|>\n";
             }
+            if (!tool.name.empty()) tools.push_back(std::move(tool));
         }
-        prompt << "<|im_start|>assistant\n<think>\n\n</think>\n\n";
-    } else {
-        auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
-        if (!tool_instruction.empty()) {
-            prompt << "<|im_start|>system\n" << tool_instruction << "<|im_end|>\n";
-        }
-        for (const auto& msg : messages) {
-            prompt << "<|im_start|>" << RoleToTemplateRole(msg.role) << "\n";
-            if (!msg.name.empty()) prompt << "name: " << msg.name << "\n";
-            if (!msg.tool_call_id.empty()) prompt << "tool_call_id: " << msg.tool_call_id << "\n";
-            prompt << msg.content << "<|im_end|>\n";
-        }
-        prompt << "<|im_start|>assistant\n";
-    }
-    return prompt.str();
-}
-
-std::string BuildChatPrompt(llama_model* model,
-                            const std::vector<ChatMessage>& messages,
-                            const InferenceParams& params,
-                            const std::string& model_family) {
-    std::string family = model_family.empty() ? "universal" : model_family;
-    bool is_qwen = (family == "qwen");
-    bool has_tools = !params.tools_json.empty();
-
-    if (is_qwen && has_tools) {
-        std::vector<std::string> roles;
-        std::vector<std::string> contents;
-
-        auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
-        if (!tool_instruction.empty()) {
-            roles.push_back("system");
-            contents.push_back(tool_instruction);
-        }
-
-        for (const auto& msg : messages) {
-            if (msg.role == MessageRole::Tool) {
-                roles.push_back("user");
-                contents.push_back("<tool_response>\n" + msg.content + "\n</tool_response>");
-            } else {
-                roles.push_back(RoleToTemplateRole(msg.role));
-                std::string content;
-                if (!msg.name.empty()) content += "name: " + msg.name + "\n";
-                if (!msg.tool_call_id.empty()) content += "tool_call_id: " + msg.tool_call_id + "\n";
-                content += msg.content;
-                if (msg.role == MessageRole::Assistant && !msg.tool_calls_json.empty()) {
-                    auto rendered = RenderQwenToolCalls(msg.tool_calls_json);
-                    if (!rendered.empty()) content += "\n" + rendered;
-                }
-                contents.push_back(std::move(content));
-            }
-        }
-
-        std::vector<llama_chat_message> chat;
-        chat.reserve(roles.size());
-        for (std::size_t i = 0; i < roles.size(); ++i) {
-            chat.push_back({roles[i].c_str(), contents[i].c_str()});
-        }
-
-        const char* tmpl = model ? llama_model_chat_template(model, nullptr) : nullptr;
-        int32_t needed = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, nullptr, 0);
-        if (needed <= 0) return BuildFallbackPrompt(messages, params, model_family);
-
-        std::string prompt(static_cast<std::size_t>(needed), '\0');
-        int32_t written = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, prompt.data(), needed);
-        if (written < 0) return BuildFallbackPrompt(messages, params, model_family);
-        prompt.resize(static_cast<std::size_t>(written));
-        return prompt;
-    }
-
-    std::vector<std::string> roles;
-    std::vector<std::string> contents;
-    roles.reserve(messages.size() + 1);
-    contents.reserve(messages.size() + 1);
-
-    for (const auto& msg : messages) {
-        roles.push_back(RoleToTemplateRole(msg.role));
-        std::string content;
-        if (!msg.name.empty()) content += "name: " + msg.name + "\n";
-        if (!msg.tool_call_id.empty()) content += "tool_call_id: " + msg.tool_call_id + "\n";
-        content += msg.content;
-        contents.push_back(std::move(content));
-    }
-
-    auto tool_instruction = BuildToolInstruction(params.tools_json, model_family);
-    if (!tool_instruction.empty()) {
-        roles.insert(roles.begin(), "system");
-        contents.insert(contents.begin(), std::move(tool_instruction));
-    }
-
-    std::vector<llama_chat_message> chat;
-    chat.reserve(roles.size());
-    for (std::size_t i = 0; i < roles.size(); ++i) {
-        chat.push_back({roles[i].c_str(), contents[i].c_str()});
-    }
-
-    const char* tmpl = model ? llama_model_chat_template(model, nullptr) : nullptr;
-    int32_t needed = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, nullptr, 0);
-    if (needed <= 0) return BuildFallbackPrompt(messages, params, model_family);
-
-    std::string prompt(static_cast<std::size_t>(needed), '\0');
-    int32_t written = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, prompt.data(), needed);
-    if (written < 0) return BuildFallbackPrompt(messages, params, model_family);
-    prompt.resize(static_cast<std::size_t>(written));
-    return prompt;
+    } catch (...) {}
+    return tools;
 }
 
 std::vector<llama_token> Tokenize(llama_model* model, const std::string& text, bool add_bos) {
@@ -331,20 +167,45 @@ ggml_type CacheTypeFromString(const std::string& type) {
     return GGML_TYPE_F16;
 }
 
-llama_sampler* CreateSampler(const InferenceParams& params) {
+llama_sampler* CreateSampler(const InferenceParams& params, llama_model* model) {
     auto sparams = llama_sampler_chain_default_params();
     sparams.no_perf = true;
     llama_sampler* sampler = llama_sampler_chain_init(sparams);
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
+
+    // Order matches llama-server: penalties -> DRY -> top_k -> top_p -> min_p -> temp -> dist
+    llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
+        params.penalty_last_n,
+        params.repetition_penalty,
+        params.frequency_penalty,
+        params.presence_penalty));
+
+    if (params.dry_multiplier > 0.0f && model) {
+        const char* dry_seq_breakers[] = {"\n", ":", "\"", "*"};
+        llama_sampler_chain_add(sampler, llama_sampler_init_dry(
+            llama_model_get_vocab(model),
+            llama_model_n_ctx_train(model),
+            params.dry_multiplier, params.dry_base, params.dry_allowed_length, params.dry_penalty_last_n,
+            dry_seq_breakers, 4));
+    }
+
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(std::max(1, static_cast<int>(params.top_k))));
     llama_sampler_chain_add(sampler, llama_sampler_init_top_p(std::clamp(params.top_p, 0.0f, 1.0f), 1));
+    llama_sampler_chain_add(sampler, llama_sampler_init_min_p(std::clamp(params.min_p, 0.0f, 1.0f), 1));
     llama_sampler_chain_add(sampler, llama_sampler_init_temp(std::max(0.0f, params.temperature)));
-    llama_sampler_chain_add(sampler, llama_sampler_init_dist(std::random_device{}()));
+
+    uint32_t seed = params.seed >= 0 ? static_cast<uint32_t>(params.seed) : LLAMA_DEFAULT_SEED;
+    llama_sampler_chain_add(sampler, llama_sampler_init_dist(seed));
     return sampler;
 }
 
-bool EndsWithStop(const std::string& text, const std::string& stop) {
-    if (stop.empty() || text.size() < stop.size()) return false;
-    return text.compare(text.size() - stop.size(), stop.size(), stop) == 0;
+bool EndsWithStop(const std::string& text, const std::vector<std::string>& stops) {
+    for (const auto& stop : stops) {
+        if (stop.empty()) continue;
+        if (text.size() >= stop.size() && text.compare(text.size() - stop.size(), stop.size(), stop) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -422,6 +283,10 @@ bool LlamaEngine::Initialize(const EngineParams& params) {
         return false;
     }
 
+    // Initialize chat templates from the model
+    common_chat_templates_free(static_cast<common_chat_templates*>(chat_templates_));
+    chat_templates_ = common_chat_templates_init(model, "").release();
+
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = static_cast<uint32_t>(std::max(512, params.context_size));
     ctx_params.n_batch = static_cast<uint32_t>(params.batch_size);
@@ -429,7 +294,7 @@ bool LlamaEngine::Initialize(const EngineParams& params) {
     ctx_params.n_seq_max = 1;
     ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     ctx_params.offload_kqv = true;
-    ctx_params.kv_unified = true;
+    ctx_params.kv_unified = false;
     ctx_params.swa_full = params.swa_full;
     ctx_params.op_offload = params.op_offload;
     ctx_params.no_perf = params.no_perf;
@@ -455,14 +320,39 @@ bool LlamaEngine::Initialize(const EngineParams& params) {
     context_ = context;
     initialized_ = true;
 
-    if (!params.mmproj_path.empty()) {
-        auto mmproj_params = mtmd_context_params_default();
-        mmproj_params.use_gpu = true;
-        mmproj_ctx_ = mtmd_init_from_file(params.mmproj_path.c_str(), static_cast<llama_model*>(model), mmproj_params);
-        if (mmproj_ctx_) {
-            has_vision_ = true;
-            Logger::Get().Info("Vision model initialized with mmproj: " + params.mmproj_path);
-        } else {
+    {
+        auto try_mmproj = [&](const std::string& path) -> bool {
+            auto mp = mtmd_context_params_default();
+            mp.use_gpu = true;
+            mmproj_ctx_ = mtmd_init_from_file(path.c_str(), static_cast<llama_model*>(model), mp);
+            if (mmproj_ctx_) {
+                has_vision_ = true;
+                Logger::Get().Info("Vision model initialized with mmproj: " + path);
+                return true;
+            }
+            return false;
+        };
+
+        bool mmproj_loaded = false;
+        if (!params.mmproj_path.empty()) {
+            mmproj_loaded = try_mmproj(params.mmproj_path);
+        }
+        if (!mmproj_loaded) {
+            std::filesystem::path model_dir = std::filesystem::path(params.model_path).parent_path();
+            if (std::filesystem::exists(model_dir)) {
+                for (const auto& entry : std::filesystem::directory_iterator(model_dir)) {
+                    if (!entry.is_regular_file()) continue;
+                    std::string filename = entry.path().filename().string();
+                    if (filename.find("mmproj") == 0 && entry.path().extension() == ".gguf") {
+                        if (try_mmproj(entry.path().string())) {
+                            mmproj_loaded = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (!mmproj_loaded && !params.mmproj_path.empty()) {
             Logger::Get().Warn("Failed to initialize vision model from mmproj: " + params.mmproj_path);
         }
     }
@@ -533,18 +423,28 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
 
     abort_requested_.store(false);
 
+    // Use common_chat_templates_apply for prompt building
+    common_chat_templates_inputs inputs;
+    inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+    for (const auto& msg : messages) {
+        inputs.messages.push_back(ToCommonChatMsg(msg));
+    }
+    auto tools = ParseToolsJson(params.tools_json);
+    if (!tools.empty()) {
+        inputs.tools = tools;
+        inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
+    }
+
+    auto chat_params = common_chat_templates_apply(static_cast<common_chat_templates*>(chat_templates_), inputs);
+    std::string prompt = chat_params.prompt;
+    if (!chat_params.generation_prompt.empty()) {
+        prompt += chat_params.generation_prompt;
+    }
+
     bool reuse_cache = cache_valid_ &&
                        messages.size() > last_message_count_ &&
                        last_message_count_ > 0;
 
-    std::string model_family;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        model_family = DetectModelFamily(current_model_name_);
-    }
-    if (!params.tool_format_override.empty()) {
-        model_family = params.tool_format_override;
-    }
     bool has_images = false;
     for (const auto& m : messages) {
         if (!m.images.empty()) { has_images = true; break; }
@@ -557,12 +457,9 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     int n_past = 0;
 
     if (has_vision_ && has_images) {
-        if (reuse_cache) {
-            llama_memory_clear(llama_get_memory(context), true);
-            n_past = 0;
-            reuse_cache = false;
-        }
-        std::string prompt = BuildChatPrompt(model, messages, params, model_family);
+        llama_memory_clear(llama_get_memory(context), true);
+        n_past = 0;
+        reuse_cache = false;
         Logger::Get().Info("Building multimodal prompt with " + std::to_string(messages.size()) + " messages");
 
         std::vector<const mtmd_bitmap*> bitmaps;
@@ -626,17 +523,9 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
         owned_bitmaps.clear();
 
         if (!multimodal_used) {
-            prompt = BuildChatPrompt(model, messages, params, model_family);
             prompt_tokens = Tokenize(model, prompt, true);
         }
     } else {
-        std::string prompt = BuildChatPrompt(model, messages, params, model_family);
-        const std::string think_suffix = "<|im_start|>assistant\n<think>\n";
-        const std::string no_think_suffix = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
-        if (prompt.size() >= think_suffix.size() &&
-            prompt.compare(prompt.size() - think_suffix.size(), think_suffix.size(), think_suffix) == 0) {
-            prompt.replace(prompt.size() - think_suffix.size(), think_suffix.size(), no_think_suffix);
-        }
         prompt_tokens = Tokenize(model, prompt, true);
     }
     if (prompt_tokens.empty() && !multimodal_used) {
@@ -646,7 +535,7 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     }
 
     const int32_t model_max_ctx = llama_model_n_ctx_train(model);
-    const int max_predict = params.max_tokens > 0 ? params.max_tokens : model_max_ctx;
+    const int max_predict = params.max_tokens > 0 ? params.max_tokens : std::min(model_max_ctx, 8192);
     Logger::Get().Info("max_predict: " + std::to_string(max_predict) + " (client requested: " + std::to_string(params.max_tokens) + ")");
     if (!multimodal_used) {
         result.prompt_tokens = static_cast<int>(prompt_tokens.size());
@@ -665,7 +554,18 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
         }
     }
 
-    llama_sampler* sampler = CreateSampler(params);
+    llama_sampler* sampler = CreateSampler(params, model);
+
+    // Add grammar sampler if one was provided by common_chat_templates_apply
+    // Skip lazy grammars (tool-call grammars that need trigger-token activation)
+    if (!chat_params.grammar.empty() && !chat_params.grammar_lazy) {
+        llama_sampler* grammar_sampler = llama_sampler_init_grammar(
+            llama_model_get_vocab(model),
+            chat_params.grammar.c_str(),
+            "root");
+        llama_sampler_chain_add(sampler, grammar_sampler);
+    }
+
     constexpr int32_t max_batch_tokens = 512;
     int generated_tokens = 0;
     int decode_status = 0;
@@ -734,6 +634,7 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     }
 
     llama_sampler_free(sampler);
+    // grammar_sampler is owned by the chain, no need to free separately
 
     if (decode_status != 0 && result.error_message.empty()) {
         result.http_status = 500;
@@ -758,6 +659,10 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
         }
         stats_.max_latency_ms = std::max(stats_.max_latency_ms, result.duration_ms);
         stats_.min_latency_ms = std::min(stats_.min_latency_ms, result.duration_ms);
+    }
+
+    if (!result.HasError() && !chat_params.generation_prompt.empty()) {
+        result.text = chat_params.generation_prompt + result.text;
     }
 
     last_message_count_ = messages.size();
@@ -814,6 +719,8 @@ void LlamaEngine::AbortActiveRequest(const std::string& reason) {
 }
 
 void LlamaEngine::FreeRuntime() {
+    common_chat_templates_free(static_cast<common_chat_templates*>(chat_templates_));
+    chat_templates_ = nullptr;
     if (mmproj_ctx_) {
         mtmd_free(static_cast<mtmd_context*>(mmproj_ctx_));
         mmproj_ctx_ = nullptr;
