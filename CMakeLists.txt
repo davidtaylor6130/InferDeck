@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.27)
 project(InferDeck LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -72,6 +72,7 @@ set(LLAMA_INSTALL_VERSION "0.0.0" CACHE STRING "llama.cpp version")
 add_subdirectory(${llama_cpp_SOURCE_DIR}/tools/mtmd EXCLUDE_FROM_ALL)
 
 # --- Our libraries and app ---
+add_subdirectory(libs/foundation)
 add_subdirectory(libs/core)
 add_subdirectory(libs/llama_cpp_wrapper)
 add_subdirectory(libs/backends)
