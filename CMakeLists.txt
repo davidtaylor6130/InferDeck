@@ -89,6 +89,7 @@ add_subdirectory(libs/observability)
 
 if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests/integration)
+    add_subdirectory(tests/parity)
 endif()
 add_subdirectory(libs/core)
 add_subdirectory(libs/llama_cpp_wrapper)
