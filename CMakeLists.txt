@@ -12,6 +12,10 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 option(INFERDECK_BUILD_TESTS "Build tests" OFF)
 option(INFERDECK_BUILD_WASM "Build WASM module" OFF)
 
+if(INFERDECK_BUILD_TESTS)
+    enable_testing()
+endif()
+
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 
 # --- Dependencies via vcpkg ---
@@ -73,6 +77,7 @@ add_subdirectory(${llama_cpp_SOURCE_DIR}/tools/mtmd EXCLUDE_FROM_ALL)
 
 # --- Our libraries and app ---
 add_subdirectory(libs/foundation)
+add_subdirectory(libs/messaging)
 add_subdirectory(libs/core)
 add_subdirectory(libs/llama_cpp_wrapper)
 add_subdirectory(libs/backends)
