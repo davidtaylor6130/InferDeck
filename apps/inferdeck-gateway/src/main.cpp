@@ -16,6 +16,7 @@
 #include "gateway/metrics_builder.hpp"
 #include "gateway/routes.hpp"
 #include "httplib.h"
+#include "llama.h"
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
@@ -85,6 +86,16 @@ int main(int argc, char** argv) {
 
     LOG_INFO("startup", "inferdeck-gateway 2.0.0 starting");
     LOG_INFO("config", "loaded from {}", config_path.string());
+    LOG_INFO("vulkan_test", "About to initialize llama backend");
+    std::cerr << "DEBUG: About to call llama_backend_init()" << std::endl;
+
+    llama_backend_init();
+    const char* sys_info = llama_print_system_info();
+    std::cerr << "DEBUG: llama_print_system_info returned" << std::endl;
+    if (sys_info) {
+        LOG_INFO("llama_system_info", "{}", sys_info);
+        std::cerr << "DEBUG: sys_info = " << sys_info << std::endl;
+    }
 
     model::ModelRegistry registry;
     registry.set_factory([](const model::ModelInfo& info) -> std::unique_ptr<model::IModel> {

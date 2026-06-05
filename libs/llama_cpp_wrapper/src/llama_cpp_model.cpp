@@ -8,6 +8,7 @@
 #include <string>
 
 #include "llama.h"
+#include "foundation/logging.hpp"
 
 namespace inferdeck::llama_wrapper {
 
@@ -16,12 +17,16 @@ namespace {
 using inferdeck::foundation::Error;
 using inferdeck::foundation::ErrorCode;
 using inferdeck::foundation::Result;
+using inferdeck::foundation::LOG_INFO;
+using inferdeck::foundation::LOG_ERROR;
 using inferdeck::model::InferenceRequest;
 using inferdeck::model::InferenceResult;
 
 inline Error make_error(ErrorCode code, std::string msg) {
   return Error{code, std::move(msg)};
 }
+
+static bool g_backend_initialized = false;
 
 std::string normalize_path(const std::string& p) {
   std::filesystem::path path(p);
@@ -37,8 +42,19 @@ std::string LlamaCppModel::version() {
   return info ? std::string(info) : std::string("unknown");
 }
 
-void LlamaCppModel::init_backend() { llama_backend_init(); }
-void LlamaCppModel::shutdown_backend() { llama_backend_free(); }
+void LlamaCppModel::init_backend() {
+  if (!g_backend_initialized) {
+    llama_backend_init();
+    g_backend_initialized = true;
+    LOG_INFO("llama_backend_init", "Vulkan backend initialized");
+  }
+}
+void LlamaCppModel::shutdown_backend() {
+  if (g_backend_initialized) {
+    llama_backend_free();
+    g_backend_initialized = false;
+  }
+}
 
 LlamaCppModel::LlamaCppModel(inferdeck::model::ModelInfo info, LlamaCppConfig cfg)
     : info_(std::move(info)), cfg_(std::move(cfg)) {
@@ -67,9 +83,19 @@ Result<void> LlamaCppModel::load() {
   llama_model_params mparams = llama_model_default_params();
   mparams.use_mmap = cfg_.use_mmap;
   mparams.use_mlock = cfg_.use_mlock;
+  mparams.n_gpu_layers = -1;
+
+  llama_backend_init();
+  const char* sys_info = llama_print_system_info();
+  if (sys_info) {
+    LOG_INFO("llama_system_info", "{}", sys_info);
+  }
 
   model_ = llama_model_load_from_file(resolved_gguf_path_.string().c_str(), mparams);
   if (model_ == nullptr) {
+    const char* err = llama_print_system_info();
+    LOG_ERROR("model_load_failed", "llama_model_load_from_file returned null for {}", resolved_gguf_path_.string());
+    if (err) LOG_ERROR("model_load_failed", "system_info: {}", err);
     return Result<void>(std::unexpect,
         make_error(ErrorCode::Internal,
                    "llama_model_load_from_file returned null for " + resolved_gguf_path_.string()));

@@ -2,6 +2,7 @@
 
 #include "engine/token_sequence.hpp"
 #include "gateway/streaming_sanitizer.hpp"
+#include "foundation/logging.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -12,6 +13,8 @@
 #include <thread>
 
 namespace inferdeck::gateway {
+
+using namespace inferdeck::foundation;
 
 namespace {
 
@@ -125,15 +128,21 @@ void handle_swap_to(const httplib::Request& req, httplib::Response& resp,
         write_json(resp, 200, body);
         return;
     }
-    std::thread([&deps, model_name]() {
-        (void)deps.coordinator.swap_to(model_name);
-    }).detach();
+    // Synchronous swap for debugging
+    LOG_INFO("swap_start", "model={}", model_name);
+    auto swap_result = deps.coordinator.swap_to(model_name);
+    LOG_INFO("swap_complete", "model={} success={}", model_name, swap_result.has_value());
+    if (!swap_result) {
+        LOG_ERROR("swap_failed", "model={} error={}", model_name, swap_result.error().message);
+        write_error(resp, 500, "swap_failed", swap_result.error().message);
+        return;
+    }
     nlohmann::json body = {
-        {"status", "swapping"},
+        {"status", "ready"},
         {"model", model_name},
-        {"message", "swap started in background"},
+        {"message", "model loaded successfully"},
     };
-    write_json(resp, 202, body);
+    write_json(resp, 200, body);
 }
 
 void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
@@ -182,32 +191,39 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
     bool stream = body.value("stream", false);
 
-    scheduler::ScheduledSlot slot;
+    int slot_id = -1;
     {
-        engine::TokenSequence empty_ts;
-        auto r = deps.scheduler.acquire(model_name, empty_ts);
-        if (!r) {
+        model::AcquireSlotOptions opts;
+        opts.timeout = std::chrono::milliseconds{30000};
+        opts.block = true;
+        auto sr = deps.coordinator.acquire_slot(model_name, opts);
+        if (!sr) {
             int status = 503;
             std::string code = "no_slots";
-            if (r.error().code == foundation::ErrorCode::Timeout) {
+            if (sr.error().code == foundation::ErrorCode::Timeout) {
                 status = 503;
                 code = "slot_timeout";
-            } else if (r.error().code == foundation::ErrorCode::Cancelled) {
+            } else if (sr.error().code == foundation::ErrorCode::Cancelled) {
                 status = 503;
                 code = "cancelled";
+            } else if (sr.error().code == foundation::ErrorCode::NotFound) {
+                status = 404;
+                code = "model_not_loaded";
             }
             resp.set_header("Retry-After", "1");
-            write_error(resp, status, code, r.error().message);
+            write_error(resp, status, code, sr.error().message);
             return;
         }
-        slot = std::move(*r);
+        slot_id = *sr;
     }
 
     const std::string id = make_id();
     const std::string stream_model = model_name;
 
-    std::function<void()> release_slot = [&slot]() noexcept {
-        if (slot.valid()) slot.release();
+    std::function<void()> release_slot = [slot_id, &deps, model_name]() noexcept {
+        if (slot_id >= 0) {
+            (void)deps.coordinator.release_slot(model_name, slot_id);
+        }
     };
     struct ReleaseGuard {
         std::function<void()>* fn;
@@ -233,7 +249,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         ir.top_p = static_cast<float>(body.value("top_p", 0.95));
         ir.top_k = body.value("top_k", 40);
 
-        auto pr = deps.coordinator.predict(model_name, slot.slot_id, ir);
+        auto pr = deps.coordinator.predict(model_name, slot_id, ir);
         if (!pr) {
             write_error(resp, 500, "inference_error", pr.error().message);
             return;
@@ -276,7 +292,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     ir.top_p = static_cast<float>(body.value("top_p", 0.95));
     ir.top_k = body.value("top_k", 40);
 
-    auto pr = deps.coordinator.predict(model_name, slot.slot_id, ir);
+    auto pr = deps.coordinator.predict(model_name, slot_id, ir);
     if (!pr) {
         resp.set_chunked_content_provider(
             "text/event-stream",

@@ -40,22 +40,34 @@ set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_UI OFF CACHE BOOL "" FORCE)
-set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+set(GGML_VULKAN ON CACHE BOOL "" FORCE)
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
 set(GGML_HIP OFF CACHE BOOL "" FORCE)
 set(GGML_SYCL OFF CACHE BOOL "" FORCE)
 set(GGML_METAL OFF CACHE BOOL "" FORCE)
-set(Vulkan_LIBRARY "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/vulkan-1.lib" CACHE FILEPATH "" FORCE)
-set(Vulkan_INCLUDE_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include" CACHE PATH "" FORCE)
-set(Vulkan_GLSLC_EXECUTABLE "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/shaderc/glslc.exe" CACHE FILEPATH "" FORCE)
-add_subdirectory(libs/third_party/llama.cpp EXCLUDE_FROM_ALL)
-set(llama_cpp_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/llama.cpp")
-if(TARGET Vulkan::Vulkan)
+
+# Set up Vulkan BEFORE adding llama.cpp subdirectory
+set(Vulkan_LIBRARY "C:/VulkanSDK/1.4.309.0/Lib/vulkan-1.lib" CACHE FILEPATH "" FORCE)
+set(Vulkan_INCLUDE_DIR "C:/VulkanSDK/1.4.309.0/Include" CACHE PATH "" FORCE)
+set(Vulkan_GLSLC_EXECUTABLE "C:/VulkanSDK/1.4.309.0/Bin/glslc.exe" CACHE FILEPATH "" FORCE)
+set(Vulkan_FOUND ON CACHE INTERNAL "")
+set(Vulkan_INCLUDE_DIRS "C:/VulkanSDK/1.4.309.0/Include" CACHE INTERNAL "")
+set(Vulkan_LIBRARIES "C:/VulkanSDK/1.4.309.0/Lib/vulkan-1.lib" CACHE INTERNAL "")
+set(Vulkan_VERSION "1.4" CACHE INTERNAL "")
+
+# Create Vulkan::Vulkan imported target before llama.cpp subdirectory
+if (NOT TARGET Vulkan::Vulkan)
+    # Use SHARED IMPORTED instead of INTERFACE IMPORTED so the library gets linked
+    add_library(Vulkan::Vulkan SHARED IMPORTED)
     set_target_properties(Vulkan::Vulkan PROPERTIES
-        IMPORTED_LOCATION "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/vulkan-1.lib"
-        IMPORTED_IMPLIB "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/vulkan-1.lib"
+        IMPORTED_IMPLIB "C:/VulkanSDK/1.4.309.0/Lib/vulkan-1.lib"
+        IMPORTED_LOCATION "C:/VulkanSDK/1.4.309.0/Bin/vulkan-1.dll"
+        INTERFACE_INCLUDE_DIRECTORIES "C:/VulkanSDK/1.4.309.0/Include"
     )
 endif()
+
+add_subdirectory(libs/third_party/llama.cpp EXCLUDE_FROM_ALL)
+set(llama_cpp_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/llama.cpp")
 if(TARGET llama)
     set_target_properties(llama PROPERTIES
         CXX_STANDARD 17
@@ -69,7 +81,7 @@ if(TARGET ggml-vulkan)
         ${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/llama.cpp/ggml/include
     )
     set_target_properties(ggml-vulkan PROPERTIES
-        LINK_LIBRARIES "ggml-base;${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/vulkan-1.lib"
+        LINK_LIBRARIES "ggml-base;Vulkan::Vulkan"
     )
 endif()
 
