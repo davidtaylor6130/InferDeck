@@ -7,6 +7,7 @@ function(inferdeck_add_integration_test name)
     target_link_libraries(${name} PRIVATE
         messaging
         foundation
+        model
         Catch2::Catch2WithMain
     )
     set_target_properties(${name} PROPERTIES
@@ -42,9 +43,14 @@ inferdeck_add_integration_test(integration_auth_headers
     test_auth_headers.cpp
 )
 
+inferdeck_add_integration_test(integration_mocked_coordinator
+    test_mocked_coordinator.cpp
+)
+
 if(MSVC AND DEFINED _VCPKG_INSTALLED_DIR AND EXISTS "${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/bin/fmtd.dll")
     foreach(tgt integration_realistic_workloads integration_sse_streaming
-                integration_refusal_handling integration_auth_headers)
+                integration_refusal_handling integration_auth_headers
+                integration_mocked_coordinator)
         add_custom_command(TARGET ${tgt} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/bin/fmtd.dll"
