@@ -80,6 +80,7 @@ add_subdirectory(libs/foundation)
 add_subdirectory(libs/messaging)
 add_subdirectory(libs/sampling)
 add_subdirectory(libs/model)
+add_subdirectory(libs/engine)
 
 if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests/integration)
