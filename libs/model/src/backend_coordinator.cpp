@@ -116,15 +116,47 @@ foundation::Result<void> BackendCoordinator::ensure_loaded(const std::string& na
 }
 
 foundation::Result<void> BackendCoordinator::swap_to(const std::string& name) {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (current_loaded_.has_value() && *current_loaded_ == name) {
-            return foundation::Ok();
-        }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (current_loaded_.has_value() && *current_loaded_ == name) {
+      return foundation::Ok();
     }
+  }
+  auto drain_r = unload_current();
+  if (!drain_r) return drain_r;
+  return load(name);
+}
+
+foundation::Result<void> BackendCoordinator::swap_to_cancellable(
+    const std::string& name, std::chrono::milliseconds timeout) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (current_loaded_.has_value() && *current_loaded_ == name) {
+      return foundation::Ok();
+    }
+  }
+  if (swap_cancel_.load()) {
+    reset_swap_cancel();
+    return foundation::Err(foundation::ErrorCode::Cancelled, "swap cancelled before start");
+  }
+  swap_in_progress_.store(true);
+  foundation::Result<void> result;
+  try {
     auto drain_r = unload_current();
-    if (!drain_r) return drain_r;
-    return load(name);
+    if (!drain_r) {
+      result = drain_r;
+    } else if (swap_cancel_.load()) {
+      result = foundation::Err(foundation::ErrorCode::Cancelled, "swap cancelled before load");
+    } else {
+      result = load(name);
+    }
+  } catch (...) {
+    result = foundation::Err(foundation::ErrorCode::Internal, "swap threw");
+  }
+  swap_in_progress_.store(false);
+  reset_swap_cancel();
+  (void)timeout;
+  return result;
 }
 
 bool BackendCoordinator::is_loaded(const std::string& name) const {

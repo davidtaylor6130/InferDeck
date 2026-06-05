@@ -1,36 +1,37 @@
 cmake_minimum_required(VERSION 3.27)
-project(llama_cpp_wrapper LANGUAGES CXX)
+
+if(MSVC)
+    set(CMAKE_CXX_STANDARD 23)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+endif()
 
 add_library(llama_cpp_wrapper STATIC
-    src/LlamaServerManager.cpp
-    src/LlamaEngine.cpp
-    src/GGUFParser.cpp
+    src/llama_cpp_model.cpp
 )
 
 target_include_directories(llama_cpp_wrapper PUBLIC
-    include
-    ${llama_cpp_SOURCE_DIR}/include
-    ${llama_cpp_SOURCE_DIR}/ggml/include
-    ${llama_cpp_SOURCE_DIR}/tools/mtmd
-    ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/include
+    ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/common
+    ${CMAKE_SOURCE_DIR}/libs/model/include
+    ${CMAKE_SOURCE_DIR}/libs/foundation/include
 )
 
-target_link_libraries(llama_cpp_wrapper PUBLIC
-    core
-    llama
-    llama-common
-    ggml
-    mtmd
-    nlohmann_json::nlohmann_json
+target_link_libraries(llama_cpp_wrapper
+    PUBLIC
+        model
+        foundation
+        llama
 )
 
 if(MSVC)
-    target_compile_options(llama_cpp_wrapper PRIVATE /W4 /utf-8)
+    target_compile_options(llama_cpp_wrapper PRIVATE /W4 /utf-8 /FS)
+    target_compile_definitions(llama_cpp_wrapper PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 else()
-    target_compile_options(llama_cpp_wrapper PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(llama_cpp_wrapper PRIVATE -Wall -Wextra)
 endif()
 
-install(TARGETS llama_cpp_wrapper
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-)
+if(INFERDECK_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

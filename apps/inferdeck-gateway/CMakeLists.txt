@@ -13,6 +13,8 @@ target_link_libraries(inferdeck-gateway PRIVATE
     scheduler
     engine
     foundation
+    llama_cpp_wrapper
+    llama
     yaml-cpp::yaml-cpp
 )
 

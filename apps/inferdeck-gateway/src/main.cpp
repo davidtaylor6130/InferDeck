@@ -16,6 +16,7 @@
 #include "gateway/metrics_builder.hpp"
 #include "gateway/routes.hpp"
 #include "httplib.h"
+#include "llama_cpp_wrapper/llama_cpp_model.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
 #include "observability/gpu_telemetry.hpp"
@@ -86,15 +87,16 @@ int main(int argc, char** argv) {
     LOG_INFO("config", "loaded from {}", config_path.string());
 
     model::ModelRegistry registry;
-    registry.set_factory([](const model::ModelInfo&) -> std::unique_ptr<model::IModel> {
-        return nullptr;
+    registry.set_factory([](const model::ModelInfo& info) -> std::unique_ptr<model::IModel> {
+        llama_wrapper::LlamaCppConfig lc;
+        return std::make_unique<llama_wrapper::LlamaCppModel>(info, lc);
     });
     for (const auto& m : cfg.models) {
         registry.register_model(m);
         LOG_INFO("model_registered", "name={} vram_mb={} n_slots={}",
                  m.name, m.vram_required_mb, m.n_slots);
     }
-    LOG_WARN("factory_stub", "IModel factory returns nullptr; set_factory must be replaced with real LlamaCppModel in P10");
+    LOG_INFO("factory_set", "LlamaCppModel factory installed");
 
     model::BackendCoordinator coordinator(registry);
     scheduler::Scheduler scheduler(coordinator);

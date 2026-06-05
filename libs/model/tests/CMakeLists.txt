@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.27)
 
 add_executable(model_tests
     test_model.cpp
+    test_swap_cancellation.cpp
 )
 
 target_link_libraries(model_tests PRIVATE

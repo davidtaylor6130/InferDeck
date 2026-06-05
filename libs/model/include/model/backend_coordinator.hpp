@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "foundation/result.hpp"
@@ -52,6 +53,14 @@ public:
     void drain_active(std::chrono::milliseconds timeout = std::chrono::milliseconds{30000});
     int active_request_count() const;
 
+    bool swap_in_progress() const noexcept { return swap_in_progress_.load(); }
+    void request_swap_cancel() noexcept { swap_cancel_.store(true); }
+    void reset_swap_cancel() noexcept { swap_cancel_.store(false); }
+    bool swap_cancel_requested() const noexcept { return swap_cancel_.load(); }
+
+    foundation::Result<void> swap_to_cancellable(const std::string& name,
+                                                 std::chrono::milliseconds timeout = std::chrono::milliseconds{30000});
+
 private:
     using clock = std::chrono::steady_clock;
     using time_point = clock::time_point;
@@ -69,6 +78,8 @@ private:
     std::optional<std::string> current_loaded_;
     int active_requests_{0};
     std::condition_variable cv_;
+    std::atomic<bool> swap_in_progress_{false};
+    std::atomic<bool> swap_cancel_{false};
 };
 
 } // namespace inferdeck::model
