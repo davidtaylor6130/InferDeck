@@ -1,58 +1,53 @@
 server:
   host: "0.0.0.0"
-  dashboardPort: 8080
-  apiPort: 11434
-  request_timeout_ms: 300000
-  auth_required: false
-  auth_token: ""
-  cors_origins:
-    - "*"
-  tls:
-    enabled: false
-    cert_file: ""
-    key_file: ""
-
-model:
-  path: "C:/Users/david/Documents/00_Models/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
-  directory: "C:/Users/david/Documents/00_Models"
-  mmproj: "C:/Users/david/Documents/00_Models/Qwen3.6-35B-A3B-GGUF/mmproj-Qwen3.6-35B-A3B-BF16.gguf"
-  precision: "auto"
-  n_gpu_layers: -1
-  context_size: 131072
-  batch_size: 2048
-  flash_attn: true
-  cache_type_k: "q8_0"
-  cache_type_v: "q8_0"
-  split_mode: "none"
-  fit_target: 512
-  parallel: 1
-  kv_unified: false
-
-whisper:
-  enabled: true
-  executable: "C:/Users/david/Documents/GitHub/InferDeck/runtime/whisper.cpp-v1.8.4-cpu-build/bin/Release/whisper-cli.exe"
-  model_directory: "C:/Users/david/Documents/00_Models/Whisper"
-  model: "ggml-base.en.bin"
-  backend: "cpu"
-  language: "auto"
-  task: "transcribe"
-  extra_args: ""
-
-gpu:
-  device_id: 0
-
-llama_server:
-  port: 18080
-  host: "127.0.0.1"
-
-queue:
-  worker_threads: 4
-  max_queue_size: 100
+  port: 11434
 
 logging:
   level: "info"
   file: "logs/gateway.log"
 
-metrics:
-  enabled: true
-  endpoint: "/inferdeck/metrics"
+auth:
+  required: false
+  token: ""
+
+cors:
+  origins:
+    - "*"
+
+state:
+  file: "~/.inferdeck/state.json"
+
+default_model: "qwen3.6-35b-a3b"
+
+observability:
+  stats_db: "~/.inferdeck/stats.db"
+  adlx_helper: ""
+  telemetry_poll_ms: 100
+
+model_registry:
+  - name: "qwen3.6-35b-a3b"
+    family: "qwen3.6"
+    gguf_path: "C:/Inferdeck/models/Qwen/Qwen3.6-35B-A3B-GGUF/qwen3.6-35b-a3b-q4_k_m.gguf"
+    mmproj_path: "C:/Inferdeck/models/Qwen/Qwen3.6-35B-A3B-GGUF/mmproj-Qwen3.6-35B-A3B-BF16.gguf"
+    n_slots: 2
+    vram_required_mb: 24000
+    context_size: 65536
+    has_vision: true
+
+  - name: "qwen2.5-coder-3b"
+    family: "qwen2.5"
+    gguf_path: "C:/Inferdeck/models/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
+    mmproj_path: null
+    n_slots: 2
+    vram_required_mb: 2500
+    context_size: 32768
+    has_vision: false
+
+  - name: "gemma-4-26b-a4b"
+    family: "gemma4"
+    gguf_path: "C:/Inferdeck/models/lmstudio-community/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-a4b-it-Q4_K_M.gguf"
+    mmproj_path: "C:/Inferdeck/models/lmstudio-community/gemma-4-26B-A4B-it-GGUF/mmproj-gemma-4-26B-A4B-it-BF16.gguf"
+    n_slots: 2
+    vram_required_mb: 18000
+    context_size: 65536
+    has_vision: true
