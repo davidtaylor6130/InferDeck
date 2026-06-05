@@ -81,6 +81,7 @@ add_subdirectory(libs/messaging)
 add_subdirectory(libs/sampling)
 add_subdirectory(libs/model)
 add_subdirectory(libs/engine)
+add_subdirectory(libs/scheduler)
 
 if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests/integration)

@@ -39,6 +39,8 @@ public:
     [[nodiscard]] int get_vram_usage() const;
     [[nodiscard]] const IModel* get_model(const std::string& name) const;
 
+    [[nodiscard]] ModelRegistry& registry() noexcept { return registry_; }
+
     foundation::Result<int> acquire_slot(
         const std::string& name, const AcquireSlotOptions& opts = {});
     foundation::Result<void> release_slot(
