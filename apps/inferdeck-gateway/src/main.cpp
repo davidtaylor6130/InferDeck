@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -12,10 +13,14 @@
 #include "foundation/logging.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
+#include "gateway/metrics_builder.hpp"
 #include "gateway/routes.hpp"
 #include "httplib.h"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
+#include "observability/gpu_telemetry.hpp"
+#include "observability/metrics.hpp"
+#include "observability/stats_db.hpp"
 #include "scheduler/scheduler.hpp"
 
 namespace fs = std::filesystem;
@@ -94,7 +99,27 @@ int main(int argc, char** argv) {
     model::BackendCoordinator coordinator(registry);
     scheduler::Scheduler scheduler(coordinator);
 
+    observability::Metrics metrics;
+    observability::GpuTelemetry gpu;
+    observability::StatsDb stats_db(cfg.stats_db_path);
+    const auto started_at = std::chrono::steady_clock::now();
+
+    if (!cfg.adlx_helper_path.empty()) {
+        gpu.set_helper_path(cfg.adlx_helper_path);
+        gpu.set_poll_interval(std::chrono::milliseconds(cfg.telemetry_poll_ms));
+        gpu.start();
+        LOG_INFO("gpu_telemetry_started", "helper={} poll_ms={}",
+                 cfg.adlx_helper_path, cfg.telemetry_poll_ms);
+    } else {
+        LOG_WARN("gpu_telemetry_disabled", "no adlx_helper configured");
+    }
+
     GatewayDeps deps{coordinator, scheduler, "15"};
+
+    auto uptime_seconds = [&] {
+        const auto now = std::chrono::steady_clock::now();
+        return std::chrono::duration_cast<std::chrono::seconds>(now - started_at).count();
+    };
 
     AuthConfig ac;
     ac.required = cfg.auth_required;
@@ -140,6 +165,22 @@ int main(int argc, char** argv) {
     server.Post("/v1/chat/completions", wrap([&](const httplib::Request& req,
                                                  httplib::Response& resp) {
         handle_chat_completions(req, resp, deps);
+    }));
+    server.Get("/v1/metrics", wrap([&](const httplib::Request& req,
+                                       httplib::Response& resp) {
+        resp.set_content(
+            MetricsBuilder::build_live(metrics, gpu, uptime_seconds()).dump(),
+            "application/json");
+    }));
+    server.Get("/v1/stats/history", wrap([&](const httplib::Request& req,
+                                             httplib::Response& resp) {
+        resp.set_content(MetricsBuilder::build_history(stats_db, 100).dump(),
+                         "application/json");
+    }));
+    server.Get("/v1/health", wrap([&](const httplib::Request& req,
+                                      httplib::Response& resp) {
+        resp.set_content(MetricsBuilder::build_health(metrics, gpu, stats_db).dump(),
+                         "application/json");
     }));
     if (cors.handles_options()) {
         server.Options(".*", [&](const httplib::Request& req,

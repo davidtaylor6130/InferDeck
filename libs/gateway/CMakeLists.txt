@@ -4,6 +4,7 @@ project(gateway LANGUAGES CXX)
 set(GATEWAY_SOURCES
     src/streaming_sanitizer.cpp
     src/routes.cpp
+    src/metrics_builder.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})
@@ -18,6 +19,7 @@ target_link_libraries(gateway
         foundation
         model
         scheduler
+        observability
         nlohmann_json::nlohmann_json
         httplib::httplib
 )

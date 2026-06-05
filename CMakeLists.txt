@@ -85,6 +85,7 @@ add_subdirectory(libs/model)
 add_subdirectory(libs/engine)
 add_subdirectory(libs/scheduler)
 add_subdirectory(libs/gateway)
+add_subdirectory(libs/observability)
 
 if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests/integration)
