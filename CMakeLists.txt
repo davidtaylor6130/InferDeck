@@ -16,6 +16,8 @@ if(INFERDECK_BUILD_TESTS)
     enable_testing()
 endif()
 
+add_subdirectory(apps/inferdeck-gateway)
+
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 
 # --- Dependencies via vcpkg ---
@@ -82,6 +84,7 @@ add_subdirectory(libs/sampling)
 add_subdirectory(libs/model)
 add_subdirectory(libs/engine)
 add_subdirectory(libs/scheduler)
+add_subdirectory(libs/gateway)
 
 if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests/integration)
