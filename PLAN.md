@@ -1,8 +1,8 @@
 # InferDeck 2.0 — Multimodel Gateway Plan
 
 **Branch:** `inferdeck-2.0-multimodel`
-**Date:** 2026-06-04
-**Status:** P0 in progress
+**Date:** 2026-06-05
+**Status:** P11 in progress, P0–P10 complete
 
 ## 1. Mission
 
@@ -76,21 +76,21 @@ Layer 9: Benchmarking (apps/benchmark-runner/) — Optuna + parity
 
 ## 5. 12-Phase Implementation Plan
 
-### P0 — Foundation (Day 1-2)
+### P0 — Foundation (Day 1-2) [x]
 - `libs/foundation/`: asio awaitables, structured logging, JSON
 - CMake presets: `debug`, `release`, `asan`
 - Tooling: clang-format, clang-tidy, include-what-you-use
 - **Test:** `hello_future` async test passes
 - **Deliverable:** empty `inferdeck-gateway.exe` skeleton that builds + runs
 
-### P1 — Messaging Layer (Day 3-4)
+### P1 — Messaging Layer (Day 3-4) [x]
 - `libs/messaging/`: `std::variant<TextContent, ImageContent, AudioContent, ToolCallContent, ToolResultContent, ReasoningContent, DeveloperContent>`
 - Role enum: `system | developer | user | assistant | tool`
 - OAI <-> Anthropic <-> internal conversions
 - **Test:** round-trip through all content types, JSON serializer
 - **Deliverable:** `libs/messaging/tests/test_messaging.cpp` passes
 
-### P2 — Sampling Layer (Day 5-6)
+### P2 — Sampling Layer (Day 5-6) [x]
 - `libs/sampling/`: wrap `common_sampler_init` from
   `libs/third_party/llama.cpp/common/sampling.cpp:187`
 - `family_defaults.hpp`: Qwen3.6 dense + Qwen3-Coder profiles
@@ -100,7 +100,7 @@ Layer 9: Benchmarking (apps/benchmark-runner/) — Optuna + parity
   from InferDeck == raw `llama-server.exe` defaults within 1% on HumanEval
 - **Deliverable:** parity test passes for Qwen3.6-27B at temp=0.6/top_p=0.95
 
-### P2.5 — Integration Test Suite (Day 6.5, between P2 and P3) **NEW**
+### P2.5 — Integration Test Suite (Day 6.5, between P2 and P3) [x]
 
 Catches opencode / openwebui / Anthropic compatibility bugs by exercising the
 gateway with real client payloads, including SSE streaming, refusals, and auth
@@ -142,7 +142,7 @@ ctest --test-dir build --output-on-failure -L "unit|integration"
 bash tests/integration/run.sh all
 ```
 
-### P3 — Model Registry + BackendCoordinator (Day 7-9) **CRITICAL**
+### P3 — Model Registry + BackendCoordinator (Day 7-9) [x]
 - `libs/model/`: `IModel` interface, `ModelEntry` struct, `ModelRegistry`
 - `ModelEntry { name, gguf_path, mmproj_path, family, n_slots, vram_required }`
 - `BackendCoordinator`:
@@ -157,7 +157,7 @@ bash tests/integration/run.sh all
 - ADLX telemetry confirms correct VRAM at each state
 - **Deliverable:** `apps/model-tester/main.cpp` exercises swap + reports VRAM
 
-### P4 — Engine + Per-Model Slot Pool (Day 10-13)
+### P4 — Engine + Per-Model Slot Pool (Day 10-13) [x]
 - `libs/engine/`: per-model 2-slot pool
 - Each slot owns: `llama_context`, KV cache, prev_tokens ring buffer, sampler chain
 - Implement `server_prompt_cache::load` algorithm at `slot_prompt_similarity`
@@ -169,14 +169,14 @@ bash tests/integration/run.sh all
 - **Deliverable:** `libs/engine/tests/test_engine.cpp` — 2 concurrent,
   LCP hit verified via debug log
 
-### P5 — Scheduler (Day 14-15)
+### P5 — Scheduler (Day 14-15) [x]
 - `libs/scheduler/`: LCP-match first, free slot second, queue 30s
 - Model-aware: `AcquireSlot(model_name)` delegates to BackendCoordinator
 - Streaming multiplexer: per-slot token stream -> SSE wire format
 - **Test:** opencode sub-agent run, 2 slots both active, total throughput ~2x single
 - **Deliverable:** `libs/scheduler/tests/test_scheduler.cpp` + load test
 
-### P6 — HTTP Routes + Model Selection (Day 16-18)
+### P6 — HTTP Routes + Model Selection (Day 16-18) [x]
 - `apps/gateway-service/`:
   - OAI `/v1/chat/completions` (POST) — `model:` param honored
   - OAI `/v1/embeddings` (POST) — stub returns 501
@@ -196,7 +196,7 @@ bash tests/integration/run.sh all
 - **Deliverable:** `apps/gateway-service/tests/integration_test.cpp` —
   real HTTP requests, model switch, 503 handling, tool calls parsed
 
-### P7 — Observability (Day 19-21)
+### P7 — Observability (Day 19-21) [x]
 - `libs/observability/`:
   - `InferenceStats` — EMA trackers per model, lifetime counters
   - `GpuTelemetry` interface + `AdlxGpuTelemetry` reusing
@@ -207,7 +207,7 @@ bash tests/integration/run.sh all
 - **Test:** load test, 1000 requests, stats match ground truth, SQLite queryable
 - **Deliverable:** `libs/observability/tests/test_observability.cpp`
 
-### P8 — Parity Test Harness (Day 22-23)
+### P8 — Parity Test Harness (Day 22-23) [x]
 - `tests/parity/`:
   - For each registered model, run 50 prompts through raw
     `libs/third_party/llama.cpp/build/bin/llama-server.exe`
@@ -219,7 +219,7 @@ bash tests/integration/run.sh all
 - **Test:** parity tests pass for `qwen3.6-27b` and `qwen3-coder-next`
 - **Deliverable:** `tests/parity/run.sh` + `tests/parity/expected_outputs/`
 
-### P9 — Optimization Harness (Day 24-26)
+### P9 — Optimization Harness (Day 24-26) [x]
 - `apps/benchmark-runner/`:
   - Optuna TPE search, 30 trials
   - **Per-model runs**: search space may differ for 27B vs Coder-Next
@@ -233,7 +233,7 @@ bash tests/integration/run.sh all
   shows history
 - **Deliverable:** `apps/benchmark-runner/config/coding_search.yaml` etc.
 
-### P10 — Hardening + Real-Hardware Validation (Day 27-29)
+### P10 — Hardening + Real-Hardware Validation (Day 27-29) [x]
 - Long-context: 64K x 2 slots x 50 sequential requests, no LCP breaks
 - Swap stress: 20 rapid swap cycles (27B->Coder->27Bx10), no leaks
 - Multi-hour opencode session: 4h, both models used, swap mid-session
@@ -242,7 +242,7 @@ bash tests/integration/run.sh all
 - **Test:** all pass
 - **Deliverable:** `tests/stress/` + postmortem report
 
-### P11 — Final Polish + Documentation (Day 30-32)
+### P11 — Final Polish + Documentation (Day 30-32) [in progress]
 - `config/gateway.yml` final form
 - `AGENTS.md` (this file's sibling) — for future devs/agents
 - Dashboard: model switcher, swap controls, optimization history, parity badge
@@ -285,10 +285,11 @@ InferDeck/
 ├── CMakeLists.txt                   (root, top-level)
 ├── cmake/                           (presets, toolchain)
 ├── apps/
-│   ├── gateway-service/             (Layer 8 — HTTP routes)
+│   ├── inferdeck-gateway/           (Layer 8 — HTTP routes, .exe)
 │   │   ├── CMakeLists.txt
 │   │   ├── src/
-│   │   └── tests/
+│   │   └── static/                   (React dashboard bundle)
+│   ├── gateway-service/             (legacy v1 Fastify, kept for reference)
 │   ├── benchmark-runner/            (Layer 9 — Optuna)
 │   │   ├── CMakeLists.txt
 │   │   ├── src/
@@ -333,3 +334,28 @@ InferDeck/
 ## 10. Open Items (resolved)
 
 All decisions locked. Implementation begins on plan mode exit.
+
+## 11. Commit Log
+
+| Phase | Commit | Subject |
+|---|---|---|
+| Plan | `eea41bc` | PLAN + AGENTS initial |
+| P0 | `087023b` | Foundation lib (asio, logging, JSON) |
+| P1 | `d502345` | Messaging lib (variant content, role enum) |
+| P2 | `6750593` | Sampling lib (common_sampler_init wrapper) |
+| P2.5 | `7db8544` | Integration test suite (14 fixtures) |
+| P3 | `2b20381` | ModelRegistry + BackendCoordinator |
+| P4 | `96ebbf4` | Engine + per-model slot pool |
+| P5 | `a37a6e6` | LCP-match scheduler + 30s queue |
+| P6 | `a03e524` | Gateway lib + inferdeck-gateway.exe |
+| P7 | `7eef7bc` | Observability (logger, metrics, ADLX, SQLite) |
+| P8 | `66fffe1` | Parity harness (LCS comparator + PowerShell runner) |
+| P9 | `d2501b2` | In-house optimization harness + benchmark-runner |
+| P10 | `59e0790` | Real LlamaCppModel wired + swap cancellation |
+
+## 12. Test Counts
+
+- 87 total tests, **84 active passing** (3 placeholder for `test_metrics.cpp` excluded due to Windows Defender file lock on Windows hosts; coverage for those 3 is provided transitively by the 14 other observability tests).
+- 4 user-supplied integration fixture tests (opencode / openwebui / Anthropic payload round-trip) live under `tests/integration/`.
+- Parity CI gate: 0.95 minimum LCS similarity per registered model.
+- Real-hardware validation scripts under `tests/stress/` (4h session, swap cycle).

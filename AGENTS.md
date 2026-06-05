@@ -18,8 +18,9 @@ have been a pain point.
 ## Project Structure
 
 ```
-apps/gateway-service/         HTTP routes (Layer 8)
-apps/benchmark-runner/        Optuna optimization harness (Layer 9)
+apps/inferdeck-gateway/       HTTP routes + .exe entry (Layer 8)
+apps/benchmark-runner/        inferdeck-bench optimization harness (Layer 9)
+apps/dashboard/               React dashboard source (build into static/)
 apps/model-tester/            Swap exerciser (P3 dev tool)
 apps/hardware-adlx-helper/    ADLX wrapper for GPU telemetry — REUSE THIS
                               in libs/observability/, do not rewrite
@@ -31,8 +32,9 @@ libs/model/                   ModelRegistry + BackendCoordinator (Layer 4)
 libs/engine/                  Per-model slot pool (Layer 5)
 libs/scheduler/               LCP-match + queue (Layer 6)
 libs/observability/           ADLX + EMA stats + SQLite (Layer 7)
-libs/llama_cpp_wrapper/       Legacy — being replaced by new layers
-libs/core/                    Legacy — being replaced
+libs/llama_cpp_wrapper/       Real LlamaCppModel — P10 wires llama.cpp C API
+libs/optimize/                In-house search (random + greedy, P9)
+libs/core/                    Legacy v1 C++20 logger — left untouched
 libs/third_party/llama.cpp    Layer 0, Vulkan build
 
 config/gateway.yml            Active config (only this one is read)
@@ -156,17 +158,19 @@ When swap is requested:
 6. **Layer 7** logs swap event to SQLite
 7. WebSocket broadcasts `ready`
 
-## Critical Bugs to Avoid (Current Code)
+## Critical Bugs to Avoid (legacy code, fixed in v2)
 
-These are the 4 bugs being fixed in P0-P6. **Do not reintroduce them** if
-working in the legacy `LlamaEngine.cpp` or `ChatCompletions.cpp` files.
+These are the 4 bugs that v2 fixed in P0-P6. The new layers do not have
+them. **Do not reintroduce them** if you ever touch the legacy
+`LlamaEngine.cpp` or `ChatCompletions.cpp` files (v1 inheritance, kept
+unmodified).
 
-| File:line | Bug |
-|---|---|
-| `libs/llama_cpp_wrapper/src/LlamaEngine.cpp:444-554` | `reuse_cache` uses message count, not LCP. **Fix:** use `server_prompt_cache::load` algorithm. |
-| `libs/llama_cpp_wrapper/src/LlamaEngine.cpp:170-199` | Hand-rolled sampler chain fights Qwen3 defaults. **Fix:** use `common_sampler_init` from `libs/third_party/llama.cpp/common/sampling.cpp:187`. |
-| `apps/gateway-service/src/.../ChatCompletions.cpp:2175-2188` | O(n²) streaming sanitizer. **Fix:** cursor-based, only scan new tokens. |
-| `libs/llama_cpp_wrapper/src/LlamaEngine.cpp:126` | `add_bos=true` hardcoded. **Fix:** use `llama_vocab_get_add_bos`. |
+| File:line | Bug | Fixed in |
+|---|---|---|
+| `libs/llama_cpp_wrapper/src/LlamaEngine.cpp:444-554` | `reuse_cache` uses message count, not LCP. **Fix:** use `server_prompt_cache::load` algorithm. | `libs/sampling/` (P2) + `libs/engine/` (P4) LCP match |
+| `libs/llama_cpp_wrapper/src/LlamaEngine.cpp:170-199` | Hand-rolled sampler chain fights Qwen3 defaults. **Fix:** use `common_sampler_init` from `libs/third_party/llama.cpp/common/sampling.cpp:187`. | `libs/sampling/` (P2) |
+| `apps/gateway-service/src/.../ChatCompletions.cpp:2175-2188` | O(n²) streaming sanitizer. **Fix:** cursor-based, only scan new tokens. | `libs/gateway/streaming` (P6) |
+| `libs/llama_cpp_wrapper/src/LlamaEngine.cpp:126` | `add_bos=true` hardcoded. **Fix:** use `llama_vocab_get_add_bos`. | `libs/llama_cpp_wrapper/llama_cpp_model.cpp` (P10) |
 
 ## Don'ts
 
@@ -282,6 +286,12 @@ Dashboard pulls from WebSocket `/v1/stats` (live) and `/v1/stats/history`
 5. **Swap stuck?** Check ADLX VRAM. Probably mmproj still loaded.
 6. **mmproj not found?** Verify path in `config/gateway.yml` and the GGUF
    actually has vision enabled (Unsloth Dynamic GGUFs do).
+7. **Swap cancellation** is exposed via
+   `BackendCoordinator::request_swap_cancel()` /
+   `swap_to_cancellable(name, timeout)`. The dashboard "Cancel swap" button
+   wires `request_swap_cancel()`. Honour the flag after every long-running
+   step inside `swap_to_cancellable`; do not roll back VRAM on a successful
+   cancel — partial state is acceptable, the next swap will re-unload.
 
 ## Useful llama.cpp Functions
 
@@ -314,7 +324,7 @@ Dashboard pulls from WebSocket `/v1/stats` (live) and `/v1/stats/history`
 
 React app in `apps/dashboard/`. WebSocket to `/v1/stats` and
 `/v1/swap/status`. Build with `npm run build`, output to
-`apps/gateway-service/src/static/`.
+`apps/inferdeck-gateway/src/static/`.
 
 Panels:
 - **Models:** current model, target model, "Switch" button

@@ -1,152 +1,173 @@
 # InferDeck
 
-A production-ready monorepo for running and managing local AI workloads on single-GPU machines.
-The gateway provides smart GPU scheduling, mode switching (AI/Gaming/Maintenance), and a React dashboard.
+A local AI gateway. Single Windows `.exe` that runs LLMs (Qwen3.6-27B and
+Qwen3-Coder-Next) in-process via llama.cpp, exposes an OpenAI-compatible
+HTTP API on `:11434/v1/`, and serves a React dashboard on `:11434/`.
 
-## C++ Gateway (v2.0)
+> **Branch:** `inferdeck-2.0-multimodel`. v2 replaces the v1 Node/Fastify
+> stack with a clean, layered, in-process C++23 multimodel gateway. See
+> `PLAN.md` for the full plan and commit log, and `AGENTS.md` for build/test
+> commands.
 
-The gateway service has been converted from Node/TypeScript to C++ 23 with:
+## What it does
 
-- **Direct llama.cpp integration** — No external backend required
-- **Vulkan GPU acceleration** — AMD-first, auto-detects mixed precision from GGUF
-- **Strict OpenAI API compatibility** — `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`
-- **SSE streaming** — OpenAI-compatible chunked output
-- **Self-contained .exe** — No Node.js runtime needed
+- **Multimodel, hot-swap.** `qwen3.6-27b` (default, vision) and
+  `qwen3-coder-next` (specialist, no vision) registered at startup. Switch
+  via the OAI `model:` field or the dashboard. Only one model is loaded at
+  a time (32 GB VRAM ceiling); swap drains active requests, unloads, reads
+  the new GGUF, initialises `n_parallel=2` contexts.
+- **OpenAI-compatible.** `POST /v1/chat/completions` (streaming + non-
+  streaming), `GET /v1/models`, `POST /v1/swap/to/{model}`,
+  `GET /v1/swap/status`, `GET /v1/health`, `GET /v1/metrics`,
+  `GET /v1/stats/history`, `WebSocket /v1/stats`.
+- **Parity CI gate.** 0.95 LCS token similarity vs raw `llama-server.exe`
+  per registered model. See `tests/parity/README.md`.
+- **Automated sampler tuning.** `inferdeck-bench run --trials 30` produces
+  `~/.inferdeck/optimization.json`. Apply a trial's params to
+  `config/sampler-profiles/{model}.yaml` after human review.
+- **Live observability.** GPU util / temp / VRAM / power via ADLX
+  (subprocess `inferdeck-adlx-helper.exe --json`); per-request t/s, prompt
+  + completion tokens, slot id, status; swap history. Persisted to
+  `~/.inferdeck/stats.db` (SQLite).
 
-### Quick Start (C++ Gateway)
+## Hard constraints
+
+- **In-process.** No `llama-server.exe` subprocess, no `popen`, no orphan
+  processes. The only subprocess is `inferdeck-adlx-helper.exe` for GPU
+  telemetry (per `apps/hardware-adlx-helper/` reuse rule in `AGENTS.md`).
+- **llama.cpp library directly.** No proxy design, no CLI parsing of
+  `llama-server.exe` output. We link `llama.dll` and call the C API.
+- **No auto-swap on OAI request.** Swap is a dashboard click. The
+  Scheduler returns 503 with a hint instead.
+- **No MTP for v1.** Conflicts with `n_parallel>1`.
+- **mmproj stays loaded** permanently for the vision model.
+
+## Build
 
 ```bash
+# Configure
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH="C:/Users/david/Documents/GitHub/InferDeck/vcpkg_installed/x64-windows" \
+      -DINFERDECK_BUILD_TESTS=ON
+
 # Build
-./scripts/build.sh Release
-
-# Run
-./build/inferdeck-gateway.exe
-
-# With custom config
-./build/inferdeck-gateway.exe -c config/gateway.yml
+cmake --build build --config Release -j
 ```
 
-### C++ Gateway API
+Output: `build/Release/inferdeck-gateway.exe` and
+`build/Release/inferdeck-bench.exe`.
 
-The C++ gateway exposes OpenAI-compatible endpoints:
+> The vcpkg toolchain shim `cmake/vcpkg-msvc.cmake` is currently broken
+> (recursive `CMAKE_TOOLCHAIN_FILE`); use the `CMAKE_PREFIX_PATH` form
+> above until it is fixed.
 
-- `POST /v1/chat/completions` — Chat completions (streaming + non-streaming)
-- `POST /v1/completions` — Text completions (streaming + non-streaming)
-- `GET /v1/models` — List available models
-- `POST /v1/embeddings` — Create embeddings
-- `GET /v1/health` — Health check
-- `GET /inferdeck/metrics` — Inference metrics
-- `GET /inferdeck/status` — Engine status
-
-See `docs/api_reference.md` for full API documentation.
-
-### Build & Deploy
-
-See `docs/BUILD.md` for build instructions and `docs/DEPLOY.md` for deployment.
-
-## Project Structure
-
-```
-InferDeck/
-├── apps/
-│   ├── gateway-service/   # Backend gateway service (Fastify, SQLite)
-│   └── dashboard/         # React + Vite + Tailwind dashboard
-├── config/                # Configuration files
-│   ├── gateway.example.yaml
-│   └── gateway.local.yaml
-├── data/                  # Runtime data (SQLite DB, logs, job artifacts)
-├── docs/                  # Architecture and API documentation
-├── packages/
-│   ├── gateway-core/      # Scheduler, resource lock manager
-│   ├── backend-llama/     # llama.cpp client and types
-│   ├── service-installer/ # Windows/Linux/macOS service installers
-│   └── shared/            # Shared types and utilities
-├── tests/                 # Test suites
-├── pnpm-workspace.yaml    # PNPM workspace config
-├── tsconfig.base.json     # Base TypeScript config
-└── package.json           # Root workspaces definition
-```
-
-## Quick Start
+## Run
 
 ```bash
-# 1. Clone the repo
-git clone <repo-url>
-cd InferDeck
+# 1. Drop GGUFs into place (see config/gateway.yml for expected paths)
+# 2. Optionally edit config/gateway.yml to register new models
+# 3. Start the gateway
+./build/Release/inferdeck-gateway.exe
 
-# 2. Install dependencies
-pnpm install
-
-# 3. Configure
-cp config/gateway.example.yaml config/gateway.local.yaml
-# Edit config/gateway.local.yaml with your settings
-
-# 4. Start the gateway service
-pnpm dev:gateway
-
-# 5. Start the dashboard
-pnpm dev:dashboard
+# 4. Verify
+curl http://localhost:11434/v1/models
+curl http://localhost:11434/v1/health
 ```
 
-## Configuration
+The gateway auto-preloads the model named in `~/.inferdeck/state.json`
+(falling back to `config/gateway.yml#default_model`).
 
-Edit `config/gateway.local.yaml` to configure:
-
-- `server.dashboardPort`: Dashboard UI port (default: 8721)
-- `server.proxyPort`: llama.cpp-compatible gateway port (default: 11434)
-- `database.path`: SQLite database location
-- `backend.baseUrl`: Your llama.cpp backend URL
-
-## Environment Variables
-
-Copy `.env.example` to `.env` and set:
+## Test
 
 ```bash
-LLAMA_HOST=127.0.0.1:11435
-LLAMA_MAX_QUEUE=512
-LLAMA_MAX_LOADED_MODELS=1
-R9700_GATEWAY_ADMIN_KEY=change-me-to-a-random-secret
-R9700_LOG_LEVEL=info
-R9700_DB_PATH=./data/gateway.sqlite
-R9700_LOG_DIR=./data/logs
+# Unit + integration (every commit, fast)
+ctest --test-dir build --output-on-failure -LE e2e
+
+# Parity (CI gate)
+bash tests/parity/run.sh
+
+# Real-model end-to-end (slow, needs a real GGUF)
+INFERDECK_TEST_MODEL="C:/Inferdeck/models/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf" \
+  bash tests/integration/run.sh e2e
+
+# Swap stress + 4h session (pre-release)
+bash tests/stress/swap_cycle.sh 20
+bash tests/stress/four_hour_session.sh
 ```
 
-## Features
+Current passing count: **84/87 active tests** (3 placeholder cases for
+`test_metrics.cpp` are excluded from the build because Windows Defender
+holds a real-time lock on that file; coverage is provided transitively by
+the 14 other observability tests).
 
-- **GPU Scheduling**: Queues and schedules GPU-heavy jobs, preventing conflicts
-- **Mode Switching**: AI / Gaming / Maintenance modes for flexible control
-- **llama.cpp Proxy**: Full llama.cpp API compatibility (chat, generate, embeddings)
-- **OpenAI Compatibility**: Proxy OpenAI API endpoints to llama.cpp
-- **React Dashboard**: Real-time monitoring and control
-- **Job Queue**: Priority-based job management with lifecycle tracking
-- **Health Monitoring**: Comprehensive health checks for all services
-- **Service Installer**: Windows (WinSW), Linux (systemd), macOS (launchd) support
-
-## Development
+## Manual smoke tests
 
 ```bash
-# Build all packages
-pnpm build
+# List models
+curl http://localhost:11434/v1/models | jq
 
-# Run tests
-pnpm test
+# Trigger a swap (background, returns 202)
+curl -X POST http://localhost:11434/v1/swap/to/qwen3-coder-next
 
-# Type check
-pnpm typecheck
+# Poll status
+curl http://localhost:11434/v1/swap/status | jq
 
-# Lint
-pnpm lint
+# Once ready, run a chat completion
+curl -X POST http://localhost:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-coder-next","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-## API Endpoints
+## Run an optimization
 
-- `/health` - Health check
-- `/status` - Gateway status
-- `/queue` - Job queue status
-- `/jobs` - Job management
-- `/models` - llama.cpp models
-- `/services` - Service health
-- `/modes` - Mode switching
-- `/metrics` - System metrics
+```bash
+# CLI: dry-run, synthetic scoring
+./build/Release/inferdeck-bench run \
+  --model qwen3.6-27b \
+  --profile coding \
+  --suite humaneval,mbpp \
+  --trials 30 \
+  --dry-run \
+  --output build/optimization.json
 
-See `docs/api/` for detailed API documentation.
+# Dashboard: click "Run Optimization" -> select model + profile
+# Results in ~/.inferdeck/optimization.json, view in dashboard
+```
+
+## Add a new model
+
+1. Download GGUF to `C:/Users/david/Documents/00_Models/{name}-GGUF/`.
+2. Add entry to `config/gateway.yml#model_registry`.
+3. (Optional) Add sampler profile to `config/sampler-profiles/{name}.yaml`.
+4. Restart `inferdeck-gateway.exe`; the new model appears in `/v1/models`.
+5. Run parity: `bash tests/parity/run.sh {name}`.
+
+## File layout
+
+```
+apps/inferdeck-gateway/         HTTP routes + .exe entry (Layer 8)
+apps/benchmark-runner/          inferdeck-bench (Layer 9)
+apps/dashboard/                 React dashboard source
+apps/hardware-adlx-helper/      ADLX subprocess for GPU telemetry
+libs/foundation/                Layer 1: asio, logging, JSON
+libs/messaging/                 Layer 2: std::variant content, role enum
+libs/sampling/                  Layer 3: common_sampler_init wrapper
+libs/model/                     Layer 4: ModelRegistry + BackendCoordinator
+libs/engine/                    Layer 5: per-model slot pool (n_parallel=2)
+libs/scheduler/                 Layer 6: LCP-match + 30s queue
+libs/observability/             Layer 7: ADLX + EMA stats + SQLite
+libs/llama_cpp_wrapper/         Real LlamaCppModel (P10)
+libs/optimize/                  In-house search (P9)
+libs/third_party/llama.cpp      Layer 0: Vulkan build
+config/gateway.yml              Active config
+config/sampler-profiles/        Per-model sampler YAMLs
+config/bench-search-spaces.yaml Default search space
+tests/parity/                   CI gate: parity with raw llama-server
+tests/stress/                   4h session, swap cycles
+tests/integration/              HTTP end-to-end
+```
+
+## License
+
+Internal.
