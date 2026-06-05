@@ -1,0 +1,17 @@
+{
+  "model": "qwen3.6-27b",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a senior software architect. Help the user plan a new feature by breaking it down into clear, testable components. Always think about failure modes, scaling, and observability before writing code."
+    },
+    {
+      "role": "user",
+      "content": "I need to design a real-time collaborative document editor. Multiple users should be able to edit the same document simultaneously without conflicts. We expect up to 500 concurrent users per document and 10,000 documents total. Drafts need to autosave every 2 seconds. Comments and suggestions should be visible to all editors in real time. What architecture do you recommend?\n\nSome context: we're a small team of 4 engineers, mostly familiar with TypeScript and PostgreSQL. We have AWS credits available. We don't want to vendor-lock on a specific CRDT library but we are open to using one. The product roadmap includes offline editing support next quarter.\n\nPlease consider:\n- Conflict resolution strategy (CRDT vs OT vs last-write-wins)\n- Backend storage (relational vs document store vs both)\n- Transport (WebSocket vs Server-Sent Events vs long polling)\n- Presence and cursor synchronization\n- Permissions and access control\n- Offline sync strategy for next quarter\n- Observability and debugging tools\n- Disaster recovery and backup\n- Cost estimates for 10K docs at 500 users each\n- 6-month delivery plan with milestones\n\nProvide a detailed plan with diagrams in ASCII art where helpful. Be opinionated. If you'd recommend technologies, list 2-3 alternatives with tradeoffs. If you see risks, call them out explicitly."
+    }
+  ],
+  "temperature": 0.7,
+  "top_p": 0.8,
+  "max_tokens": 8192,
+  "stream": true
+}

@@ -1,0 +1,15 @@
+{
+  "model": "qwen3.6-27b",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You handle multilingual text. Preserve Unicode exactly."
+    },
+    {
+      "role": "user",
+      "content": "Translate this: مرحبا بكم في InferDeck 🚀 — 这是一个多模型推理网关 with RTL, CJK, emoji 🎉, and zero-width​joiner characters. What about RTL+emoji mixed: 🇸🇦👨‍👩‍👧‍👦 العربية? And Greek: Γειά σου κόσμε."
+    }
+  ],
+  "temperature": 0.3,
+  "max_tokens": 1024
+}

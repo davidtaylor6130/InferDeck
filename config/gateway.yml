@@ -3,6 +3,10 @@ server:
   dashboardPort: 8080
   apiPort: 11434
   request_timeout_ms: 300000
+  auth_required: false
+  auth_token: ""
+  cors_origins:
+    - "*"
   tls:
     enabled: false
     cert_file: ""

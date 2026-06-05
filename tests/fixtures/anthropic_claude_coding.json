@@ -1,0 +1,87 @@
+{
+  "model": "claude-sonnet-4-5",
+  "max_tokens": 4096,
+  "system": "You are a coding assistant with access to file system and shell tools. Always explain your reasoning before making tool calls. Prefer minimal, surgical changes.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Refactor src/server/handlers/auth.py to use the new TokenValidator class from src/security/. The old code does manual JWT parsing and we want to remove that in favor of the validated type."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I'll start by reading both files to understand the current implementation."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01ABC",
+          "name": "read_file",
+          "input": {"path": "src/server/handlers/auth.py"}
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_02DEF",
+          "name": "read_file",
+          "input": {"path": "src/security/__init__.py"}
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01ABC",
+          "content": "import jwt\nfrom .response import error\n\ndef handler(request):\n    token = request.headers.get('Authorization', '').replace('Bearer ', '')\n    try:\n        payload = jwt.decode(token, options={'verify_signature': False})\n    except Exception:\n        return error(401, 'invalid token')\n    return payload"
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_02DEF",
+          "content": "from .tokens import TokenValidator, Claims\n\n__all__ = ['TokenValidator', 'Claims']"
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read the contents of a file",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Absolute or relative path"}
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Write content to a file, creating or overwriting",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string"},
+          "content": {"type": "string"}
+        },
+        "required": ["path", "content"]
+      }
+    },
+    {
+      "name": "bash",
+      "description": "Execute a shell command and return stdout/stderr",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "cmd": {"type": "string"}
+        },
+        "required": ["cmd"]
+      }
+    }
+  ],
+  "tool_choice": {"type": "auto"},
+  "metadata": {
+    "user_id": "user_abc"
+  }
+}

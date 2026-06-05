@@ -30,6 +30,9 @@ using Json = nlohmann::json;
 [[nodiscard]] Json message_to_anthropic(const Message& m);
 [[nodiscard]] Result<Message> message_from_anthropic(const Json& j);
 
+[[nodiscard]] Json conversation_to_anthropic(const Conversation& c);
+[[nodiscard]] Result<Conversation> conversation_from_anthropic(const Json& j);
+
 [[nodiscard]] Json content_to_internal(const Content& c);
 [[nodiscard]] Result<Content> content_from_internal(const Json& j);
 

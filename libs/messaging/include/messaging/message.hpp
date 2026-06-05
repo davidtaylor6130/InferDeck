@@ -19,11 +19,22 @@ struct Message {
 
     [[nodiscard]] bool empty() const noexcept { return content.empty(); }
     [[nodiscard]] std::size_t size() const noexcept { return content.size(); }
+
+    [[nodiscard]] std::vector<ToolCallContent> tool_calls() const noexcept {
+        std::vector<ToolCallContent> out;
+        for (const auto& c : content) {
+            if (auto* tc = std::get_if<ToolCallContent>(&c)) {
+                out.push_back(*tc);
+            }
+        }
+        return out;
+    }
 };
 
 struct Conversation {
     std::string model{};
     std::vector<Message> messages{};
+    std::optional<std::string> system{};
     std::optional<double> temperature{};
     std::optional<double> top_p{};
     std::optional<int> top_k{};

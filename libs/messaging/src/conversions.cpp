@@ -285,6 +285,15 @@ Json inferdeck::messaging::conversation_to_oai(const Conversation& c) {
     Json arr = Json::array();
     for (const auto& m : c.messages) arr.push_back(message_to_oai(m));
     obj["messages"] = arr;
+    if (c.system) {
+        Json sys_msg;
+        sys_msg["role"] = "system";
+        sys_msg["content"] = *c.system;
+        Json with_sys = Json::array();
+        with_sys.push_back(sys_msg);
+        for (auto& m : arr) with_sys.push_back(std::move(m));
+        obj["messages"] = std::move(with_sys);
+    }
     if (c.temperature) obj["temperature"] = *c.temperature;
     if (c.top_p)       obj["top_p"] = *c.top_p;
     if (c.top_k)       obj["top_k"] = *c.top_k;
@@ -471,4 +480,64 @@ Json inferdeck::messaging::message_to_internal(const Message& m) {
 
 Result<Message> inferdeck::messaging::message_from_internal(const Json& j) {
     return message_from_oai(j);
+}
+
+Json inferdeck::messaging::conversation_to_anthropic(const Conversation& c) {
+    Json obj;
+    if (!c.model.empty()) obj["model"] = c.model;
+    if (c.system) {
+        Json sys;
+        sys["type"] = "text";
+        sys["text"] = *c.system;
+        obj["system"] = Json::array({sys});
+    }
+    if (c.max_tokens) obj["max_tokens"] = *c.max_tokens;
+    if (c.temperature) obj["temperature"] = *c.temperature;
+    if (c.top_p)       obj["top_p"] = *c.top_p;
+    if (c.top_k)       obj["top_k"] = *c.top_k;
+    if (c.stream)      obj["stream"] = *c.stream;
+    Json arr = Json::array();
+    for (const auto& m : c.messages) arr.push_back(message_to_anthropic(m));
+    obj["messages"] = arr;
+    return obj;
+}
+
+Result<Conversation> inferdeck::messaging::conversation_from_anthropic(const Json& j) {
+    Conversation c;
+    c.model = j.value("model", std::string{});
+    c.max_tokens = opt_int(j, "max_tokens");
+    c.temperature = opt_num(j, "temperature");
+    c.top_p = opt_num(j, "top_p");
+    c.top_k = opt_int(j, "top_k");
+    c.stream = opt_bool(j, "stream");
+    c.reasoning_effort = opt_str(j, "reasoning_effort");
+
+    if (j.contains("system")) {
+        const auto& s = j["system"];
+        if (s.is_string()) {
+            c.system = s.get<std::string>();
+        } else if (s.is_array()) {
+            std::string joined;
+            for (const auto& part : s) {
+                if (part.value("type", std::string{}) == "text") {
+                    if (!joined.empty()) joined += "\n";
+                    joined += part.value("text", std::string{});
+                }
+            }
+            if (!joined.empty()) c.system = joined;
+        }
+    }
+
+    if (!j.contains("messages") || !j["messages"].is_array()) {
+        return Err<Conversation>(ErrorCode::InvalidArgument, "anthropic missing 'messages' array");
+    }
+    for (const auto& mj : j["messages"]) {
+        auto parsed = message_from_anthropic(mj);
+        if (!parsed) {
+            return Err<Conversation>(ErrorCode::ParseError,
+                                      "anthropic message: " + parsed.error().message);
+        }
+        c.messages.push_back(std::move(*parsed));
+    }
+    return Ok(c);
 }

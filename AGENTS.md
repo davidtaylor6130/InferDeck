@@ -72,11 +72,20 @@ cmake --build build-asan --config Debug -j
 ## Test Commands
 
 ```bash
-# Unit tests
+# Unit tests (fast, every commit)
 ctest --test-dir build --output-on-failure -L unit
 
-# Integration tests
+# Integration tests (medium, every commit, includes Tier A + Tier B once P3 lands)
 ctest --test-dir build --output-on-failure -L integration
+
+# All non-e2e (unit + integration)
+ctest --test-dir build --output-on-failure -LE e2e
+
+# Real-model end-to-end (slow, pre-release, needs test GGUF)
+bash tests/integration/run.sh e2e
+
+# All tiers including e2e
+bash tests/integration/run.sh all
 
 # Parity tests (CI gate, slow)
 bash tests/parity/run.sh
@@ -87,6 +96,26 @@ bash tests/stress/swap_cycle.sh 20
 # Real-hardware validation (4h session)
 bash tests/stress/four_hour_session.sh
 ```
+
+### Test Labels
+
+| Label         | Speed     | When          | Requires                |
+|---------------|-----------|---------------|-------------------------|
+| `unit`        | fast      | every commit  | nothing                 |
+| `integration` | medium    | every commit  | nothing (Tier A + B)    |
+| `e2e`         | slow      | pre-release   | test GGUF in `C:/Inferdeck/models/` |
+
+### Integration Test Fixtures
+
+Real opencode / openwebui / Anthropic payloads live in `tests/fixtures/`.
+Each fixture is a JSON file representing one realistic request body from a
+client you actually use (opencode, openwebui) or from the Anthropic Messages
+API. Tier A tests parse each fixture, round-trip through `messaging`, and
+diff against the original.
+
+Tier C uses the Qwen2.5-Coder-3B-Instruct Q4_K_M GGUF at
+`C:/Inferdeck/models/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf`
+(~2 GB, small enough for CI). Override with `INFERDECK_TEST_MODEL` env var.
 
 ## Code Conventions
 

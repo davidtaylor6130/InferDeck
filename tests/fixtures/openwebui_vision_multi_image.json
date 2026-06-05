@@ -1,0 +1,39 @@
+{
+  "model": "qwen3.6-27b",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What's in this screenshot? Describe the UI and any errors you can see."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+            "detail": "high"
+          }
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "I see two images. The first is a 1x1 transparent PNG pixel. The second appears to be a Wikipedia demonstration of PNG transparency with colored circles."
+    },
+    {
+      "role": "user",
+      "content": "What file format would you recommend for screenshots with text? Compare PNG vs JPEG for documentation."
+    }
+  ],
+  "temperature": 0.7,
+  "top_p": 0.8,
+  "max_tokens": 2048,
+  "stream": false
+}

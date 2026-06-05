@@ -100,6 +100,48 @@ Layer 9: Benchmarking (apps/benchmark-runner/) — Optuna + parity
   from InferDeck == raw `llama-server.exe` defaults within 1% on HumanEval
 - **Deliverable:** parity test passes for Qwen3.6-27B at temp=0.6/top_p=0.95
 
+### P2.5 — Integration Test Suite (Day 6.5, between P2 and P3) **NEW**
+
+Catches opencode / openwebui / Anthropic compatibility bugs by exercising the
+gateway with real client payloads, including SSE streaming, refusals, and auth
+plumbing. Three tiers:
+
+- **Tier A — Conversion layer (no model):** 12 JSON fixtures in
+  `tests/fixtures/` (9 OAI + 2 Anthropic + 1 SSE `.jsonl`). Each parsed
+  through `messaging::Conversation`, round-tripped to OAI and Anthropic,
+  diffed against original. 4 test exes: `test_realistic_workloads`,
+  `test_sse_streaming`, `test_refusal_handling`, `test_auth_headers`.
+- **Tier B — Mocked coordinator (after P3):** `IModelMock : IModel` records
+  every call. Tests `BackendCoordinator` end-to-end with synthetic responses.
+  **P3 requirement:** `IModel` must be mockable (virtual dtor, no templates,
+  no static state in interface).
+- **Tier C — Real GGUF end-to-end (after P3):** Loads
+  `C:/Inferdeck/models/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf`
+  (~2 GB, small enough for CI, coding-tuned for opencode). Runs the
+  opencode fixture through real coordinator + engine. Loose assertions:
+  status 200, completion_tokens > 0, t/s > 5, tool call present, first
+  token < 10s. Tagged `e2e` (skipped in default `ctest -L unit`).
+
+Test labels:
+
+| Label         | Coverage                                          | Speed     | When          |
+|---------------|---------------------------------------------------|-----------|---------------|
+| `unit`        | foundation + messaging + sampling + Tier A core   | fast      | every commit  |
+| `integration` | Tier A SSE/refusal/auth + Tier B (post-P3)        | medium    | every commit  |
+| `e2e`         | Tier C (real GGUF)                                | slow      | pre-release   |
+
+Commands:
+```bash
+# Tier A only (no model, fast)
+ctest --test-dir build --output-on-failure -L unit
+
+# Tier A + B (after P3)
+ctest --test-dir build --output-on-failure -L "unit|integration"
+
+# All including e2e
+bash tests/integration/run.sh all
+```
+
 ### P3 — Model Registry + BackendCoordinator (Day 7-9) **CRITICAL**
 - `libs/model/`: `IModel` interface, `ModelEntry` struct, `ModelRegistry`
 - `ModelEntry { name, gguf_path, mmproj_path, family, n_slots, vram_required }`
