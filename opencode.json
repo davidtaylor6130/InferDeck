@@ -10,35 +10,69 @@
       "models": {
         "qwen3.6-35b-a3b:latest": {
           "name": "qwen3.6-35b-a3b",
-          "limit": { "context": 65536, "output": 8192 }
+          "limit": { "context": 262144, "output": 16384 },
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          }
         },
-        "qwen.qwen3-coder-30b-a3b-instruct:latest": {
-          "name": "qwen.qwen3-coder-30b-a3b-instruct",
-          "limit": { "context": 65536, "output": 8192 }
+        "qwen3-coder-30b-a3b:latest": {
+          "name": "qwen3-coder-30b-a3b",
+          "limit": { "context": 262144, "output": 16384 },
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
         },
-        "gemma-4-26b-a4b-it:latest": {
-          "name": "gemma-4-26b-a4b-it",
-          "limit": { "context": 65536, "output": 8192 }
+        "gemma-4-26b-a4b:latest": {
+          "name": "gemma-4-26b-a4b",
+          "limit": { "context": 262144, "output": 16384 },
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          }
         },
         "gpt-oss-20b:latest": {
           "name": "gpt-oss-20b",
-          "limit": { "context": 65536, "output": 8192 }
+          "limit": { "context": 131072, "output": 16384 },
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
         },
-        "qwen2.5-coder-14b-instruct:latest": {
-          "name": "qwen2.5-coder-14b-instruct",
-          "limit": { "context": 65536, "output": 8192 }
+        "qwen2.5-coder-3b:latest": {
+          "name": "qwen2.5-coder-3b",
+          "limit": { "context": 32768, "output": 16384 },
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
         },
-        "qwen2.5-coder-3b-instruct:latest": {
-          "name": "qwen2.5-coder-3b-instruct",
-          "limit": { "context": 65536, "output": 8192 }
-        },
-        "qwen2.5-coder-0.5b-instruct:latest": {
-          "name": "qwen2.5-coder-0.5b-instruct",
-          "limit": { "context": 65536, "output": 8192 }
+        "qwen3.6-27b:latest": {
+          "name": "qwen3.6-27b",
+          "limit": { "context": 65536, "output": 16384 },
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          }
         }
       }
     }
   },
   "model": "inferdeck/qwen3.6-35b-a3b:latest",
-  "small_model": "inferdeck/qwen3.6-35b-a3b:latest"
+  "small_model": "inferdeck/qwen2.5-coder-3b:latest",
+  "plugin": [
+    "@tarquinen/opencode-dcp",
+    "@mohak34/opencode-notifier@latest",
+    "@mbanucu/opencode-background",
+    "opencode-ignore",
+    "superbased-opencode-plugin"
+  ],
+  "mcp": {
+    "puppeteer-screenshot-mcp": {
+      "type": "local",
+      "command": ["npx", "-y", "puppeteer-screenshot-mcp"],
+      "enabled": true
+    }
+  }
 }

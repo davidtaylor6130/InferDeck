@@ -48,6 +48,7 @@ public:
   inferdeck::foundation::Result<int> acquire_slot() override;
   inferdeck::foundation::Result<void> release_slot(int slot_id) override;
   bool slot_busy(int slot_id) const noexcept override;
+  inferdeck::foundation::Result<void> reset_all_slots() noexcept;
 
   inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict(
       int slot_id, const inferdeck::model::InferenceRequest& req) override;

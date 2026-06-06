@@ -60,6 +60,7 @@ foundation::Result<void> BackendCoordinator::load(const std::string& name) {
         current_loaded_ = name;
     }
     cv_.notify_all();
+    (void)inst->reset_all_slots();
     return foundation::Ok();
 }
 

@@ -17,6 +17,7 @@ struct GatewayDeps {
     model::BackendCoordinator& coordinator;
     scheduler::Scheduler& scheduler;
     std::string default_swap_timeout_s{"15"};
+    bool auto_swap{true};
 };
 
 void write_json(httplib::Response& resp, int status, const nlohmann::json& body);

@@ -138,7 +138,9 @@ struct TestServer {
     }
 
     GatewayDeps make_deps() {
-        return GatewayDeps{coordinator, scheduler, "10"};
+        GatewayDeps deps{coordinator, scheduler, "10"};
+        deps.auto_swap = false;
+        return deps;
     }
 
     bool start() {

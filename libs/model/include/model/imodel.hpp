@@ -58,6 +58,9 @@ public:
     virtual foundation::Result<int> acquire_slot() = 0;
     virtual foundation::Result<void> release_slot(int slot_id) = 0;
     virtual bool slot_busy(int slot_id) const = 0;
+    virtual foundation::Result<void> reset_all_slots() {
+        return foundation::Ok();
+    }
 
     virtual foundation::Result<InferenceResult> predict(
         int slot_id, const InferenceRequest& req) = 0;

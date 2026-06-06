@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 
@@ -189,7 +190,12 @@ Result<void> LlamaCppModel::release_slot(int slot_id) {
         make_error(ErrorCode::InvalidArgument,
                    "slot_id out of range: " + std::to_string(slot_id)));
   }
-  slots_[slot_id].busy = false;
+  auto& slot = slots_[slot_id];
+  if (slot.ctx) {
+    llama_memory_t mem = llama_get_memory(slot.ctx.get());
+    llama_memory_clear(mem, false);
+  }
+  slot.busy = false;
   return Result<void>{};
 }
 
@@ -197,6 +203,19 @@ bool LlamaCppModel::slot_busy(int slot_id) const noexcept {
   std::lock_guard lk(mtx_);
   if (slot_id < 0 || slot_id >= static_cast<int>(slots_.size())) return false;
   return slots_[slot_id].busy;
+}
+
+Result<void> LlamaCppModel::reset_all_slots() noexcept {
+  std::lock_guard lk(mtx_);
+  for (auto& s : slots_) {
+    if (s.ctx) {
+      llama_memory_t mem = llama_get_memory(s.ctx.get());
+      llama_memory_clear(mem, false);
+    }
+    s.busy = false;
+    s.last_prompt_tokens.clear();
+  }
+  return Result<void>{};
 }
 
 Result<void> LlamaCppModel::build_sampler_locked(
@@ -257,21 +276,26 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
     }
   }
   prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
+  std::cerr << "DEBUG predict: tokenized " << n_tokens << " tokens" << std::endl;
+
+  const int seq_id = 0;
 
   llama_batch batch = llama_batch_init(n_tokens, 0, 1);
   for (int i = 0; i < n_tokens; ++i) {
     batch.token[i] = prompt_tokens[i];
     batch.pos[i] = i;
     batch.n_seq_id[i] = 1;
-    batch.seq_id[i][0] = 0;
+    batch.seq_id[i][0] = seq_id;
     batch.logits[i] = (i == n_tokens - 1) ? 1 : 0;
   }
   batch.n_tokens = n_tokens;
+  std::cerr << "DEBUG predict: starting llama_decode (prompt)" << std::endl;
   if (llama_decode(slot.ctx.get(), batch) != 0) {
     llama_batch_free(batch);
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
   }
+  std::cerr << "DEBUG predict: llama_decode (prompt) done" << std::endl;
 
   llama_sampler* smp = nullptr;
   auto sres = build_sampler_locked(&smp, req);
@@ -279,6 +303,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
     llama_batch_free(batch);
     return Result<InferenceResult>(std::unexpect, sres.error());
   }
+  std::cerr << "DEBUG predict: sampler built" << std::endl;
 
   InferenceResult out;
   out.prompt_tokens = n_tokens;
@@ -299,7 +324,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
     one.token[0] = id;
     one.pos[0] = n_cur++;
     one.n_seq_id[0] = 1;
-    one.seq_id[0][0] = 0;
+    one.seq_id[0][0] = seq_id;
     one.logits[0] = 1;
     one.n_tokens = 1;
     if (llama_decode(slot.ctx.get(), one) != 0) {
@@ -310,6 +335,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
           make_error(ErrorCode::Internal, "llama_decode (token) failed"));
     }
     llama_batch_free(one);
+    if (i % 10 == 0) std::cerr << "DEBUG predict: generated " << (i+1) << " tokens" << std::endl;
   }
   const auto end = std::chrono::steady_clock::now();
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
@@ -321,6 +347,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
 
   llama_sampler_free(smp);
   llama_batch_free(batch);
+  std::cerr << "DEBUG predict: completed, " << out.completion_tokens << " tokens" << std::endl;
   return Result<InferenceResult>(std::move(out));
 }
 

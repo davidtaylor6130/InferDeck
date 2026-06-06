@@ -16,7 +16,12 @@ target_link_libraries(inferdeck-gateway PRIVATE
     llama_cpp_wrapper
     llama
     yaml-cpp::yaml-cpp
+    ${CMAKE_DL_LIBS}
 )
+
+if(WIN32)
+    target_link_libraries(inferdeck-gateway PRIVATE dbghelp)
+endif()
 
 set_target_properties(inferdeck-gateway PROPERTIES
     CXX_STANDARD 23

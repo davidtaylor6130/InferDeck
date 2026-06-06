@@ -2,12 +2,20 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <dbghelp.h>
+#endif
 
 #include "config.hpp"
 #include "foundation/logging.hpp"
@@ -32,6 +40,18 @@ namespace {
 std::atomic<bool> g_stop{false};
 httplib::Server* g_server = nullptr;
 
+void my_terminate_handler() {
+    std::cerr << "=== std::terminate called ===" << std::endl;
+    try {
+        throw;
+    } catch (const std::exception& e) {
+        std::cerr << "Terminate: std::exception: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "Terminate: unknown exception" << std::endl;
+    }
+    std::abort();
+}
+
 void signal_handler(int sig) {
     g_stop.store(true);
     if (g_server) g_server->stop();
@@ -54,6 +74,56 @@ void persist_state(const std::string& path, const std::string& model) {
     if (!f.is_open()) return;
     f << "loaded_model: " << model << "\n";
 }
+
+#ifdef _WIN32
+LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ex) {
+    DWORD code = ex->ExceptionRecord->ExceptionCode;
+    if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_SINGLE_STEP || code == 0x40010006 || code == 0xE06D7363) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    FILE* f = fopen("logs/crash.log", "a");
+    if (f) {
+        fprintf(f, "=== CRASH ===\n");
+        fprintf(f, "code=0x%08lX addr=%p\n", code, ex->ExceptionRecord->ExceptionAddress);
+        CONTEXT* ctx = ex->ContextRecord;
+        fprintf(f, "rip=%p rsp=%p rbp=%p\n", (void*)ctx->Rip, (void*)ctx->Rsp, (void*)ctx->Rbp);
+        fprintf(f, "rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p\n",
+                (void*)ctx->Rbx, (void*)ctx->Rcx, (void*)ctx->Rdx,
+                (void*)ctx->Rsi, (void*)ctx->Rdi);
+        fprintf(f, "r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\n",
+                (void*)ctx->R8, (void*)ctx->R9, (void*)ctx->R10, (void*)ctx->R11,
+                (void*)ctx->R12, (void*)ctx->R13, (void*)ctx->R14, (void*)ctx->R15);
+        STACKFRAME64 frame = {};
+        frame.AddrPC.Offset = ctx->Rip;
+        frame.AddrPC.Mode = AddrModeFlat;
+        frame.AddrStack.Offset = ctx->Rsp;
+        frame.AddrStack.Mode = AddrModeFlat;
+        frame.AddrFrame.Offset = ctx->Rbp;
+        frame.AddrFrame.Mode = AddrModeFlat;
+        HANDLE proc = GetCurrentProcess();
+        HANDLE thread = GetCurrentThread();
+        SymInitialize(proc, NULL, TRUE);
+        for (int i = 0; i < 30; ++i) {
+            if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thread, &frame, ctx, NULL,
+                             SymFunctionTableAccess64, SymGetModuleBase64, NULL)) break;
+            if (frame.AddrPC.Offset == 0) break;
+            DWORD64 disp = 0;
+            SYMBOL_INFO* sym = (SYMBOL_INFO*)malloc(sizeof(SYMBOL_INFO) + 256);
+            sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+            sym->MaxNameLen = 255;
+            if (SymFromAddr(proc, frame.AddrPC.Offset, &disp, sym)) {
+                fprintf(f, "  #%d 0x%llx %s+0x%llx\n", i, frame.AddrPC.Offset, sym->Name, disp);
+            } else {
+                fprintf(f, "  #%d 0x%llx (no symbol)\n", i, frame.AddrPC.Offset);
+            }
+            free(sym);
+        }
+        SymCleanup(proc);
+        fclose(f);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 
 } // namespace
 
@@ -83,6 +153,13 @@ int main(int argc, char** argv) {
     lc.level = parse_log_level(cfg.log_level);
     if (!cfg.log_file.empty()) lc.log_file = cfg.log_file;
     foundation::Logger::instance().initialize(lc);
+
+    std::set_terminate(my_terminate_handler);
+
+#ifdef _WIN32
+    SymInitialize(GetCurrentProcess(), NULL, TRUE);
+    AddVectoredExceptionHandler(0, CrashHandler);
+#endif
 
     LOG_INFO("startup", "inferdeck-gateway 2.0.0 starting");
     LOG_INFO("config", "loaded from {}", config_path.string());
@@ -127,7 +204,7 @@ int main(int argc, char** argv) {
         LOG_WARN("gpu_telemetry_disabled", "no adlx_helper configured");
     }
 
-    GatewayDeps deps{coordinator, scheduler, "15"};
+    GatewayDeps deps{coordinator, scheduler, "15", cfg.auto_swap};
 
     auto uptime_seconds = [&] {
         const auto now = std::chrono::steady_clock::now();
@@ -151,7 +228,9 @@ int main(int argc, char** argv) {
     auto wrap = [&](auto handler) {
         return [&, handler](const httplib::Request& req,
                             httplib::Response& resp) {
+            std::cerr << "DEBUG wrap: start" << std::endl;
             cors.apply(resp);
+            std::cerr << "DEBUG wrap: cors done" << std::endl;
             if (auth.required() && !auth.check(header_value(req, "Authorization"))) {
                 resp.status = 401;
                 resp.set_header("WWW-Authenticate", "Bearer");
@@ -159,7 +238,19 @@ int main(int argc, char** argv) {
                                                   {"message", "valid Bearer token required"}}}});
                 return;
             }
-            handler(req, resp);
+            std::cerr << "DEBUG wrap: auth done" << std::endl;
+            try {
+                handler(req, resp);
+                std::cerr << "DEBUG wrap: handler done" << std::endl;
+            } catch (const std::exception& e) {
+                LOG_ERROR("handler_exception", "what={}", e.what());
+                if (resp.status == 0) resp.status = 500;
+                write_json(resp, resp.status, nlohmann::json{{"error", {{"code", "internal_error"}, {"message", e.what()}}}});
+            } catch (...) {
+                LOG_ERROR("handler_unknown_exception", "");
+                if (resp.status == 0) resp.status = 500;
+                write_json(resp, resp.status, nlohmann::json{{"error", {{"code", "internal_error"}, {"message", "unknown exception"}}}});
+            }
         };
     };
 

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <iostream>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -159,6 +160,7 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
 
 void handle_chat_completions(const httplib::Request& req, httplib::Response& resp,
                              const GatewayDeps& deps) {
+    std::cerr << "DEBUG handle_chat_completions: start" << std::endl;
     nlohmann::json body;
     try {
         body = nlohmann::json::parse(req.body);
@@ -181,12 +183,23 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
     if (!deps.coordinator.is_loaded(model_name)) {
-        resp.status = 503;
-        resp.set_header("Retry-After", deps.default_swap_timeout_s);
-        write_error(resp, 503, "model_not_loaded",
-                    "model not loaded; POST /v1/swap/to/" + model_name +
-                    " then retry");
-        return;
+        if (deps.auto_swap) {
+            LOG_INFO("auto_swap_begin", "requested={}", model_name);
+            auto swap_result = deps.coordinator.swap_to(model_name);
+            if (!swap_result) {
+                LOG_ERROR("auto_swap_failed", "model={} error={}", model_name, swap_result.error().message);
+                write_error(resp, 500, "swap_failed", swap_result.error().message);
+                return;
+            }
+            LOG_INFO("auto_swap_complete", "model={}", model_name);
+        } else {
+            resp.status = 503;
+            resp.set_header("Retry-After", deps.default_swap_timeout_s);
+            write_error(resp, 503, "model_not_loaded",
+                        "model not loaded; POST /v1/swap/to/" + model_name +
+                        " then retry");
+            return;
+        }
     }
 
     bool stream = body.value("stream", false);
@@ -249,9 +262,21 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         ir.top_p = static_cast<float>(body.value("top_p", 0.95));
         ir.top_k = body.value("top_k", 40);
 
-        auto pr = deps.coordinator.predict(model_name, slot_id, ir);
-        if (!pr) {
-            write_error(resp, 500, "inference_error", pr.error().message);
+        model::InferenceResult pr;
+        try {
+            auto pres = deps.coordinator.predict(model_name, slot_id, ir);
+            if (!pres) {
+                write_error(resp, 500, "inference_error", pres.error().message);
+                return;
+            }
+            pr = std::move(*pres);
+        } catch (const std::exception& e) {
+            LOG_ERROR("predict_exception", "what={}", e.what());
+            write_error(resp, 500, "inference_exception", e.what());
+            return;
+        } catch (...) {
+            LOG_ERROR("predict_unknown_exception", "");
+            write_error(resp, 500, "inference_exception", "unknown exception");
             return;
         }
 
@@ -265,18 +290,17 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     {"index", 0},
                     {"message", {
                         {"role", "assistant"},
-                        {"content", pr->text},
+                        {"content", pr.text},
                     }},
                     {"finish_reason", "stop"},
                 }
             })},
             {"usage", {
-                {"prompt_tokens", pr->prompt_tokens},
-                {"completion_tokens", pr->completion_tokens},
-                {"total_tokens", pr->prompt_tokens + pr->completion_tokens},
+                {"prompt_tokens", pr.prompt_tokens},
+                {"completion_tokens", pr.completion_tokens},
+                {"total_tokens", pr.prompt_tokens + pr.completion_tokens},
             }},
         };
-        guard.disarm();
         write_json(resp, 200, resp_body);
         return;
     }
@@ -285,82 +309,118 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     resp.set_header("Cache-Control", "no-cache");
     resp.set_header("Connection", "keep-alive");
 
+    std::string prompt = "stub-prompt";
+    if (body.contains("messages") && body["messages"].is_array() &&
+        !body["messages"].empty()) {
+        const auto& last = body["messages"].back();
+        if (last.is_object() && last.contains("content") &&
+            last["content"].is_string()) {
+            prompt = last["content"].get<std::string>();
+        }
+    }
     model::InferenceRequest ir;
-    ir.prompt = "stub-stream-prompt";
+    ir.prompt = prompt;
     ir.max_tokens = body.value("max_tokens", 256);
     ir.temperature = static_cast<float>(body.value("temperature", 0.7));
     ir.top_p = static_cast<float>(body.value("top_p", 0.95));
     ir.top_k = body.value("top_k", 40);
 
-    auto pr = deps.coordinator.predict(model_name, slot_id, ir);
-    if (!pr) {
+    try {
+        auto pr = deps.coordinator.predict(model_name, slot_id, ir);
+        if (!pr) {
+            resp.set_chunked_content_provider(
+                "text/event-stream",
+                [id, stream_model, msg = pr.error().message](
+                    std::size_t, httplib::DataSink& sink) {
+                    std::string out;
+                    nlohmann::json err_chunk = {
+                        {"id", id},
+                        {"object", "chat.completion.chunk"},
+                        {"created", std::time(nullptr)},
+                        {"model", stream_model},
+                        {"choices", nlohmann::json::array({
+                            {{"index", 0},
+                             {"delta", nlohmann::json::object()},
+                             {"finish_reason", "error"}}
+                        })},
+                        {"error", {{"message", msg}}},
+                    };
+                    out += "data: " + err_chunk.dump() + "\n\n";
+                    out += "data: [DONE]\n\n";
+                    sink.write(out.data(), out.size());
+                    sink.done();
+                    return true;
+                });
+            return;
+        }
+
+        const std::string text = pr->text;
+        const std::string sanitized_full = [&]() {
+            StreamingSanitizer s;
+            auto out = s.on_token(text);
+            auto tail = s.finish();
+            return out + tail;
+        }();
+        (void)sanitized_full;
+
+        guard.disarm();
         resp.set_chunked_content_provider(
             "text/event-stream",
-            [id, stream_model, msg = pr.error().message](
-                std::size_t, httplib::DataSink& sink) {
-                std::string out;
-                nlohmann::json err_chunk = {
-                    {"id", id},
-                    {"object", "chat.completion.chunk"},
-                    {"created", std::time(nullptr)},
-                    {"model", stream_model},
-                    {"choices", nlohmann::json::array({
-                        {{"index", 0},
-                         {"delta", nlohmann::json::object()},
-                         {"finish_reason", "error"}}
-                    })},
-                    {"error", {{"message", msg}}},
-                };
-                out += "data: " + err_chunk.dump() + "\n\n";
-                out += "data: [DONE]\n\n";
-                sink.write(out.data(), out.size());
-                sink.done();
-                return true;
+            [id, stream_model, text, slot_release = release_slot](
+                std::size_t, httplib::DataSink& sink) mutable {
+                static std::atomic<bool> started{false};
+                bool expected = false;
+                if (!started.compare_exchange_strong(expected, true)) {
+                    sink.done();
+                    return false;
+                }
+                try {
+                    std::string out;
+                    out += sse_chunk(id, stream_model, R"({"role":"assistant"})");
+                    StreamingSanitizer sanitizer;
+                    for (char c : text) {
+                        std::string tok(1, c);
+                        auto clean = sanitizer.on_token(tok);
+                        if (!clean.empty()) {
+                            nlohmann::json delta = {{"content", clean}};
+                            out += sse_chunk(id, stream_model, delta.dump());
+                        }
+                    }
+                    auto tail = sanitizer.finish();
+                    if (!tail.empty()) {
+                        nlohmann::json delta = {{"content", tail}};
+                        out += sse_chunk(id, stream_model, delta.dump());
+                    }
+                    out += sse_done(id, stream_model, "stop");
+                    sink.write(out.data(), out.size());
+                    sink.done();
+                    slot_release();
+                    return false;
+                } catch (const std::exception& e) {
+                    LOG_ERROR("streaming_lambda_exception", "what={}", e.what());
+                    std::string err = "data: " + nlohmann::json{{"error",{{"message",e.what()}}}}.dump() + "\n\ndata: [DONE]\n\n";
+                    sink.write(err.data(), err.size());
+                    sink.done();
+                    slot_release();
+                    return false;
+                } catch (...) {
+                    LOG_ERROR("streaming_lambda_unknown_exception", "");
+                    sink.done();
+                    slot_release();
+                    return false;
+                }
             });
+    } catch (const std::exception& e) {
+        LOG_ERROR("streaming_setup_exception", "what={}", e.what());
+        release_slot();
+        write_error(resp, 500, "streaming_setup_failed", e.what());
+        return;
+    } catch (...) {
+        LOG_ERROR("streaming_setup_unknown_exception", "");
+        release_slot();
+        write_error(resp, 500, "streaming_setup_failed", "unknown");
         return;
     }
-
-    const std::string text = pr->text;
-    const std::string sanitized_full = [&]() {
-        StreamingSanitizer s;
-        auto out = s.on_token(text);
-        auto tail = s.finish();
-        return out + tail;
-    }();
-    (void)sanitized_full;
-
-    resp.set_chunked_content_provider(
-        "text/event-stream",
-        [id, stream_model, text, slot_release = release_slot](
-            std::size_t, httplib::DataSink& sink) mutable {
-            static std::atomic<bool> started{false};
-            bool expected = false;
-            if (!started.compare_exchange_strong(expected, true)) {
-                sink.done();
-                return false;
-            }
-            std::string out;
-            out += sse_chunk(id, stream_model, R"({"role":"assistant"})");
-            StreamingSanitizer sanitizer;
-            for (char c : text) {
-                std::string tok(1, c);
-                auto clean = sanitizer.on_token(tok);
-                if (!clean.empty()) {
-                    nlohmann::json delta = {{"content", clean}};
-                    out += sse_chunk(id, stream_model, delta.dump());
-                }
-            }
-            auto tail = sanitizer.finish();
-            if (!tail.empty()) {
-                nlohmann::json delta = {{"content", tail}};
-                out += sse_chunk(id, stream_model, delta.dump());
-            }
-            out += sse_done(id, stream_model, "stop");
-            sink.write(out.data(), out.size());
-            sink.done();
-            slot_release();
-            return true;
-        });
 }
 
 } // namespace inferdeck::gateway

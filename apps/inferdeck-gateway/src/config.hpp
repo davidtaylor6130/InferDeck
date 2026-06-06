@@ -25,6 +25,7 @@ struct GatewayConfig {
     std::string stats_db_path{};
     std::string adlx_helper_path{};
     int telemetry_poll_ms{100};
+    bool auto_swap{true};
 };
 
 inline std::string read_text_file(const std::filesystem::path& path) {
@@ -88,6 +89,10 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (o["stats_db"]) cfg.stats_db_path = o["stats_db"].as<std::string>();
         if (o["adlx_helper"]) cfg.adlx_helper_path = o["adlx_helper"].as<std::string>();
         if (o["telemetry_poll_ms"]) cfg.telemetry_poll_ms = o["telemetry_poll_ms"].as<int>();
+    }
+    if (root["gateway"]) {
+        const auto& g = root["gateway"];
+        if (g["auto_swap"]) cfg.auto_swap = g["auto_swap"].as<bool>();
     }
     if (root["model_registry"] && root["model_registry"].IsSequence()) {
         for (const auto& m : root["model_registry"]) {

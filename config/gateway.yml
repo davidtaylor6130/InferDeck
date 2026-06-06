@@ -17,22 +17,43 @@ cors:
 state:
   file: "~/.inferdeck/state.json"
 
-default_model: "qwen3.6-35b-a3b"
+default_model: "qwen3.6-27b"
 
 observability:
   stats_db: "~/.inferdeck/stats.db"
   adlx_helper: ""
   telemetry_poll_ms: 100
 
+gateway:
+  auto_swap: true
+
 model_registry:
+  - name: "qwen3.6-27b"
+    family: "qwen3.6"
+    gguf_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
+    mmproj_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/mmproj-BF16.gguf"
+    n_slots: 2
+    vram_required_mb: 20000
+    context_size: 65536
+    has_vision: true
+
   - name: "qwen3.6-35b-a3b"
     family: "qwen3.6"
-    gguf_path: "C:/Inferdeck/models/Qwen/Qwen3.6-35B-A3B-GGUF/qwen3.6-35b-a3b-q4_k_m.gguf"
-    mmproj_path: "C:/Inferdeck/models/Qwen/Qwen3.6-35B-A3B-GGUF/mmproj-Qwen3.6-35B-A3B-BF16.gguf"
+    gguf_path: "C:/Inferdeck/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+    mmproj_path: "C:/Inferdeck/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/mmproj-Qwen3.6-35B-A3B-BF16.gguf"
     n_slots: 2
     vram_required_mb: 24000
     context_size: 65536
     has_vision: true
+
+  - name: "qwen3-coder-30b-a3b"
+    family: "qwen3.6"
+    gguf_path: "C:/Inferdeck/models/DevQuasar/Qwen.Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen.Qwen3-Coder-30B-A3B-Instruct.Q4_K_M.gguf"
+    mmproj_path: null
+    n_slots: 2
+    vram_required_mb: 20000
+    context_size: 65536
+    has_vision: false
 
   - name: "qwen2.5-coder-3b"
     family: "qwen2.5"
@@ -45,9 +66,18 @@ model_registry:
 
   - name: "gemma-4-26b-a4b"
     family: "gemma4"
-    gguf_path: "C:/Inferdeck/models/lmstudio-community/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-a4b-it-Q4_K_M.gguf"
-    mmproj_path: "C:/Inferdeck/models/lmstudio-community/gemma-4-26B-A4B-it-GGUF/mmproj-gemma-4-26B-A4B-it-BF16.gguf"
+    gguf_path: "C:/Inferdeck/models/unsloth/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-UD-IQ3_XXS.gguf"
+    mmproj_path: "C:/Inferdeck/models/unsloth/gemma-4-26B-A4B-it-GGUF/mmproj-F32.gguf"
     n_slots: 2
-    vram_required_mb: 18000
+    vram_required_mb: 13000
     context_size: 65536
     has_vision: true
+
+  - name: "gpt-oss-20b"
+    family: "gpt-oss"
+    gguf_path: "C:/Inferdeck/models/lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf"
+    mmproj_path: null
+    n_slots: 2
+    vram_required_mb: 13000
+    context_size: 32768
+    has_vision: false
