@@ -259,6 +259,18 @@ foundation::Result<InferenceResult> BackendCoordinator::predict(
     return it->second->predict(slot_id, req);
 }
 
+foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
+    const std::string& name, int slot_id, const InferenceRequest& req,
+    const IModel::TokenCallback& callback) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    auto it = instances_.find(name);
+    if (it == instances_.end() || !it->second) {
+        return foundation::Err<InferenceResult>(foundation::ErrorCode::NotFound,
+                                                  "model not loaded: " + name);
+    }
+    return it->second->predict_stream(slot_id, req, callback);
+}
+
 void BackendCoordinator::drain_active(std::chrono::milliseconds timeout) {
     auto deadline = clock::now() + timeout;
     std::unique_lock<std::mutex> lock(mutex_);

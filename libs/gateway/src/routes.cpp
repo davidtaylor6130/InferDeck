@@ -6,9 +6,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <ctime>
+#include <deque>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -325,102 +328,145 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     ir.top_p = static_cast<float>(body.value("top_p", 0.95));
     ir.top_k = body.value("top_k", 40);
 
-    try {
-        auto pr = deps.coordinator.predict(model_name, slot_id, ir);
-        if (!pr) {
-            resp.set_chunked_content_provider(
-                "text/event-stream",
-                [id, stream_model, msg = pr.error().message](
-                    std::size_t, httplib::DataSink& sink) {
-                    std::string out;
-                    nlohmann::json err_chunk = {
-                        {"id", id},
-                        {"object", "chat.completion.chunk"},
-                        {"created", std::time(nullptr)},
-                        {"model", stream_model},
-                        {"choices", nlohmann::json::array({
-                            {{"index", 0},
-                             {"delta", nlohmann::json::object()},
-                             {"finish_reason", "error"}}
-                        })},
-                        {"error", {{"message", msg}}},
-                    };
-                    out += "data: " + err_chunk.dump() + "\n\n";
-                    out += "data: [DONE]\n\n";
-                    sink.write(out.data(), out.size());
-                    sink.done();
-                    return true;
+    struct StreamState {
+        std::mutex mtx;
+        std::condition_variable cv;
+        std::deque<std::string> token_queue;
+        bool inference_done{false};
+        bool inference_error{false};
+        std::string error_msg;
+        std::shared_ptr<model::InferenceResult> final_result;
+        std::atomic<bool> aborted{false};
+        std::thread inference_thread;
+        int slot_id{-1};
+        std::string model_name;
+        model::BackendCoordinator* coordinator{nullptr};
+    };
+
+    auto state = std::make_shared<StreamState>();
+    state->slot_id = slot_id;
+    state->model_name = model_name;
+    state->coordinator = &deps.coordinator;
+
+    guard.disarm();
+
+    state->inference_thread = std::thread([state, ir]() {
+        try {
+            auto result = state->coordinator->predict_stream(
+                state->model_name, state->slot_id, ir,
+                [state](const std::string& token) -> bool {
+                    if (state->aborted.load()) return false;
+                    {
+                        std::lock_guard<std::mutex> lk(state->mtx);
+                        state->token_queue.push_back(token);
+                    }
+                    state->cv.notify_one();
+                    return !state->aborted.load();
                 });
-            return;
+            {
+                std::lock_guard<std::mutex> lk(state->mtx);
+                if (result) {
+                    state->final_result = std::make_shared<model::InferenceResult>(std::move(*result));
+                } else {
+                    state->inference_error = true;
+                    state->error_msg = result.error().message;
+                }
+                state->inference_done = true;
+            }
+            state->cv.notify_all();
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lk(state->mtx);
+            state->inference_error = true;
+            state->error_msg = e.what();
+            state->inference_done = true;
+            state->cv.notify_all();
+        } catch (...) {
+            std::lock_guard<std::mutex> lk(state->mtx);
+            state->inference_error = true;
+            state->error_msg = "unknown exception";
+            state->inference_done = true;
+            state->cv.notify_all();
         }
+    });
 
-        const std::string text = pr->text;
-        const std::string sanitized_full = [&]() {
-            StreamingSanitizer s;
-            auto out = s.on_token(text);
-            auto tail = s.finish();
-            return out + tail;
-        }();
-        (void)sanitized_full;
+    auto last_heartbeat = std::chrono::steady_clock::now();
+    const auto heartbeat_interval = std::chrono::seconds{10};
 
-        guard.disarm();
-        resp.set_chunked_content_provider(
-            "text/event-stream",
-            [id, stream_model, text, slot_release = release_slot](
-                std::size_t, httplib::DataSink& sink) mutable {
-                static std::atomic<bool> started{false};
-                bool expected = false;
-                if (!started.compare_exchange_strong(expected, true)) {
-                    sink.done();
-                    return false;
-                }
-                try {
-                    std::string out;
-                    out += sse_chunk(id, stream_model, R"({"role":"assistant"})");
-                    StreamingSanitizer sanitizer;
-                    for (char c : text) {
-                        std::string tok(1, c);
-                        auto clean = sanitizer.on_token(tok);
-                        if (!clean.empty()) {
-                            nlohmann::json delta = {{"content", clean}};
-                            out += sse_chunk(id, stream_model, delta.dump());
-                        }
-                    }
-                    auto tail = sanitizer.finish();
-                    if (!tail.empty()) {
-                        nlohmann::json delta = {{"content", tail}};
-                        out += sse_chunk(id, stream_model, delta.dump());
-                    }
-                    out += sse_done(id, stream_model, "stop");
-                    sink.write(out.data(), out.size());
-                    sink.done();
-                    slot_release();
-                    return false;
-                } catch (const std::exception& e) {
-                    LOG_ERROR("streaming_lambda_exception", "what={}", e.what());
-                    std::string err = "data: " + nlohmann::json{{"error",{{"message",e.what()}}}}.dump() + "\n\ndata: [DONE]\n\n";
-                    sink.write(err.data(), err.size());
-                    sink.done();
-                    slot_release();
-                    return false;
-                } catch (...) {
-                    LOG_ERROR("streaming_lambda_unknown_exception", "");
-                    sink.done();
-                    slot_release();
-                    return false;
-                }
+    resp.set_chunked_content_provider(
+        "text/event-stream",
+        [id, stream_model, state, last_heartbeat = std::move(last_heartbeat),
+         heartbeat_interval = std::move(heartbeat_interval)](
+            std::size_t, httplib::DataSink& sink) mutable {
+            std::unique_lock<std::mutex> lk(state->mtx);
+
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_heartbeat >= heartbeat_interval) {
+                last_heartbeat = now;
+                sink.write(": \n\n", 5);
+            }
+
+            state->cv.wait(lk, [&] {
+                return !state->token_queue.empty() || state->inference_done;
             });
-    } catch (const std::exception& e) {
-        LOG_ERROR("streaming_setup_exception", "what={}", e.what());
-        release_slot();
-        write_error(resp, 500, "streaming_setup_failed", e.what());
-        return;
-    } catch (...) {
-        LOG_ERROR("streaming_setup_unknown_exception", "");
-        release_slot();
-        write_error(resp, 500, "streaming_setup_failed", "unknown");
-        return;
-    }
+
+            if (!state->token_queue.empty()) {
+                std::string batch;
+                while (!state->token_queue.empty()) {
+                    batch += state->token_queue.front();
+                    state->token_queue.pop_front();
+                }
+                lk.unlock();
+
+                if (!sink.is_writable()) {
+                    state->aborted.store(true);
+                    state->cv.notify_all();
+                    if (state->inference_thread.joinable()) {
+                        state->inference_thread.join();
+                    }
+                    state->coordinator->release_slot(state->model_name, state->slot_id);
+                    return false;
+                }
+
+                StreamingSanitizer sanitizer;
+                auto clean = sanitizer.on_token(batch);
+                if (!clean.empty()) {
+                    nlohmann::json delta = {{"content", clean}};
+                    std::string out = sse_chunk(id, stream_model, delta.dump());
+                    if (!sink.write(out.data(), out.size())) {
+                        state->aborted.store(true);
+                        state->cv.notify_all();
+                        if (state->inference_thread.joinable()) {
+                            state->inference_thread.join();
+                        }
+                        state->coordinator->release_slot(state->model_name, state->slot_id);
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            if (state->inference_error) {
+                std::string err = "data: " + nlohmann::json{{"error", {{"message", state->error_msg}}}}.dump() + "\n\n";
+                sink.write(err.data(), err.size());
+            } else {
+                StreamingSanitizer sanitizer;
+                auto tail = sanitizer.finish();
+                if (!tail.empty()) {
+                    nlohmann::json delta = {{"content", tail}};
+                    std::string out = sse_chunk(id, stream_model, delta.dump());
+                    sink.write(out.data(), out.size());
+                }
+                std::string done = "data: [DONE]\n\n";
+                sink.write(done.data(), done.size());
+            }
+            sink.done();
+
+            if (state->inference_thread.joinable()) {
+                state->inference_thread.join();
+            }
+            state->coordinator->release_slot(state->model_name, state->slot_id);
+            return false;
+        });
 }
 
 } // namespace inferdeck::gateway

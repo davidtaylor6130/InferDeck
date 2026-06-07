@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -62,8 +63,16 @@ public:
         return foundation::Ok();
     }
 
+    using TokenCallback = std::function<bool(const std::string& token)>;
+
     virtual foundation::Result<InferenceResult> predict(
         int slot_id, const InferenceRequest& req) = 0;
+
+    virtual foundation::Result<InferenceResult> predict_stream(
+        int slot_id, const InferenceRequest& req, const TokenCallback& callback) {
+        return foundation::Err<InferenceResult>(foundation::ErrorCode::Internal,
+            "streaming not implemented");
+    }
 };
 
 } // namespace inferdeck::model

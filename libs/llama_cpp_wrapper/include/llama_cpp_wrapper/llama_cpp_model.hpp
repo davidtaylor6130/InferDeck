@@ -52,6 +52,9 @@ public:
 
   inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict(
       int slot_id, const inferdeck::model::InferenceRequest& req) override;
+  inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict_stream(
+      int slot_id, const inferdeck::model::InferenceRequest& req,
+      const inferdeck::model::IModel::TokenCallback& callback) override;
 
   static std::string version();
   static void init_backend();
