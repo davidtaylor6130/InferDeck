@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -26,8 +27,17 @@ struct GatewayConfig {
     std::string adlx_helper_path{};
     int telemetry_poll_ms{100};
     bool auto_swap{true};
-    int n_batch{4096};
-    int n_ubatch{4096};
+    int n_batch{512};
+    int n_ubatch{512};
+    bool use_mmap{false};
+    bool use_mlock{false};
+    std::optional<int> n_gpu_layers{};
+    std::string flash_attn{"auto"};
+    bool kv_offload{true};
+    bool op_offload{true};
+    std::string cache_type_k{"q8_0"};
+    std::string cache_type_v{"q8_0"};
+    bool swa_full{false};
 };
 
 inline std::string read_text_file(const std::filesystem::path& path) {
@@ -97,6 +107,17 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["auto_swap"]) cfg.auto_swap = g["auto_swap"].as<bool>();
         if (g["n_batch"]) cfg.n_batch = g["n_batch"].as<int>();
         if (g["n_ubatch"]) cfg.n_ubatch = g["n_ubatch"].as<int>();
+        if (g["use_mmap"]) cfg.use_mmap = g["use_mmap"].as<bool>();
+        if (g["use_mlock"]) cfg.use_mlock = g["use_mlock"].as<bool>();
+        if (g["n_gpu_layers"] && !g["n_gpu_layers"].IsNull()) {
+            cfg.n_gpu_layers = g["n_gpu_layers"].as<int>();
+        }
+        if (g["flash_attn"]) cfg.flash_attn = g["flash_attn"].as<std::string>();
+        if (g["kv_offload"]) cfg.kv_offload = g["kv_offload"].as<bool>();
+        if (g["op_offload"]) cfg.op_offload = g["op_offload"].as<bool>();
+        if (g["cache_type_k"]) cfg.cache_type_k = g["cache_type_k"].as<std::string>();
+        if (g["cache_type_v"]) cfg.cache_type_v = g["cache_type_v"].as<std::string>();
+        if (g["swa_full"]) cfg.swa_full = g["swa_full"].as<bool>();
     }
     if (root["model_registry"] && root["model_registry"].IsSequence()) {
         for (const auto& m : root["model_registry"]) {
@@ -112,6 +133,9 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
                 m["vram_required_mb"] ? m["vram_required_mb"].as<int>() : 0;
             info.context_size =
                 m["context_size"] ? m["context_size"].as<int>() : 65536;
+            if (m["n_gpu_layers"] && !m["n_gpu_layers"].IsNull()) {
+                info.n_gpu_layers = m["n_gpu_layers"].as<int>();
+            }
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
             info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";
             cfg.models.push_back(std::move(info));

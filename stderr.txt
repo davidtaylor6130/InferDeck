@@ -6017,3 +6017,11 @@ Grammar still awaiting trigger after token 5077 (` focus`)
 Grammar still awaiting trigger after token 383 (` on`)
 Grammar still awaiting trigger after token 1118 (` first`)
 Grammar still awaiting trigger after token 30 (`?`)
+DEBUG wrap: start
+DEBUG wrap: cors done
+DEBUG wrap: auth done
+DEBUG wrap: handler done
+DEBUG wrap: start
+DEBUG wrap: cors done
+DEBUG wrap: auth done
+DEBUG wrap: handler done

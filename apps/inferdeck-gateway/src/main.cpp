@@ -179,6 +179,15 @@ int main(int argc, char** argv) {
         llama_wrapper::LlamaCppConfig lc;
         lc.n_batch = cfg.n_batch;
         lc.n_ubatch = cfg.n_ubatch;
+        lc.use_mmap = cfg.use_mmap;
+        lc.use_mlock = cfg.use_mlock;
+        lc.n_gpu_layers = info.n_gpu_layers.has_value() ? info.n_gpu_layers : cfg.n_gpu_layers;
+        lc.flash_attn = cfg.flash_attn;
+        lc.kv_offload = cfg.kv_offload;
+        lc.op_offload = cfg.op_offload;
+        lc.cache_type_k = cfg.cache_type_k;
+        lc.cache_type_v = cfg.cache_type_v;
+        lc.swa_full = cfg.swa_full;
         lc.reasoning_format = info.reasoning_format.empty() ? "auto" : info.reasoning_format;
         return std::make_unique<llama_wrapper::LlamaCppModel>(info, lc);
     });

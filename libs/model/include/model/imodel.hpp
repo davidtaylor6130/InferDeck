@@ -18,6 +18,7 @@ struct ModelInfo {
     int n_slots{2};
     int vram_required_mb{0};
     int context_size{65536};
+    std::optional<int> n_gpu_layers{};
     bool has_vision{false};
     std::string reasoning_format{};  // "auto", "deepseek", "deepseek_legacy", "none"
 };

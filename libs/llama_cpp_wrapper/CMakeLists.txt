@@ -38,6 +38,10 @@ else()
     target_compile_options(llama_cpp_wrapper PRIVATE -Wall -Wextra)
 endif()
 
+if(WIN32)
+    target_link_libraries(llama_cpp_wrapper PUBLIC psapi dxgi)
+endif()
+
 if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests)
 endif()

@@ -26,18 +26,27 @@ observability:
 
 gateway:
   auto_swap: true
-  n_batch: 2048
-  n_ubatch: 2048
+  n_batch: 512
+  n_ubatch: 512
+  use_mmap: false
+  use_mlock: false
+  n_gpu_layers: null
+  flash_attn: "auto"
+  kv_offload: true
+  op_offload: true
+  cache_type_k: "q8_0"
+  cache_type_v: "q8_0"
+  swa_full: false
 
 model_registry:
   - name: "qwen3.6-27b"
     family: "qwen3.6"
     gguf_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
-    mmproj_path: ""
+    mmproj_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/mmproj-BF16.gguf"
     n_slots: 1
     vram_required_mb: 20000
     context_size: 65536
-    has_vision: false
+    has_vision: true
 
   - name: "qwen3.6-35b-a3b"
     family: "qwen3.6"
@@ -54,7 +63,7 @@ model_registry:
     mmproj_path: ""
     n_slots: 1
     vram_required_mb: 20000
-    context_size: 65536
+    context_size: 262144
     has_vision: false
 
   - name: "qwen2.5-coder-3b"
@@ -69,11 +78,11 @@ model_registry:
   - name: "gemma-4-26b-a4b"
     family: "gemma4"
     gguf_path: "C:/Inferdeck/models/unsloth/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-UD-IQ3_XXS.gguf"
-    mmproj_path: ""
+    mmproj_path: "C:/Inferdeck/models/unsloth/gemma-4-26B-A4B-it-GGUF/mmproj-F32.gguf"
     n_slots: 1
     vram_required_mb: 13000
-    context_size: 65536
-    has_vision: false
+    context_size: 262144
+    has_vision: true
 
   - name: "gpt-oss-20b"
     family: "gpt-oss"
@@ -81,5 +90,5 @@ model_registry:
     mmproj_path: null
     n_slots: 1
     vram_required_mb: 13000
-    context_size: 32768
+    context_size: 131072
     has_vision: false

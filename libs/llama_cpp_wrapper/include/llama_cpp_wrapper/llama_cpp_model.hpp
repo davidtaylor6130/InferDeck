@@ -36,8 +36,15 @@ struct LlamaCppConfig {
   int n_threads{8};
   int n_batch{512};
   int n_ubatch{512};
-  bool use_mmap{true};
+  bool use_mmap{false};
   bool use_mlock{false};
+  std::optional<int> n_gpu_layers{};
+  std::string flash_attn{"auto"};
+  bool kv_offload{true};
+  bool op_offload{true};
+  std::string cache_type_k{"q8_0"};
+  std::string cache_type_v{"q8_0"};
+  bool swa_full{false};
   std::string chat_template{};
   std::string reasoning_format{};  // "auto", "deepseek", "deepseek_legacy", "none"
 };

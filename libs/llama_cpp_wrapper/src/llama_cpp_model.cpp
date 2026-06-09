@@ -1,6 +1,7 @@
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -14,13 +15,21 @@
 #include <vector>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
+#include <dxgi1_4.h>
 #include <excpt.h>
+#include <psapi.h>
+#include <wrl/client.h>
 #endif
 
 #include "llama.h"
+#include "ggml.h"
 #include "foundation/logging.hpp"
 #include "chat.h"
 #include "sampling.h"
@@ -82,7 +91,8 @@ static bool process_prompt_chunks(
     llama_context* ctx,
     const std::vector<llama_token>& prompt_tokens,
     int seq_id,
-    int n_batch) {
+    int n_batch,
+    const std::string& model_name) {
   int n_prompt_processed = 0;
   const int n_tokens = static_cast<int>(prompt_tokens.size());
   while (n_prompt_processed < n_tokens) {
@@ -96,7 +106,18 @@ static bool process_prompt_chunks(
       batch.logits[i] = (i == n_chunk - 1) ? 1 : 0;
     }
     batch.n_tokens = n_chunk;
-    if (llama_decode(ctx, batch) != 0) {
+    const int rc = llama_decode(ctx, batch);
+    if (rc != 0) {
+      LOG_ERROR("llama_prompt_decode_failed",
+                "model={} rc={} chunk_start={} chunk_tokens={} prompt_tokens={} n_batch={} n_ctx={} n_ctx_seq={}",
+                model_name,
+                rc,
+                n_prompt_processed,
+                n_chunk,
+                n_tokens,
+                n_batch,
+                llama_n_ctx(ctx),
+                llama_n_ctx_seq(ctx));
       llama_batch_free(batch);
       return false;
     }
@@ -107,6 +128,118 @@ static bool process_prompt_chunks(
 }
 
 static bool g_backend_initialized = false;
+
+std::string lower_copy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return s;
+}
+
+ggml_type cache_type_from_string(const std::string& type) {
+  const auto t = lower_copy(type);
+  if (t == "f32") return GGML_TYPE_F32;
+  if (t == "f16") return GGML_TYPE_F16;
+  if (t == "bf16") return GGML_TYPE_BF16;
+  if (t == "q8_0") return GGML_TYPE_Q8_0;
+  if (t == "q4_0") return GGML_TYPE_Q4_0;
+  if (t == "q4_1") return GGML_TYPE_Q4_1;
+  if (t == "q5_0") return GGML_TYPE_Q5_0;
+  if (t == "q5_1") return GGML_TYPE_Q5_1;
+  if (t == "iq4_nl") return GGML_TYPE_IQ4_NL;
+  return GGML_TYPE_F16;
+}
+
+llama_flash_attn_type flash_attn_from_string(const std::string& value) {
+  const auto v = lower_copy(value);
+  if (v == "on" || v == "enabled" || v == "true" || v == "1") {
+    return LLAMA_FLASH_ATTN_TYPE_ENABLED;
+  }
+  if (v == "off" || v == "disabled" || v == "false" || v == "0") {
+    return LLAMA_FLASH_ATTN_TYPE_DISABLED;
+  }
+  return LLAMA_FLASH_ATTN_TYPE_AUTO;
+}
+
+struct ProcessMemorySnapshot {
+  std::uint64_t working_set_mb{0};
+  std::uint64_t private_mb{0};
+  std::uint64_t system_commit_mb{0};
+  std::uint64_t gpu_local_mb{0};
+  std::uint64_t gpu_nonlocal_mb{0};
+  bool gpu_memory_available{false};
+};
+
+std::optional<ProcessMemorySnapshot> process_memory_snapshot() {
+#ifdef _WIN32
+  PROCESS_MEMORY_COUNTERS_EX pmc{};
+  if (!GetProcessMemoryInfo(GetCurrentProcess(),
+                            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                            sizeof(pmc))) {
+    return std::nullopt;
+  }
+  MEMORYSTATUSEX mem{};
+  mem.dwLength = sizeof(mem);
+  ProcessMemorySnapshot out;
+  out.working_set_mb = static_cast<std::uint64_t>(pmc.WorkingSetSize / (1024 * 1024));
+  out.private_mb = static_cast<std::uint64_t>(pmc.PrivateUsage / (1024 * 1024));
+  if (GlobalMemoryStatusEx(&mem)) {
+    out.system_commit_mb =
+        static_cast<std::uint64_t>((mem.ullTotalPageFile - mem.ullAvailPageFile) / (1024 * 1024));
+  }
+  Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+  if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(factory.GetAddressOf())))) {
+    for (UINT i = 0;; ++i) {
+      Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+      if (factory->EnumAdapters1(i, adapter.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) {
+        break;
+      }
+      Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+      if (FAILED(adapter.As(&adapter3))) {
+        continue;
+      }
+      DXGI_QUERY_VIDEO_MEMORY_INFO local{};
+      DXGI_QUERY_VIDEO_MEMORY_INFO nonlocal{};
+      if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
+        out.gpu_local_mb += static_cast<std::uint64_t>(local.CurrentUsage / (1024 * 1024));
+        out.gpu_memory_available = true;
+      }
+      if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonlocal))) {
+        out.gpu_nonlocal_mb += static_cast<std::uint64_t>(nonlocal.CurrentUsage / (1024 * 1024));
+        out.gpu_memory_available = true;
+      }
+    }
+  }
+  return out;
+#else
+  return std::nullopt;
+#endif
+}
+
+void log_memory_snapshot(const char* event, const std::string& model_name) {
+  const auto snap = process_memory_snapshot();
+  if (!snap) {
+    LOG_INFO(event, "model={} process_memory=unavailable", model_name);
+    return;
+  }
+  if (snap->gpu_memory_available) {
+    LOG_INFO(event,
+             "model={} working_set_mb={} private_mb={} system_commit_mb={} gpu_local_mb={} gpu_nonlocal_mb={}",
+             model_name,
+             snap->working_set_mb,
+             snap->private_mb,
+             snap->system_commit_mb,
+             snap->gpu_local_mb,
+             snap->gpu_nonlocal_mb);
+    return;
+  }
+  LOG_INFO(event,
+           "model={} working_set_mb={} private_mb={} system_commit_mb={} gpu_memory=unavailable",
+           model_name,
+           snap->working_set_mb,
+           snap->private_mb,
+           snap->system_commit_mb);
+}
 
 std::string normalize_path(const std::string& p) {
   std::filesystem::path path(p);
@@ -508,7 +641,7 @@ LlamaCppModel::LlamaCppModel(inferdeck::model::ModelInfo info, LlamaCppConfig cf
 
 LlamaCppModel::~LlamaCppModel() {
   if (loaded_.load()) {
-    unload();
+    (void)unload();
   }
 }
 
@@ -528,13 +661,31 @@ Result<void> LlamaCppModel::load() {
   llama_model_params mparams = llama_model_default_params();
   mparams.use_mmap = cfg_.use_mmap;
   mparams.use_mlock = cfg_.use_mlock;
-  mparams.n_gpu_layers = -1;
+  mparams.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
 
   llama_backend_init();
   const char* sys_info = llama_print_system_info();
   if (sys_info) {
     LOG_INFO("llama_system_info", "{}", sys_info);
   }
+  LOG_INFO("llama_model_load_config",
+           "model={} path={} use_mmap={} use_mlock={} n_gpu_layers={} n_ctx={} n_slots={} n_batch={} n_ubatch={} flash_attn={} kv_offload={} op_offload={} cache_type_k={} cache_type_v={} swa_full={}",
+           info_.name,
+           resolved_gguf_path_.string(),
+           cfg_.use_mmap,
+           cfg_.use_mlock,
+           mparams.n_gpu_layers,
+           info_.context_size,
+           info_.n_slots,
+           cfg_.n_batch,
+           cfg_.n_ubatch,
+           cfg_.flash_attn,
+           cfg_.kv_offload,
+           cfg_.op_offload,
+           cfg_.cache_type_k,
+           cfg_.cache_type_v,
+           cfg_.swa_full);
+  log_memory_snapshot("llama_model_load_memory_before", info_.name);
 
   model_ = llama_model_load_from_file(resolved_gguf_path_.string().c_str(), mparams);
   if (model_ == nullptr) {
@@ -545,6 +696,7 @@ Result<void> LlamaCppModel::load() {
         make_error(ErrorCode::Internal,
                    "llama_model_load_from_file returned null for " + resolved_gguf_path_.string()));
   }
+  log_memory_snapshot("llama_model_loaded_memory_after", info_.name);
   vocab_ = llama_model_get_vocab(model_);
   if (vocab_ == nullptr) {
     llama_model_free(model_);
@@ -566,6 +718,7 @@ Result<void> LlamaCppModel::load() {
     return ctx_res;
   }
   loaded_.store(true);
+  log_memory_snapshot("llama_contexts_initialized_memory_after", info_.name);
   LOG_INFO("chat_template_loaded", "model={} kind=jinja", info_.name);
   return Result<void>{};
 }
@@ -579,6 +732,27 @@ Result<void> LlamaCppModel::init_contexts_locked() {
     cparams.n_threads = cfg_.n_threads;
     cparams.n_batch = static_cast<std::uint32_t>(std::max(1, cfg_.n_batch));
     cparams.n_ubatch = static_cast<std::uint32_t>(std::max(1, cfg_.n_ubatch));
+    cparams.n_seq_max = 1;
+    cparams.flash_attn_type = flash_attn_from_string(cfg_.flash_attn);
+    cparams.offload_kqv = cfg_.kv_offload;
+    cparams.op_offload = cfg_.op_offload;
+    cparams.swa_full = cfg_.swa_full;
+    cparams.type_k = cache_type_from_string(cfg_.cache_type_k);
+    cparams.type_v = cache_type_from_string(cfg_.cache_type_v);
+    LOG_INFO("llama_context_config",
+             "model={} slot={} n_ctx={} n_batch={} n_ubatch={} n_seq_max={} flash_attn={} kv_offload={} op_offload={} cache_type_k={} cache_type_v={} swa_full={}",
+             info_.name,
+             i,
+             cparams.n_ctx,
+             cparams.n_batch,
+             cparams.n_ubatch,
+             cparams.n_seq_max,
+             cfg_.flash_attn,
+             cfg_.kv_offload,
+             cfg_.op_offload,
+             cfg_.cache_type_k,
+             cfg_.cache_type_v,
+             cfg_.swa_full);
     auto* ctx = llama_init_from_model(model_, cparams);
     if (ctx == nullptr) {
       return Result<void>(std::unexpect,
@@ -595,6 +769,7 @@ Result<void> LlamaCppModel::init_contexts_locked() {
 Result<void> LlamaCppModel::unload() {
   std::lock_guard lk(mtx_);
   if (!loaded_.load()) return Result<void>{};
+  log_memory_snapshot("llama_model_unload_memory_before", info_.name);
   for (auto& s : slots_) {
     s.ctx.reset();
     s.busy = false;
@@ -610,6 +785,7 @@ Result<void> LlamaCppModel::unload() {
   }
   vocab_ = nullptr;
   loaded_.store(false);
+  log_memory_snapshot("llama_model_unload_memory_after", info_.name);
   return Result<void>{};
 }
 
@@ -935,8 +1111,16 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   }
   prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
   const int seq_id = 0;
+  const auto n_ctx = llama_n_ctx_seq(slot.ctx.get());
+  if (n_tokens >= static_cast<int>(n_ctx)) {
+    return Result<InferenceResult>(std::unexpect,
+        make_error(ErrorCode::InvalidArgument,
+                   "prompt has " + std::to_string(n_tokens) +
+                   " tokens but context is " + std::to_string(n_ctx)));
+  }
+  llama_memory_clear(llama_get_memory(slot.ctx.get()), true);
 
-  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch))) {
+  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch), info_.name)) {
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
   }
@@ -1078,8 +1262,16 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   }
   prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
   const int seq_id = 0;
+  const auto n_ctx = llama_n_ctx_seq(slot.ctx.get());
+  if (n_tokens >= static_cast<int>(n_ctx)) {
+    return Result<InferenceResult>(std::unexpect,
+        make_error(ErrorCode::InvalidArgument,
+                   "prompt has " + std::to_string(n_tokens) +
+                   " tokens but context is " + std::to_string(n_ctx)));
+  }
+  llama_memory_clear(llama_get_memory(slot.ctx.get()), true);
 
-  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch))) {
+  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch), info_.name)) {
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
   }
