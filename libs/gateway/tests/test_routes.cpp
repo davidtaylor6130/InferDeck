@@ -37,12 +37,14 @@ public:
     std::atomic<int> max_slots{2};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
+    ChatTemplateMeta chat_meta_{};
 
     explicit IModelMock(ModelInfo info) : model_info(std::move(info)) {
         busy_slots.assign(max_slots.load(), 0);
     }
 
     const ModelInfo& info() const override { return model_info; }
+    const ChatTemplateMeta& chat_template_meta() const override { return chat_meta_; }
 
     Result<void> load() override { loaded.store(true); return Ok(); }
     Result<void> unload() override {
@@ -93,6 +95,40 @@ public:
         r.text = "Hello from model";
         r.prompt_tokens = 3;
         r.completion_tokens = 4;
+        return Ok(std::move(r));
+    }
+
+    Result<InferenceResult> predict_stream(
+        int, const InferenceRequest&, const TokenCallback& callback) override {
+        InferenceDelta reasoning;
+        reasoning.reasoning_text = "need a tool";
+        if (!callback(reasoning)) return Ok(InferenceResult{});
+
+        InferenceDelta header;
+        ToolCallDelta tc_header;
+        tc_header.index = 0;
+        tc_header.id = "call_test";
+        tc_header.type = "function";
+        tc_header.function_name = "list_workspace";
+        header.tool_calls.push_back(std::move(tc_header));
+        if (!callback(header)) return Ok(InferenceResult{});
+
+        InferenceDelta args;
+        ToolCallDelta tc_args;
+        tc_args.index = 0;
+        tc_args.function_arguments = "{\"path\":\".\"}";
+        args.tool_calls.push_back(std::move(tc_args));
+        if (!callback(args)) return Ok(InferenceResult{});
+
+        InferenceResult r;
+        r.prompt_tokens = 8;
+        r.completion_tokens = 12;
+        ToolCall call;
+        call.id = "call_test";
+        call.type = "function";
+        call.function_name = "list_workspace";
+        call.function_arguments = "{\"path\":\".\"}";
+        r.tool_calls.push_back(std::move(call));
         return Ok(std::move(r));
     }
 };
@@ -304,5 +340,79 @@ TEST_CASE("Routes: POST /v1/chat/completions strips :latest suffix", "[routes][c
     REQUIRE(res);
     REQUIRE(res->status == 200);
     REQUIRE(nlohmann::json::parse(res->body)["model"] == "qwen3.6-27b");
+    ts.stop();
+}
+
+TEST_CASE("Routes: streaming tool call emits llama-server shaped SSE",
+          "[routes][chat][stream][tools]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("qwen3.6-27b"));
+    REQUIRE(ts.coordinator.load("qwen3.6-27b"));
+    REQUIRE(ts.start());
+    httplib::Client cli("127.0.0.1", ts.port);
+    auto res = cli.Post(
+        "/v1/chat/completions",
+        R"({
+          "model":"qwen3.6-27b",
+          "stream":true,
+          "messages":[{"role":"user","content":"review local files"}],
+          "tools":[{
+            "type":"function",
+            "function":{
+              "name":"list_workspace",
+              "description":"list files",
+              "parameters":{"type":"object","properties":{"path":{"type":"string"}}}
+            }
+          }]
+        })",
+        "application/json");
+    REQUIRE(res);
+    REQUIRE(res->status == 200);
+
+    std::vector<nlohmann::json> chunks;
+    std::size_t pos = 0;
+    while (pos < res->body.size()) {
+        auto nl = res->body.find('\n', pos);
+        if (nl == std::string::npos) nl = res->body.size();
+        std::string line = res->body.substr(pos, nl - pos);
+        pos = nl + 1;
+        if (line.rfind("data: ", 0) != 0 || line.find("[DONE]") != std::string::npos) continue;
+        chunks.push_back(nlohmann::json::parse(line.substr(6)));
+    }
+
+    bool saw_reasoning = false;
+    bool saw_tool_header = false;
+    bool saw_tool_args = false;
+    bool saw_tool_finish = false;
+    for (const auto& chunk : chunks) {
+        const auto& choice = chunk["choices"][0];
+        const auto& delta = choice["delta"];
+        if (delta.contains("reasoning_content")) {
+            saw_reasoning = true;
+        }
+        if (delta.contains("tool_calls")) {
+            const auto& tc = delta["tool_calls"][0];
+            REQUIRE(tc["index"].is_number_unsigned());
+            if (tc.contains("id")) {
+                REQUIRE(tc["id"].is_string());
+                REQUIRE(tc["id"] == "call_test");
+                REQUIRE(tc["type"] == "function");
+                REQUIRE(tc["function"]["name"] == "list_workspace");
+                saw_tool_header = true;
+            }
+            if (tc.contains("function") && tc["function"].contains("arguments")) {
+                REQUIRE_FALSE(tc.contains("id"));
+                REQUIRE(tc["function"]["arguments"].is_string());
+                saw_tool_args = true;
+            }
+        }
+        if (choice.contains("finish_reason") && choice["finish_reason"] == "tool_calls") {
+            saw_tool_finish = true;
+        }
+    }
+    REQUIRE(saw_reasoning);
+    REQUIRE(saw_tool_header);
+    REQUIRE(saw_tool_args);
+    REQUIRE(saw_tool_finish);
     ts.stop();
 }

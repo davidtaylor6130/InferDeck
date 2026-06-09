@@ -47,6 +47,11 @@ std::string sse_chunk(const std::string& id, const std::string& model,
     return "data: " + chunk.dump() + "\n\n";
 }
 
+std::string sse_chunk_json(const std::string& id, const std::string& model,
+                           const nlohmann::json& delta) {
+    return sse_chunk(id, model, delta.dump());
+}
+
 std::string sse_done(const std::string& id, const std::string& model,
                      const std::string& finish_reason = "stop") {
     nlohmann::json chunk = {
@@ -63,6 +68,59 @@ std::string sse_done(const std::string& id, const std::string& model,
         })},
     };
     return "data: " + chunk.dump() + "\n\ndata: [DONE]\n\n";
+}
+
+nlohmann::json tool_call_json(const model::ToolCall& tc) {
+    nlohmann::json out = {
+        {"type", tc.type.empty() ? "function" : tc.type},
+        {"function", {
+            {"name", tc.function_name},
+            {"arguments", tc.function_arguments},
+        }},
+    };
+    if (!tc.id.empty()) out["id"] = tc.id;
+    return out;
+}
+
+nlohmann::json tool_call_delta_json(const model::ToolCallDelta& tc) {
+    nlohmann::json out = {{"index", tc.index}};
+    if (!tc.id.empty()) {
+        out["id"] = tc.id;
+        out["type"] = tc.type.empty() ? "function" : tc.type;
+    }
+    if (!tc.function_name.empty() || !tc.function_arguments.empty()) {
+        nlohmann::json fn = nlohmann::json::object();
+        if (!tc.function_name.empty()) fn["name"] = tc.function_name;
+        if (!tc.function_arguments.empty()) fn["arguments"] = tc.function_arguments;
+        out["function"] = fn;
+    }
+    return out;
+}
+
+model::InferenceRequest make_inference_request(const nlohmann::json& body) {
+    model::InferenceRequest ir;
+    ir.openai_body_json = body.dump();
+    ir.max_tokens = body.value("max_tokens", body.value("max_completion_tokens", 256));
+    ir.temperature = static_cast<float>(body.value("temperature", 0.7));
+    ir.top_p = static_cast<float>(body.value("top_p", 0.95));
+    ir.top_k = body.value("top_k", 40);
+    ir.repeat_penalty = static_cast<float>(body.value("repeat_penalty", 1.1));
+    ir.repeat_last_n = body.value("repeat_last_n", 64);
+    ir.seed = body.value("seed", -1);
+    return ir;
+}
+
+nlohmann::json delta_json(const model::InferenceDelta& delta) {
+    nlohmann::json out = nlohmann::json::object();
+    if (!delta.reasoning_text.empty()) out["reasoning_content"] = delta.reasoning_text;
+    if (!delta.content.empty()) out["content"] = delta.content;
+    if (!delta.tool_calls.empty()) {
+        out["tool_calls"] = nlohmann::json::array();
+        for (const auto& tc : delta.tool_calls) {
+            out["tool_calls"].push_back(tool_call_delta_json(tc));
+        }
+    }
+    return out;
 }
 
 } // namespace
@@ -249,21 +307,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     } guard{&release_slot};
 
     if (!stream) {
-        std::string prompt = "stub-prompt";
-        if (body.contains("messages") && body["messages"].is_array() &&
-            !body["messages"].empty()) {
-            const auto& last = body["messages"].back();
-            if (last.is_object() && last.contains("content") &&
-                last["content"].is_string()) {
-                prompt = last["content"].get<std::string>();
-            }
-        }
-        model::InferenceRequest ir;
-        ir.prompt = prompt;
-        ir.max_tokens = body.value("max_tokens", 256);
-        ir.temperature = static_cast<float>(body.value("temperature", 0.7));
-        ir.top_p = static_cast<float>(body.value("top_p", 0.95));
-        ir.top_k = body.value("top_k", 40);
+        model::InferenceRequest ir = make_inference_request(body);
 
         model::InferenceResult pr;
         try {
@@ -283,6 +327,20 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             return;
         }
 
+        nlohmann::json message = {
+            {"role", "assistant"},
+            {"content", pr.text},
+        };
+        if (!pr.reasoning_text.empty()) {
+            message["reasoning_content"] = pr.reasoning_text;
+        }
+        if (!pr.tool_calls.empty()) {
+            message["tool_calls"] = nlohmann::json::array();
+            for (const auto& tc : pr.tool_calls) {
+                message["tool_calls"].push_back(tool_call_json(tc));
+            }
+        }
+        const std::string finish_reason = !pr.tool_calls.empty() ? "tool_calls" : pr.finish_reason;
         nlohmann::json resp_body = {
             {"id", id},
             {"object", "chat.completion"},
@@ -291,11 +349,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             {"choices", nlohmann::json::array({
                 {
                     {"index", 0},
-                    {"message", {
-                        {"role", "assistant"},
-                        {"content", pr.text},
-                    }},
-                    {"finish_reason", "stop"},
+                    {"message", message},
+                    {"finish_reason", finish_reason},
                 }
             })},
             {"usage", {
@@ -312,26 +367,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     resp.set_header("Cache-Control", "no-cache");
     resp.set_header("Connection", "keep-alive");
 
-    std::string prompt = "stub-prompt";
-    if (body.contains("messages") && body["messages"].is_array() &&
-        !body["messages"].empty()) {
-        const auto& last = body["messages"].back();
-        if (last.is_object() && last.contains("content") &&
-            last["content"].is_string()) {
-            prompt = last["content"].get<std::string>();
-        }
-    }
-    model::InferenceRequest ir;
-    ir.prompt = prompt;
-    ir.max_tokens = body.value("max_tokens", 256);
-    ir.temperature = static_cast<float>(body.value("temperature", 0.7));
-    ir.top_p = static_cast<float>(body.value("top_p", 0.95));
-    ir.top_k = body.value("top_k", 40);
+    model::InferenceRequest ir = make_inference_request(body);
 
     struct StreamState {
         std::mutex mtx;
         std::condition_variable cv;
-        std::deque<std::string> token_queue;
+        std::deque<model::InferenceDelta> delta_queue;
         bool inference_done{false};
         bool inference_error{false};
         std::string error_msg;
@@ -354,11 +395,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         try {
             auto result = state->coordinator->predict_stream(
                 state->model_name, state->slot_id, ir,
-                [state](const std::string& token) -> bool {
+                [state](const model::InferenceDelta& delta) -> bool {
                     if (state->aborted.load()) return false;
                     {
                         std::lock_guard<std::mutex> lk(state->mtx);
-                        state->token_queue.push_back(token);
+                        state->delta_queue.push_back(delta);
                     }
                     state->cv.notify_one();
                     return !state->aborted.load();
@@ -406,14 +447,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             }
 
             state->cv.wait(lk, [&] {
-                return !state->token_queue.empty() || state->inference_done;
+                return !state->delta_queue.empty() || state->inference_done;
             });
 
-            if (!state->token_queue.empty()) {
-                std::string batch;
-                while (!state->token_queue.empty()) {
-                    batch += state->token_queue.front();
-                    state->token_queue.pop_front();
+            if (!state->delta_queue.empty()) {
+                std::deque<model::InferenceDelta> deltas;
+                while (!state->delta_queue.empty()) {
+                    deltas.push_back(std::move(state->delta_queue.front()));
+                    state->delta_queue.pop_front();
                 }
                 lk.unlock();
 
@@ -427,11 +468,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     return false;
                 }
 
-                StreamingSanitizer sanitizer;
-                auto clean = sanitizer.on_token(batch);
-                if (!clean.empty()) {
-                    nlohmann::json delta = {{"content", clean}};
-                    std::string out = sse_chunk(id, stream_model, delta.dump());
+                for (const auto& delta : deltas) {
+                    auto json_delta = delta_json(delta);
+                    if (json_delta.empty()) continue;
+                    std::string out = sse_chunk_json(id, stream_model, json_delta);
                     if (!sink.write(out.data(), out.size())) {
                         state->aborted.store(true);
                         state->cv.notify_all();
@@ -449,14 +489,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 std::string err = "data: " + nlohmann::json{{"error", {{"message", state->error_msg}}}}.dump() + "\n\n";
                 sink.write(err.data(), err.size());
             } else {
-                StreamingSanitizer sanitizer;
-                auto tail = sanitizer.finish();
-                if (!tail.empty()) {
-                    nlohmann::json delta = {{"content", tail}};
-                    std::string out = sse_chunk(id, stream_model, delta.dump());
-                    sink.write(out.data(), out.size());
-                }
-                std::string done = "data: [DONE]\n\n";
+                const bool has_tool_calls = state->final_result && !state->final_result->tool_calls.empty();
+                const std::string finish_reason = has_tool_calls ? "tool_calls" :
+                    (state->final_result ? state->final_result->finish_reason : "stop");
+                std::string done = sse_done(id, stream_model, finish_reason);
                 sink.write(done.data(), done.size());
             }
             sink.done();

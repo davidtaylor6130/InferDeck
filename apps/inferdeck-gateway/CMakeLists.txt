@@ -21,6 +21,7 @@ target_link_libraries(inferdeck-gateway PRIVATE
 
 if(WIN32)
     target_link_libraries(inferdeck-gateway PRIVATE dbghelp)
+    target_link_options(inferdeck-gateway PRIVATE /STACK:33554432)
 endif()
 
 set_target_properties(inferdeck-gateway PROPERTIES

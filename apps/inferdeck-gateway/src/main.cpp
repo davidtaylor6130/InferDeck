@@ -175,8 +175,11 @@ int main(int argc, char** argv) {
     }
 
     model::ModelRegistry registry;
-    registry.set_factory([](const model::ModelInfo& info) -> std::unique_ptr<model::IModel> {
+    registry.set_factory([cfg](const model::ModelInfo& info) -> std::unique_ptr<model::IModel> {
         llama_wrapper::LlamaCppConfig lc;
+        lc.n_batch = cfg.n_batch;
+        lc.n_ubatch = cfg.n_ubatch;
+        lc.reasoning_format = info.reasoning_format.empty() ? "auto" : info.reasoning_format;
         return std::make_unique<llama_wrapper::LlamaCppModel>(info, lc);
     });
     for (const auto& m : cfg.models) {

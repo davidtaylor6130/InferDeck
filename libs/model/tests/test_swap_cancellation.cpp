@@ -16,6 +16,7 @@ public:
       : info_(std::move(info)), acquire_count_(acquire_count) {}
 
   const ModelInfo& info() const noexcept override { return info_; }
+  const ChatTemplateMeta& chat_template_meta() const noexcept override { return chat_meta_; }
   foundation::Result<void> load() override { loaded_.store(true); return foundation::Ok(); }
   foundation::Result<void> unload() override { loaded_.store(false); return foundation::Ok(); }
   bool is_loaded() const noexcept override { return loaded_.load(); }
@@ -36,6 +37,7 @@ private:
   ModelInfo info_;
   std::atomic<bool> loaded_{false};
   std::atomic<int>* acquire_count_;
+  ChatTemplateMeta chat_meta_{};
 };
 
 }

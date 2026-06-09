@@ -1,0 +1,31 @@
+[2026-06-09 06:58:43.500] [inferdeck-foundation] [info] event=logger_init level=2 console=true file=logs/gateway.log
+[2026-06-09 06:58:43.786] [inferdeck-foundation] [info] event=startup inferdeck-gateway 2.0.0 starting
+[2026-06-09 06:58:43.786] [inferdeck-foundation] [info] event=config loaded from C:\Users\david\Documents\GitHub\InferDeck\config\gateway.yml
+[2026-06-09 06:58:43.786] [inferdeck-foundation] [info] event=vulkan_test About to initialize llama backend
+[2026-06-09 06:58:43.955] [inferdeck-foundation] [info] event=llama_system_info CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+[2026-06-09 06:58:43.955] [inferdeck-foundation] [info] event=model_registered name=qwen3.6-27b vram_mb=20000 n_slots=1
+[2026-06-09 06:58:43.955] [inferdeck-foundation] [info] event=model_registered name=qwen3.6-35b-a3b vram_mb=24000 n_slots=1
+[2026-06-09 06:58:43.955] [inferdeck-foundation] [info] event=model_registered name=qwen3-coder-30b-a3b vram_mb=20000 n_slots=1
+[2026-06-09 06:58:43.955] [inferdeck-foundation] [info] event=model_registered name=qwen2.5-coder-3b vram_mb=2500 n_slots=1
+[2026-06-09 06:58:43.955] [inferdeck-foundation] [info] event=model_registered name=gemma-4-26b-a4b vram_mb=13000 n_slots=1
+[2026-06-09 06:58:43.956] [inferdeck-foundation] [info] event=model_registered name=gpt-oss-20b vram_mb=13000 n_slots=1
+[2026-06-09 06:58:43.956] [inferdeck-foundation] [info] event=factory_set LlamaCppModel factory installed
+[2026-06-09 06:58:43.956] [inferdeck-foundation] [warning] event=gpu_telemetry_disabled no adlx_helper configured
+[2026-06-09 06:58:43.956] [inferdeck-foundation] [info] event=default_model_deferred name=qwen3.6-27b (deferred until P10 LlamaCppModel lands)
+[2026-06-09 06:58:43.956] [inferdeck-foundation] [info] event=server_listening host=0.0.0.0 port=11434
+[2026-06-09 06:59:14.182] [inferdeck-foundation] [info] event=auto_swap_begin requested=qwen3.6-27b
+[2026-06-09 06:59:14.183] [inferdeck-foundation] [info] event=llama_system_info CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+[2026-06-09 06:59:24.949] [inferdeck-foundation] [info] event=chat_template_loaded model=qwen3.6-27b kind=jinja
+[2026-06-09 06:59:24.950] [inferdeck-foundation] [info] event=auto_swap_complete model=qwen3.6-27b
+[2026-06-09 07:00:31.223] [inferdeck-foundation] [info] event=auto_swap_begin requested=gpt-oss-20b
+[2026-06-09 07:00:34.371] [inferdeck-foundation] [info] event=llama_system_info CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+[2026-06-09 07:00:45.358] [inferdeck-foundation] [info] event=chat_template_loaded model=gpt-oss-20b kind=jinja
+[2026-06-09 07:00:45.359] [inferdeck-foundation] [info] event=auto_swap_complete model=gpt-oss-20b
+[2026-06-09 07:01:31.772] [inferdeck-foundation] [info] event=auto_swap_begin requested=qwen3.6-27b
+[2026-06-09 07:01:33.931] [inferdeck-foundation] [info] event=llama_system_info CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+[2026-06-09 07:01:49.612] [inferdeck-foundation] [info] event=chat_template_loaded model=qwen3.6-27b kind=jinja
+[2026-06-09 07:01:49.612] [inferdeck-foundation] [info] event=auto_swap_complete model=qwen3.6-27b
+[2026-06-09 07:03:36.247] [inferdeck-foundation] [info] event=auto_swap_begin requested=qwen3.6-35b-a3b
+[2026-06-09 07:03:39.345] [inferdeck-foundation] [info] event=llama_system_info CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+[2026-06-09 07:03:58.315] [inferdeck-foundation] [info] event=chat_template_loaded model=qwen3.6-35b-a3b kind=jinja
+[2026-06-09 07:03:58.316] [inferdeck-foundation] [info] event=auto_swap_complete model=qwen3.6-35b-a3b

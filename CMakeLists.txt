@@ -26,10 +26,10 @@ find_package(spdlog REQUIRED)
 find_package(fmt REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
+find_package(httplib CONFIG REQUIRED)
 
 if(INFERDECK_BUILD_TESTS)
     find_package(Catch2 REQUIRED)
-    find_package(httplib CONFIG REQUIRED)
 endif()
 
 # --- llama.cpp: internal Vulkan runtime ---

@@ -33,12 +33,14 @@ public:
     int predict_count_{0};
     int load_delay_ms_{0};
     int unload_delay_ms_{0};
+    inferdeck::model::ChatTemplateMeta chat_meta_{};
 
     explicit DummyModel(ModelInfo i) : info_(std::move(i)) {
         busy_.assign(n_slots_, 0);
     }
 
     const ModelInfo& info() const override { return info_; }
+    const inferdeck::model::ChatTemplateMeta& chat_template_meta() const override { return chat_meta_; }
     inferdeck::foundation::Result<void> load() override {
         if (load_delay_ms_ > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(load_delay_ms_));

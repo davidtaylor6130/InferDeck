@@ -39,6 +39,7 @@ public:
     std::vector<CallRecord> calls;
     std::string text_to_return{"hello world"};
     std::mutex calls_mtx;
+    ChatTemplateMeta chat_meta_{};
 
     explicit IModelMock(ModelInfo info) : model_info(std::move(info)) {
         busy_slots.assign(max_slots.load(), 0);
@@ -50,6 +51,7 @@ public:
     }
 
     const ModelInfo& info() const override { return model_info; }
+    const ChatTemplateMeta& chat_template_meta() const override { return chat_meta_; }
 
     Result<void> load() override {
         record("load");

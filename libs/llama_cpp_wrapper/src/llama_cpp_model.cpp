@@ -4,12 +4,27 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
+#include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <excpt.h>
+#endif
 
 #include "llama.h"
 #include "foundation/logging.hpp"
+#include "chat.h"
+#include "sampling.h"
+#include <nlohmann/json.hpp>
 
 namespace inferdeck::llama_wrapper {
 
@@ -22,9 +37,73 @@ using inferdeck::foundation::LOG_INFO;
 using inferdeck::foundation::LOG_ERROR;
 using inferdeck::model::InferenceRequest;
 using inferdeck::model::InferenceResult;
+using inferdeck::model::ChatMessage;
+using inferdeck::model::InferenceDelta;
+using inferdeck::model::ToolCall;
+using inferdeck::model::ToolCallDelta;
+
+#ifdef _WIN32
+static void log_stack_overflow(int iteration, int prompt_tokens, const char* model_name) {
+    std::ofstream log("logs/inference.log", std::ios::app);
+    if (log.is_open()) {
+        log << "[STACK_OVERFLOW] predict_stream iteration=" << iteration
+            << " prompt_tokens=" << prompt_tokens
+            << " model=" << (model_name ? model_name : "unknown")
+            << " timestamp=" << std::time(nullptr) << "\n";
+    }
+    std::cerr << "[STACK_OVERFLOW] predict_stream iteration=" << iteration
+              << " prompt_tokens=" << prompt_tokens
+              << " model=" << (model_name ? model_name : "unknown") << std::endl;
+}
+#endif
 
 inline Error make_error(ErrorCode code, std::string msg) {
   return Error{code, std::move(msg)};
+}
+
+std::string random_string(std::size_t n = 32) {
+  static constexpr char chars[] =
+      "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  static thread_local std::mt19937 rng{std::random_device{}()};
+  std::uniform_int_distribution<std::size_t> dist(0, sizeof(chars) - 2);
+  std::string out;
+  out.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    out.push_back(chars[dist(rng)]);
+  }
+  return out;
+}
+
+std::string gen_tool_call_id() {
+  return random_string();
+}
+
+static bool process_prompt_chunks(
+    llama_context* ctx,
+    const std::vector<llama_token>& prompt_tokens,
+    int seq_id,
+    int n_batch) {
+  int n_prompt_processed = 0;
+  const int n_tokens = static_cast<int>(prompt_tokens.size());
+  while (n_prompt_processed < n_tokens) {
+    int n_chunk = std::min(n_batch, n_tokens - n_prompt_processed);
+    llama_batch batch = llama_batch_init(n_chunk, 0, 1);
+    for (int i = 0; i < n_chunk; ++i) {
+      batch.token[i] = prompt_tokens[n_prompt_processed + i];
+      batch.pos[i] = n_prompt_processed + i;
+      batch.n_seq_id[i] = 1;
+      batch.seq_id[i][0] = seq_id;
+      batch.logits[i] = (i == n_chunk - 1) ? 1 : 0;
+    }
+    batch.n_tokens = n_chunk;
+    if (llama_decode(ctx, batch) != 0) {
+      llama_batch_free(batch);
+      return false;
+    }
+    llama_batch_free(batch);
+    n_prompt_processed += n_chunk;
+  }
+  return true;
 }
 
 static bool g_backend_initialized = false;
@@ -36,7 +115,372 @@ std::string normalize_path(const std::string& p) {
   return p;
 }
 
+std::string role_to_template_role(const std::string& role) {
+  if (role == "system") return "system";
+  if (role == "assistant") return "assistant";
+  if (role == "tool") return "tool";
+  return "user";
 }
+
+common_chat_msg to_common_chat_msg(const ChatMessage& msg) {
+  common_chat_msg cmsg;
+  cmsg.role = role_to_template_role(msg.role).c_str();
+  cmsg.content = msg.content.c_str();
+  cmsg.tool_call_id = msg.tool_call_id.c_str();
+
+  if (msg.role == "assistant" && !msg.content.empty()) {
+    try {
+      auto calls = nlohmann::json::parse(msg.content);
+      if (calls.is_array()) {
+        for (const auto& call : calls) {
+          common_chat_tool_call tc;
+          if (call.contains("function")) {
+            const auto& fn = call["function"];
+            tc.name = fn.value("name", "").c_str();
+            if (fn.contains("arguments")) {
+              const auto& a = fn["arguments"];
+              tc.arguments = a.is_string() ? a.get<std::string>().c_str() : a.dump().c_str();
+            }
+          } else if (call.contains("name")) {
+            tc.name = call.value("name", "").c_str();
+            if (call.contains("arguments")) {
+              const auto& a = call["arguments"];
+              tc.arguments = a.is_string() ? a.get<std::string>().c_str() : a.dump().c_str();
+            }
+          }
+          tc.id = call.value("id", "").c_str();
+          if (!tc.name.empty()) cmsg.tool_calls.push_back(std::move(tc));
+        }
+      }
+    } catch (...) {}
+  }
+
+  if (msg.role == "tool") {
+    cmsg.content = msg.content.c_str();
+    cmsg.tool_call_id = msg.tool_call_id.c_str();
+  }
+
+  return cmsg;
+}
+
+std::vector<common_chat_tool> parse_tools_json(const std::string& tools_json) {
+  std::vector<common_chat_tool> tools;
+  if (tools_json.empty()) return tools;
+  try {
+    auto j = nlohmann::json::parse(tools_json);
+    if (!j.is_array()) return tools;
+    for (const auto& item : j) {
+      common_chat_tool tool;
+      if (item.contains("function")) {
+        const auto& fn = item["function"];
+        tool.name = fn.value("name", "").c_str();
+        tool.description = fn.value("description", "").c_str();
+        if (fn.contains("parameters")) {
+          tool.parameters = fn["parameters"].dump().c_str();
+        }
+      } else {
+        tool.name = item.value("name", "").c_str();
+        tool.description = item.value("description", "").c_str();
+        if (item.contains("parameters")) {
+          tool.parameters = item["parameters"].dump().c_str();
+        }
+      }
+      if (!tool.name.empty()) tools.push_back(std::move(tool));
+    }
+  } catch (...) {}
+  return tools;
+}
+
+common_reasoning_format parse_reasoning_format(const std::string& value) {
+  if (value.empty()) return COMMON_REASONING_FORMAT_AUTO;
+  std::string lower = value;
+  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+  std::replace(lower.begin(), lower.end(), '-', '_');
+  if (lower == "none") return COMMON_REASONING_FORMAT_NONE;
+  if (lower == "deepseek") return COMMON_REASONING_FORMAT_DEEPSEEK;
+  if (lower == "deepseek_legacy") return COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY;
+  if (lower == "auto") return COMMON_REASONING_FORMAT_AUTO;
+  return COMMON_REASONING_FORMAT_AUTO;
+}
+
+common_chat_tool_choice parse_tool_choice(const nlohmann::ordered_json& body) {
+  if (!body.contains("tool_choice") || body["tool_choice"].is_null()) {
+    return COMMON_CHAT_TOOL_CHOICE_AUTO;
+  }
+  const auto& tc = body["tool_choice"];
+  if (tc.is_string()) {
+    return common_chat_tool_choice_parse_oaicompat(tc.get<std::string>());
+  }
+  if (tc.is_object()) {
+    const auto type = tc.value("type", std::string{"auto"});
+    if (type == "none") return COMMON_CHAT_TOOL_CHOICE_NONE;
+    if (type == "required" || type == "any") return COMMON_CHAT_TOOL_CHOICE_REQUIRED;
+    return COMMON_CHAT_TOOL_CHOICE_AUTO;
+  }
+  return COMMON_CHAT_TOOL_CHOICE_AUTO;
+}
+
+std::vector<llama_token> tokenize_stop_strings(
+    const llama_vocab* vocab, const std::vector<std::string>& stops) {
+  std::vector<llama_token> tokens;
+  for (const auto& stop_str : stops) {
+    if (stop_str.empty()) continue;
+    int n = llama_tokenize(vocab, stop_str.c_str(), static_cast<int>(stop_str.size()),
+                           nullptr, 0, false, true);
+    if (n == 1) {
+      std::vector<llama_token> tmp(1);
+      llama_tokenize(vocab, stop_str.c_str(), static_cast<int>(stop_str.size()),
+                     tmp.data(), n, false, true);
+      tokens.push_back(tmp[0]);
+    }
+  }
+  return tokens;
+}
+
+std::string tool_call_json(const common_chat_tool_call& tc) {
+  nlohmann::json j = {
+      {"type", "function"},
+      {"function", {
+          {"name", tc.name},
+          {"arguments", tc.arguments},
+      }},
+  };
+  if (!tc.id.empty()) j["id"] = tc.id;
+  return j.dump();
+}
+
+ToolCall to_tool_call(const common_chat_tool_call& tc) {
+  ToolCall out;
+  out.id = tc.id;
+  out.type = "function";
+  out.function_name = tc.name;
+  out.function_arguments = tc.arguments;
+  return out;
+}
+
+std::string json_arguments(const nlohmann::json& args) {
+  return args.is_string() ? args.get<std::string>() : args.dump();
+}
+
+std::optional<ToolCall> parse_tool_call_object(const nlohmann::json& obj, std::size_t index) {
+  if (!obj.is_object()) return std::nullopt;
+
+  ToolCall call;
+  call.id = obj.value("id", "call_" + std::to_string(index));
+  call.type = "function";
+
+  if (obj.contains("function") && obj["function"].is_object()) {
+    const auto& fn = obj["function"];
+    call.function_name = fn.value("name", "");
+    if (fn.contains("arguments")) call.function_arguments = json_arguments(fn["arguments"]);
+  } else {
+    call.function_name = obj.value("name", "");
+    if (obj.contains("arguments")) call.function_arguments = json_arguments(obj["arguments"]);
+  }
+
+  if (call.function_name.empty()) return std::nullopt;
+  if (call.function_arguments.empty()) call.function_arguments = "{}";
+  return call;
+}
+
+std::optional<std::vector<ToolCall>> parse_fallback_tool_calls(const std::string& text) {
+  std::vector<std::string> candidates;
+  candidates.push_back(text);
+
+  const auto fence = text.find("```");
+  if (fence != std::string::npos) {
+    auto body_start = text.find('\n', fence);
+    if (body_start != std::string::npos) {
+      ++body_start;
+      const auto body_end = text.find("```", body_start);
+      if (body_end != std::string::npos && body_end > body_start) {
+        candidates.push_back(text.substr(body_start, body_end - body_start));
+      }
+    }
+  }
+
+  const auto first_brace = text.find('{');
+  const auto last_brace = text.rfind('}');
+  if (first_brace != std::string::npos && last_brace != std::string::npos && last_brace > first_brace) {
+    candidates.push_back(text.substr(first_brace, last_brace - first_brace + 1));
+  }
+
+  for (const auto& candidate : candidates) {
+    try {
+      auto json = nlohmann::json::parse(candidate);
+      std::vector<ToolCall> calls;
+      if (json.is_object() && json.contains("tool_calls") && json["tool_calls"].is_array()) {
+        std::size_t i = 0;
+        for (const auto& item : json["tool_calls"]) {
+          if (auto call = parse_tool_call_object(item, i++)) calls.push_back(std::move(*call));
+        }
+      } else if (json.is_array()) {
+        std::size_t i = 0;
+        for (const auto& item : json) {
+          if (auto call = parse_tool_call_object(item, i++)) calls.push_back(std::move(*call));
+        }
+      } else if (auto call = parse_tool_call_object(json, 0)) {
+        calls.push_back(std::move(*call));
+      }
+      if (!calls.empty()) return calls;
+    } catch (...) {}
+  }
+
+  return std::nullopt;
+}
+
+InferenceDelta to_delta(const common_chat_msg_diff& diff) {
+  InferenceDelta out;
+  out.content = diff.content_delta;
+  out.reasoning_text = diff.reasoning_content_delta;
+  if (diff.tool_call_index != std::string::npos) {
+    ToolCallDelta tc;
+    tc.index = diff.tool_call_index;
+    tc.id = diff.tool_call_delta.id;
+    if (!tc.id.empty()) tc.type = "function";
+    tc.function_name = diff.tool_call_delta.name;
+    tc.function_arguments = diff.tool_call_delta.arguments;
+    out.tool_calls.push_back(std::move(tc));
+  }
+  return out;
+}
+
+class StreamingChatParserState {
+public:
+  explicit StreamingChatParserState(common_chat_parser_params params)
+      : parser_params_(std::move(params)) {
+    if (!parser_params_.echo) {
+      try {
+        chat_msg_ = common_chat_parse("", true, parser_params_);
+      } catch (...) {
+        chat_msg_ = common_chat_msg{};
+      }
+    }
+  }
+
+  std::vector<common_chat_msg_diff> update(
+      const std::string& text_added,
+      bool is_partial,
+      bool filter_tool_calls) {
+    std::vector<common_chat_msg_diff> diffs;
+    generated_text_ += text_added;
+    auto previous = chat_msg_;
+    auto next = common_chat_parse(generated_text_, is_partial, parser_params_);
+    if (next.empty()) {
+      return diffs;
+    }
+
+    next.set_tool_call_ids(generated_tool_call_ids_, gen_tool_call_id);
+    chat_msg_ = std::move(next);
+    auto all_diffs = common_chat_msg_diff::compute_diffs(previous, chat_msg_);
+    if (!filter_tool_calls) {
+      return all_diffs;
+    }
+
+    for (auto& d : all_diffs) {
+      for (std::size_t i = 0; i < chat_msg_.tool_calls.size(); ++i) {
+        if (sent_tool_call_names_.count(i) || chat_msg_.tool_calls[i].name.empty()) {
+          continue;
+        }
+        if (d.tool_call_index != i || !d.tool_call_delta.arguments.empty()) {
+          common_chat_msg_diff header;
+          header.tool_call_index = i;
+          header.tool_call_delta.id = chat_msg_.tool_calls[i].id;
+          header.tool_call_delta.name = chat_msg_.tool_calls[i].name;
+          diffs.push_back(std::move(header));
+          sent_tool_call_names_.insert(i);
+        }
+      }
+
+      if (d.tool_call_index == std::string::npos) {
+        diffs.push_back(std::move(d));
+      } else {
+        const std::size_t i = d.tool_call_index;
+        if (sent_tool_call_names_.count(i)) {
+          if (!d.tool_call_delta.arguments.empty()) {
+            d.tool_call_delta.name.clear();
+            d.tool_call_delta.id.clear();
+            diffs.push_back(std::move(d));
+          }
+        } else {
+          if (!d.tool_call_delta.arguments.empty() || !is_partial) {
+            d.tool_call_delta.name = chat_msg_.tool_calls[i].name;
+            d.tool_call_delta.id = chat_msg_.tool_calls[i].id;
+            diffs.push_back(std::move(d));
+            sent_tool_call_names_.insert(i);
+          }
+        }
+      }
+    }
+
+    if (!is_partial) {
+      for (std::size_t i = 0; i < chat_msg_.tool_calls.size(); ++i) {
+        if (!sent_tool_call_names_.count(i) && !chat_msg_.tool_calls[i].name.empty()) {
+          common_chat_msg_diff header;
+          header.tool_call_index = i;
+          header.tool_call_delta.id = chat_msg_.tool_calls[i].id;
+          header.tool_call_delta.name = chat_msg_.tool_calls[i].name;
+          diffs.push_back(std::move(header));
+          sent_tool_call_names_.insert(i);
+        }
+      }
+    }
+
+    return diffs;
+  }
+
+private:
+  common_chat_parser_params parser_params_;
+  common_chat_msg chat_msg_;
+  std::string generated_text_;
+  std::vector<std::string> generated_tool_call_ids_;
+  std::unordered_set<std::size_t> sent_tool_call_names_;
+};
+
+void apply_parsed_message(InferenceResult& out, const common_chat_msg& msg) {
+  out.text = msg.content;
+  out.reasoning_text = msg.reasoning_content;
+  out.tool_calls.clear();
+  out.tool_calls_json.clear();
+  for (const auto& tc : msg.tool_calls) {
+    out.tool_calls.push_back(to_tool_call(tc));
+    out.tool_calls_json.push_back(tool_call_json(tc));
+  }
+}
+
+common_chat_msg parse_final_message_with_ids(
+    const std::string& generated,
+    const common_chat_parser_params& parser_params) {
+  auto msg = common_chat_parse(generated, false, parser_params);
+  std::vector<std::string> ids;
+  msg.set_tool_call_ids(ids, gen_tool_call_id);
+  return msg;
+}
+
+void apply_fallback_tool_calls(InferenceResult& out, const std::string& generated) {
+  auto calls = parse_fallback_tool_calls(generated);
+  if (!calls || calls->empty()) return;
+  out.text.clear();
+  out.tool_calls = std::move(*calls);
+  out.tool_calls_json.clear();
+  for (const auto& tc : out.tool_calls) {
+    nlohmann::json j = {
+        {"type", "function"},
+        {"function", {
+            {"name", tc.function_name},
+            {"arguments", tc.function_arguments},
+        }},
+    };
+    if (!tc.id.empty()) j["id"] = tc.id;
+    out.tool_calls_json.push_back(j.dump());
+  }
+}
+
+bool fallback_tool_call_complete(const std::string& generated) {
+  return generated.find("```") != std::string::npos && parse_fallback_tool_calls(generated).has_value();
+}
+
+} // namespace
 
 std::string LlamaCppModel::version() {
   const char* info = llama_print_system_info();
@@ -108,6 +552,13 @@ Result<void> LlamaCppModel::load() {
     return Result<void>(std::unexpect,
         make_error(ErrorCode::ParseError, "llama_model_get_vocab returned null"));
   }
+  chat_templates_ = common_chat_templates_init(model_, "").release();
+  if (chat_templates_ == nullptr) {
+    llama_model_free(model_);
+    model_ = nullptr;
+    return Result<void>(std::unexpect,
+        make_error(ErrorCode::ParseError, "common_chat_templates_init returned null"));
+  }
   auto ctx_res = init_contexts_locked();
   if (!ctx_res.has_value()) {
     llama_model_free(model_);
@@ -115,6 +566,7 @@ Result<void> LlamaCppModel::load() {
     return ctx_res;
   }
   loaded_.store(true);
+  LOG_INFO("chat_template_loaded", "model={} kind=jinja", info_.name);
   return Result<void>{};
 }
 
@@ -148,6 +600,10 @@ Result<void> LlamaCppModel::unload() {
     s.busy = false;
   }
   slots_.clear();
+  if (chat_templates_) {
+    common_chat_templates_free(chat_templates_);
+    chat_templates_ = nullptr;
+  }
   if (model_) {
     llama_model_free(model_);
     model_ = nullptr;
@@ -185,17 +641,41 @@ Result<int> LlamaCppModel::acquire_slot() {
 
 Result<void> LlamaCppModel::release_slot(int slot_id) {
   std::lock_guard lk(mtx_);
+  {
+    std::ofstream dbg("logs/debug.log", std::ios::app);
+    if (dbg) { dbg << "DEBUG release_slot: slot_id=" << slot_id << "\n"; dbg.flush(); }
+  }
   if (slot_id < 0 || slot_id >= static_cast<int>(slots_.size())) {
     return Result<void>(std::unexpect,
         make_error(ErrorCode::InvalidArgument,
                    "slot_id out of range: " + std::to_string(slot_id)));
   }
   auto& slot = slots_[slot_id];
+  {
+    std::ofstream dbg("logs/debug.log", std::ios::app);
+    if (dbg) { dbg << "DEBUG release_slot: slot.ctx=" << (slot.ctx ? "valid" : "null") << " busy=" << slot.busy << "\n"; dbg.flush(); }
+  }
   if (slot.ctx) {
+    {
+      std::ofstream dbg("logs/debug.log", std::ios::app);
+      if (dbg) { dbg << "DEBUG release_slot: getting memory\n"; dbg.flush(); }
+    }
     llama_memory_t mem = llama_get_memory(slot.ctx.get());
+    {
+      std::ofstream dbg("logs/debug.log", std::ios::app);
+      if (dbg) { dbg << "DEBUG release_slot: clearing memory\n"; dbg.flush(); }
+    }
     llama_memory_clear(mem, false);
+    {
+      std::ofstream dbg("logs/debug.log", std::ios::app);
+      if (dbg) { dbg << "DEBUG release_slot: memory cleared\n"; dbg.flush(); }
+    }
   }
   slot.busy = false;
+  {
+    std::ofstream dbg("logs/debug.log", std::ios::app);
+    if (dbg) { dbg << "DEBUG release_slot: done\n"; dbg.flush(); }
+  }
   return Result<void>{};
 }
 
@@ -218,6 +698,159 @@ Result<void> LlamaCppModel::reset_all_slots() noexcept {
   return Result<void>{};
 }
 
+Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
+    const InferenceRequest& req) {
+  if (!chat_templates_) {
+    return Result<ChatTemplateResult>(std::unexpect, make_error(ErrorCode::Internal, "chat templates not initialized"));
+  }
+
+  common_chat_templates_inputs inputs;
+  nlohmann::ordered_json body = nlohmann::ordered_json::object();
+  if (!req.openai_body_json.empty()) {
+    try {
+      body = nlohmann::ordered_json::parse(req.openai_body_json);
+    } catch (const std::exception& e) {
+      return Result<ChatTemplateResult>(std::unexpect,
+          make_error(ErrorCode::ParseError, std::string("invalid OpenAI request JSON: ") + e.what()));
+    }
+  }
+
+  inputs.reasoning_format = parse_reasoning_format(info_.reasoning_format.empty() ? cfg_.reasoning_format : info_.reasoning_format);
+  if (body.contains("reasoning_format") && body["reasoning_format"].is_string()) {
+    inputs.reasoning_format = parse_reasoning_format(body["reasoning_format"].get<std::string>());
+  }
+  inputs.add_generation_prompt = true;
+  if (body.contains("add_generation_prompt") && body["add_generation_prompt"].is_boolean()) {
+    inputs.add_generation_prompt = body["add_generation_prompt"].get<bool>();
+  }
+  inputs.use_jinja = true;
+  inputs.enable_thinking = common_chat_templates_support_enable_thinking(chat_templates_);
+  auto caps = common_chat_templates_get_caps(chat_templates_);
+  inputs.parallel_tool_calls = caps["supports_parallel_tool_calls"];
+
+  if (body.contains("messages") && body["messages"].is_array()) {
+    try {
+      inputs.messages = common_chat_msgs_parse_oaicompat(body["messages"]);
+    } catch (const std::exception& e) {
+      return Result<ChatTemplateResult>(std::unexpect,
+          make_error(ErrorCode::ParseError, std::string("invalid OpenAI messages: ") + e.what()));
+    }
+  } else {
+    for (const auto& m : req.messages) {
+      inputs.messages.push_back(to_common_chat_msg(m));
+    }
+    if (inputs.messages.empty()) {
+      common_chat_msg msg;
+      msg.role = "user";
+      msg.content = req.prompt;
+      inputs.messages.push_back(std::move(msg));
+    }
+  }
+
+  if (body.contains("tools") && body["tools"].is_array()) {
+    try {
+      inputs.tools = common_chat_tools_parse_oaicompat(body["tools"]);
+    } catch (const std::exception& e) {
+      return Result<ChatTemplateResult>(std::unexpect,
+          make_error(ErrorCode::ParseError, std::string("invalid OpenAI tools: ") + e.what()));
+    }
+    inputs.tool_choice = parse_tool_choice(body);
+  } else if (!req.tools_json.empty()) {
+    inputs.tools = parse_tools_json(req.tools_json);
+    inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
+  }
+  if (!inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE &&
+      body.contains("grammar")) {
+    return Result<ChatTemplateResult>(std::unexpect,
+        make_error(ErrorCode::InvalidArgument, "Cannot use custom grammar constraints with tools."));
+  }
+  if (body.contains("parallel_tool_calls") && body["parallel_tool_calls"].is_boolean()) {
+    inputs.parallel_tool_calls = body["parallel_tool_calls"].get<bool>();
+  }
+  if (body.contains("chat_template_kwargs") && body["chat_template_kwargs"].is_object()) {
+    for (const auto& item : body["chat_template_kwargs"].items()) {
+      inputs.chat_template_kwargs[item.key()] = item.value().dump();
+    }
+    const auto it = inputs.chat_template_kwargs.find("enable_thinking");
+    if (it != inputs.chat_template_kwargs.end()) {
+      if (it->second == "true") inputs.enable_thinking = true;
+      if (it->second == "false") inputs.enable_thinking = false;
+    }
+  }
+  if (body.contains("grammar") && body["grammar"].is_string()) {
+    inputs.grammar = body["grammar"].get<std::string>();
+  }
+  if (body.contains("json_schema")) {
+    inputs.json_schema = body["json_schema"].is_null() ? "" : body["json_schema"].dump();
+  }
+  if (body.contains("response_format") && body["response_format"].is_object()) {
+    const auto& rf = body["response_format"];
+    const auto type = rf.value("type", std::string{});
+    if (type == "json_object") {
+      if (rf.contains("schema")) inputs.json_schema = rf["schema"].dump();
+      else if (inputs.json_schema.empty()) inputs.json_schema = nlohmann::ordered_json::object().dump();
+    } else if (type == "json_schema" && rf.contains("json_schema")) {
+      const auto& wrapper = rf["json_schema"];
+      if (wrapper.is_object() && wrapper.contains("schema")) {
+        inputs.json_schema = wrapper["schema"].dump();
+      }
+    }
+  }
+
+  auto chat_params = common_chat_templates_apply(chat_templates_, inputs);
+
+  ChatTemplateMeta meta;
+  meta.thinking_start_tag = chat_params.thinking_start_tag;
+  meta.thinking_end_tag = chat_params.thinking_end_tag;
+  meta.preserved_tokens = chat_params.preserved_tokens;
+  meta.supports_thinking = chat_params.supports_thinking;
+
+  ChatTemplateResult result;
+  result.prompt = chat_params.prompt;
+  result.stop_strings = chat_params.additional_stops;
+  result.parser_params = common_chat_parser_params(chat_params);
+  result.parser_params.reasoning_format = inputs.reasoning_format;
+  result.parser_params.reasoning_in_content = false;
+  result.parser_params.parse_tool_calls = !inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
+  if (!chat_params.parser.empty()) {
+    result.parser_params.parser.load(chat_params.parser);
+  }
+  if (body.contains("stop")) {
+    if (body["stop"].is_string()) {
+      result.stop_strings.push_back(body["stop"].get<std::string>());
+    } else if (body["stop"].is_array()) {
+      for (const auto& stop : body["stop"]) {
+        if (stop.is_string()) result.stop_strings.push_back(stop.get<std::string>());
+      }
+    }
+  }
+  result.sampling_params.temp = req.temperature;
+  result.sampling_params.top_p = req.top_p;
+  result.sampling_params.top_k = req.top_k;
+  result.sampling_params.penalty_repeat = req.repeat_penalty;
+  result.sampling_params.penalty_last_n = req.repeat_last_n;
+  result.sampling_params.seed = req.seed >= 0 ? static_cast<std::uint32_t>(req.seed) : LLAMA_DEFAULT_SEED;
+  if (!chat_params.grammar.empty()) {
+    if (!inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
+      result.sampling_params.grammar = {COMMON_GRAMMAR_TYPE_TOOL_CALLS, chat_params.grammar};
+    } else if (!inputs.json_schema.empty()) {
+      result.sampling_params.grammar = {COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT, chat_params.grammar};
+    } else {
+      result.sampling_params.grammar = {COMMON_GRAMMAR_TYPE_USER, chat_params.grammar};
+    }
+  }
+  result.sampling_params.grammar_lazy = chat_params.grammar_lazy;
+  result.sampling_params.grammar_triggers = chat_params.grammar_triggers;
+  result.sampling_params.generation_prompt = chat_params.generation_prompt;
+  for (const auto& token_str : chat_params.preserved_tokens) {
+    auto toks = tokenize_stop_strings(vocab_, {token_str});
+    for (auto t : toks) result.sampling_params.preserved_tokens.insert(t);
+  }
+  result.meta = std::move(meta);
+
+  return Result<ChatTemplateResult>(std::move(result));
+}
+
 Result<void> LlamaCppModel::build_sampler_locked(
     llama_sampler** out, const InferenceRequest& req) {
   const std::uint32_t seed = req.seed >= 0 ? static_cast<std::uint32_t>(req.seed)
@@ -230,6 +863,19 @@ Result<void> LlamaCppModel::build_sampler_locked(
   auto append = [&](llama_sampler* s) {
     if (s) llama_sampler_chain_add(chain, s);
   };
+
+  const char* dry_seq_breakers[] = {"\n", ":", "\"", "*"};
+  append(llama_sampler_init_dry(
+      vocab_, llama_model_n_ctx_train(model_),
+      0.8f,    // dry_multiplier
+      1.75f,   // dry_base
+      2,       // dry_allowed_length
+      1024,    // dry_penalty_last_n
+      dry_seq_breakers, 4));
+
+  append(llama_sampler_init_penalties(
+      req.repeat_last_n, req.repeat_penalty, 0.0f, 0.0f));
+
   append(llama_sampler_init_top_k(static_cast<int32_t>(req.top_k)));
   append(llama_sampler_init_top_p(req.top_p, 1));
   append(llama_sampler_init_min_p(0.05f, 1));
@@ -255,56 +901,51 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
         make_error(ErrorCode::InvalidArgument, "slot not acquired or no context"));
   }
 
-  std::vector<llama_token> prompt_tokens(req.prompt.size() + 16);
+  auto tmpl_res = apply_chat_template(req);
+  if (!tmpl_res.has_value()) {
+    return Result<InferenceResult>(std::unexpect, tmpl_res.error());
+  }
+  std::string prompt = std::move(tmpl_res->prompt);
+  auto parser_params = std::move(tmpl_res->parser_params);
+  auto sampling_params = std::move(tmpl_res->sampling_params);
+  auto stop_strings = std::move(tmpl_res->stop_strings);
+  auto stop_tokens = tokenize_stop_strings(vocab_, stop_strings);
+  chat_template_meta_ = std::move(tmpl_res->meta);
+
+  std::vector<llama_token> prompt_tokens(prompt.size() + 16);
+  const bool add_bos = llama_vocab_get_add_bos(vocab_);
   int n_tokens = llama_tokenize(vocab_,
-                                req.prompt.data(),
-                                static_cast<int>(req.prompt.size()),
+                                prompt.data(),
+                                static_cast<int>(prompt.size()),
                                 prompt_tokens.data(),
                                 static_cast<int>(prompt_tokens.size()),
-                                true, true);
+                                add_bos, true);
   if (n_tokens < 0) {
     prompt_tokens.resize(static_cast<std::size_t>(-n_tokens));
     n_tokens = llama_tokenize(vocab_,
-                              req.prompt.data(),
-                              static_cast<int>(req.prompt.size()),
+                              prompt.data(),
+                              static_cast<int>(prompt.size()),
                               prompt_tokens.data(),
                               static_cast<int>(prompt_tokens.size()),
-                              true, true);
+                              add_bos, true);
     if (n_tokens < 0) {
       return Result<InferenceResult>(std::unexpect,
           make_error(ErrorCode::Internal, "tokenization failed"));
     }
   }
   prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
-  std::cerr << "DEBUG predict: tokenized " << n_tokens << " tokens" << std::endl;
-
   const int seq_id = 0;
 
-  llama_batch batch = llama_batch_init(n_tokens, 0, 1);
-  for (int i = 0; i < n_tokens; ++i) {
-    batch.token[i] = prompt_tokens[i];
-    batch.pos[i] = i;
-    batch.n_seq_id[i] = 1;
-    batch.seq_id[i][0] = seq_id;
-    batch.logits[i] = (i == n_tokens - 1) ? 1 : 0;
-  }
-  batch.n_tokens = n_tokens;
-  std::cerr << "DEBUG predict: starting llama_decode (prompt)" << std::endl;
-  if (llama_decode(slot.ctx.get(), batch) != 0) {
-    llama_batch_free(batch);
+  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch))) {
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
   }
-  std::cerr << "DEBUG predict: llama_decode (prompt) done" << std::endl;
 
-  llama_sampler* smp = nullptr;
-  auto sres = build_sampler_locked(&smp, req);
-  if (!sres.has_value()) {
-    llama_batch_free(batch);
-    return Result<InferenceResult>(std::unexpect, sres.error());
+  common_sampler* smp = common_sampler_init(model_, sampling_params);
+  if (smp == nullptr) {
+    return Result<InferenceResult>(std::unexpect,
+        make_error(ErrorCode::Internal, "common_sampler_init returned null"));
   }
-  std::cerr << "DEBUG predict: sampler built" << std::endl;
-
   InferenceResult out;
   out.prompt_tokens = n_tokens;
   const int max_tokens = std::max(1, req.max_tokens);
@@ -312,14 +953,38 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   std::string generated;
   generated.reserve(static_cast<std::size_t>(max_tokens) * 4);
   int n_cur = n_tokens;
+  bool stopped = false;
   for (int i = 0; i < max_tokens; ++i) {
-    const llama_token id = llama_sampler_sample(smp, slot.ctx.get(), -1);
-    if (llama_vocab_is_eog(vocab_, id)) break;
+    const llama_token id = common_sampler_sample(smp, slot.ctx.get(), -1);
+    bool is_stop = llama_vocab_is_eog(vocab_, id);
+    if (!is_stop) {
+      for (auto t : stop_tokens) {
+        if (t == id) { is_stop = true; break; }
+      }
+    }
+    if (is_stop) {
+      stopped = true;
+      break;
+    }
+
     char buf[256];
     const int n = llama_token_to_piece(vocab_, id, buf, sizeof(buf), 0, true);
     if (n > 0) generated.append(buf, static_cast<std::size_t>(n));
+    bool string_stop = false;
+    for (const auto& stop : stop_strings) {
+      if (!stop.empty() && generated.size() >= stop.size() &&
+          generated.compare(generated.size() - stop.size(), stop.size(), stop) == 0) {
+        generated.resize(generated.size() - stop.size());
+        string_stop = true;
+        break;
+      }
+    }
     out.completion_tokens += 1;
-
+    common_sampler_accept(smp, id, true);
+    if (string_stop) {
+      stopped = true;
+      break;
+    }
     llama_batch one = llama_batch_init(1, 0, 1);
     one.token[0] = id;
     one.pos[0] = n_cur++;
@@ -329,25 +994,36 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
     one.n_tokens = 1;
     if (llama_decode(slot.ctx.get(), one) != 0) {
       llama_batch_free(one);
-      llama_batch_free(batch);
-      llama_sampler_free(smp);
+      common_sampler_free(smp);
       return Result<InferenceResult>(std::unexpect,
           make_error(ErrorCode::Internal, "llama_decode (token) failed"));
     }
     llama_batch_free(one);
-    if (i % 10 == 0) std::cerr << "DEBUG predict: generated " << (i+1) << " tokens" << std::endl;
   }
   const auto end = std::chrono::steady_clock::now();
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
   if (out.completion_tokens > 0 && out.duration_ms > 0.0f) {
     out.tokens_per_second = (out.completion_tokens * 1000.0f) / out.duration_ms;
   }
-  out.text = std::move(generated);
+  if (!stopped && out.completion_tokens >= max_tokens) {
+    out.finish_reason = "length";
+  }
+  try {
+    auto msg = parse_final_message_with_ids(generated, parser_params);
+    apply_parsed_message(out, msg);
+    if (parser_params.parse_tool_calls && out.tool_calls.empty()) {
+      apply_fallback_tool_calls(out, generated);
+    }
+  } catch (const std::exception& e) {
+    LOG_ERROR("chat_parse_failed", "model={} error={}", info_.name, e.what());
+    out.text = std::move(generated);
+    if (parser_params.parse_tool_calls) {
+      apply_fallback_tool_calls(out, out.text);
+    }
+  }
   slot.last_prompt_tokens.assign(prompt_tokens.begin(), prompt_tokens.end());
 
-  llama_sampler_free(smp);
-  llama_batch_free(batch);
-  std::cerr << "DEBUG predict: completed, " << out.completion_tokens << " tokens" << std::endl;
+  common_sampler_free(smp);
   return Result<InferenceResult>(std::move(out));
 }
 
@@ -368,78 +1044,112 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
         make_error(ErrorCode::InvalidArgument, "slot not acquired or no context"));
   }
 
-  std::vector<llama_token> prompt_tokens(req.prompt.size() + 16);
+  auto tmpl_res = apply_chat_template(req);
+  if (!tmpl_res.has_value()) {
+    return Result<InferenceResult>(std::unexpect, tmpl_res.error());
+  }
+  std::string prompt = std::move(tmpl_res->prompt);
+  auto parser_params = std::move(tmpl_res->parser_params);
+  auto sampling_params = std::move(tmpl_res->sampling_params);
+  auto stop_strings = std::move(tmpl_res->stop_strings);
+  auto stop_tokens = tokenize_stop_strings(vocab_, stop_strings);
+  chat_template_meta_ = std::move(tmpl_res->meta);
+
+  std::vector<llama_token> prompt_tokens(prompt.size() + 16);
+  const bool add_bos = llama_vocab_get_add_bos(vocab_);
   int n_tokens = llama_tokenize(vocab_,
-                                req.prompt.data(),
-                                static_cast<int>(req.prompt.size()),
+                                prompt.data(),
+                                static_cast<int>(prompt.size()),
                                 prompt_tokens.data(),
                                 static_cast<int>(prompt_tokens.size()),
-                                true, true);
+                                add_bos, true);
   if (n_tokens < 0) {
     prompt_tokens.resize(static_cast<std::size_t>(-n_tokens));
     n_tokens = llama_tokenize(vocab_,
-                              req.prompt.data(),
-                              static_cast<int>(req.prompt.size()),
+                              prompt.data(),
+                              static_cast<int>(prompt.size()),
                               prompt_tokens.data(),
                               static_cast<int>(prompt_tokens.size()),
-                              true, true);
+                              add_bos, true);
     if (n_tokens < 0) {
       return Result<InferenceResult>(std::unexpect,
           make_error(ErrorCode::Internal, "tokenization failed"));
     }
   }
   prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
-  std::cerr << "DEBUG predict_stream: tokenized " << n_tokens << " tokens" << std::endl;
-
   const int seq_id = 0;
 
-  llama_batch batch = llama_batch_init(n_tokens, 0, 1);
-  for (int i = 0; i < n_tokens; ++i) {
-    batch.token[i] = prompt_tokens[i];
-    batch.pos[i] = i;
-    batch.n_seq_id[i] = 1;
-    batch.seq_id[i][0] = seq_id;
-    batch.logits[i] = (i == n_tokens - 1) ? 1 : 0;
-  }
-  batch.n_tokens = n_tokens;
-  std::cerr << "DEBUG predict_stream: starting llama_decode (prompt)" << std::endl;
-  if (llama_decode(slot.ctx.get(), batch) != 0) {
-    llama_batch_free(batch);
+  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch))) {
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
   }
-  std::cerr << "DEBUG predict_stream: llama_decode (prompt) done" << std::endl;
 
-  llama_sampler* smp = nullptr;
-  auto sres = build_sampler_locked(&smp, req);
-  if (!sres.has_value()) {
-    llama_batch_free(batch);
-    return Result<InferenceResult>(std::unexpect, sres.error());
+  common_sampler* smp = common_sampler_init(model_, sampling_params);
+  if (smp == nullptr) {
+    return Result<InferenceResult>(std::unexpect,
+        make_error(ErrorCode::Internal, "common_sampler_init returned null"));
   }
-  std::cerr << "DEBUG predict_stream: sampler built" << std::endl;
-
   InferenceResult out;
   out.prompt_tokens = n_tokens;
   const int max_tokens = std::max(1, req.max_tokens);
   const auto start = std::chrono::steady_clock::now();
   std::string generated;
   generated.reserve(static_cast<std::size_t>(max_tokens) * 4);
+  StreamingChatParserState parser_state(parser_params);
   int n_cur = n_tokens;
+  bool stopped = false;
   for (int i = 0; i < max_tokens; ++i) {
-    const llama_token id = llama_sampler_sample(smp, slot.ctx.get(), -1);
-    if (llama_vocab_is_eog(vocab_, id)) break;
-    char buf[256];
-    const int n = llama_token_to_piece(vocab_, id, buf, sizeof(buf), 0, true);
-    if (n > 0) {
-      std::string token(buf, static_cast<std::size_t>(n));
-      generated.append(buf, static_cast<std::size_t>(n));
-      if (!callback(token)) {
-        std::cerr << "DEBUG predict_stream: callback returned false, aborting" << std::endl;
-        break;
+    const llama_token id = common_sampler_sample(smp, slot.ctx.get(), -1);
+    bool is_stop = llama_vocab_is_eog(vocab_, id);
+    if (!is_stop) {
+      for (auto t : stop_tokens) {
+        if (t == id) { is_stop = true; break; }
       }
     }
-    out.completion_tokens += 1;
+    if (is_stop) {
+      stopped = true;
+      break;
+    }
 
+    char buf[256];
+    const int n = llama_token_to_piece(vocab_, id, buf, sizeof(buf), 0, true);
+    bool string_stop = false;
+    if (n > 0) {
+      std::string token(buf, static_cast<std::size_t>(n));
+      generated.append(token);
+      for (const auto& stop : stop_strings) {
+        if (!stop.empty() && generated.size() >= stop.size() &&
+            generated.compare(generated.size() - stop.size(), stop.size(), stop) == 0) {
+          generated.resize(generated.size() - stop.size());
+          string_stop = true;
+          break;
+        }
+      }
+      std::vector<common_chat_msg_diff> diffs;
+      try {
+        diffs = parser_state.update(token, true, parser_params.parse_tool_calls);
+      } catch (...) {
+        InferenceDelta raw;
+        raw.content = token;
+        if (!callback(raw)) {
+          break;
+        }
+      }
+      for (const auto& diff : diffs) {
+        auto delta = to_delta(diff);
+        if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty()) continue;
+        if (!callback(delta)) {
+          common_sampler_free(smp);
+          return Result<InferenceResult>(std::move(out));
+        }
+      }
+    }
+    common_sampler_accept(smp, id, true);
+    out.completion_tokens += 1;
+    if (string_stop) {
+      stopped = true;
+      break;
+    }
     llama_batch one = llama_batch_init(1, 0, 1);
     one.token[0] = id;
     one.pos[0] = n_cur++;
@@ -449,25 +1159,46 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
     one.n_tokens = 1;
     if (llama_decode(slot.ctx.get(), one) != 0) {
       llama_batch_free(one);
-      llama_batch_free(batch);
-      llama_sampler_free(smp);
+      common_sampler_free(smp);
       return Result<InferenceResult>(std::unexpect,
           make_error(ErrorCode::Internal, "llama_decode (token) failed"));
     }
     llama_batch_free(one);
-    if (i % 10 == 0) std::cerr << "DEBUG predict_stream: generated " << (i+1) << " tokens" << std::endl;
   }
   const auto end = std::chrono::steady_clock::now();
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
   if (out.completion_tokens > 0 && out.duration_ms > 0.0f) {
     out.tokens_per_second = (out.completion_tokens * 1000.0f) / out.duration_ms;
   }
-  out.text = std::move(generated);
+  if (!stopped && out.completion_tokens >= max_tokens) {
+    out.finish_reason = "length";
+  }
+  try {
+    std::vector<common_chat_msg_diff> final_diffs;
+    final_diffs = parser_state.update("", false, parser_params.parse_tool_calls);
+    for (const auto& diff : final_diffs) {
+      auto delta = to_delta(diff);
+      if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty()) continue;
+      if (!callback(delta)) {
+        common_sampler_free(smp);
+        return Result<InferenceResult>(std::move(out));
+      }
+    }
+    auto msg = parse_final_message_with_ids(generated, parser_params);
+    apply_parsed_message(out, msg);
+    if (parser_params.parse_tool_calls && out.tool_calls.empty()) {
+      apply_fallback_tool_calls(out, generated);
+    }
+  } catch (const std::exception& e) {
+    LOG_ERROR("chat_parse_failed", "model={} error={}", info_.name, e.what());
+    out.text = std::move(generated);
+    if (parser_params.parse_tool_calls) {
+      apply_fallback_tool_calls(out, out.text);
+    }
+  }
   slot.last_prompt_tokens.assign(prompt_tokens.begin(), prompt_tokens.end());
 
-  llama_sampler_free(smp);
-  llama_batch_free(batch);
-  std::cerr << "DEBUG predict_stream: completed, " << out.completion_tokens << " tokens" << std::endl;
+  common_sampler_free(smp);
   return Result<InferenceResult>(std::move(out));
 }
 

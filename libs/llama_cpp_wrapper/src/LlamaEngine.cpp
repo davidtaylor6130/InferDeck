@@ -426,6 +426,7 @@ InferenceResult LlamaEngine::Generate(const std::vector<ChatMessage>& messages,
     // Use common_chat_templates_apply for prompt building
     common_chat_templates_inputs inputs;
     inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+    inputs.use_jinja = false;
     for (const auto& msg : messages) {
         inputs.messages.push_back(ToCommonChatMsg(msg));
     }

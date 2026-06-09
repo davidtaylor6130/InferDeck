@@ -26,6 +26,8 @@ struct GatewayConfig {
     std::string adlx_helper_path{};
     int telemetry_poll_ms{100};
     bool auto_swap{true};
+    int n_batch{4096};
+    int n_ubatch{4096};
 };
 
 inline std::string read_text_file(const std::filesystem::path& path) {
@@ -93,6 +95,8 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
     if (root["gateway"]) {
         const auto& g = root["gateway"];
         if (g["auto_swap"]) cfg.auto_swap = g["auto_swap"].as<bool>();
+        if (g["n_batch"]) cfg.n_batch = g["n_batch"].as<int>();
+        if (g["n_ubatch"]) cfg.n_ubatch = g["n_ubatch"].as<int>();
     }
     if (root["model_registry"] && root["model_registry"].IsSequence()) {
         for (const auto& m : root["model_registry"]) {
@@ -109,6 +113,7 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             info.context_size =
                 m["context_size"] ? m["context_size"].as<int>() : 65536;
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
+            info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";
             cfg.models.push_back(std::move(info));
         }
     }

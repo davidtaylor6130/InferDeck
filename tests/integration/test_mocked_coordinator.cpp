@@ -48,6 +48,7 @@ public:
     std::string text_to_return{"hello world"};
     std::vector<json> scripted_responses{};
     std::mutex calls_mtx;
+    inferdeck::model::ChatTemplateMeta chat_meta_{};
 
     explicit IModelMock(ModelInfo info) : model_info(std::move(info)) {
         busy_slots.assign(max_slots.load(), 0);
@@ -59,6 +60,7 @@ public:
     }
 
     const ModelInfo& info() const override { return model_info; }
+    const inferdeck::model::ChatTemplateMeta& chat_template_meta() const override { return chat_meta_; }
 
     inferdeck::foundation::Result<void> load() override {
         record("load");

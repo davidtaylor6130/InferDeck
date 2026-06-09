@@ -9,14 +9,28 @@
 #include <string>
 #include <vector>
 
+#include "chat.h"
+#include "common.h"
 #include "model/imodel.hpp"
 
 struct llama_model;
 struct llama_context;
 struct llama_vocab;
 struct llama_sampler;
+struct common_chat_templates;
+using llama_token = int32_t;
 
 namespace inferdeck::llama_wrapper {
+
+using ChatTemplateMeta = inferdeck::model::ChatTemplateMeta;
+
+struct ChatTemplateResult {
+  std::string prompt;
+  std::vector<std::string> stop_strings;
+  common_chat_parser_params parser_params;
+  common_params_sampling sampling_params;
+  ChatTemplateMeta meta;
+};
 
 struct LlamaCppConfig {
   int n_threads{8};
@@ -25,6 +39,7 @@ struct LlamaCppConfig {
   bool use_mmap{true};
   bool use_mlock{false};
   std::string chat_template{};
+  std::string reasoning_format{};  // "auto", "deepseek", "deepseek_legacy", "none"
 };
 
 class LlamaCppModel final : public inferdeck::model::IModel {
@@ -36,6 +51,8 @@ public:
   LlamaCppModel& operator=(const LlamaCppModel&) = delete;
 
   const inferdeck::model::ModelInfo& info() const noexcept override { return info_; }
+
+  const inferdeck::model::ChatTemplateMeta& chat_template_meta() const noexcept override { return chat_template_meta_; }
 
   inferdeck::foundation::Result<void> load() override;
   inferdeck::foundation::Result<void> unload() override;
@@ -70,6 +87,8 @@ private:
   inferdeck::foundation::Result<void> init_contexts_locked();
   inferdeck::foundation::Result<void> build_sampler_locked(
       llama_sampler** out, const inferdeck::model::InferenceRequest& req);
+  inferdeck::foundation::Result<ChatTemplateResult> apply_chat_template(
+      const inferdeck::model::InferenceRequest& req);
 
   inferdeck::model::ModelInfo info_;
   LlamaCppConfig cfg_;
@@ -79,6 +98,8 @@ private:
   const llama_vocab* vocab_{nullptr};
   std::vector<SlotState> slots_;
   std::filesystem::path resolved_gguf_path_;
+  common_chat_templates* chat_templates_{nullptr};
+  ChatTemplateMeta chat_template_meta_;
 };
 
 class LlamaCppModelError : public std::runtime_error {

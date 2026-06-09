@@ -26,31 +26,33 @@ observability:
 
 gateway:
   auto_swap: true
+  n_batch: 2048
+  n_ubatch: 2048
 
 model_registry:
   - name: "qwen3.6-27b"
     family: "qwen3.6"
     gguf_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
-    mmproj_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/mmproj-BF16.gguf"
-    n_slots: 2
+    mmproj_path: ""
+    n_slots: 1
     vram_required_mb: 20000
     context_size: 65536
-    has_vision: true
+    has_vision: false
 
   - name: "qwen3.6-35b-a3b"
     family: "qwen3.6"
     gguf_path: "C:/Inferdeck/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
-    mmproj_path: "C:/Inferdeck/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/mmproj-Qwen3.6-35B-A3B-BF16.gguf"
-    n_slots: 2
+    mmproj_path: ""
+    n_slots: 1
     vram_required_mb: 24000
-    context_size: 65536
-    has_vision: true
+    context_size: 32768
+    has_vision: false
 
   - name: "qwen3-coder-30b-a3b"
     family: "qwen3.6"
     gguf_path: "C:/Inferdeck/models/DevQuasar/Qwen.Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen.Qwen3-Coder-30B-A3B-Instruct.Q4_K_M.gguf"
-    mmproj_path: null
-    n_slots: 2
+    mmproj_path: ""
+    n_slots: 1
     vram_required_mb: 20000
     context_size: 65536
     has_vision: false
@@ -59,7 +61,7 @@ model_registry:
     family: "qwen2.5"
     gguf_path: "C:/Inferdeck/models/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
     mmproj_path: null
-    n_slots: 2
+    n_slots: 1
     vram_required_mb: 2500
     context_size: 32768
     has_vision: false
@@ -67,17 +69,17 @@ model_registry:
   - name: "gemma-4-26b-a4b"
     family: "gemma4"
     gguf_path: "C:/Inferdeck/models/unsloth/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-UD-IQ3_XXS.gguf"
-    mmproj_path: "C:/Inferdeck/models/unsloth/gemma-4-26B-A4B-it-GGUF/mmproj-F32.gguf"
-    n_slots: 2
+    mmproj_path: ""
+    n_slots: 1
     vram_required_mb: 13000
     context_size: 65536
-    has_vision: true
+    has_vision: false
 
   - name: "gpt-oss-20b"
     family: "gpt-oss"
     gguf_path: "C:/Inferdeck/models/lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf"
     mmproj_path: null
-    n_slots: 2
+    n_slots: 1
     vram_required_mb: 13000
     context_size: 32768
     has_vision: false

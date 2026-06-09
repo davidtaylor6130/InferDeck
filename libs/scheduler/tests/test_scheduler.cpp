@@ -32,12 +32,14 @@ public:
     std::atomic<int> max_slots{2};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
+    inferdeck::model::ChatTemplateMeta chat_meta_{};
 
     explicit IModelMock(ModelInfo info) : model_info(std::move(info)) {
         busy_slots.assign(max_slots.load(), 0);
     }
 
     const ModelInfo& info() const override { return model_info; }
+    const inferdeck::model::ChatTemplateMeta& chat_template_meta() const override { return chat_meta_; }
 
     Result<void> load() override {
         loaded.store(true);
