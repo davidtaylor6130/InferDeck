@@ -1,5 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "reserved": 16000
+  },
   "provider": {
     "inferdeck": {
       "npm": "@ai-sdk/openai-compatible",
@@ -10,9 +15,9 @@
       "models": {
         "qwen3.6-35b-a3b:latest": {
           "name": "qwen3.6-35b-a3b",
-          "limit": { "context": 262144, "output": 16384 },
+          "limit": { "context": 100096, "output": 8192 },
           "modalities": {
-            "input": ["text", "image"],
+            "input": ["text"],
             "output": ["text"]
           }
         },
@@ -50,7 +55,7 @@
         },
         "qwen3.6-27b:latest": {
           "name": "qwen3.6-27b",
-          "limit": { "context": 65536, "output": 16384 },
+          "limit": { "context": 65536, "output": 8192 },
           "modalities": {
             "input": ["text", "image"],
             "output": ["text"]
@@ -59,8 +64,8 @@
       }
     }
   },
-  "model": "inferdeck/qwen3.6-35b-a3b:latest",
-  "small_model": "inferdeck/qwen2.5-coder-3b:latest",
+  "model": "inferdeck/qwen3-coder-30b-a3b:latest",
+  "small_model": "inferdeck/qwen3-coder-30b-a3b:latest",
   "plugin": [
     "@tarquinen/opencode-dcp",
     "@mohak34/opencode-notifier@latest",

@@ -241,6 +241,43 @@ void log_memory_snapshot(const char* event, const std::string& model_name) {
            snap->system_commit_mb);
 }
 
+void log_slot_release(
+    const std::string& model_name,
+    int n_tokens,
+    bool truncated,
+    int n_decoded,
+    int n_ctx) {
+  LOG_INFO("llama_slot_release",
+           "model={} n_tokens={} truncated={} n_decoded={} n_ctx={}",
+           model_name,
+           n_tokens,
+           truncated,
+           n_decoded,
+           n_ctx);
+}
+
+void log_token_decode_failed(
+    const std::string& model_name,
+    int rc,
+    int token_index,
+    llama_token token_id,
+    int pos,
+    int n_cur,
+    int n_ctx,
+    int n_decoded) {
+  LOG_ERROR("llama_token_decode_failed",
+            "model={} rc={} token_index={} token_id={} pos={} n_cur={} n_ctx={} n_decoded={}",
+            model_name,
+            rc,
+            token_index,
+            token_id,
+            pos,
+            n_cur,
+            n_ctx,
+            n_decoded);
+  log_memory_snapshot("llama_token_decode_failed_memory", model_name);
+}
+
 std::string normalize_path(const std::string& p) {
   std::filesystem::path path(p);
   std::error_code ec;
@@ -1137,7 +1174,9 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   std::string generated;
   generated.reserve(static_cast<std::size_t>(max_tokens) * 4);
   int n_cur = n_tokens;
+  int n_decoded = 0;
   bool stopped = false;
+  bool truncated = false;
   for (int i = 0; i < max_tokens; ++i) {
     const llama_token id = common_sampler_sample(smp, slot.ctx.get(), -1);
     bool is_stop = llama_vocab_is_eog(vocab_, id);
@@ -1164,26 +1203,44 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
       }
     }
     out.completion_tokens += 1;
+    n_decoded += 1;
     common_sampler_accept(smp, id, true);
     if (string_stop) {
       stopped = true;
       break;
     }
+    if (n_cur + 1 >= static_cast<int>(n_ctx)) {
+      truncated = true;
+      stopped = true;
+      out.finish_reason = "length";
+      LOG_INFO("llama_context_limit",
+               "model={} n_tokens={} truncated={} n_decoded={} n_ctx={}",
+               info_.name,
+               n_cur,
+               truncated,
+               n_decoded,
+               n_ctx);
+      break;
+    }
     llama_batch one = llama_batch_init(1, 0, 1);
     one.token[0] = id;
-    one.pos[0] = n_cur++;
+    one.pos[0] = n_cur;
     one.n_seq_id[0] = 1;
     one.seq_id[0][0] = seq_id;
     one.logits[0] = 1;
     one.n_tokens = 1;
-    if (llama_decode(slot.ctx.get(), one) != 0) {
+    const int rc = llama_decode(slot.ctx.get(), one);
+    if (rc != 0) {
+      log_token_decode_failed(info_.name, rc, i, id, one.pos[0], n_cur, static_cast<int>(n_ctx), n_decoded);
       llama_batch_free(one);
       common_sampler_free(smp);
       return Result<InferenceResult>(std::unexpect,
           make_error(ErrorCode::Internal, "llama_decode (token) failed"));
     }
+    n_cur += 1;
     llama_batch_free(one);
   }
+  log_slot_release(info_.name, n_cur, truncated, n_decoded, static_cast<int>(n_ctx));
   const auto end = std::chrono::steady_clock::now();
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
   if (out.completion_tokens > 0 && out.duration_ms > 0.0f) {
@@ -1289,7 +1346,9 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   generated.reserve(static_cast<std::size_t>(max_tokens) * 4);
   StreamingChatParserState parser_state(parser_params);
   int n_cur = n_tokens;
+  int n_decoded = 0;
   bool stopped = false;
+  bool truncated = false;
   for (int i = 0; i < max_tokens; ++i) {
     const llama_token id = common_sampler_sample(smp, slot.ctx.get(), -1);
     bool is_stop = llama_vocab_is_eog(vocab_, id);
@@ -1338,25 +1397,43 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
     }
     common_sampler_accept(smp, id, true);
     out.completion_tokens += 1;
+    n_decoded += 1;
     if (string_stop) {
       stopped = true;
       break;
     }
+    if (n_cur + 1 >= static_cast<int>(n_ctx)) {
+      truncated = true;
+      stopped = true;
+      out.finish_reason = "length";
+      LOG_INFO("llama_context_limit",
+               "model={} n_tokens={} truncated={} n_decoded={} n_ctx={}",
+               info_.name,
+               n_cur,
+               truncated,
+               n_decoded,
+               n_ctx);
+      break;
+    }
     llama_batch one = llama_batch_init(1, 0, 1);
     one.token[0] = id;
-    one.pos[0] = n_cur++;
+    one.pos[0] = n_cur;
     one.n_seq_id[0] = 1;
     one.seq_id[0][0] = seq_id;
     one.logits[0] = 1;
     one.n_tokens = 1;
-    if (llama_decode(slot.ctx.get(), one) != 0) {
+    const int rc = llama_decode(slot.ctx.get(), one);
+    if (rc != 0) {
+      log_token_decode_failed(info_.name, rc, i, id, one.pos[0], n_cur, static_cast<int>(n_ctx), n_decoded);
       llama_batch_free(one);
       common_sampler_free(smp);
       return Result<InferenceResult>(std::unexpect,
           make_error(ErrorCode::Internal, "llama_decode (token) failed"));
     }
+    n_cur += 1;
     llama_batch_free(one);
   }
+  log_slot_release(info_.name, n_cur, truncated, n_decoded, static_cast<int>(n_ctx));
   const auto end = std::chrono::steady_clock::now();
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
   if (out.completion_tokens > 0 && out.duration_ms > 0.0f) {

@@ -330,6 +330,48 @@ TEST_CASE("BackendCoordinator: swap_to same model is no-op", "[model][coordinato
     REQUIRE(mock->calls.size() == before);
 }
 
+TEST_CASE("BackendCoordinator: concurrent swaps serialize model loads", "[model][coordinator]") {
+    std::atomic<int> active_loads{0};
+    std::atomic<int> max_active_loads{0};
+
+    class SerialLoadMock : public IModelMock {
+    public:
+        std::atomic<int>& active_loads;
+        std::atomic<int>& max_active_loads;
+
+        SerialLoadMock(ModelInfo info, std::atomic<int>& active, std::atomic<int>& max_active)
+            : IModelMock(std::move(info)), active_loads(active), max_active_loads(max_active) {
+            load_delay_ms.store(100);
+        }
+
+        Result<void> load() override {
+            int active = active_loads.fetch_add(1) + 1;
+            int observed = max_active_loads.load();
+            while (active > observed &&
+                   !max_active_loads.compare_exchange_weak(observed, active)) {
+            }
+            auto r = IModelMock::load();
+            active_loads.fetch_sub(1);
+            return r;
+        }
+    };
+
+    ModelRegistry reg;
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        return std::make_unique<SerialLoadMock>(i, active_loads, max_active_loads);
+    });
+    reg.register_model(make_info("a"));
+    reg.register_model(make_info("b"));
+    BackendCoordinator c(reg);
+
+    std::thread t1([&] { REQUIRE(c.swap_to("a").has_value()); });
+    std::thread t2([&] { REQUIRE(c.swap_to("b").has_value()); });
+    t1.join();
+    t2.join();
+
+    REQUIRE(max_active_loads.load() == 1);
+}
+
 TEST_CASE("BackendCoordinator: acquire_slot returns slot id", "[model][coordinator]") {
     ModelRegistry reg;
     reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {

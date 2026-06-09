@@ -36,6 +36,7 @@ foundation::Result<void> BackendCoordinator::unregister(const std::string& name)
 }
 
 foundation::Result<void> BackendCoordinator::load(const std::string& name) {
+    std::lock_guard<std::recursive_mutex> swap_lock(swap_mutex_);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (current_loaded_.has_value() && *current_loaded_ == name) {
@@ -79,6 +80,7 @@ foundation::Result<void> BackendCoordinator::unload_current() {
 }
 
 foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
+    std::lock_guard<std::recursive_mutex> swap_lock(swap_mutex_);
     auto drain_deadline = clock::now() + std::chrono::milliseconds{30000};
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -122,6 +124,7 @@ foundation::Result<void> BackendCoordinator::ensure_loaded(const std::string& na
 }
 
 foundation::Result<void> BackendCoordinator::swap_to(const std::string& name) {
+  std::lock_guard<std::recursive_mutex> swap_lock(swap_mutex_);
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (current_loaded_.has_value() && *current_loaded_ == name) {
@@ -135,6 +138,7 @@ foundation::Result<void> BackendCoordinator::swap_to(const std::string& name) {
 
 foundation::Result<void> BackendCoordinator::swap_to_cancellable(
     const std::string& name, std::chrono::milliseconds timeout) {
+  std::lock_guard<std::recursive_mutex> swap_lock(swap_mutex_);
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (current_loaded_.has_value() && *current_loaded_ == name) {

@@ -54,7 +54,7 @@ model_registry:
     mmproj_path: ""
     n_slots: 1
     vram_required_mb: 24000
-    context_size: 32768
+    context_size: 100096
     has_vision: false
 
   - name: "qwen3-coder-30b-a3b"

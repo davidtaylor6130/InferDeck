@@ -211,6 +211,10 @@ TEST_CASE("Routes: GET /v1/models lists registered models", "[routes][models]") 
     REQUIRE(body["object"] == "list");
     REQUIRE(body["data"].is_array());
     REQUIRE(body["data"].size() == 2);
+    REQUIRE(body["data"][0]["context_size"] == 65536);
+    REQUIRE(body["data"][0]["context_length"] == 65536);
+    REQUIRE(body["data"][0]["max_context_length"] == 65536);
+    REQUIRE(body["data"][0]["limit"]["context"] == 65536);
     ts.stop();
 }
 

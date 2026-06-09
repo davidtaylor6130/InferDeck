@@ -82,6 +82,7 @@ private:
     std::optional<std::string> current_loaded_;
     int active_requests_{0};
     std::condition_variable cv_;
+    std::recursive_mutex swap_mutex_;
     std::atomic<bool> swap_in_progress_{false};
     std::atomic<bool> swap_cancel_{false};
 };
