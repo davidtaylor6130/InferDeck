@@ -114,6 +114,15 @@ static int prepare_prompt_cache(
     llama_memory_clear(mem, true);
     return 0;
   }
+  const auto pos_max = llama_memory_seq_pos_max(mem, seq_id);
+  if (n_past > pos_max) {
+    LOG_INFO("llama_prompt_cache_extend",
+             "model={} cached_prompt_tokens={} prompt_tokens={}",
+             model_name,
+             n_past,
+             prompt_tokens.size());
+    return n_past;
+  }
   if (!llama_memory_seq_rm(mem, seq_id, n_past, -1)) {
     LOG_WARN("llama_prompt_cache_fallback",
              "model={} cached_prompt_tokens={} reason=seq_rm_failed pos_min={} pos_max={}",
@@ -1208,6 +1217,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   const auto start = std::chrono::steady_clock::now();
   std::string generated;
   generated.reserve(4096);
+  std::vector<llama_token> decoded_ids;
   int n_cur = n_tokens;
   int n_decoded = 0;
   bool stopped = false;
@@ -1274,6 +1284,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
           make_error(ErrorCode::Internal, "llama_decode (token) failed"));
     }
     n_cur += 1;
+    decoded_ids.push_back(id);
     llama_batch_free(one);
   }
   log_slot_release(info_.name, n_cur, truncated, n_decoded, static_cast<int>(n_ctx));
@@ -1299,6 +1310,8 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
     }
   }
   slot.last_prompt_tokens.assign(prompt_tokens.begin(), prompt_tokens.end());
+  slot.last_prompt_tokens.insert(slot.last_prompt_tokens.end(),
+                                 decoded_ids.begin(), decoded_ids.end());
 
   common_sampler_free(smp);
   return Result<InferenceResult>(std::move(out));
@@ -1386,6 +1399,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   const auto start = std::chrono::steady_clock::now();
   std::string generated;
   generated.reserve(4096);
+  std::vector<llama_token> decoded_ids;
   StreamingChatParserState parser_state(parser_params);
   int n_cur = n_tokens;
   int n_decoded = 0;
@@ -1470,6 +1484,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
           make_error(ErrorCode::Internal, "llama_decode (token) failed"));
     }
     n_cur += 1;
+    decoded_ids.push_back(id);
     llama_batch_free(one);
   }
   log_slot_release(info_.name, n_cur, truncated, n_decoded, static_cast<int>(n_ctx));
@@ -1523,6 +1538,8 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
     }
   }
   slot.last_prompt_tokens.assign(prompt_tokens.begin(), prompt_tokens.end());
+  slot.last_prompt_tokens.insert(slot.last_prompt_tokens.end(),
+                                 decoded_ids.begin(), decoded_ids.end());
 
   common_sampler_free(smp);
   return Result<InferenceResult>(std::move(out));
