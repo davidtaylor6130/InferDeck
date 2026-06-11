@@ -430,7 +430,7 @@ int main(int argc, char** argv) {
         resp.set_content(MetricsBuilder::build_health(metrics, gpu, stats_db).dump(),
                          "application/json");
     }));
-    DashboardDeps dash_deps{deps, gpu, cfg.log_file, uptime_seconds};
+    DashboardDeps dash_deps{deps, gpu, cfg.log_file, "data/pricing.json", uptime_seconds};
     register_dashboard_routes(server, dash_deps, wrap);
     if (cors.handles_options()) {
         server.Options(".*", [&](const httplib::Request& req,

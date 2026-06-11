@@ -308,6 +308,22 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         write_json(resp, 200, {{"ok", true}, {"status", "stopped"}});
     }));
 
+    server.Get(R"(^/api/pricing$)", wrap([deps](const httplib::Request& req,
+                                                httplib::Response& resp) {
+        (void)req;
+        nlohmann::json pricing = nlohmann::json::array();
+        std::ifstream file(deps.pricing_file);
+        if (file.is_open()) {
+            try {
+                pricing = nlohmann::json::parse(file);
+                if (!pricing.is_array()) pricing = nlohmann::json::array();
+            } catch (...) {
+                pricing = nlohmann::json::array();
+            }
+        }
+        resp.set_content(pricing.dump(), "application/json");
+    }));
+
     server.Get(R"(^/api/logs$)", wrap([deps](const httplib::Request& req,
                                              httplib::Response& resp) {
         std::size_t limit = 250;

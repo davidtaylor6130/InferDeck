@@ -17,6 +17,7 @@ struct DashboardDeps {
     GatewayDeps gw;
     observability::GpuTelemetry& gpu;
     std::string log_file;
+    std::string pricing_file{"data/pricing.json"};
     std::function<std::int64_t()> uptime_seconds;
 };
 

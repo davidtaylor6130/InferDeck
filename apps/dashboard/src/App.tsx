@@ -1,405 +1,135 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { AppShell } from './components/AppShell';
-import type { DashboardActions, DashboardState, JobRecord, ModelRecord, PageId, PageProps, ServiceRecord } from './types';
-import { HardwarePage } from './pages/HardwarePage';
-import { LogsPage } from './pages/LogsPage';
-import { ModelsPage } from './pages/ModelsPage';
+import React, { useEffect, useState } from 'react';
+import {
+  ChartBarIcon,
+  CircleStackIcon,
+  CpuChipIcon,
+  Squares2X2Icon,
+} from '@heroicons/react/24/outline';
+import { Badge } from './components/ui';
+import { GatewayProvider, useGateway } from './gateway';
 import { OverviewPage } from './pages/OverviewPage';
-import { QueuePage } from './pages/QueuePage';
-import { ServicesPage } from './pages/ServicesPage';
-import { SettingsPage } from './pages/SettingsPage';
-import { formatError } from './utils';
+import { ModelsPage } from './pages/ModelsPage';
+import { UsagePage } from './pages/UsagePage';
+import { SystemPage } from './pages/SystemPage';
+import { compactModel, timeAgo } from './utils';
 
-const API = '/api';
-const pages: PageId[] = ['overview', 'workloads', 'models', 'services', 'hardware', 'logs', 'settings'];
+type PageId = 'overview' | 'models' | 'usage' | 'system';
 
-interface Toast {
-  id: number;
-  message: string;
-  tone: 'success' | 'warning' | 'danger' | 'info';
+const PAGES: Array<{ id: PageId; label: string; Icon: React.ComponentType<React.SVGProps<SVGSVGElement>> }> = [
+  { id: 'overview', label: 'Overview', Icon: Squares2X2Icon },
+  { id: 'models', label: 'Models', Icon: CircleStackIcon },
+  { id: 'usage', label: 'Usage & Cost', Icon: ChartBarIcon },
+  { id: 'system', label: 'System', Icon: CpuChipIcon },
+];
+
+function pageFromHash(): PageId {
+  const hash = window.location.hash.replace(/^#\/?/, '');
+  return (PAGES.some(page => page.id === hash) ? hash : 'overview') as PageId;
 }
 
-const App: React.FC = () => {
-  const [activePage, setActivePage] = useState<PageId>(() => getHashPage());
-  const [healthData, setHealthData] = useState<Record<string, any> | null>(null);
-  const [statusData, setStatusData] = useState<Record<string, any> | null>(null);
-  const [jobsList, setJobsList] = useState<JobRecord[]>([]);
-  const [modelsList, setModelsList] = useState<ModelRecord[]>([]);
-  const [whisperModels, setWhisperModels] = useState<ModelRecord[]>([]);
-  const [runningModels, setRunningModels] = useState<ModelRecord[]>([]);
-  const [servicesList, setServicesList] = useState<ServiceRecord[]>([]);
-  const [errors, setErrors] = useState<Record<string, string | null>>({});
-  const [loading, setLoading] = useState(true);
-  const [connected, setConnected] = useState(false);
-  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
-  const [toasts, setToasts] = useState<Toast[]>([]);
+const App: React.FC = () => (
+  <GatewayProvider>
+    <Shell />
+  </GatewayProvider>
+);
 
-  const toast = useCallback((message: string, tone: Toast['tone'] = 'info') => {
-    const id = Date.now() + Math.random();
-    setToasts(current => [...current, { id, message, tone }].slice(-4));
-    window.setTimeout(() => setToasts(current => current.filter(item => item.id !== id)), 2600);
-  }, []);
-
-  const requestJson = useCallback(async <T,>(path: string, options?: RequestInit): Promise<T> => {
-    const res = await fetch(`${API}${path}`, options);
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(formatError(body.error || `HTTP ${res.status}`));
-    }
-    return res.json() as Promise<T>;
-  }, []);
-
-  const fetchHealth = useCallback(async () => {
-    try {
-      const data = await requestJson<Record<string, any>>('/health');
-      setHealthData(data);
-      setErrors(prev => ({ ...prev, health: null }));
-      setConnected(true);
-      setLastUpdatedAt(new Date());
-    } catch (err) {
-      setHealthData(prev => prev || { status: 'degraded', version: '0.1.0' });
-      setConnected(false);
-      setErrors(prev => ({ ...prev, health: formatError(err) }));
-    } finally {
-      setLoading(false);
-    }
-  }, [requestJson]);
-
-  const fetchStatus = useCallback(async () => {
-    try {
-      const data = await requestJson<Record<string, any>>('/status');
-      setStatusData(data);
-      setErrors(prev => ({ ...prev, status: null }));
-      setLastUpdatedAt(new Date());
-    } catch (err) {
-      setErrors(prev => ({ ...prev, status: formatError(err) }));
-    }
-  }, [requestJson]);
-
-  const fetchJobs = useCallback(async () => {
-    try {
-      const data = await requestJson<{ jobs?: JobRecord[] }>('/jobs');
-      setJobsList(data.jobs || []);
-      setErrors(prev => ({ ...prev, jobs: null }));
-    } catch (err) {
-      setErrors(prev => ({ ...prev, jobs: formatError(err) }));
-    }
-  }, [requestJson]);
-
-  const fetchModels = useCallback(async () => {
-    try {
-      const data = await requestJson<{ models?: ModelRecord[]; whisperModels?: ModelRecord[]; backends?: { error?: string } }>('/models');
-      setModelsList(data.models || []);
-      setWhisperModels(data.whisperModels || []);
-      const running = await requestJson<{ running?: ModelRecord[] }>('/models/running').catch(() => ({ running: [] }));
-      setRunningModels(running.running || []);
-      setErrors(prev => ({ ...prev, models: data.backends?.error ? formatError(data.backends.error) : null }));
-    } catch (err) {
-      setErrors(prev => ({ ...prev, models: formatError(err) }));
-    }
-  }, [requestJson]);
-
-  const fetchServices = useCallback(async () => {
-    try {
-      const data = await requestJson<{ services?: ServiceRecord[] }>('/services');
-      setServicesList(data.services || []);
-      setErrors(prev => ({ ...prev, services: null }));
-    } catch (err) {
-      setErrors(prev => ({ ...prev, services: formatError(err) }));
-    }
-  }, [requestJson]);
-
-  const refreshAll = useCallback(() => {
-    void Promise.all([fetchHealth(), fetchStatus(), fetchJobs(), fetchModels(), fetchServices()]);
-  }, [fetchHealth, fetchJobs, fetchModels, fetchServices, fetchStatus]);
+const Shell: React.FC = () => {
+  const [page, setPage] = useState<PageId>(() => (typeof window === 'undefined' ? 'overview' : pageFromHash()));
 
   useEffect(() => {
-    refreshAll();
-  }, [refreshAll]);
-
-  useEffect(() => {
-    const onHashChange = () => setActivePage(getHashPage());
+    const onHashChange = () => setPage(pageFromHash());
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  useEffect(() => {
-    const pollId = window.setInterval(refreshAll, 4000);
-    return () => window.clearInterval(pollId);
-  }, [refreshAll]);
-
-  const actions = useMemo<DashboardActions>(() => ({
-    refreshAll,
-    changeMode: async (mode: string) => {
-      try {
-        await fetch(`${API}/modes/${mode}`, { method: 'POST' });
-        toast(`Switched to ${mode === 'ai' ? 'AI Mode' : mode}`, 'success');
-        refreshAll();
-      } catch (err) {
-        toast(err instanceof Error ? err.message : 'Mode switch failed', 'danger');
-      }
-    },
-    pullModel: async (name: string) => {
-      try {
-        await requestJson('/models/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
-        toast(`Pull requested for ${name}`, 'success');
-        fetchModels();
-      } catch (err) {
-        toast(err instanceof Error ? err.message : 'Pull failed', 'danger');
-      }
-    },
-    loadModel: async (model: string) => {
-      try {
-        await requestJson('/models/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
-        toast(`Loaded ${model}`, 'success');
-        fetchModels();
-      } catch (err) {
-        toast(err instanceof Error ? err.message : 'Load failed', 'danger');
-      }
-    },
-    unloadModel: async (model: string) => {
-      try {
-        await requestJson('/models/unload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
-        toast(`Unloaded ${model}`, 'success');
-        fetchModels();
-      } catch (err) {
-        toast(err instanceof Error ? err.message : 'Unload failed', 'danger');
-      }
-    },
-    rescanModels: async () => {
-      try {
-        await requestJson('/models/rescan', { method: 'POST' });
-        toast('Model inventory refreshed', 'success');
-        fetchModels();
-      } catch (err) {
-        toast(err instanceof Error ? err.message : 'Rescan failed', 'danger');
-      }
-    },
-    deleteModel: async (model: string) => {
-      try {
-        await fetch(`${API}/models/${encodeURIComponent(model)}`, { method: 'DELETE' });
-        toast(`Deleted ${model}`, 'success');
-        fetchModels();
-      } catch (err) {
-        toast(err instanceof Error ? err.message : 'Delete failed', 'danger');
-      }
-    },
-    cancelJob: async (jobId: string) => {
-      try {
-        await requestJson(`/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
-        toast(`Cancelled ${jobId}`, 'warning');
-        fetchJobs();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    retryJob: async (jobId: string) => {
-      try {
-        await fetch(`${API}/jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
-        toast(`Retry queued for ${jobId}`, 'success');
-        fetchJobs();
-      } catch (err) {
-        toast(err instanceof Error ? err.message : 'Retry failed', 'danger');
-      }
-    },
-    reprioritizeJob: async (jobId: string, priority: number) => {
-      try {
-        await requestJson(`/jobs/${encodeURIComponent(jobId)}/reprioritize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ priority }) });
-        toast(`Priority updated for ${jobId}`, 'success');
-        fetchJobs();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    restartBackend: async () => {
-      try {
-        await requestJson('/services/llama-server/restart', { method: 'POST' });
-        toast('Runtime refresh requested', 'success');
-        fetchServices();
-      } catch (err) {
-        toast(err instanceof Error ? err.message : 'Runtime refresh failed', 'danger');
-      }
-    },
-    startService: async (id: string) => {
-      try {
-        await requestJson(`/services/${encodeURIComponent(id)}/start`, { method: 'POST' });
-        toast(`Started ${id}`, 'success');
-        fetchServices();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    stopService: async (id: string) => {
-      try {
-        await requestJson(`/services/${encodeURIComponent(id)}/stop`, { method: 'POST' });
-        toast(`Stopped ${id}`, 'warning');
-        fetchServices();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    restartService: async (id: string) => {
-      try {
-        await requestJson(`/services/${encodeURIComponent(id)}/restart`, { method: 'POST' });
-        toast(`Restarted ${id}`, 'success');
-        fetchServices();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    pauseQueue: async () => {
-      try {
-        await requestJson('/queue/pause', { method: 'POST' });
-        toast('Queue pause requested', 'warning');
-        fetchStatus();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    resumeQueue: async () => {
-      try {
-        await requestJson('/queue/resume', { method: 'POST' });
-        toast('Queue resume requested', 'success');
-        refreshAll();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    clearFailedJobs: async () => {
-      try {
-        await requestJson('/queue/clear-failed', { method: 'POST' });
-        toast('Failed jobs cleared', 'success');
-        refreshAll();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    unloadModels: async () => {
-      try {
-        await Promise.all(modelsList.map(model => requestJson('/models/unload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: model.name }) })));
-        toast('Unload requested for loaded models', 'success');
-        fetchModels();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    loadWhisperModel: async (model: string) => {
-      try {
-        await requestJson('/whisper/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
-        toast(`Loaded Whisper model ${model}`, 'success');
-        refreshAll();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    rescanWhisperModels: async () => {
-      try {
-        await requestJson('/whisper/rescan', { method: 'POST' });
-        toast('Whisper models refreshed', 'success');
-        refreshAll();
-      } catch (err) {
-        toast(formatError(err), 'danger');
-      }
-    },
-    transcribeAudio: async (audio: Blob) => {
-      const form = new FormData();
-      form.append('file', audio, `dictation-${Date.now()}.wav`);
-      form.append('model', 'whisper');
-      form.append('response_format', 'json');
-      const res = await fetch('/v1/audio/transcriptions', { method: 'POST', body: form });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(formatError(body.error || `HTTP ${res.status}`));
-      }
-      const body = await res.json() as { text?: string };
-      refreshAll();
-      return body.text || '';
-    },
-    toast,
-  }), [fetchJobs, fetchModels, fetchServices, fetchStatus, modelsList, refreshAll, requestJson, toast]);
-
-  const state: DashboardState = {
-    healthData,
-    statusData,
-    jobsList,
-    modelsList,
-    whisperModels,
-    runningModels,
-    servicesList,
-    errors,
-    loading,
-    connected,
-    lastUpdatedAt,
-  };
-
-  const pageProps: PageProps = { state, actions };
-  const Page = getPage(activePage);
-
   return (
-    <AppShell
-      activePage={activePage}
-      onNavigate={(page) => {
-        window.location.hash = page;
-        setActivePage(page);
-      }}
-      version={healthData?.version || '0.1.0'}
-      connected={connected}
-      lastUpdatedAt={lastUpdatedAt}
-      onMode={actions.changeMode}
-      onPauseQueue={actions.pauseQueue}
-      onRestartBackend={actions.restartBackend}
-    >
-      {loading ? <Skeleton /> : <Page {...pageProps} />}
-      <ToastStack toasts={toasts} />
-    </AppShell>
+    <div className="deck-grid-bg flex min-h-screen">
+      <aside className="hidden w-56 shrink-0 flex-col border-r border-white/10 bg-[#070d18] p-4 md:flex">
+        <div className="mb-6 flex items-center gap-2 px-2">
+          <span className="grid h-8 w-8 place-items-center rounded-lg bg-infer-violet/20 text-infer-violet">⌁</span>
+          <span className="text-lg font-semibold text-text-primary">InferDeck</span>
+        </div>
+        <nav className="flex flex-col gap-1">
+          {PAGES.map(({ id, label, Icon }) => (
+            <a
+              key={id}
+              href={`#${id}`}
+              className={`flex items-center gap-3 rounded-md px-3 py-2 text-sm transition ${page === id
+                ? 'bg-white/[0.08] font-medium text-text-primary'
+                : 'text-text-secondary hover:bg-white/[0.04] hover:text-text-primary'}`}
+            >
+              <Icon className="h-5 w-5" />
+              {label}
+            </a>
+          ))}
+        </nav>
+        <div className="mt-auto px-2 text-xs text-text-muted">InferDeck 2.0 · llama.cpp in-process</div>
+      </aside>
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <TopBar page={page} />
+        <ConnectionBanner />
+        <main className="min-w-0 flex-1 overflow-y-auto p-4">
+          <div className="mx-auto max-w-[1400px]">
+            {page === 'overview' && <OverviewPage />}
+            {page === 'models' && <ModelsPage />}
+            {page === 'usage' && <UsagePage />}
+            {page === 'system' && <SystemPage />}
+          </div>
+        </main>
+      </div>
+    </div>
   );
 };
 
-function getHashPage(): PageId {
-  const raw = window.location.hash.replace('#', '');
-  const value = (raw === 'queue' || raw === 'jobs' ? 'workloads' : raw) as PageId;
-  return pages.includes(value) ? value : 'overview';
-}
+const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
+  const { connection, stats, swap } = useGateway();
+  const loaded = stats?.loadedModel || '';
+  const connectionTone = connection === 'connected' ? 'good' : connection === 'offline' ? 'critical' : 'warn';
+  const connectionLabel = connection === 'connected' ? 'Live' : connection === 'connecting' ? 'Connecting' : connection === 'reconnecting' ? 'Reconnecting' : 'Offline';
 
-function getPage(page: PageId): React.FC<PageProps> {
-  const map: Record<PageId, React.FC<PageProps>> = {
-    overview: OverviewPage,
-    workloads: QueuePage,
-    models: ModelsPage,
-    services: ServicesPage,
-    hardware: HardwarePage,
-    logs: LogsPage,
-    settings: SettingsPage,
-  };
-  return map[page];
-}
-
-const Skeleton: React.FC = () => (
-  <div className="space-y-5">
-    <div className="h-56 animate-pulse rounded-xl border border-border-slate bg-panel-slate" />
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
-      {Array.from({ length: 6 }).map((_, index) => <div key={index} className="h-40 animate-pulse rounded-xl border border-border-slate bg-panel-slate" />)}
-    </div>
-    <div className="grid gap-4 xl:grid-cols-2">
-      <div className="h-72 animate-pulse rounded-xl border border-border-slate bg-panel-slate" />
-      <div className="h-72 animate-pulse rounded-xl border border-border-slate bg-panel-slate" />
-    </div>
-  </div>
-);
-
-const ToastStack: React.FC<{ toasts: Toast[] }> = ({ toasts }) => (
-  <div className="fixed bottom-4 right-4 z-50 space-y-2">
-    {toasts.map(toast => (
-      <div key={toast.id} className={`max-w-sm rounded-lg border px-4 py-3 text-sm shadow-deck ${
-        toast.tone === 'danger' ? 'border-danger-rose/50 bg-danger-rose/15 text-danger-rose' :
-        toast.tone === 'warning' ? 'border-warning-amber/50 bg-warning-amber/15 text-warning-amber' :
-        toast.tone === 'success' ? 'border-success-green/50 bg-success-green/15 text-success-green' :
-        'border-border-slate bg-panel-slate text-text-primary'
-      }`}>
-        {toast.message}
+  return (
+    <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-[#070d18]/80 px-4 py-3">
+      <div className="flex items-center gap-3 md:hidden">
+        <span className="text-base font-semibold text-text-primary">InferDeck</span>
+        <nav className="flex gap-1">
+          {PAGES.map(({ id, label }) => (
+            <a key={id} href={`#${id}`} className={`rounded px-2 py-1 text-xs ${page === id ? 'bg-white/10 text-text-primary' : 'text-text-muted'}`}>{label}</a>
+          ))}
+        </nav>
       </div>
-    ))}
-  </div>
-);
+      <h1 className="hidden text-lg font-semibold capitalize text-text-primary md:block">
+        {PAGES.find(item => item.id === page)?.label}
+      </h1>
+      <div className="flex flex-wrap items-center gap-2">
+        {swap.swapping ? (
+          <Badge label={`Swapping → ${compactModel(swap.target)}`} tone="info" />
+        ) : loaded ? (
+          <Badge label={compactModel(loaded)} tone="good" />
+        ) : (
+          <Badge label="No model" tone="idle" />
+        )}
+        <Badge label={connectionLabel} tone={connectionTone} />
+      </div>
+    </header>
+  );
+};
+
+const ConnectionBanner: React.FC = () => {
+  const { connection, lastUpdatedAt } = useGateway();
+  if (connection === 'connected') return null;
+  const tone = connection === 'offline' ? 'border-danger-rose/40 bg-danger-rose/10 text-danger-rose' : 'border-warning-amber/40 bg-warning-amber/10 text-warning-amber';
+  const message = connection === 'connecting'
+    ? 'Connecting to the gateway…'
+    : connection === 'reconnecting'
+      ? 'Event stream interrupted — reconnecting.'
+      : 'Gateway unreachable — retrying.';
+  return (
+    <div className={`border-b px-4 py-2 text-sm ${tone}`}>
+      {message}
+      {lastUpdatedAt && <span className="ml-2 opacity-80">Data last updated {timeAgo(lastUpdatedAt)}.</span>}
+    </div>
+  );
+};
 
 export default App;
