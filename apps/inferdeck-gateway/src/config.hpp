@@ -38,6 +38,7 @@ struct GatewayConfig {
     std::string cache_type_k{"q8_0"};
     std::string cache_type_v{"q8_0"};
     bool swa_full{false};
+    bool truncate_prompt{true};
 };
 
 inline std::string read_text_file(const std::filesystem::path& path) {
@@ -118,6 +119,7 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["cache_type_k"]) cfg.cache_type_k = g["cache_type_k"].as<std::string>();
         if (g["cache_type_v"]) cfg.cache_type_v = g["cache_type_v"].as<std::string>();
         if (g["swa_full"]) cfg.swa_full = g["swa_full"].as<bool>();
+        if (g["truncate_prompt"]) cfg.truncate_prompt = g["truncate_prompt"].as<bool>();
     }
     if (root["model_registry"] && root["model_registry"].IsSequence()) {
         for (const auto& m : root["model_registry"]) {

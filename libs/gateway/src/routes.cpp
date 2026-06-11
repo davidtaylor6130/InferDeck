@@ -615,7 +615,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 record_request(metrics, stats_db, events, model_name, *result, status, slot_id);
             } else {
                 model::InferenceResult failed;
-                status = aborted_stream ? 499 : (error ? 500 : fallback_status);
+                status = aborted_stream ? 499
+                       : (error && fallback_status < 400 ? 500 : fallback_status);
                 record_request(metrics, stats_db, events, model_name, failed, status, slot_id);
             }
 

@@ -141,6 +141,33 @@ static int prepare_prompt_cache(
   return n_past;
 }
 
+static bool maybe_truncate_prompt(
+    std::vector<llama_token>& prompt_tokens,
+    int n_ctx,
+    int req_max_tokens,
+    const std::string& model_name) {
+  const int n_tokens = static_cast<int>(prompt_tokens.size());
+  if (n_tokens < n_ctx) return false;
+  const int reserve = std::clamp(req_max_tokens > 0 ? req_max_tokens : 1024, 256, n_ctx / 4);
+  const int target = n_ctx - reserve - 1;
+  const int keep_head = std::min(1024, target / 4);
+  const int keep_tail = target - keep_head;
+  std::vector<llama_token> kept;
+  kept.reserve(static_cast<std::size_t>(target));
+  kept.insert(kept.end(), prompt_tokens.begin(), prompt_tokens.begin() + keep_head);
+  kept.insert(kept.end(), prompt_tokens.end() - keep_tail, prompt_tokens.end());
+  LOG_WARN("llama_prompt_truncated",
+           "model={} original_tokens={} kept_tokens={} keep_head={} keep_tail={} n_ctx={}",
+           model_name,
+           n_tokens,
+           kept.size(),
+           keep_head,
+           keep_tail,
+           n_ctx);
+  prompt_tokens = std::move(kept);
+  return true;
+}
+
 static bool process_prompt_chunks(
     llama_context* ctx,
     const std::vector<llama_token>& prompt_tokens,
@@ -1188,11 +1215,15 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   const int seq_id = 0;
   const auto n_ctx = llama_n_ctx_seq(slot.ctx.get());
   if (n_tokens >= static_cast<int>(n_ctx)) {
-    return Result<InferenceResult>(std::unexpect,
-        make_error(ErrorCode::InvalidArgument,
-                   "This model's maximum context length is " + std::to_string(n_ctx) +
-                   " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
-                   " tokens. Please reduce the length of the messages."));
+    if (!cfg_.truncate_prompt) {
+      return Result<InferenceResult>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument,
+                     "This model's maximum context length is " + std::to_string(n_ctx) +
+                     " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
+                     " tokens. Please reduce the length of the messages."));
+    }
+    maybe_truncate_prompt(prompt_tokens, static_cast<int>(n_ctx), req.max_tokens, info_.name);
+    n_tokens = static_cast<int>(prompt_tokens.size());
   }
   const int cached_prompt_tokens = prepare_prompt_cache(
       slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name);
@@ -1370,11 +1401,15 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   const int seq_id = 0;
   const auto n_ctx = llama_n_ctx_seq(slot.ctx.get());
   if (n_tokens >= static_cast<int>(n_ctx)) {
-    return Result<InferenceResult>(std::unexpect,
-        make_error(ErrorCode::InvalidArgument,
-                   "This model's maximum context length is " + std::to_string(n_ctx) +
-                   " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
-                   " tokens. Please reduce the length of the messages."));
+    if (!cfg_.truncate_prompt) {
+      return Result<InferenceResult>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument,
+                     "This model's maximum context length is " + std::to_string(n_ctx) +
+                     " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
+                     " tokens. Please reduce the length of the messages."));
+    }
+    maybe_truncate_prompt(prompt_tokens, static_cast<int>(n_ctx), req.max_tokens, info_.name);
+    n_tokens = static_cast<int>(prompt_tokens.size());
   }
   const int cached_prompt_tokens = prepare_prompt_cache(
       slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name);

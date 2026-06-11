@@ -45,6 +45,7 @@ struct LlamaCppConfig {
   std::string cache_type_k{"q8_0"};
   std::string cache_type_v{"q8_0"};
   bool swa_full{false};
+  bool truncate_prompt{true};
   std::string chat_template{};
   std::string reasoning_format{};  // "auto", "deepseek", "deepseek_legacy", "none"
 };
