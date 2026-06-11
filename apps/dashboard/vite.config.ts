@@ -26,7 +26,7 @@ export default defineConfig({
     host: '0.0.0.0',
   },
   build: {
-    outDir: '../gateway-service/public/dashboard',
+    outDir: '../inferdeck-gateway/static',
     emptyOutDir: true,
   },
 })

@@ -35,3 +35,15 @@ if(MSVC)
 else()
     target_compile_options(inferdeck-gateway PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+set(INFERDECK_DASHBOARD_STATIC_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/static"
+    CACHE PATH "Built InferDeck dashboard static asset directory")
+
+add_custom_command(TARGET inferdeck-gateway POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:inferdeck-gateway>/static"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${INFERDECK_DASHBOARD_STATIC_DIR}"
+            "$<TARGET_FILE_DIR:inferdeck-gateway>/static"
+    COMMENT "Copying InferDeck dashboard static assets"
+)

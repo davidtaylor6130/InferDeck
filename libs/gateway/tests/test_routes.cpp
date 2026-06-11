@@ -9,6 +9,8 @@
 #include "model/backend_coordinator.hpp"
 #include "model/imodel.hpp"
 #include "model/model_registry.hpp"
+#include "observability/metrics.hpp"
+#include "observability/stats_db.hpp"
 #include "scheduler/scheduler.hpp"
 
 #include <atomic>
@@ -148,6 +150,8 @@ struct TestServer {
     ModelRegistry registry;
     BackendCoordinator coordinator;
     Scheduler scheduler;
+    observability::Metrics metrics;
+    observability::StatsDb stats_db{":memory:"};
     httplib::Server server;
     std::thread th;
     int port{0};
@@ -176,6 +180,8 @@ struct TestServer {
     GatewayDeps make_deps() {
         GatewayDeps deps{coordinator, scheduler, "10"};
         deps.auto_swap = false;
+        deps.metrics = &metrics;
+        deps.stats_db = &stats_db;
         return deps;
     }
 
@@ -329,6 +335,14 @@ TEST_CASE("Routes: POST /v1/chat/completions loaded model returns 200 with conte
     auto body = nlohmann::json::parse(res->body);
     REQUIRE(body["choices"][0]["message"]["content"] == "Hello from model");
     REQUIRE(body["usage"]["completion_tokens"] == 4);
+    REQUIRE(ts.metrics.total_requests() == 1);
+    REQUIRE(ts.metrics.total_prompt_tokens() == 3);
+    REQUIRE(ts.metrics.total_completion_tokens() == 4);
+    auto usage = ts.stats_db.model_usage();
+    REQUIRE(usage.size() == 1);
+    REQUIRE(usage[0].model == "qwen3.6-27b");
+    REQUIRE(usage[0].prompt_tokens == 3);
+    REQUIRE(usage[0].completion_tokens == 4);
     ts.stop();
 }
 
@@ -418,5 +432,11 @@ TEST_CASE("Routes: streaming tool call emits llama-server shaped SSE",
     REQUIRE(saw_tool_header);
     REQUIRE(saw_tool_args);
     REQUIRE(saw_tool_finish);
+    REQUIRE(ts.metrics.total_requests() == 1);
+    auto usage = ts.stats_db.model_usage();
+    REQUIRE(usage.size() == 1);
+    REQUIRE(usage[0].model == "qwen3.6-27b");
+    REQUIRE(usage[0].prompt_tokens == 8);
+    REQUIRE(usage[0].completion_tokens == 12);
     ts.stop();
 }

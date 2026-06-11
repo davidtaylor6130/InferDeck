@@ -43,6 +43,7 @@ using inferdeck::foundation::Error;
 using inferdeck::foundation::ErrorCode;
 using inferdeck::foundation::Result;
 using inferdeck::foundation::LOG_INFO;
+using inferdeck::foundation::LOG_WARN;
 using inferdeck::foundation::LOG_ERROR;
 using inferdeck::model::InferenceRequest;
 using inferdeck::model::InferenceResult;
@@ -87,14 +88,57 @@ std::string gen_tool_call_id() {
   return random_string();
 }
 
+static int common_prefix_length(
+    const std::vector<int>& previous,
+    const std::vector<llama_token>& current) {
+  const auto n = std::min(previous.size(), current.size());
+  std::size_t i = 0;
+  while (i < n && previous[i] == current[i]) {
+    ++i;
+  }
+  return static_cast<int>(i);
+}
+
+static int prepare_prompt_cache(
+    llama_context* ctx,
+    const std::vector<int>& previous_prompt_tokens,
+    const std::vector<llama_token>& prompt_tokens,
+    int seq_id,
+    const std::string& model_name) {
+  int n_past = common_prefix_length(previous_prompt_tokens, prompt_tokens);
+  if (n_past >= static_cast<int>(prompt_tokens.size()) && n_past > 0) {
+    --n_past;
+  }
+  auto* mem = llama_get_memory(ctx);
+  if (n_past <= 0) {
+    llama_memory_clear(mem, true);
+    return 0;
+  }
+  if (!llama_memory_seq_rm(mem, seq_id, n_past, -1)) {
+    LOG_WARN("llama_prompt_cache_fallback",
+             "model={} cached_prompt_tokens={} reason=seq_rm_failed",
+             model_name,
+             n_past);
+    llama_memory_clear(mem, true);
+    return 0;
+  }
+  LOG_INFO("llama_prompt_cache_reuse",
+           "model={} cached_prompt_tokens={} prompt_tokens={}",
+           model_name,
+           n_past,
+           prompt_tokens.size());
+  return n_past;
+}
+
 static bool process_prompt_chunks(
     llama_context* ctx,
     const std::vector<llama_token>& prompt_tokens,
+    int start_token_index,
     int seq_id,
     int n_batch,
     const std::string& model_name) {
-  int n_prompt_processed = 0;
   const int n_tokens = static_cast<int>(prompt_tokens.size());
+  int n_prompt_processed = std::max(0, std::min(start_token_index, n_tokens));
   while (n_prompt_processed < n_tokens) {
     int n_chunk = std::min(n_batch, n_tokens - n_prompt_processed);
     llama_batch batch = llama_batch_init(n_chunk, 0, 1);
@@ -1155,20 +1199,24 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
                    "prompt has " + std::to_string(n_tokens) +
                    " tokens but context is " + std::to_string(n_ctx)));
   }
-  llama_memory_clear(llama_get_memory(slot.ctx.get()), true);
+  const int cached_prompt_tokens = prepare_prompt_cache(
+      slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name);
 
-  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch), info_.name)) {
+  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, cached_prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch), info_.name)) {
+    slot.last_prompt_tokens.clear();
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
   }
 
   common_sampler* smp = common_sampler_init(model_, sampling_params);
   if (smp == nullptr) {
+    slot.last_prompt_tokens.clear();
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "common_sampler_init returned null"));
   }
   InferenceResult out;
   out.prompt_tokens = n_tokens;
+  out.cached_prompt_tokens = cached_prompt_tokens;
   const int max_tokens = std::max(1, req.max_tokens);
   const auto start = std::chrono::steady_clock::now();
   std::string generated;
@@ -1234,6 +1282,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
       log_token_decode_failed(info_.name, rc, i, id, one.pos[0], n_cur, static_cast<int>(n_ctx), n_decoded);
       llama_batch_free(one);
       common_sampler_free(smp);
+      slot.last_prompt_tokens.clear();
       return Result<InferenceResult>(std::unexpect,
           make_error(ErrorCode::Internal, "llama_decode (token) failed"));
     }
@@ -1326,20 +1375,24 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
                    "prompt has " + std::to_string(n_tokens) +
                    " tokens but context is " + std::to_string(n_ctx)));
   }
-  llama_memory_clear(llama_get_memory(slot.ctx.get()), true);
+  const int cached_prompt_tokens = prepare_prompt_cache(
+      slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name);
 
-  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch), info_.name)) {
+  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, cached_prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch), info_.name)) {
+    slot.last_prompt_tokens.clear();
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
   }
 
   common_sampler* smp = common_sampler_init(model_, sampling_params);
   if (smp == nullptr) {
+    slot.last_prompt_tokens.clear();
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "common_sampler_init returned null"));
   }
   InferenceResult out;
   out.prompt_tokens = n_tokens;
+  out.cached_prompt_tokens = cached_prompt_tokens;
   const int max_tokens = std::max(1, req.max_tokens);
   const auto start = std::chrono::steady_clock::now();
   std::string generated;
@@ -1391,6 +1444,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
         if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty()) continue;
         if (!callback(delta)) {
           common_sampler_free(smp);
+          slot.last_prompt_tokens.clear();
           return Result<InferenceResult>(std::move(out));
         }
       }
@@ -1427,6 +1481,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       log_token_decode_failed(info_.name, rc, i, id, one.pos[0], n_cur, static_cast<int>(n_ctx), n_decoded);
       llama_batch_free(one);
       common_sampler_free(smp);
+      slot.last_prompt_tokens.clear();
       return Result<InferenceResult>(std::unexpect,
           make_error(ErrorCode::Internal, "llama_decode (token) failed"));
     }
@@ -1450,6 +1505,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty()) continue;
       if (!callback(delta)) {
         common_sampler_free(smp);
+        slot.last_prompt_tokens.clear();
         return Result<InferenceResult>(std::move(out));
       }
     }

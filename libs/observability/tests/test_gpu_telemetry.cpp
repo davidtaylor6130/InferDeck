@@ -9,6 +9,21 @@
 using namespace inferdeck::observability;
 using namespace std::chrono_literals;
 
+namespace {
+
+GpuStats wait_for_sample(GpuTelemetry& telemetry, std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  GpuStats sample;
+  do {
+    sample = telemetry.latest();
+    if (sample.timestamp_unix_ms > 0 && !sample.provider.empty()) return sample;
+    std::this_thread::sleep_for(50ms);
+  } while (std::chrono::steady_clock::now() < deadline);
+  return sample;
+}
+
+}
+
 TEST_CASE("GpuTelemetry: no helper path leaves stats unavailable", "[observability][gpu]") {
   GpuTelemetry t;
   auto s = t.latest();
@@ -17,45 +32,31 @@ TEST_CASE("GpuTelemetry: no helper path leaves stats unavailable", "[observabili
   REQUIRE_FALSE(t.try_fetch_blocking(50ms).has_value());
 }
 
-TEST_CASE("GpuTelemetry: poll thread updates latest when helper succeeds", "[observability][gpu]") {
-  const auto dir = test_helpers::make_temp_dir("gpu_ok");
-  const auto helper = test_helpers::write_fake_helper(
-    dir,
-    "{\"available\":true,\"provider\":\"amd_adlx\",\"gpu\":{"
-    "\"name\":\"R9700\",\"utilization\":42.5,\"vramMb\":17000.0,"
-    "\"temperature\":55.0,\"power\":180.0,\"fanSpeed\":30.0,\"hotspotTemperature\":65.0}}"
-  );
+TEST_CASE("GpuTelemetry: poll thread publishes an in-process provider sample", "[observability][gpu]") {
   GpuTelemetry t;
-  t.set_helper_path(helper);
   t.set_poll_interval(50ms);
   t.set_max_staleness(500ms);
   t.start();
-  std::this_thread::sleep_for(250ms);
-  auto s = t.latest();
+  auto s = wait_for_sample(t, 2s);
   t.stop();
-  REQUIRE(s.available);
-  REQUIRE(s.provider == "amd_adlx");
-  REQUIRE(s.utilization_pct == 42.5);
-  REQUIRE(s.vram_mb == 17000.0);
-  REQUIRE(s.temperature_c == 55.0);
-  REQUIRE(s.power_w == 180.0);
+  REQUIRE_FALSE(s.provider.empty());
   REQUIRE(s.timestamp_unix_ms > 0);
-  auto opt = t.try_fetch_blocking(100ms);
-  REQUIRE(opt.has_value());
-  REQUIRE(opt->utilization_pct == 42.5);
+  if (s.available) {
+    auto opt = t.try_fetch_blocking(100ms);
+    REQUIRE(opt.has_value());
+    REQUIRE(opt->provider == s.provider);
+  }
 }
 
-TEST_CASE("GpuTelemetry: graceful failure when helper missing", "[observability][gpu]") {
+TEST_CASE("GpuTelemetry: helper path is ignored by in-process telemetry", "[observability][gpu]") {
   GpuTelemetry t;
   t.set_helper_path("C:/nonexistent/inferdeck-adlx-helper.exe");
   t.set_poll_interval(50ms);
   t.start();
-  std::this_thread::sleep_for(150ms);
-  auto s = t.latest();
+  auto s = wait_for_sample(t, 2s);
   t.stop();
-  REQUIRE_FALSE(s.available);
-  REQUIRE(s.reason == "helper_unreachable");
-  REQUIRE_FALSE(t.try_fetch_blocking(100ms).has_value());
+  REQUIRE_FALSE(s.provider.empty());
+  REQUIRE(s.timestamp_unix_ms > 0);
 }
 
 TEST_CASE("GpuTelemetry: stop is idempotent and joinable", "[observability][gpu]") {
@@ -99,6 +100,3 @@ TEST_CASE("GpuTelemetry: stale sample rejected", "[observability][gpu]") {
   std::this_thread::sleep_for(50ms);
   REQUIRE_FALSE(t.try_fetch_blocking(50ms).has_value());
 }
-
-// sentinel edit to test writability
-

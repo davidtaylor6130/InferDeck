@@ -25,6 +25,10 @@ else()
     target_compile_options(observability PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+if(WIN32)
+    target_link_libraries(observability PUBLIC pdh dxgi)
+endif()
+
 if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests)
 endif()

@@ -66,7 +66,38 @@ json MetricsBuilder::build_history(const observability::StatsDb& db, int limit) 
       {"error", s.error}
     });
   }
-  return {{"requests", std::move(requests)}, {"swaps", std::move(swaps)}};
+  json usage = json::array();
+  for (const auto& u : db.model_usage()) {
+    usage.push_back({
+      {"model", u.model},
+      {"requests", u.requests},
+      {"successful_requests", u.successful_requests},
+      {"prompt_tokens", u.prompt_tokens},
+      {"completion_tokens", u.completion_tokens},
+      {"total_tokens", u.prompt_tokens + u.completion_tokens},
+      {"total_duration_ms", u.total_duration_ms},
+      {"peak_tokens_per_second", u.peak_tokens_per_second},
+      {"last_timestamp_unix_ms", u.last_timestamp_unix_ms}
+    });
+  }
+  json monthly = json::array();
+  for (const auto& b : db.monthly_usage()) {
+    monthly.push_back({
+      {"bucket", b.bucket},
+      {"model", b.model},
+      {"prompt_tokens", b.prompt_tokens},
+      {"completion_tokens", b.completion_tokens},
+      {"total_tokens", b.total_tokens},
+      {"requests", b.requests},
+      {"successful_requests", b.successful_requests}
+    });
+  }
+  return {
+    {"requests", std::move(requests)},
+    {"swaps", std::move(swaps)},
+    {"model_usage", std::move(usage)},
+    {"monthly_usage", std::move(monthly)}
+  };
 }
 
 json MetricsBuilder::build_health(const observability::Metrics& m,

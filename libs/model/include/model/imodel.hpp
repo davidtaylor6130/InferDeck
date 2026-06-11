@@ -79,6 +79,7 @@ struct InferenceResult {
     std::string reasoning_text{};
     std::string finish_reason{"stop"};
     int prompt_tokens{0};
+    int cached_prompt_tokens{0};
     int completion_tokens{0};
     float duration_ms{0.0f};
     float tokens_per_second{0.0f};

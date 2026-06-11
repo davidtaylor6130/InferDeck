@@ -6,6 +6,8 @@
 #include "engine/token_sequence.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
+#include "observability/metrics.hpp"
+#include "observability/stats_db.hpp"
 #include "scheduler/scheduler.hpp"
 
 #include <chrono>
@@ -18,6 +20,8 @@ struct GatewayDeps {
     scheduler::Scheduler& scheduler;
     std::string default_swap_timeout_s{"15"};
     bool auto_swap{true};
+    observability::Metrics* metrics{nullptr};
+    observability::StatsDb* stats_db{nullptr};
 };
 
 void write_json(httplib::Response& resp, int status, const nlohmann::json& body);

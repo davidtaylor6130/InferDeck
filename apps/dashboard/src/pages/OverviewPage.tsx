@@ -44,7 +44,14 @@ interface ModelCostConfig {
   equivalentModel: string;
   promptPerMillion: number;
   outputPerMillion: number;
+  breakEvenTarget: number;
+  source?: string;
+  defaultsVersion?: number;
+  userEdited?: boolean;
 }
+
+const DEFAULT_BREAK_EVEN_TARGET = 1739;
+const MODEL_COST_DEFAULTS_VERSION = 4;
 
 interface ModelTokenUsage {
   model: string;
@@ -53,13 +60,69 @@ interface ModelTokenUsage {
   total: number;
 }
 
+interface PersistedUsage {
+  model: string;
+  requests?: number;
+  successfulRequests?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
+
+interface PersistedUsageBucket {
+  bucket: string;
+  model: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  requests?: number;
+  successfulRequests?: number;
+}
+
+type TokenRange = 'week' | 'month' | 'year' | 'all';
+
 const DEFAULT_COST_CONFIG: ModelCostConfig = {
-  equivalentModel: 'Equivalent API model',
+  equivalentModel: 'OpenRouter median tracked chat model',
   promptPerMillion: 0.55,
-  outputPerMillion: 1.35,
+  outputPerMillion: 1.44,
+  breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
+  source: 'OpenRouter median chat model pricing',
+  defaultsVersion: MODEL_COST_DEFAULTS_VERSION,
 };
 
+const MODEL_COST_DEFAULTS: Record<string, ModelCostConfig> = {
+  'qwen3.6-27b': { equivalentModel: 'Qwen3 VL 32B / Qwen3 32B class', promptPerMillion: 0.104, outputPerMillion: 0.416, breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET, source: 'Qwen3 27B open-weight equivalent: Qwen3 VL 32B / Qwen3 32B public pricing', defaultsVersion: MODEL_COST_DEFAULTS_VERSION },
+  'qwen3.6-35b-a3b': { equivalentModel: 'Qwen3.6 35B A3B', promptPerMillion: 0.14, outputPerMillion: 0.90, breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET, source: 'PricePerToken Qwen3.6 35B A3B', defaultsVersion: MODEL_COST_DEFAULTS_VERSION },
+  'qwen3-coder-30b-a3b': { equivalentModel: 'Qwen3 Coder 30B A3B Instruct', promptPerMillion: 0.07, outputPerMillion: 0.27, breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET, source: 'OpenRouter Qwen3 Coder 30B A3B Instruct', defaultsVersion: MODEL_COST_DEFAULTS_VERSION },
+  'qwen3-coder-next': { equivalentModel: 'Qwen3 Coder Next', promptPerMillion: 0.11, outputPerMillion: 0.80, breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET, source: 'OpenRouter Qwen3 Coder Next', defaultsVersion: MODEL_COST_DEFAULTS_VERSION },
+  'qwen2.5-coder-3b': { equivalentModel: 'Qwen2.5 Coder / small coder API average', promptPerMillion: 0.08, outputPerMillion: 0.28, breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET, source: 'Qwen 30B low-cost public provider average fallback', defaultsVersion: MODEL_COST_DEFAULTS_VERSION },
+  'gemma-4-26b-a4b': { equivalentModel: 'Gemma 3 27B Instruct', promptPerMillion: 0.08, outputPerMillion: 0.16, breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET, source: 'OpenRouter / Puter Gemma 3 27B', defaultsVersion: MODEL_COST_DEFAULTS_VERSION },
+  'gpt-oss-20b': { equivalentModel: 'GPT-OSS 20B', promptPerMillion: 0.05, outputPerMillion: 0.20, breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET, source: 'Puter GPT-OSS 20B', defaultsVersion: MODEL_COST_DEFAULTS_VERSION },
+};
+
+const LEGACY_DEFAULT_PRICES: Record<string, Array<[number, number]>> = {
+  'qwen3.6-27b': [[0.455, 1.82], [0.325, 1.95]],
+  'qwen3.6-35b-a3b': [[0.455, 1.82], [0.325, 1.95], [0.129, 0.512]],
+  'qwen3-coder-30b-a3b': [[0.455, 1.82]],
+  'qwen2.5-coder-3b': [[0.30, 0.30]],
+  'gemma-4-26b-a4b': [[0.10, 0.30]],
+  'gpt-oss-20b': [[0.05, 0.20]],
+};
+
+const ALL_MODELS = 'All tracked models';
 const COST_STORAGE_KEY = 'inferdeck:model-token-costs';
+const TOKEN_RANGE_LABELS: Record<TokenRange, string> = {
+  week: 'Week',
+  month: 'Month',
+  year: 'Year',
+  all: 'All time',
+};
 
 export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const queue = getQueueCounts(state.statusData, state.jobsList);
@@ -78,6 +141,8 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const totalTokens = Number(summary.totalTokens ?? metrics.total_tokens ?? sumJobTokens(state.jobsList, 'totalTokens'));
   const promptTokens = Number(summary.promptTokens ?? metrics.tokens_processed ?? sumJobTokens(state.jobsList, 'promptTokens'));
   const outputTokens = Number(summary.completionTokens ?? metrics.tokens_generated ?? sumJobTokens(state.jobsList, 'completionTokens'));
+  const persistedUsage = Array.isArray(state.statusData?.tokenUsage) ? state.statusData.tokenUsage as PersistedUsage[] : [];
+  const monthlyUsage = Array.isArray(state.statusData?.monthlyTokenUsage) ? state.statusData.monthlyTokenUsage as PersistedUsageBucket[] : [];
   const cpuPercent = firstPercent(system.cpuUtilization, system.cpuPercent, system.cpu, telemetry.cpu?.utilization, telemetry.cpu?.usage);
   const cpuTemp = firstNumber(system.temperature, system.cpuTemp, system.cpuTemperature, telemetry.cpu?.temperature, telemetry.cpu?.tempC);
   const ramUsed = firstNumber(system.memoryUsed, system.ramUsed, telemetry.memory?.used, telemetry.ram?.used);
@@ -90,19 +155,30 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
   const gpuTemp = firstNumber(gpu.temperature, gpu.tempC, gpu.temperatureC);
   const healthTone: Tone = state.connected && !getErrorCount(state.errors, state.jobsList, summary, metrics) ? 'good' : state.connected ? 'warn' : 'critical';
   const queueTone: Tone = queue.failed ? 'critical' : queue.queued > 0 ? 'info' : 'idle';
-  const modelNames = useMemo(() => getModelNames(state.jobsList, state.modelsList, activeModel), [activeModel, state.jobsList, state.modelsList]);
+  const modelNames = useMemo(() => getModelNames(state.jobsList, state.modelsList, activeModel, persistedUsage), [activeModel, persistedUsage, state.jobsList, state.modelsList]);
   const [selectedCostModel, setSelectedCostModel] = useState(activeModel);
+  const [tokenRange, setTokenRange] = useState<TokenRange>('all');
   const [costConfig, setCostConfig] = useState<Record<string, ModelCostConfig>>(() => loadCostConfig());
   useEffect(() => {
     if (!modelNames.includes(selectedCostModel)) setSelectedCostModel(modelNames[0] || activeModel);
   }, [activeModel, modelNames, selectedCostModel]);
-  const selectedModelCost = costConfig[selectedCostModel] || DEFAULT_COST_CONFIG;
-  const modelUsage = useMemo(
-    () => getModelTokenUsage(state.jobsList, selectedCostModel, { prompt: promptTokens, output: outputTokens, total: totalTokens }),
-    [outputTokens, promptTokens, selectedCostModel, state.jobsList, totalTokens],
+  const selectedModelCost = getCostConfigForModel(selectedCostModel, costConfig);
+  const tokenSeries = useMemo(
+    () => buildTokenSeries(state.jobsList, selectedCostModel, selectedModelCost, monthlyUsage, costConfig, tokenRange),
+    [costConfig, monthlyUsage, selectedCostModel, selectedModelCost, state.jobsList, tokenRange],
   );
-  const tokenSeries = useMemo(() => buildTokenSeries(state.jobsList, selectedCostModel, selectedModelCost), [selectedCostModel, selectedModelCost, state.jobsList]);
-  const estimatedCostAvoided = estimateCostAvoided(modelUsage, selectedModelCost);
+  const modelUsage = useMemo(
+    () => tokenUsageFromSeries(selectedCostModel, tokenSeries),
+    [selectedCostModel, tokenSeries],
+  );
+  const portfolioCost = getCostConfigForModel(ALL_MODELS, costConfig);
+  const portfolioCostAvoided = persistedUsage.length
+    ? estimatePortfolioCostAvoided(persistedUsage, costConfig)
+    : estimateJobsPortfolioCostAvoided(state.jobsList, costConfig, { prompt: promptTokens, output: outputTokens, total: totalTokens });
+  const roiRemaining = Math.max(0, portfolioCost.breakEvenTarget - portfolioCostAvoided);
+  const roiProgress = portfolioCost.breakEvenTarget > 0
+    ? Math.min(100, (portfolioCostAvoided / portfolioCost.breakEvenTarget) * 100)
+    : 0;
   const activity = buildActivity(state.jobsList, state.statusData?.observability, state.lastUpdatedAt);
   const [history, setHistory] = useState<Array<{ timestamp: string; cpu: number; ram: number; gpu: number; vram: number }>>([]);
 
@@ -144,7 +220,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
         </div>
         <div className="flex flex-wrap gap-2">
           <CommandButton tone="blue" onClick={actions.pauseQueue} className="min-h-9 px-3 py-1.5 text-xs"><PauseIcon className="h-4 w-4" />Pause Queue</CommandButton>
-          <CommandButton tone="neutral" onClick={actions.restartBackend} className="min-h-9 px-3 py-1.5 text-xs"><ArrowPathIcon className="h-4 w-4" />Restart llama.cpp</CommandButton>
+          <CommandButton tone="neutral" onClick={actions.restartBackend} className="min-h-9 px-3 py-1.5 text-xs"><ArrowPathIcon className="h-4 w-4" />Refresh Runtime</CommandButton>
           <CommandButton tone="neutral" onClick={actions.refreshAll} className="min-h-9 px-3 py-1.5 text-xs"><ArrowPathIcon className="h-4 w-4" />Refresh</CommandButton>
         </div>
       </section>
@@ -189,23 +265,57 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
 
         <Panel className="min-h-[278px]">
           <div className="flex flex-col gap-3 min-[1800px]:flex-row min-[1800px]:items-start min-[1800px]:justify-between">
-            <SectionTitle title="Token Usage & Cost" aside="Last 6 months" />
-            <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
+            <SectionTitle title="Token Usage & Cost" aside={TOKEN_RANGE_LABELS[tokenRange]} />
+            <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-5">
               <SummaryStat label="Total Tokens" value={formatTokenCount(modelUsage.total)} />
               <SummaryStat label="Prompt" value={formatTokenCount(modelUsage.prompt)} />
               <SummaryStat label="Output" value={formatTokenCount(modelUsage.output)} />
-              <SummaryStat label="Est. Cost Avoided" value={formatCurrency(estimatedCostAvoided)} tone="good" />
+              <SummaryStat label="Portfolio Cost Avoided" value={formatCurrency(portfolioCostAvoided)} tone="good" />
+              <SummaryStat label="ROI Remaining" value={portfolioCost.breakEvenTarget > 0 ? formatCurrency(roiRemaining) : 'Set target'} tone={roiRemaining === 0 && portfolioCost.breakEvenTarget > 0 ? 'good' : 'warn'} />
             </div>
           </div>
+          <TokenRangeSelector value={tokenRange} onChange={setTokenRange} />
+          {portfolioCost.breakEvenTarget > 0 && (
+            <div className="mt-3">
+              <div className="mb-1 flex justify-between text-xs text-text-muted">
+                <span>Portfolio break-even progress</span>
+                <span>{Math.round(roiProgress)}%</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                <div className="h-full rounded-full bg-success-green" style={{ width: `${roiProgress}%` }} />
+              </div>
+            </div>
+          )}
           <TokenUsageGraph series={tokenSeries} />
           <TokenCostSettings
             models={modelNames}
             selectedModel={selectedCostModel}
             config={selectedModelCost}
+            portfolioBreakEvenTarget={portfolioCost.breakEvenTarget}
             usage={modelUsage}
             onSelectModel={setSelectedCostModel}
             onChange={(next) => {
-              const merged = { ...costConfig, [selectedCostModel]: next };
+              const merged = {
+                ...costConfig,
+                [selectedCostModel]: {
+                  ...next,
+                  defaultsVersion: MODEL_COST_DEFAULTS_VERSION,
+                  userEdited: selectedCostModel !== ALL_MODELS,
+                },
+              };
+              setCostConfig(merged);
+              saveCostConfig(merged);
+            }}
+            onChangePortfolioBreakEven={(breakEvenTarget) => {
+              const current = getCostConfigForModel(ALL_MODELS, costConfig);
+              const merged = {
+                ...costConfig,
+                [ALL_MODELS]: {
+                  ...current,
+                  breakEvenTarget,
+                  defaultsVersion: MODEL_COST_DEFAULTS_VERSION,
+                },
+              };
               setCostConfig(merged);
               saveCostConfig(merged);
             }}
@@ -224,7 +334,7 @@ export const OverviewPage: React.FC<PageProps> = ({ state, actions }) => {
                   <h3 className="truncate font-mono text-sm font-semibold text-text-primary" title={activeModel}>{activeModel}</h3>
                   <StatusBadge label={state.runningModels.length ? 'Online' : 'Standby'} tone={state.runningModels.length ? 'online' : 'idle'} />
                 </div>
-                <p className="mt-1 text-sm text-text-secondary">{state.runningModels.length ? 'Loaded in llama.cpp' : `${state.modelsList.length || 0} local model candidates`}</p>
+                <p className="mt-1 text-sm text-text-secondary">{state.runningModels.length ? 'Loaded in-process' : `${state.modelsList.length || 0} local model candidates`}</p>
               </div>
             </div>
             <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
@@ -363,6 +473,7 @@ const LineChart: React.FC<{ values: number[]; tone: Tone; height: number; yMax?:
 const TokenUsageGraph: React.FC<{ series: ReturnType<typeof buildTokenSeries> }> = ({ series }) => {
   const tokenMax = Math.max(1, ...series.total, ...series.prompt, ...series.output);
   const costMax = Math.max(1, ...series.cost);
+  const monthX = (index: number) => series.months.length <= 1 ? 340 : (680 / (series.months.length - 1)) * index;
   return (
     <div className="mt-5">
       <div className="grid grid-cols-[34px_1fr_42px] gap-2 text-xs text-text-muted">
@@ -371,7 +482,7 @@ const TokenUsageGraph: React.FC<{ series: ReturnType<typeof buildTokenSeries> }>
           <svg viewBox="0 0 680 150" className="h-[150px] w-full overflow-visible" role="img" aria-label="token usage graph">
             <g stroke="rgba(148,163,184,0.14)" strokeDasharray="4 5">
               {[0, 75, 150].map(y => <line key={y} x1="0" y1={y} x2="680" y2={y} />)}
-              {series.months.map((_, index) => <line key={index} x1={(680 / (series.months.length - 1)) * index} y1="0" x2={(680 / (series.months.length - 1)) * index} y2="150" />)}
+              {series.months.map((_, index) => <line key={index} x1={monthX(index)} y1="0" x2={monthX(index)} y2="150" />)}
             </g>
             <path d={toPath(series.total, 680, 150, tokenMax)} fill="none" stroke="#60A5FA" strokeWidth="3" />
             <path d={toPath(series.prompt, 680, 150, tokenMax)} fill="none" stroke="#34D399" strokeWidth="3" />
@@ -392,14 +503,31 @@ const TokenUsageGraph: React.FC<{ series: ReturnType<typeof buildTokenSeries> }>
   );
 };
 
+const TokenRangeSelector: React.FC<{ value: TokenRange; onChange: (value: TokenRange) => void }> = ({ value, onChange }) => (
+  <div className="mt-3 flex flex-wrap gap-1 rounded-lg border border-white/10 bg-[#07101d] p-1 text-xs">
+    {(Object.keys(TOKEN_RANGE_LABELS) as TokenRange[]).map(range => (
+      <button
+        key={range}
+        type="button"
+        className={`rounded-md px-3 py-1.5 font-medium transition ${value === range ? 'bg-primary-blue text-white' : 'text-text-muted hover:bg-white/5 hover:text-text-primary'}`}
+        onClick={() => onChange(range)}
+      >
+        {TOKEN_RANGE_LABELS[range]}
+      </button>
+    ))}
+  </div>
+);
+
 const TokenCostSettings: React.FC<{
   models: string[];
   selectedModel: string;
   config: ModelCostConfig;
+  portfolioBreakEvenTarget: number;
   usage: ModelTokenUsage;
   onSelectModel: (model: string) => void;
   onChange: (config: ModelCostConfig) => void;
-}> = ({ models, selectedModel, config, usage, onSelectModel, onChange }) => (
+  onChangePortfolioBreakEven: (breakEvenTarget: number) => void;
+}> = ({ models, selectedModel, config, portfolioBreakEvenTarget, usage, onSelectModel, onChange, onChangePortfolioBreakEven }) => (
   <div className="mt-4 grid gap-3 rounded-lg border border-white/10 bg-[#07101d] p-3 lg:grid-cols-[1.15fr_1fr_1fr_1fr]">
     <label className="min-w-0 text-xs text-text-secondary">
       <span className="mb-1 block text-text-muted">Model</span>
@@ -411,15 +539,7 @@ const TokenCostSettings: React.FC<{
         {models.map(model => <option key={model} value={model}>{model}</option>)}
       </select>
     </label>
-    <label className="min-w-0 text-xs text-text-secondary">
-      <span className="mb-1 block text-text-muted">Equivalent API Model</span>
-      <input
-        className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
-        value={config.equivalentModel}
-        onChange={event => onChange({ ...config, equivalentModel: event.target.value })}
-      />
-    </label>
-    <label className="min-w-0 text-xs text-text-secondary">
+    <label className={`min-w-0 text-xs text-text-secondary ${selectedModel === ALL_MODELS ? 'opacity-50' : ''}`}>
       <span className="mb-1 block text-text-muted">Prompt $/1M</span>
       <input
         className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
@@ -427,10 +547,11 @@ const TokenCostSettings: React.FC<{
         min="0"
         step="0.01"
         value={config.promptPerMillion}
+        disabled={selectedModel === ALL_MODELS}
         onChange={event => onChange({ ...config, promptPerMillion: Number(event.target.value) || 0 })}
       />
     </label>
-    <label className="min-w-0 text-xs text-text-secondary">
+    <label className={`min-w-0 text-xs text-text-secondary ${selectedModel === ALL_MODELS ? 'opacity-50' : ''}`}>
       <span className="mb-1 block text-text-muted">Output $/1M</span>
       <input
         className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
@@ -438,11 +559,26 @@ const TokenCostSettings: React.FC<{
         min="0"
         step="0.01"
         value={config.outputPerMillion}
+        disabled={selectedModel === ALL_MODELS}
         onChange={event => onChange({ ...config, outputPerMillion: Number(event.target.value) || 0 })}
       />
     </label>
+    <label className="min-w-0 text-xs text-text-secondary">
+      <span className="mb-1 block text-text-muted">Portfolio Break-even $</span>
+      <input
+        className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
+        type="number"
+        min="0"
+        step="1"
+        value={portfolioBreakEvenTarget}
+        onChange={event => onChangePortfolioBreakEven(Number(event.target.value) || 0)}
+      />
+    </label>
     <p className="lg:col-span-4 text-xs text-text-muted">
-      Cost avoided for {compactModel(usage.model)} uses this model's recorded prompt/output tokens and your saved equivalent API prices.
+      {selectedModel === ALL_MODELS
+        ? 'Portfolio cost avoided uses each model\'s persisted tokens and saved per-model API prices; the break-even target applies to the whole tracked portfolio.'
+        : `The token graph and price fields are for ${compactModel(usage.model)}. Headline ROI always uses all tracked models and the portfolio break-even target.`}
+      {selectedModel !== ALL_MODELS && config.source ? ` Default source: ${config.source}.` : ''}
     </p>
   </div>
 );
@@ -528,29 +664,131 @@ function getHardwareHistory(samples: unknown): Array<{ timestamp: string; cpu: n
     .slice(-60);
 }
 
-function buildTokenSeries(jobs: JobRecord[], model: string, cost: ModelCostConfig) {
-  const months = lastSixMonths();
-  const byMonth = new Map(months.map(month => [month.key, { prompt: 0, output: 0, total: 0, cost: 0 }]));
+function buildTokenSeries(
+  jobs: JobRecord[],
+  model: string,
+  cost: ModelCostConfig,
+  persisted: PersistedUsageBucket[] = [],
+  config: Record<string, ModelCostConfig> = {},
+  range: TokenRange = 'all',
+) {
+  const buckets = buildTokenBuckets(range, jobs, model, persisted);
+  const byBucket = new Map(buckets.map(bucket => [bucket.key, { prompt: 0, output: 0, total: 0, cost: 0 }]));
+  const usePersisted = persisted.length > 0 && (range === 'all' || range === 'year');
+  if (usePersisted) {
+    for (const row of persisted) {
+      if (model !== ALL_MODELS && row.model !== model) continue;
+      const bucket = byBucket.get(row.bucket);
+      if (!bucket) continue;
+      const prompt = Number(row.promptTokens ?? row.prompt_tokens ?? 0);
+      const output = Number(row.completionTokens ?? row.completion_tokens ?? 0);
+      bucket.prompt += prompt;
+      bucket.output += output;
+      bucket.total += Number(row.totalTokens ?? row.total_tokens ?? prompt + output);
+      bucket.cost += estimateCostAvoided(
+        { model: row.model, prompt, output, total: prompt + output },
+        model === ALL_MODELS ? getCostConfigForModel(row.model, config) : cost,
+      );
+    }
+    const values = buckets.map(bucket => byBucket.get(bucket.key) || { prompt: 0, output: 0, total: 0, cost: 0 });
+    return {
+      months: buckets.map(bucket => bucket.label),
+      total: values.map(value => value.total),
+      prompt: values.map(value => value.prompt),
+      output: values.map(value => value.output),
+      cost: values.map(value => value.cost),
+    };
+  }
   for (const job of jobs) {
-    if ((job.model || 'Unknown model') !== model) continue;
+    if (model !== ALL_MODELS && (job.model || 'Unknown model') !== model) continue;
     const date = parseJobDate(job);
-    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-    const bucket = byMonth.get(key);
+    const chartBucket = findTokenBucket(buckets, date);
+    const bucket = chartBucket ? byBucket.get(chartBucket.key) : undefined;
     if (!bucket) continue;
     const prompt = Number(job.promptTokens ?? 0);
     const output = Number(job.completionTokens ?? 0);
+    const jobModel = job.model || 'Unknown model';
     bucket.prompt += prompt;
     bucket.output += output;
     bucket.total += Number(job.totalTokens ?? prompt + output);
-    bucket.cost += estimateCostAvoided({ model, prompt, output, total: prompt + output }, cost);
+    bucket.cost += estimateCostAvoided(
+      { model: jobModel, prompt, output, total: prompt + output },
+      model === ALL_MODELS ? getCostConfigForModel(jobModel, config) : cost,
+    );
   }
-  const values = months.map(month => byMonth.get(month.key) || { prompt: 0, output: 0, total: 0, cost: 0 });
+  const values = buckets.map(bucket => byBucket.get(bucket.key) || { prompt: 0, output: 0, total: 0, cost: 0 });
   return {
-    months: months.map(month => month.label),
+    months: buckets.map(bucket => bucket.label),
     total: values.map(value => value.total),
     prompt: values.map(value => value.prompt),
     output: values.map(value => value.output),
     cost: values.map(value => value.cost),
+  };
+}
+
+type TokenBucket = { key: string; label: string; start: Date; end: Date };
+
+function buildTokenBuckets(range: TokenRange, jobs: JobRecord[], model: string, persisted: PersistedUsageBucket[]): TokenBucket[] {
+  if (range === 'week') return fixedDayBuckets(7);
+  if (range === 'month') return fixedDayBuckets(30, 5);
+  return monthlyTokenBuckets(range, jobs, model, persisted);
+}
+
+function fixedDayBuckets(days: number, spanDays = 1): TokenBucket[] {
+  const now = startOfDay(new Date());
+  const bucketCount = Math.ceil(days / spanDays);
+  const firstStart = addDays(now, -(days - 1));
+  return Array.from({ length: bucketCount }, (_, index) => {
+    const start = addDays(firstStart, index * spanDays);
+    const end = addDays(start, spanDays);
+    return {
+      key: `${dateKey(start)}:${spanDays}`,
+      label: spanDays === 1 ? start.toLocaleString([], { weekday: 'short' }) : start.toLocaleString([], { month: 'short', day: 'numeric' }),
+      start,
+      end: index === bucketCount - 1 ? addDays(now, 1) : end,
+    };
+  });
+}
+
+function monthlyTokenBuckets(range: TokenRange, jobs: JobRecord[], model: string, persisted: PersistedUsageBucket[]): TokenBucket[] {
+  const monthKeys = new Set<string>();
+  const now = new Date();
+  const earliestYearMonth = range === 'year'
+    ? `${now.getFullYear() - (now.getMonth() < 11 ? 1 : 0)}-${String(((now.getMonth() + 1) % 12) + 1).padStart(2, '0')}`
+    : '';
+  for (const row of persisted) {
+    if (model !== ALL_MODELS && row.model !== model) continue;
+    if (!/^\d{4}-\d{2}$/.test(row.bucket)) continue;
+    if (range === 'year' && row.bucket < earliestYearMonth) continue;
+    monthKeys.add(row.bucket);
+  }
+  if (!monthKeys.size) {
+    for (const job of jobs) {
+      if (model !== ALL_MODELS && (job.model || 'Unknown model') !== model) continue;
+      const date = parseJobDate(job);
+      const key = monthKey(date);
+      if (range === 'year' && key < earliestYearMonth) continue;
+      monthKeys.add(key);
+    }
+  }
+  if (!monthKeys.size) monthKeys.add(monthKey(now));
+  return Array.from(monthKeys).sort().map(key => {
+    const start = monthStart(key);
+    return { key, label: monthLabel(key), start, end: addMonths(start, 1) };
+  });
+}
+
+function findTokenBucket(buckets: TokenBucket[], date: Date): TokenBucket | undefined {
+  const time = date.getTime();
+  return buckets.find(bucket => time >= bucket.start.getTime() && time < bucket.end.getTime());
+}
+
+function tokenUsageFromSeries(model: string, series: ReturnType<typeof buildTokenSeries>): ModelTokenUsage {
+  return {
+    model,
+    prompt: series.prompt.reduce((sum, value) => sum + value, 0),
+    output: series.output.reduce((sum, value) => sum + value, 0),
+    total: series.total.reduce((sum, value) => sum + value, 0),
   };
 }
 
@@ -580,8 +818,12 @@ function buildActivity(jobs: JobRecord[], observability: any, lastUpdatedAt: Dat
 
 function toPath(values: number[], width: number, height: number, max: number): string {
   if (!values.length) return `M 0 ${height}`;
+  if (values.length === 1) {
+    const y = height - (clamp(values[0], 0, max) / max) * height;
+    return `M 0 ${y.toFixed(2)} L ${width} ${y.toFixed(2)}`;
+  }
   return values.map((value, index) => {
-    const x = values.length === 1 ? 0 : (width / (values.length - 1)) * index;
+    const x = (width / (values.length - 1)) * index;
     const y = height - (clamp(value, 0, max) / max) * height;
     return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
   }).join(' ');
@@ -629,15 +871,41 @@ function bytesPair(used?: number | null, total?: number | null): string {
   return `${formatBytes(used)} / ${formatBytes(total)}`;
 }
 
-function getModelNames(jobs: JobRecord[], models: ModelRecord[], activeModel: string): string[] {
+function getModelNames(jobs: JobRecord[], models: ModelRecord[], activeModel: string, persisted: PersistedUsage[] = []): string[] {
   const names = new Set<string>();
+  if (persisted.length || jobs.length) names.add(ALL_MODELS);
   if (activeModel && activeModel !== 'No model loaded') names.add(activeModel);
+  for (const row of persisted) names.add(row.model);
   for (const job of jobs) names.add(job.model || 'Unknown model');
   for (const model of models) names.add(model.name);
   return Array.from(names).filter(Boolean);
 }
 
-function getModelTokenUsage(jobs: JobRecord[], model: string, fallback: { prompt: number; output: number; total: number }): ModelTokenUsage {
+function getModelTokenUsage(jobs: JobRecord[], model: string, fallback: { prompt: number; output: number; total: number }, persisted: PersistedUsage[] = []): ModelTokenUsage {
+  if (model === ALL_MODELS) {
+    if (persisted.length) {
+      return persisted.reduce<ModelTokenUsage>((current, row) => {
+        const prompt = Number(row.promptTokens ?? row.prompt_tokens ?? 0);
+        const output = Number(row.completionTokens ?? row.completion_tokens ?? 0);
+        current.prompt += prompt;
+        current.output += output;
+        current.total += Number(row.totalTokens ?? row.total_tokens ?? prompt + output);
+        return current;
+      }, { model, prompt: 0, output: 0, total: 0 });
+    }
+    return { model, ...fallback };
+  }
+  const stored = persisted.find(row => row.model === model);
+  if (stored) {
+    const prompt = Number(stored.promptTokens ?? stored.prompt_tokens ?? 0);
+    const output = Number(stored.completionTokens ?? stored.completion_tokens ?? 0);
+    return {
+      model,
+      prompt,
+      output,
+      total: Number(stored.totalTokens ?? stored.total_tokens ?? prompt + output),
+    };
+  }
   const usage = jobs.reduce<ModelTokenUsage>((current, job) => {
     if ((job.model || 'Unknown model') !== model) return current;
     const prompt = Number(job.promptTokens ?? 0);
@@ -657,7 +925,8 @@ function loadCostConfig(): Record<string, ModelCostConfig> {
   if (typeof window === 'undefined') return {};
   try {
     const parsed = JSON.parse(window.localStorage.getItem(COST_STORAGE_KEY) || '{}') as Record<string, ModelCostConfig>;
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    if (!parsed || typeof parsed !== 'object') return {};
+    return Object.fromEntries(Object.entries(parsed).map(([model, config]) => [model, normalizeCostConfig(model, config, MODEL_COST_DEFAULTS[model])]));
   } catch {
     return {};
   }
@@ -668,19 +937,115 @@ function saveCostConfig(config: Record<string, ModelCostConfig>) {
   window.localStorage.setItem(COST_STORAGE_KEY, JSON.stringify(config));
 }
 
+function normalizeCostConfig(model: string, config?: Partial<ModelCostConfig>, defaultConfig: ModelCostConfig = DEFAULT_COST_CONFIG): ModelCostConfig {
+  const shouldRefreshDefaults =
+    defaultConfig !== DEFAULT_COST_CONFIG &&
+    config &&
+    !config.userEdited &&
+    Number(config.defaultsVersion ?? 0) < MODEL_COST_DEFAULTS_VERSION &&
+    isLegacyDefaultConfig(model, config);
+  const source = shouldRefreshDefaults ? defaultConfig : config;
+  const savedBreakEven = Number(config?.breakEvenTarget);
+  const breakEvenTarget = !Number.isFinite(savedBreakEven) || savedBreakEven === 0
+    ? DEFAULT_BREAK_EVEN_TARGET
+    : sanitizeMoney(config?.breakEvenTarget, defaultConfig.breakEvenTarget);
+  return {
+    equivalentModel: typeof source?.equivalentModel === 'string' && source.equivalentModel.trim()
+      ? source.equivalentModel
+      : defaultConfig.equivalentModel,
+    promptPerMillion: sanitizeMoney(source?.promptPerMillion, defaultConfig.promptPerMillion),
+    outputPerMillion: sanitizeMoney(source?.outputPerMillion, defaultConfig.outputPerMillion),
+    breakEvenTarget,
+    source: typeof source?.source === 'string' && source.source.trim() ? source.source : defaultConfig.source,
+    defaultsVersion: Number(source?.defaultsVersion ?? defaultConfig.defaultsVersion ?? MODEL_COST_DEFAULTS_VERSION),
+    userEdited: Boolean(config?.userEdited),
+  };
+}
+
+function getCostConfigForModel(model: string, config: Record<string, ModelCostConfig>): ModelCostConfig {
+  const defaultConfig = MODEL_COST_DEFAULTS[model] || DEFAULT_COST_CONFIG;
+  return normalizeCostConfig(model, config[model], defaultConfig);
+}
+
+function sanitizeMoney(value: unknown, fallback: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function isLegacyDefaultConfig(model: string, config: Partial<ModelCostConfig>): boolean {
+  if (!config.defaultsVersion && config.equivalentModel === DEFAULT_COST_CONFIG.equivalentModel) return true;
+  const prompt = Number(config.promptPerMillion);
+  const output = Number(config.outputPerMillion);
+  return (LEGACY_DEFAULT_PRICES[model] || []).some(([legacyPrompt, legacyOutput]) =>
+    Math.abs(prompt - legacyPrompt) < 0.0001 && Math.abs(output - legacyOutput) < 0.0001,
+  );
+}
+
 function estimateCostAvoided(usage: ModelTokenUsage, cost: ModelCostConfig): number {
   return (usage.prompt / 1_000_000) * cost.promptPerMillion + (usage.output / 1_000_000) * cost.outputPerMillion;
 }
 
-function lastSixMonths(): Array<{ key: string; label: string }> {
-  const now = new Date();
-  return Array.from({ length: 6 }, (_, index) => {
-    const date = new Date(now.getFullYear(), now.getMonth() - (5 - index), 1);
-    return {
-      key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
-      label: date.toLocaleString([], { month: 'short' }),
-    };
-  });
+function estimatePortfolioCostAvoided(usage: PersistedUsage[], config: Record<string, ModelCostConfig>): number {
+  return usage.reduce((sum, row) => {
+    const prompt = Number(row.promptTokens ?? row.prompt_tokens ?? 0);
+    const output = Number(row.completionTokens ?? row.completion_tokens ?? 0);
+    return sum + estimateCostAvoided(
+      { model: row.model, prompt, output, total: Number(row.totalTokens ?? row.total_tokens ?? prompt + output) },
+      getCostConfigForModel(row.model, config),
+    );
+  }, 0);
+}
+
+function estimateJobsPortfolioCostAvoided(
+  jobs: JobRecord[],
+  config: Record<string, ModelCostConfig>,
+  fallback: { prompt: number; output: number; total: number },
+): number {
+  if (!jobs.length) return estimateCostAvoided({ model: ALL_MODELS, ...fallback }, DEFAULT_COST_CONFIG);
+  return jobs.reduce((sum, job) => {
+    const prompt = Number(job.promptTokens ?? 0);
+    const output = Number(job.completionTokens ?? 0);
+    const model = job.model || 'Unknown model';
+    return sum + estimateCostAvoided(
+      { model, prompt, output, total: Number(job.totalTokens ?? prompt + output) },
+      getCostConfigForModel(model, config),
+    );
+  }, 0);
+}
+
+function monthLabel(key: string): string {
+  const [year, month] = key.split('-').map(Number);
+  const date = new Date(year, (month || 1) - 1, 1);
+  return `${date.toLocaleString([], { month: 'short' })} ${year}`;
+}
+
+function monthKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function dateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function monthStart(key: string): Date {
+  const [year, month] = key.split('-').map(Number);
+  return new Date(year, (month || 1) - 1, 1);
+}
+
+function startOfDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addMonths(date: Date, months: number): Date {
+  const next = new Date(date);
+  next.setMonth(next.getMonth() + months);
+  return next;
 }
 
 function parseJobDate(job: JobRecord): Date {

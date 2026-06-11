@@ -29,6 +29,116 @@ std::string make_id() {
     return "chatcmpl-" + std::to_string(rng());
 }
 
+std::int64_t now_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+void record_request(const GatewayDeps& deps,
+                    const std::string& model_name,
+                    const model::InferenceResult& result,
+                    int status_code,
+                    int slot_id) {
+    observability::RequestRecord rec;
+    rec.timestamp_unix_ms = now_ms();
+    rec.model = model_name;
+    rec.prompt_tokens = result.prompt_tokens;
+    rec.completion_tokens = result.completion_tokens;
+    rec.duration_ms = result.duration_ms;
+    rec.tokens_per_second = result.tokens_per_second;
+    rec.status_code = status_code;
+    rec.slot_id = slot_id;
+    if (deps.metrics) deps.metrics->record_request(rec);
+    LOG_INFO("request_recorded",
+             "model={} status={} slot_id={} prompt_tokens={} cached_prompt_tokens={} completion_tokens={} duration_ms={} tps={}",
+             model_name,
+             status_code,
+             slot_id,
+             result.prompt_tokens,
+             result.cached_prompt_tokens,
+             result.completion_tokens,
+             result.duration_ms,
+             result.tokens_per_second);
+    if (deps.stats_db) {
+        deps.stats_db->record_request({
+            rec.timestamp_unix_ms,
+            rec.model,
+            rec.prompt_tokens,
+            rec.completion_tokens,
+            rec.duration_ms,
+            rec.tokens_per_second,
+            rec.status_code,
+            rec.slot_id
+        });
+    }
+}
+
+void record_request(observability::Metrics* metrics,
+                    observability::StatsDb* stats_db,
+                    const std::string& model_name,
+                    const model::InferenceResult& result,
+                    int status_code,
+                    int slot_id) {
+    observability::RequestRecord rec;
+    rec.timestamp_unix_ms = now_ms();
+    rec.model = model_name;
+    rec.prompt_tokens = result.prompt_tokens;
+    rec.completion_tokens = result.completion_tokens;
+    rec.duration_ms = result.duration_ms;
+    rec.tokens_per_second = result.tokens_per_second;
+    rec.status_code = status_code;
+    rec.slot_id = slot_id;
+    if (metrics) metrics->record_request(rec);
+    LOG_INFO("request_recorded",
+             "model={} status={} slot_id={} prompt_tokens={} cached_prompt_tokens={} completion_tokens={} duration_ms={} tps={}",
+             model_name,
+             status_code,
+             slot_id,
+             result.prompt_tokens,
+             result.cached_prompt_tokens,
+             result.completion_tokens,
+             result.duration_ms,
+             result.tokens_per_second);
+    if (stats_db) {
+        stats_db->record_request({
+            rec.timestamp_unix_ms,
+            rec.model,
+            rec.prompt_tokens,
+            rec.completion_tokens,
+            rec.duration_ms,
+            rec.tokens_per_second,
+            rec.status_code,
+            rec.slot_id
+        });
+    }
+}
+
+void record_swap(const GatewayDeps& deps,
+                 const std::string& from_model,
+                 const std::string& to_model,
+                 double duration_ms,
+                 bool success,
+                 const std::string& error) {
+    observability::SwapRecord rec;
+    rec.timestamp_unix_ms = now_ms();
+    rec.from_model = from_model;
+    rec.to_model = to_model;
+    rec.duration_ms = duration_ms;
+    rec.success = success;
+    rec.error = error;
+    if (deps.metrics) deps.metrics->record_swap(rec);
+    if (deps.stats_db) {
+        deps.stats_db->record_swap({
+            rec.timestamp_unix_ms,
+            rec.from_model,
+            rec.to_model,
+            rec.duration_ms,
+            rec.success,
+            rec.error
+        });
+    }
+}
+
 std::string sse_chunk(const std::string& id, const std::string& model,
                       const std::string& delta_json) {
     nlohmann::json chunk = {
@@ -195,13 +305,18 @@ void handle_swap_to(const httplib::Request& req, httplib::Response& resp,
     }
     // Synchronous swap for debugging
     LOG_INFO("swap_start", "model={}", model_name);
+    const auto start = std::chrono::steady_clock::now();
     auto swap_result = deps.coordinator.swap_to(model_name);
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
     LOG_INFO("swap_complete", "model={} success={}", model_name, swap_result.has_value());
     if (!swap_result) {
         LOG_ERROR("swap_failed", "model={} error={}", model_name, swap_result.error().message);
+        record_swap(deps, current.value_or(""), model_name, elapsed, false, swap_result.error().message);
         write_error(resp, 500, "swap_failed", swap_result.error().message);
         return;
     }
+    record_swap(deps, current.value_or(""), model_name, elapsed, true, "");
     nlohmann::json body = {
         {"status", "ready"},
         {"model", model_name},
@@ -249,12 +364,18 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     if (!deps.coordinator.is_loaded(model_name)) {
         if (deps.auto_swap) {
             LOG_INFO("auto_swap_begin", "requested={}", model_name);
+            const auto from_model = deps.coordinator.get_loaded_model();
+            const auto start = std::chrono::steady_clock::now();
             auto swap_result = deps.coordinator.swap_to(model_name);
+            const auto elapsed = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
             if (!swap_result) {
                 LOG_ERROR("auto_swap_failed", "model={} error={}", model_name, swap_result.error().message);
+                record_swap(deps, from_model.value_or(""), model_name, elapsed, false, swap_result.error().message);
                 write_error(resp, 500, "swap_failed", swap_result.error().message);
                 return;
             }
+            record_swap(deps, from_model.value_or(""), model_name, elapsed, true, "");
             LOG_INFO("auto_swap_complete", "model={}", model_name);
         } else {
             resp.status = 503;
@@ -288,6 +409,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 code = "model_not_loaded";
             }
             resp.set_header("Retry-After", "1");
+            model::InferenceResult failed;
+            record_request(deps, model_name, failed, status, -1);
             write_error(resp, status, code, sr.error().message);
             return;
         }
@@ -316,19 +439,26 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         try {
             auto pres = deps.coordinator.predict(model_name, slot_id, ir);
             if (!pres) {
+                model::InferenceResult failed;
+                record_request(deps, model_name, failed, 500, slot_id);
                 write_error(resp, 500, "inference_error", pres.error().message);
                 return;
             }
             pr = std::move(*pres);
         } catch (const std::exception& e) {
             LOG_ERROR("predict_exception", "what={}", e.what());
+            model::InferenceResult failed;
+            record_request(deps, model_name, failed, 500, slot_id);
             write_error(resp, 500, "inference_exception", e.what());
             return;
         } catch (...) {
             LOG_ERROR("predict_unknown_exception", "");
+            model::InferenceResult failed;
+            record_request(deps, model_name, failed, 500, slot_id);
             write_error(resp, 500, "inference_exception", "unknown exception");
             return;
         }
+        record_request(deps, model_name, pr, 200, slot_id);
 
         nlohmann::json message = {
             {"role", "assistant"},
@@ -358,6 +488,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             })},
             {"usage", {
                 {"prompt_tokens", pr.prompt_tokens},
+                {"prompt_tokens_details", {
+                    {"cached_tokens", pr.cached_prompt_tokens},
+                }},
                 {"completion_tokens", pr.completion_tokens},
                 {"total_tokens", pr.prompt_tokens + pr.completion_tokens},
             }},
@@ -385,12 +518,63 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         int slot_id{-1};
         std::string model_name;
         model::BackendCoordinator* coordinator{nullptr};
+        observability::Metrics* metrics{nullptr};
+        observability::StatsDb* stats_db{nullptr};
+        std::atomic<bool> cleanup_done{false};
+
+        void finish_once(bool aborted_stream, int fallback_status, const std::string& reason) {
+            bool expected = false;
+            if (!cleanup_done.compare_exchange_strong(expected, true)) return;
+            if (aborted_stream) {
+                aborted.store(true);
+            }
+            cv.notify_all();
+            if (inference_thread.joinable()) {
+                if (inference_thread.get_id() == std::this_thread::get_id()) {
+                    inference_thread.detach();
+                } else {
+                    inference_thread.join();
+                }
+            }
+
+            std::shared_ptr<model::InferenceResult> result;
+            bool error = false;
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                result = final_result;
+                error = inference_error;
+            }
+
+            int status = fallback_status;
+            if (result && !aborted_stream && !error) {
+                status = 200;
+                record_request(metrics, stats_db, model_name, *result, status, slot_id);
+            } else {
+                model::InferenceResult failed;
+                status = aborted_stream ? 499 : (error ? 500 : fallback_status);
+                record_request(metrics, stats_db, model_name, failed, status, slot_id);
+            }
+
+            LOG_INFO("stream_recorded", "model={} slot_id={} status={} reason={}",
+                     model_name, slot_id, status, reason);
+            if (coordinator) {
+                auto released = coordinator->release_slot(model_name, slot_id);
+                if (!released) {
+                    LOG_WARN("stream_cleanup_release_failed", "model={} slot_id={} reason={}",
+                             model_name, slot_id, released.error().message);
+                }
+            }
+            LOG_INFO("stream_cleanup", "model={} slot_id={} aborted={} reason={}",
+                     model_name, slot_id, aborted_stream, reason);
+        }
     };
 
     auto state = std::make_shared<StreamState>();
     state->slot_id = slot_id;
     state->model_name = model_name;
     state->coordinator = &deps.coordinator;
+    state->metrics = deps.metrics;
+    state->stats_db = deps.stats_db;
 
     guard.disarm();
 
@@ -405,8 +589,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         state->delta_queue.push_back(delta);
                     }
                     state->cv.notify_one();
-                    return !state->aborted.load();
-                });
+                return !state->aborted.load();
+            });
             {
                 std::lock_guard<std::mutex> lk(state->mtx);
                 if (result) {
@@ -441,17 +625,32 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         [id, stream_model, state, last_heartbeat = std::move(last_heartbeat),
          heartbeat_interval = std::move(heartbeat_interval)](
             std::size_t, httplib::DataSink& sink) mutable {
+            try {
             std::unique_lock<std::mutex> lk(state->mtx);
 
             auto now = std::chrono::steady_clock::now();
             if (now - last_heartbeat >= heartbeat_interval) {
                 last_heartbeat = now;
-                sink.write(": \n\n", 5);
+                if (!sink.write(": \n\n", 5)) {
+                    lk.unlock();
+                    LOG_WARN("stream_abort", "model={} slot_id={} reason=heartbeat_write_failed",
+                             state->model_name, state->slot_id);
+                    state->finish_once(true, 499, "heartbeat_write_failed");
+                    return false;
+                }
             }
 
             state->cv.wait(lk, [&] {
-                return !state->delta_queue.empty() || state->inference_done;
+                return !state->delta_queue.empty() || state->inference_done || state->aborted.load();
             });
+
+            if (state->aborted.load() && !state->inference_done && state->delta_queue.empty()) {
+                lk.unlock();
+                LOG_WARN("stream_abort", "model={} slot_id={} reason=aborted",
+                         state->model_name, state->slot_id);
+                state->finish_once(true, 499, "aborted");
+                return false;
+            }
 
             if (!state->delta_queue.empty()) {
                 std::deque<model::InferenceDelta> deltas;
@@ -462,12 +661,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 lk.unlock();
 
                 if (!sink.is_writable()) {
-                    state->aborted.store(true);
-                    state->cv.notify_all();
-                    if (state->inference_thread.joinable()) {
-                        state->inference_thread.join();
-                    }
-                    state->coordinator->release_slot(state->model_name, state->slot_id);
+                    LOG_WARN("stream_abort", "model={} slot_id={} reason=sink_not_writable",
+                             state->model_name, state->slot_id);
+                    state->finish_once(true, 499, "sink_not_writable");
                     return false;
                 }
 
@@ -476,35 +672,64 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     if (json_delta.empty()) continue;
                     std::string out = sse_chunk_json(id, stream_model, json_delta);
                     if (!sink.write(out.data(), out.size())) {
-                        state->aborted.store(true);
-                        state->cv.notify_all();
-                        if (state->inference_thread.joinable()) {
-                            state->inference_thread.join();
-                        }
-                        state->coordinator->release_slot(state->model_name, state->slot_id);
+                        LOG_WARN("stream_abort", "model={} slot_id={} reason=chunk_write_failed",
+                                 state->model_name, state->slot_id);
+                        state->finish_once(true, 499, "chunk_write_failed");
                         return false;
                     }
                 }
                 return true;
             }
 
-            if (state->inference_error) {
-                std::string err = "data: " + nlohmann::json{{"error", {{"message", state->error_msg}}}}.dump() + "\n\n";
-                sink.write(err.data(), err.size());
+            const bool inference_error = state->inference_error;
+            const std::string error_msg = state->error_msg;
+            const auto final_result = state->final_result;
+            lk.unlock();
+
+            if (inference_error) {
+                std::string err = "data: " + nlohmann::json{{"error", {{"message", error_msg}}}}.dump() + "\n\n";
+                if (!sink.write(err.data(), err.size())) {
+                    LOG_WARN("stream_abort", "model={} slot_id={} reason=error_write_failed",
+                             state->model_name, state->slot_id);
+                    state->finish_once(true, 499, "error_write_failed");
+                    return false;
+                }
+                state->finish_once(false, 500, "inference_error");
             } else {
-                const bool has_tool_calls = state->final_result && !state->final_result->tool_calls.empty();
+                const bool has_tool_calls = final_result && !final_result->tool_calls.empty();
                 const std::string finish_reason = has_tool_calls ? "tool_calls" :
-                    (state->final_result ? state->final_result->finish_reason : "stop");
+                    (final_result ? final_result->finish_reason : "stop");
                 std::string done = sse_done(id, stream_model, finish_reason);
-                sink.write(done.data(), done.size());
+                if (!sink.write(done.data(), done.size())) {
+                    LOG_WARN("stream_abort", "model={} slot_id={} reason=done_write_failed",
+                             state->model_name, state->slot_id);
+                    state->finish_once(true, 499, "done_write_failed");
+                    return false;
+                }
+                state->finish_once(false, 200, "completed");
             }
             sink.done();
-
-            if (state->inference_thread.joinable()) {
-                state->inference_thread.join();
-            }
-            state->coordinator->release_slot(state->model_name, state->slot_id);
             return false;
+            } catch (const std::exception& e) {
+                LOG_ERROR("stream_provider_exception", "model={} slot_id={} what={}",
+                          state->model_name, state->slot_id, e.what());
+                state->finish_once(true, 500, "provider_exception");
+                return false;
+            } catch (...) {
+                LOG_ERROR("stream_provider_unknown_exception", "model={} slot_id={}",
+                          state->model_name, state->slot_id);
+                state->finish_once(true, 500, "provider_unknown_exception");
+                return false;
+            }
+        },
+        [state](bool success) {
+            if (!success) {
+                LOG_WARN("stream_abort", "model={} slot_id={} reason=resource_releaser",
+                         state->model_name, state->slot_id);
+                state->finish_once(true, 499, "resource_releaser");
+            } else {
+                state->finish_once(false, 200, "resource_releaser_success");
+            }
         });
 }
 

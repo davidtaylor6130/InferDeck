@@ -15,7 +15,7 @@ function originWithPort(port: string): string {
 export const DASHBOARD_URL = origin;
 export const GATEWAY_API = originWithPort('11434');
 export const OPENAI_API = `${GATEWAY_API}/v1`;
-export const LLAMA_BACKEND = 'http://127.0.0.1:18080';
+export const LLAMA_BACKEND = 'in-process llama.cpp';
 
 export function formatBytes(bytes?: number | null): string {
   if (!bytes || bytes <= 0) return 'N/A';

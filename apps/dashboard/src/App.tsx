@@ -124,31 +124,8 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    let closed = false;
     const pollId = window.setInterval(refreshAll, 4000);
-
-    try {
-      const source = new EventSource('/api/events/stream');
-      const handleEvent = () => {
-        if (!closed) refreshAll();
-      };
-      ['connected', 'heartbeat', 'job:created', 'job:updated', 'job:cancelled', 'queue:changed', 'mode:changed', 'model:changed', 'service:health', 'hardware:update', 'system:error', 'log:entry'].forEach(event => {
-        source.addEventListener(event, handleEvent);
-      });
-      source.onerror = () => {
-        source.close();
-      };
-      return () => {
-        closed = true;
-        source.close();
-        window.clearInterval(pollId);
-      };
-    } catch {
-      return () => {
-        closed = true;
-        window.clearInterval(pollId);
-      };
-    }
+    return () => window.clearInterval(pollId);
   }, [refreshAll]);
 
   const actions = useMemo<DashboardActions>(() => ({
@@ -237,10 +214,10 @@ const App: React.FC = () => {
     restartBackend: async () => {
       try {
         await requestJson('/services/llama-server/restart', { method: 'POST' });
-        toast('llama.cpp restart requested', 'success');
+        toast('Runtime refresh requested', 'success');
         fetchServices();
       } catch (err) {
-        toast(err instanceof Error ? err.message : 'Restart failed', 'danger');
+        toast(err instanceof Error ? err.message : 'Runtime refresh failed', 'danger');
       }
     },
     startService: async (id: string) => {

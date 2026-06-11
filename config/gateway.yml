@@ -66,6 +66,15 @@ model_registry:
     context_size: 262144
     has_vision: false
 
+  - name: "qwen3-coder-next"
+    family: "qwen3-next"
+    gguf_path: "C:/Inferdeck/models/unsloth/Qwen3-Coder-Next-GGUF/Qwen3-Coder-Next-UD-Q2_K_XL.gguf"
+    mmproj_path: null
+    n_slots: 1
+    vram_required_mb: 30000
+    context_size: 32768
+    has_vision: false
+
   - name: "qwen2.5-coder-3b"
     family: "qwen2.5"
     gguf_path: "C:/Inferdeck/models/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
