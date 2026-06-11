@@ -156,6 +156,18 @@ Concurrency invariants:
 
 ## Known open items
 
+- **qwen3.6-35b-a3b re-prefills the whole prompt every turn** (~60s at
+  80k ctx). It is a hybrid recurrent/linear-attention model: the
+  recurrent state cannot be rewound to an arbitrary position
+  (`llama_memory_seq_rm` mid-sequence fails, `pos_min==pos_max` in the
+  `llama_prompt_cache_fallback` log line), and thinking-model history
+  re-rendering always diverges just before the generation boundary, so
+  a rewind is always needed. Fix = llama-server-style recurrent-state
+  checkpoints (snapshot before each generation, restore on rewind).
+  Full-attention models reuse the cache fine, and follow-up turns that
+  strictly extend the cache skip the rewind entirely
+  (`llama_prompt_cache_extend`). `swa_full` does not help; keep false.
+
 - `config/gateway.yml` has `gateway.auto_swap: true` while the original
   design said "no auto-swap, return 503". Both paths exist in
   `handle_chat_completions`; the config flag decides. Owner decision on

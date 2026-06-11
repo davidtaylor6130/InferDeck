@@ -1,5 +1,25 @@
 # InferDeck - Changelog
 
+## [2.1.1] - 2026-06-11
+
+### Fixed
+- 500 errors that blocked opencode auto-compaction at the context
+  threshold: assistant messages with neither content nor tool_calls
+  (produced by context pruning) made message parsing throw; missing
+  content now defaults to "", template application is exception-guarded,
+  and parse/template failures return 400 invalid_request_error instead
+  of an opaque 500
+- Inference failures are now logged with status, code, and full message
+  (previously only `reason=inference_error`)
+- Follow-up turns that strictly extend the prompt cache no longer rewind
+  the KV (generated tokens are tracked); 4k-token follow-up on
+  qwen2.5-coder-3b: 792ms -> 47ms
+
+### Known limitation
+- qwen3.6-35b-a3b (hybrid recurrent attention + thinking) still
+  re-prefills fully each turn; needs recurrent-state checkpoints
+  (see AGENTS.md "Known open items")
+
 ## [2.1.0] - 2026-06-11
 
 ### Added
