@@ -210,7 +210,7 @@ nlohmann::json tool_call_delta_json(const model::ToolCallDelta& tc) {
 model::InferenceRequest make_inference_request(const nlohmann::json& body) {
     model::InferenceRequest ir;
     ir.openai_body_json = body.dump();
-    ir.max_tokens = body.value("max_tokens", body.value("max_completion_tokens", 256));
+    ir.max_tokens = body.value("max_tokens", body.value("max_completion_tokens", -1));
     ir.temperature = static_cast<float>(body.value("temperature", 0.7));
     ir.top_p = static_cast<float>(body.value("top_p", 0.95));
     ir.top_k = body.value("top_k", 40);
@@ -339,7 +339,6 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
 
 void handle_chat_completions(const httplib::Request& req, httplib::Response& resp,
                              const GatewayDeps& deps) {
-    std::cerr << "DEBUG handle_chat_completions: start" << std::endl;
     nlohmann::json body;
     try {
         body = nlohmann::json::parse(req.body);
@@ -439,9 +438,17 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         try {
             auto pres = deps.coordinator.predict(model_name, slot_id, ir);
             if (!pres) {
+                const bool invalid_request =
+                    pres.error().code == foundation::ErrorCode::InvalidArgument;
+                const int status = invalid_request ? 400 : 500;
+                const std::string code = invalid_request
+                    ? (pres.error().message.find("maximum context length") != std::string::npos
+                           ? "context_length_exceeded"
+                           : "invalid_request_error")
+                    : "inference_error";
                 model::InferenceResult failed;
-                record_request(deps, model_name, failed, 500, slot_id);
-                write_error(resp, 500, "inference_error", pres.error().message);
+                record_request(deps, model_name, failed, status, slot_id);
+                write_error(resp, status, code, pres.error().message);
                 return;
             }
             pr = std::move(*pres);
@@ -511,6 +518,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         std::deque<model::InferenceDelta> delta_queue;
         bool inference_done{false};
         bool inference_error{false};
+        bool invalid_request{false};
         std::string error_msg;
         std::shared_ptr<model::InferenceResult> final_result;
         std::atomic<bool> aborted{false};
@@ -597,6 +605,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     state->final_result = std::make_shared<model::InferenceResult>(std::move(*result));
                 } else {
                     state->inference_error = true;
+                    state->invalid_request =
+                        result.error().code == foundation::ErrorCode::InvalidArgument;
                     state->error_msg = result.error().message;
                 }
                 state->inference_done = true;
@@ -617,32 +627,25 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         }
     });
 
-    auto last_heartbeat = std::chrono::steady_clock::now();
-    const auto heartbeat_interval = std::chrono::seconds{10};
-
     resp.set_chunked_content_provider(
         "text/event-stream",
-        [id, stream_model, state, last_heartbeat = std::move(last_heartbeat),
-         heartbeat_interval = std::move(heartbeat_interval)](
+        [id, stream_model, state](
             std::size_t, httplib::DataSink& sink) mutable {
             try {
             std::unique_lock<std::mutex> lk(state->mtx);
 
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_heartbeat >= heartbeat_interval) {
-                last_heartbeat = now;
-                if (!sink.write(": \n\n", 5)) {
-                    lk.unlock();
+            while (!state->cv.wait_for(lk, std::chrono::seconds{2}, [&] {
+                return !state->delta_queue.empty() || state->inference_done || state->aborted.load();
+            })) {
+                lk.unlock();
+                if (!sink.write(": \n\n", 4)) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=heartbeat_write_failed",
                              state->model_name, state->slot_id);
                     state->finish_once(true, 499, "heartbeat_write_failed");
                     return false;
                 }
+                lk.lock();
             }
-
-            state->cv.wait(lk, [&] {
-                return !state->delta_queue.empty() || state->inference_done || state->aborted.load();
-            });
 
             if (state->aborted.load() && !state->inference_done && state->delta_queue.empty()) {
                 lk.unlock();
@@ -682,19 +685,30 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             }
 
             const bool inference_error = state->inference_error;
+            const bool invalid_request = state->invalid_request;
             const std::string error_msg = state->error_msg;
             const auto final_result = state->final_result;
             lk.unlock();
 
             if (inference_error) {
-                std::string err = "data: " + nlohmann::json{{"error", {{"message", error_msg}}}}.dump() + "\n\n";
+                const std::string err_type = invalid_request ? "invalid_request_error" : "server_error";
+                const std::string err_code = invalid_request
+                    ? (error_msg.find("maximum context length") != std::string::npos
+                           ? "context_length_exceeded"
+                           : "invalid_request_error")
+                    : "inference_error";
+                std::string err = "data: " + nlohmann::json{{"error", {
+                    {"message", error_msg},
+                    {"type", err_type},
+                    {"code", err_code},
+                }}}.dump() + "\n\n";
                 if (!sink.write(err.data(), err.size())) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=error_write_failed",
                              state->model_name, state->slot_id);
                     state->finish_once(true, 499, "error_write_failed");
                     return false;
                 }
-                state->finish_once(false, 500, "inference_error");
+                state->finish_once(false, invalid_request ? 400 : 500, "inference_error");
             } else {
                 const bool has_tool_calls = final_result && !final_result->tool_calls.empty();
                 const std::string finish_reason = has_tool_calls ? "tool_calls" :

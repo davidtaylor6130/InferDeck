@@ -243,10 +243,6 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
 foundation::Result<void> BackendCoordinator::release_slot(
     const std::string& name, int slot_id) {
     {
-        std::ofstream dbg("logs/debug.log", std::ios::app);
-        if (dbg) { dbg << "DEBUG BackendCoordinator::release_slot: name=" << name << " slot_id=" << slot_id << "\n"; dbg.flush(); }
-    }
-    {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = instances_.find(name);
         if (it == instances_.end() || !it->second) {
@@ -258,10 +254,6 @@ foundation::Result<void> BackendCoordinator::release_slot(
         if (active_requests_ > 0) --active_requests_;
     }
     cv_.notify_all();
-    {
-        std::ofstream dbg("logs/debug.log", std::ios::app);
-        if (dbg) { dbg << "DEBUG BackendCoordinator::release_slot: done\n"; dbg.flush(); }
-    }
     return foundation::Ok();
 }
 

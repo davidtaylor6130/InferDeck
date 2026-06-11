@@ -1,0 +1,49 @@
+server:
+  host: "127.0.0.1"
+  port: 11435
+
+logging:
+  level: "info"
+  file: "logs/gateway.test-ralph.log"
+
+auth:
+  required: false
+  token: ""
+
+cors:
+  origins:
+    - "*"
+
+state:
+  file: "~/.inferdeck/state.test-ralph.json"
+
+default_model: "qwen2.5-coder-3b"
+
+observability:
+  stats_db: ""
+  adlx_helper: ""
+  telemetry_poll_ms: 1000
+
+gateway:
+  auto_swap: true
+  n_batch: 512
+  n_ubatch: 512
+  use_mmap: false
+  use_mlock: false
+  n_gpu_layers: null
+  flash_attn: "auto"
+  kv_offload: true
+  op_offload: true
+  cache_type_k: "q8_0"
+  cache_type_v: "q8_0"
+  swa_full: false
+
+model_registry:
+  - name: "qwen2.5-coder-3b"
+    family: "qwen2.5"
+    gguf_path: "C:/Inferdeck/models/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
+    mmproj_path: null
+    n_slots: 1
+    vram_required_mb: 2500
+    context_size: 32768
+    has_vision: false

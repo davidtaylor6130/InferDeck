@@ -898,41 +898,13 @@ Result<int> LlamaCppModel::acquire_slot() {
 
 Result<void> LlamaCppModel::release_slot(int slot_id) {
   std::lock_guard lk(mtx_);
-  {
-    std::ofstream dbg("logs/debug.log", std::ios::app);
-    if (dbg) { dbg << "DEBUG release_slot: slot_id=" << slot_id << "\n"; dbg.flush(); }
-  }
   if (slot_id < 0 || slot_id >= static_cast<int>(slots_.size())) {
     return Result<void>(std::unexpect,
         make_error(ErrorCode::InvalidArgument,
                    "slot_id out of range: " + std::to_string(slot_id)));
   }
   auto& slot = slots_[slot_id];
-  {
-    std::ofstream dbg("logs/debug.log", std::ios::app);
-    if (dbg) { dbg << "DEBUG release_slot: slot.ctx=" << (slot.ctx ? "valid" : "null") << " busy=" << slot.busy << "\n"; dbg.flush(); }
-  }
-  if (slot.ctx) {
-    {
-      std::ofstream dbg("logs/debug.log", std::ios::app);
-      if (dbg) { dbg << "DEBUG release_slot: getting memory\n"; dbg.flush(); }
-    }
-    llama_memory_t mem = llama_get_memory(slot.ctx.get());
-    {
-      std::ofstream dbg("logs/debug.log", std::ios::app);
-      if (dbg) { dbg << "DEBUG release_slot: clearing memory\n"; dbg.flush(); }
-    }
-    llama_memory_clear(mem, false);
-    {
-      std::ofstream dbg("logs/debug.log", std::ios::app);
-      if (dbg) { dbg << "DEBUG release_slot: memory cleared\n"; dbg.flush(); }
-    }
-  }
   slot.busy = false;
-  {
-    std::ofstream dbg("logs/debug.log", std::ios::app);
-    if (dbg) { dbg << "DEBUG release_slot: done\n"; dbg.flush(); }
-  }
   return Result<void>{};
 }
 
@@ -1196,8 +1168,9 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   if (n_tokens >= static_cast<int>(n_ctx)) {
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::InvalidArgument,
-                   "prompt has " + std::to_string(n_tokens) +
-                   " tokens but context is " + std::to_string(n_ctx)));
+                   "This model's maximum context length is " + std::to_string(n_ctx) +
+                   " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
+                   " tokens. Please reduce the length of the messages."));
   }
   const int cached_prompt_tokens = prepare_prompt_cache(
       slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name);
@@ -1217,10 +1190,11 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   InferenceResult out;
   out.prompt_tokens = n_tokens;
   out.cached_prompt_tokens = cached_prompt_tokens;
-  const int max_tokens = std::max(1, req.max_tokens);
+  const int ctx_budget = std::max(1, static_cast<int>(n_ctx) - n_tokens - 1);
+  const int max_tokens = req.max_tokens > 0 ? std::min(req.max_tokens, ctx_budget) : ctx_budget;
   const auto start = std::chrono::steady_clock::now();
   std::string generated;
-  generated.reserve(static_cast<std::size_t>(max_tokens) * 4);
+  generated.reserve(4096);
   int n_cur = n_tokens;
   int n_decoded = 0;
   bool stopped = false;
@@ -1372,8 +1346,9 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   if (n_tokens >= static_cast<int>(n_ctx)) {
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::InvalidArgument,
-                   "prompt has " + std::to_string(n_tokens) +
-                   " tokens but context is " + std::to_string(n_ctx)));
+                   "This model's maximum context length is " + std::to_string(n_ctx) +
+                   " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
+                   " tokens. Please reduce the length of the messages."));
   }
   const int cached_prompt_tokens = prepare_prompt_cache(
       slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name);
@@ -1393,10 +1368,11 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   InferenceResult out;
   out.prompt_tokens = n_tokens;
   out.cached_prompt_tokens = cached_prompt_tokens;
-  const int max_tokens = std::max(1, req.max_tokens);
+  const int ctx_budget = std::max(1, static_cast<int>(n_ctx) - n_tokens - 1);
+  const int max_tokens = req.max_tokens > 0 ? std::min(req.max_tokens, ctx_budget) : ctx_budget;
   const auto start = std::chrono::steady_clock::now();
   std::string generated;
-  generated.reserve(static_cast<std::size_t>(max_tokens) * 4);
+  generated.reserve(4096);
   StreamingChatParserState parser_state(parser_params);
   int n_cur = n_tokens;
   int n_decoded = 0;
@@ -1433,11 +1409,6 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       try {
         diffs = parser_state.update(token, true, parser_params.parse_tool_calls);
       } catch (...) {
-        InferenceDelta raw;
-        raw.content = token;
-        if (!callback(raw)) {
-          break;
-        }
       }
       for (const auto& diff : diffs) {
         auto delta = to_delta(diff);
@@ -1497,6 +1468,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   if (!stopped && out.completion_tokens >= max_tokens) {
     out.finish_reason = "length";
   }
+  bool fallback_tool_calls_used = false;
   try {
     std::vector<common_chat_msg_diff> final_diffs;
     final_diffs = parser_state.update("", false, parser_params.parse_tool_calls);
@@ -1513,12 +1485,28 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
     apply_parsed_message(out, msg);
     if (parser_params.parse_tool_calls && out.tool_calls.empty()) {
       apply_fallback_tool_calls(out, generated);
+      fallback_tool_calls_used = !out.tool_calls.empty();
     }
   } catch (const std::exception& e) {
     LOG_ERROR("chat_parse_failed", "model={} error={}", info_.name, e.what());
     out.text = std::move(generated);
     if (parser_params.parse_tool_calls) {
       apply_fallback_tool_calls(out, out.text);
+      fallback_tool_calls_used = !out.tool_calls.empty();
+    }
+  }
+  if (fallback_tool_calls_used) {
+    for (std::size_t i = 0; i < out.tool_calls.size(); ++i) {
+      const auto& tc = out.tool_calls[i];
+      InferenceDelta delta;
+      ToolCallDelta tcd;
+      tcd.index = i;
+      tcd.id = tc.id;
+      tcd.type = "function";
+      tcd.function_name = tc.function_name;
+      tcd.function_arguments = tc.function_arguments;
+      delta.tool_calls.push_back(std::move(tcd));
+      if (!callback(delta)) break;
     }
   }
   slot.last_prompt_tokens.assign(prompt_tokens.begin(), prompt_tokens.end());
