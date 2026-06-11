@@ -34,47 +34,9 @@ std::int64_t now_ms() {
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
-void record_request(const GatewayDeps& deps,
-                    const std::string& model_name,
-                    const model::InferenceResult& result,
-                    int status_code,
-                    int slot_id) {
-    observability::RequestRecord rec;
-    rec.timestamp_unix_ms = now_ms();
-    rec.model = model_name;
-    rec.prompt_tokens = result.prompt_tokens;
-    rec.completion_tokens = result.completion_tokens;
-    rec.duration_ms = result.duration_ms;
-    rec.tokens_per_second = result.tokens_per_second;
-    rec.status_code = status_code;
-    rec.slot_id = slot_id;
-    if (deps.metrics) deps.metrics->record_request(rec);
-    LOG_INFO("request_recorded",
-             "model={} status={} slot_id={} prompt_tokens={} cached_prompt_tokens={} completion_tokens={} duration_ms={} tps={}",
-             model_name,
-             status_code,
-             slot_id,
-             result.prompt_tokens,
-             result.cached_prompt_tokens,
-             result.completion_tokens,
-             result.duration_ms,
-             result.tokens_per_second);
-    if (deps.stats_db) {
-        deps.stats_db->record_request({
-            rec.timestamp_unix_ms,
-            rec.model,
-            rec.prompt_tokens,
-            rec.completion_tokens,
-            rec.duration_ms,
-            rec.tokens_per_second,
-            rec.status_code,
-            rec.slot_id
-        });
-    }
-}
-
 void record_request(observability::Metrics* metrics,
                     observability::StatsDb* stats_db,
+                    foundation::EventBus* events,
                     const std::string& model_name,
                     const model::InferenceResult& result,
                     int status_code,
@@ -111,6 +73,26 @@ void record_request(observability::Metrics* metrics,
             rec.slot_id
         });
     }
+    if (events) {
+        events->publish("request", nlohmann::json{
+            {"timestampUnixMs", rec.timestamp_unix_ms},
+            {"model", model_name},
+            {"promptTokens", result.prompt_tokens},
+            {"completionTokens", result.completion_tokens},
+            {"durationMs", result.duration_ms},
+            {"tokensPerSecond", result.tokens_per_second},
+            {"status", status_code},
+        }.dump());
+    }
+}
+
+void record_request(const GatewayDeps& deps,
+                    const std::string& model_name,
+                    const model::InferenceResult& result,
+                    int status_code,
+                    int slot_id) {
+    record_request(deps.metrics, deps.stats_db, deps.events,
+                   model_name, result, status_code, slot_id);
 }
 
 void record_swap(const GatewayDeps& deps,
@@ -137,6 +119,55 @@ void record_swap(const GatewayDeps& deps,
             rec.error
         });
     }
+}
+
+void publish_model_event(const GatewayDeps& deps, const std::string& state,
+                         const std::string& from, const std::string& to,
+                         double duration_ms, const std::string& error) {
+    if (!deps.events) return;
+    deps.events->publish("model", nlohmann::json{
+        {"state", state},
+        {"from", from},
+        {"to", to},
+        {"durationMs", duration_ms},
+        {"error", error},
+        {"timestampUnixMs", now_ms()},
+    }.dump());
+}
+
+foundation::Result<void> perform_swap(const GatewayDeps& deps,
+                                      const std::string& from,
+                                      const std::string& target) {
+    LOG_INFO("swap_start", "from={} to={}", from, target);
+    const auto start = std::chrono::steady_clock::now();
+    foundation::Result<void> result;
+    try {
+        result = deps.coordinator.swap_to_cancellable(target);
+    } catch (const std::exception& e) {
+        result = foundation::Err(foundation::ErrorCode::Internal, e.what());
+    } catch (...) {
+        result = foundation::Err(foundation::ErrorCode::Internal, "swap threw unknown exception");
+    }
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    const std::string error = result ? std::string{} : result.error().message;
+    const bool cancelled = !result && result.error().code == foundation::ErrorCode::Cancelled;
+    LOG_INFO("swap_complete", "to={} success={} duration_ms={} error={}",
+             target, result.has_value(), elapsed, error);
+    record_swap(deps, from, target, elapsed, result.has_value(), error);
+    publish_model_event(deps, result ? "ready" : (cancelled ? "cancelled" : "failed"),
+                        from, target, elapsed, error);
+    if (deps.swap_tracker) deps.swap_tracker->end(result.has_value(), error);
+    return result;
+}
+
+bool begin_tracked_swap(const GatewayDeps& deps, const std::string& from,
+                        const std::string& target) {
+    if (deps.swap_tracker && !deps.swap_tracker->begin(from, target, now_ms())) {
+        return false;
+    }
+    publish_model_event(deps, "swapping", from, target, 0.0, "");
+    return true;
 }
 
 std::string sse_chunk(const std::string& id, const std::string& model,
@@ -285,54 +316,66 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
     write_json(resp, 200, body);
 }
 
-void handle_swap_to(const httplib::Request& req, httplib::Response& resp,
-                    const GatewayDeps& deps, const std::string& model_name) {
-    (void)req;
+SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name) {
     if (!deps.coordinator.registry().has(model_name)) {
-        write_error(resp, 404, "model_not_found",
-                    "model not registered: " + model_name);
-        return;
+        return {404, {{"error", {{"code", "model_not_found"},
+                                 {"message", "model not registered: " + model_name}}}}};
     }
     auto current = deps.coordinator.get_loaded_model();
     if (current && *current == model_name) {
-        nlohmann::json body = {
-            {"status", "ready"},
-            {"model", model_name},
-            {"message", "model already loaded"},
-        };
-        write_json(resp, 200, body);
+        return {200, {{"status", "ready"},
+                      {"model", model_name},
+                      {"message", "model already loaded"}}};
+    }
+    if (!begin_tracked_swap(deps, current.value_or(""), model_name)) {
+        const auto snap = deps.swap_tracker ? deps.swap_tracker->snapshot() : SwapSnapshot{};
+        return {409, {{"error", {{"code", "swap_in_progress"},
+                                 {"message", "a swap to " + snap.target + " is already in progress"}}}}};
+    }
+    GatewayDeps deps_copy = deps;
+    const std::string from = current.value_or("");
+    std::thread([deps_copy, from, model_name]() {
+        (void)perform_swap(deps_copy, from, model_name);
+    }).detach();
+    return {202, {{"status", "swapping"},
+                  {"model", model_name},
+                  {"from", from}}};
+}
+
+void handle_swap_to(const httplib::Request& req, httplib::Response& resp,
+                    const GatewayDeps& deps, const std::string& model_name) {
+    (void)req;
+    auto started = start_swap_async(deps, model_name);
+    write_json(resp, started.status, started.body);
+}
+
+void handle_swap_cancel(const httplib::Request& req, httplib::Response& resp,
+                        const GatewayDeps& deps) {
+    (void)req;
+    const auto snap = deps.swap_tracker ? deps.swap_tracker->snapshot() : SwapSnapshot{};
+    if (!snap.swapping && !deps.coordinator.swap_in_progress()) {
+        write_json(resp, 200, {{"status", "idle"}, {"message", "no swap in progress"}});
         return;
     }
-    // Synchronous swap for debugging
-    LOG_INFO("swap_start", "model={}", model_name);
-    const auto start = std::chrono::steady_clock::now();
-    auto swap_result = deps.coordinator.swap_to(model_name);
-    const auto elapsed = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - start).count();
-    LOG_INFO("swap_complete", "model={} success={}", model_name, swap_result.has_value());
-    if (!swap_result) {
-        LOG_ERROR("swap_failed", "model={} error={}", model_name, swap_result.error().message);
-        record_swap(deps, current.value_or(""), model_name, elapsed, false, swap_result.error().message);
-        write_error(resp, 500, "swap_failed", swap_result.error().message);
-        return;
-    }
-    record_swap(deps, current.value_or(""), model_name, elapsed, true, "");
-    nlohmann::json body = {
-        {"status", "ready"},
-        {"model", model_name},
-        {"message", "model loaded successfully"},
-    };
-    write_json(resp, 200, body);
+    deps.coordinator.request_swap_cancel();
+    LOG_INFO("swap_cancel_requested", "target={}", snap.target);
+    write_json(resp, 202, {{"status", "cancelling"}, {"target", snap.target}});
 }
 
 void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
                         const GatewayDeps& deps) {
     (void)req;
     auto current = deps.coordinator.get_loaded_model();
+    const auto snap = deps.swap_tracker ? deps.swap_tracker->snapshot() : SwapSnapshot{};
     nlohmann::json body = {
         {"loaded_model", current ? *current : ""},
         {"vram_usage_mb", deps.coordinator.get_vram_usage()},
         {"active_requests", deps.coordinator.active_request_count()},
+        {"swapping", snap.swapping},
+        {"target", snap.target},
+        {"from", snap.from},
+        {"started_unix_ms", snap.started_unix_ms},
+        {"last_error", snap.last_error},
     };
     write_json(resp, 200, body);
 }
@@ -364,17 +407,18 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         if (deps.auto_swap) {
             LOG_INFO("auto_swap_begin", "requested={}", model_name);
             const auto from_model = deps.coordinator.get_loaded_model();
-            const auto start = std::chrono::steady_clock::now();
-            auto swap_result = deps.coordinator.swap_to(model_name);
-            const auto elapsed = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - start).count();
+            if (!begin_tracked_swap(deps, from_model.value_or(""), model_name)) {
+                resp.set_header("Retry-After", deps.default_swap_timeout_s);
+                write_error(resp, 503, "swap_in_progress",
+                            "another model swap is in progress; retry shortly");
+                return;
+            }
+            auto swap_result = perform_swap(deps, from_model.value_or(""), model_name);
             if (!swap_result) {
                 LOG_ERROR("auto_swap_failed", "model={} error={}", model_name, swap_result.error().message);
-                record_swap(deps, from_model.value_or(""), model_name, elapsed, false, swap_result.error().message);
                 write_error(resp, 500, "swap_failed", swap_result.error().message);
                 return;
             }
-            record_swap(deps, from_model.value_or(""), model_name, elapsed, true, "");
             LOG_INFO("auto_swap_complete", "model={}", model_name);
         } else {
             resp.status = 503;
@@ -528,6 +572,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         model::BackendCoordinator* coordinator{nullptr};
         observability::Metrics* metrics{nullptr};
         observability::StatsDb* stats_db{nullptr};
+        foundation::EventBus* events{nullptr};
         std::atomic<bool> cleanup_done{false};
 
         void finish_once(bool aborted_stream, int fallback_status, const std::string& reason) {
@@ -556,11 +601,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             int status = fallback_status;
             if (result && !aborted_stream && !error) {
                 status = 200;
-                record_request(metrics, stats_db, model_name, *result, status, slot_id);
+                record_request(metrics, stats_db, events, model_name, *result, status, slot_id);
             } else {
                 model::InferenceResult failed;
                 status = aborted_stream ? 499 : (error ? 500 : fallback_status);
-                record_request(metrics, stats_db, model_name, failed, status, slot_id);
+                record_request(metrics, stats_db, events, model_name, failed, status, slot_id);
             }
 
             LOG_INFO("stream_recorded", "model={} slot_id={} status={} reason={}",
@@ -583,6 +628,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     state->coordinator = &deps.coordinator;
     state->metrics = deps.metrics;
     state->stats_db = deps.stats_db;
+    state->events = deps.events;
 
     guard.disarm();
 

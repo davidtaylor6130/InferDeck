@@ -259,25 +259,35 @@ foundation::Result<void> BackendCoordinator::release_slot(
 
 foundation::Result<InferenceResult> BackendCoordinator::predict(
     const std::string& name, int slot_id, const InferenceRequest& req) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    auto it = instances_.find(name);
-    if (it == instances_.end() || !it->second) {
-        return foundation::Err<InferenceResult>(foundation::ErrorCode::NotFound,
-                                                  "model not loaded: " + name);
+    IModel* inst = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second) {
+            return foundation::Err<InferenceResult>(foundation::ErrorCode::NotFound,
+                                                      "model not loaded: " + name);
+        }
+        inst = it->second.get();
     }
-    return it->second->predict(slot_id, req);
+    // Safe to call unlocked: the caller holds a slot, so unload() drains before
+    // the instance can be destroyed.
+    return inst->predict(slot_id, req);
 }
 
 foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
     const std::string& name, int slot_id, const InferenceRequest& req,
     const IModel::TokenCallback& callback) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    auto it = instances_.find(name);
-    if (it == instances_.end() || !it->second) {
-        return foundation::Err<InferenceResult>(foundation::ErrorCode::NotFound,
-                                                  "model not loaded: " + name);
+    IModel* inst = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second) {
+            return foundation::Err<InferenceResult>(foundation::ErrorCode::NotFound,
+                                                      "model not loaded: " + name);
+        }
+        inst = it->second.get();
     }
-    return it->second->predict_stream(slot_id, req, callback);
+    return inst->predict_stream(slot_id, req, callback);
 }
 
 void BackendCoordinator::drain_active(std::chrono::milliseconds timeout) {

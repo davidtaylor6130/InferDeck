@@ -1,4 +1,4 @@
-#include <atomic>
+﻿#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <csignal>
@@ -22,11 +22,14 @@
 #endif
 
 #include "config.hpp"
+#include "foundation/event_bus.hpp"
 #include "foundation/logging.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
+#include "gateway/dashboard_routes.hpp"
 #include "gateway/metrics_builder.hpp"
 #include "gateway/routes.hpp"
+#include "gateway/swap_tracker.hpp"
 #include "httplib.h"
 #include "llama.h"
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
@@ -133,240 +136,6 @@ fs::path find_dashboard_static_dir() {
         if (fs::exists(candidate / "index.html", ec)) return candidate;
     }
     return candidates.front();
-}
-
-nlohmann::json gpu_hardware_json(const observability::GpuStats& gpu) {
-    double total_mb = 0.0;
-    if (!gpu.reason.empty()) {
-        const std::string key = "vram_total_mb=";
-        auto pos = gpu.reason.find(key);
-        if (pos != std::string::npos) {
-            try { total_mb = std::stod(gpu.reason.substr(pos + key.size())); } catch (...) { total_mb = 0.0; }
-        }
-    }
-    const double memory_percent = total_mb > 0.0 ? std::clamp((gpu.vram_mb / total_mb) * 100.0, 0.0, 100.0) : 0.0;
-    nlohmann::json gpu_json = {
-        {"name", gpu.gpu_name.empty() ? "Windows GPU" : gpu.gpu_name},
-        {"backend", gpu.provider},
-        {"utilization", gpu.utilization_pct},
-        {"usage", gpu.utilization_pct},
-        {"memoryUsed", gpu.vram_mb * 1024.0 * 1024.0},
-        {"memoryPercent", memory_percent},
-        {"vramUsed", gpu.vram_mb * 1024.0 * 1024.0},
-        {"vramPercent", memory_percent},
-        {"temperature", gpu.temperature_c},
-        {"power", gpu.power_w}
-    };
-    if (total_mb > 0.0) {
-        gpu_json["memoryTotal"] = total_mb * 1024.0 * 1024.0;
-        gpu_json["vramTotal"] = total_mb * 1024.0 * 1024.0;
-    } else {
-        gpu_json["memoryTotal"] = nullptr;
-        gpu_json["vramTotal"] = nullptr;
-    }
-    return {
-        {"available", gpu.available},
-        {"provider", gpu.provider},
-        {"reason", gpu.reason},
-        {"timestamp_unix_ms", gpu.timestamp_unix_ms},
-        {"gpu", gpu_json}
-    };
-}
-
-nlohmann::json system_hardware_json() {
-    nlohmann::json out = nlohmann::json::object();
-#ifdef _WIN32
-    MEMORYSTATUSEX mem{};
-    mem.dwLength = sizeof(mem);
-    if (GlobalMemoryStatusEx(&mem)) {
-        const auto used = mem.ullTotalPhys - mem.ullAvailPhys;
-        out["memory"] = {
-            {"used", static_cast<double>(used)},
-            {"total", static_cast<double>(mem.ullTotalPhys)},
-            {"percentage", static_cast<double>(mem.dwMemoryLoad)}
-        };
-    }
-    SYSTEM_INFO info{};
-    GetSystemInfo(&info);
-    out["cpu"] = {
-        {"name", "Windows host CPU"},
-        {"logicalProcessors", static_cast<unsigned int>(info.dwNumberOfProcessors)}
-    };
-#endif
-    return out;
-}
-
-nlohmann::json build_dashboard_health(
-    const observability::Metrics& metrics,
-    const observability::GpuTelemetry& gpu,
-    const observability::StatsDb& stats_db,
-    std::int64_t uptime_seconds) {
-    const auto live = gpu.latest();
-    return {
-        {"status", stats_db.healthy() ? "healthy" : "degraded"},
-        {"version", "2.0.0"},
-        {"uptime", uptime_seconds},
-        {"db_healthy", stats_db.healthy()},
-        {"db_path", stats_db.path()},
-        {"telemetry", {{"available", live.available}, {"provider", live.provider}, {"reason", live.reason}}},
-        {"requests", metrics.total_requests()}
-    };
-}
-
-nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
-    nlohmann::json models = nlohmann::json::array();
-    auto loaded = coordinator.get_loaded_model();
-    for (const auto& name : coordinator.registry().list()) {
-        const auto& info = coordinator.registry().get_info(name);
-        models.push_back({
-            {"id", name},
-            {"name", name},
-            {"family", info.family},
-            {"loaded", loaded && *loaded == name},
-            {"context_size", info.context_size},
-            {"vram_required_mb", info.vram_required_mb},
-            {"n_slots", info.n_slots},
-            {"has_vision", info.has_vision},
-            {"details", {
-                {"backend", "llama.cpp"},
-                {"format", "gguf"},
-                {"parameter_size", std::to_string(info.context_size) + " ctx"}
-            }}
-        });
-    }
-    nlohmann::json running = nlohmann::json::array();
-    if (loaded) {
-        const auto& info = coordinator.registry().get_info(*loaded);
-        running.push_back({
-            {"id", *loaded},
-            {"name", *loaded},
-            {"loaded", true},
-            {"context_size", info.context_size},
-            {"vram_required_mb", info.vram_required_mb},
-            {"details", {{"backend", "llama.cpp"}, {"format", "gguf"}}}
-        });
-    }
-    return {{"models", models}, {"running", running}, {"current", loaded.value_or("")}};
-}
-
-nlohmann::json build_dashboard_jobs(const observability::StatsDb& stats_db, int limit = 100) {
-    nlohmann::json jobs = nlohmann::json::array();
-    int index = 0;
-    for (const auto& row : stats_db.recent_requests(limit)) {
-        std::time_t seconds = static_cast<std::time_t>(row.timestamp_unix_ms / 1000);
-        std::tm tm{};
-#ifdef _WIN32
-        gmtime_s(&tm, &seconds);
-#else
-        gmtime_r(&seconds, &tm);
-#endif
-        char timestamp[32]{};
-        std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &tm);
-        jobs.push_back({
-            {"id", "request-" + std::to_string(row.timestamp_unix_ms) + "-" + std::to_string(index++)},
-            {"type", "chat.completion"},
-            {"status", row.status_code >= 200 && row.status_code < 300 ? "succeeded" : "failed"},
-            {"priority", 50},
-            {"client", "OpenAI compatible"},
-            {"model", row.model},
-            {"resourceClass", "gpu_llm"},
-            {"createdAt", timestamp},
-            {"promptTokens", row.prompt_tokens},
-            {"completionTokens", row.completion_tokens},
-            {"totalTokens", row.prompt_tokens + row.completion_tokens},
-            {"durationMs", row.duration_ms},
-            {"httpStatus", row.status_code}
-        });
-    }
-    return {{"jobs", jobs}};
-}
-
-nlohmann::json build_dashboard_status(
-    model::BackendCoordinator& coordinator,
-    const observability::Metrics& metrics,
-    const observability::GpuTelemetry& gpu,
-    const observability::StatsDb& stats_db,
-    std::int64_t uptime_seconds) {
-    auto hardware = gpu_hardware_json(gpu.latest());
-    auto system = system_hardware_json();
-    for (auto it = system.begin(); it != system.end(); ++it) hardware[it.key()] = it.value();
-
-    nlohmann::json usage = nlohmann::json::array();
-    std::int64_t prompt_tokens = 0;
-    std::int64_t completion_tokens = 0;
-    std::int64_t requests = 0;
-    for (const auto& row : stats_db.model_usage()) {
-        prompt_tokens += row.prompt_tokens;
-        completion_tokens += row.completion_tokens;
-        requests += row.requests;
-        usage.push_back({
-            {"model", row.model},
-            {"requests", row.requests},
-            {"successfulRequests", row.successful_requests},
-            {"promptTokens", row.prompt_tokens},
-            {"completionTokens", row.completion_tokens},
-            {"totalTokens", row.prompt_tokens + row.completion_tokens},
-            {"prompt_tokens", row.prompt_tokens},
-            {"completion_tokens", row.completion_tokens},
-            {"total_tokens", row.prompt_tokens + row.completion_tokens},
-            {"peakTokensPerSecond", row.peak_tokens_per_second},
-            {"lastTimestampUnixMs", row.last_timestamp_unix_ms}
-        });
-    }
-
-    nlohmann::json monthly = nlohmann::json::array();
-    for (const auto& row : stats_db.monthly_usage()) {
-        monthly.push_back({
-            {"bucket", row.bucket},
-            {"model", row.model},
-            {"promptTokens", row.prompt_tokens},
-            {"completionTokens", row.completion_tokens},
-            {"totalTokens", row.total_tokens},
-            {"requests", row.requests},
-            {"successfulRequests", row.successful_requests}
-        });
-    }
-
-    auto loaded = coordinator.get_loaded_model();
-    auto model_json = build_dashboard_models(coordinator);
-    return {
-        {"status", "ok"},
-        {"mode", {{"mode", "ai"}, {"queuePaused", false}}},
-        {"queue", {
-            {"queued", 0},
-            {"running", coordinator.active_request_count()},
-            {"paused", 0},
-            {"failed", 0},
-            {"gpuLocked", coordinator.active_request_count() > 0},
-            {"lockOwner", loaded.value_or("")}
-        }},
-        {"hardware", hardware},
-        {"hardwareSamples", nlohmann::json::array()},
-        {"summary", {
-            {"jobsToday", requests},
-            {"totalTokens", prompt_tokens + completion_tokens},
-            {"promptTokens", prompt_tokens},
-            {"completionTokens", completion_tokens},
-            {"avgLatencyMs", metrics.total_requests() > 0 ? metrics.total_duration_ms() / static_cast<double>(metrics.total_requests()) : 0.0}
-        }},
-        {"metrics", {
-            {"total_requests", metrics.total_requests()},
-            {"total_swaps", metrics.total_swaps()},
-            {"tokens_processed", prompt_tokens},
-            {"tokens_generated", completion_tokens},
-            {"total_tokens", prompt_tokens + completion_tokens},
-            {"avg_tokens_per_second", metrics.avg_tokens_per_second()}
-        }},
-        {"tokenUsage", usage},
-        {"monthlyTokenUsage", monthly},
-        {"models", model_json["models"]},
-        {"running", model_json["running"]},
-        {"services", nlohmann::json::array({
-            {{"id", "gateway"}, {"name", "Gateway"}, {"kind", "gateway"}, {"status", "running"}, {"baseUrl", "http://127.0.0.1:11434"}},
-            {{"id", "llama-cpp"}, {"name", "llama.cpp in-process"}, {"kind", "llama_cpp"}, {"status", loaded ? "running" : "stopped"}, {"managed", true}}
-        })},
-        {"uptime", uptime_seconds}
-    };
 }
 
 void write_dashboard_file(httplib::Response& resp, const fs::path& static_dir, const std::string& request_path) {
@@ -530,12 +299,50 @@ int main(int argc, char** argv) {
     LOG_INFO("gpu_telemetry_started", "provider=windows_pdh_dxgi poll_ms={}",
              cfg.telemetry_poll_ms);
 
-    GatewayDeps deps{coordinator, scheduler, "15", cfg.auto_swap, &metrics, &stats_db};
+    foundation::EventBus events;
+    SwapTracker swap_tracker;
+    GatewayDeps deps{coordinator, scheduler, "15", cfg.auto_swap, &metrics, &stats_db,
+                     &events, &swap_tracker};
 
     auto uptime_seconds = [&] {
         const auto now = std::chrono::steady_clock::now();
         return std::chrono::duration_cast<std::chrono::seconds>(now - started_at).count();
     };
+
+    std::atomic<bool> stats_stop{false};
+    std::thread stats_thread([&] {
+        while (!stats_stop.load()) {
+            if (events.subscriber_count() > 0) {
+                const auto g = gpu.latest();
+                const auto swap = swap_tracker.snapshot();
+                events.publish("stats", nlohmann::json{
+                    {"timestampUnixMs", std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count()},
+                    {"gpu", {
+                        {"available", g.available},
+                        {"name", g.gpu_name},
+                        {"utilizationPct", g.utilization_pct},
+                        {"vramUsedMb", g.vram_mb},
+                        {"temperatureC", g.temperature_c},
+                        {"powerW", g.power_w},
+                    }},
+                    {"loadedModel", coordinator.get_loaded_model().value_or("")},
+                    {"activeRequests", coordinator.active_request_count()},
+                    {"swapping", swap.swapping},
+                    {"swapTarget", swap.target},
+                    {"totalRequests", metrics.total_requests()},
+                    {"totalSwaps", metrics.total_swaps()},
+                    {"lifetimeTokensIn", metrics.lifetime_tokens_in()},
+                    {"lifetimeTokensOut", metrics.lifetime_tokens_out()},
+                    {"avgTokensPerSecond", metrics.avg_tokens_per_second()},
+                    {"uptimeSeconds", uptime_seconds()},
+                }.dump());
+            }
+            for (int i = 0; i < 10 && !stats_stop.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            }
+        }
+    });
 
     AuthConfig ac;
     ac.required = cfg.auth_required;
@@ -555,7 +362,7 @@ int main(int argc, char** argv) {
     g_server = &server;
     const auto dashboard_static_dir = find_dashboard_static_dir();
 
-    auto wrap = [&](auto handler) {
+    RouteWrapper wrap = [&](httplib::Server::Handler handler) -> httplib::Server::Handler {
         return [&, handler](const httplib::Request& req,
                             httplib::Response& resp) {
             LOG_INFO("http_request_begin", "method={} path={}", req.method, req.path);
@@ -599,6 +406,10 @@ int main(int argc, char** argv) {
                                            httplib::Response& resp) {
         handle_swap_status(req, resp, deps);
     }));
+    server.Post(R"(^/v1/swap/cancel$)", wrap([&](const httplib::Request& req,
+                                            httplib::Response& resp) {
+        handle_swap_cancel(req, resp, deps);
+    }));
     server.Post(R"(^/v1/chat/completions$)", wrap([&](const httplib::Request& req,
                                                  httplib::Response& resp) {
         handle_chat_completions(req, resp, deps);
@@ -619,125 +430,8 @@ int main(int argc, char** argv) {
         resp.set_content(MetricsBuilder::build_health(metrics, gpu, stats_db).dump(),
                          "application/json");
     }));
-    server.Get(R"(^/api/health$)", wrap([&](const httplib::Request& req,
-                                       httplib::Response& resp) {
-        (void)req;
-        resp.set_content(build_dashboard_health(metrics, gpu, stats_db, uptime_seconds()).dump(),
-                         "application/json");
-    }));
-    server.Get(R"(^/api/status$)", wrap([&](const httplib::Request& req,
-                                       httplib::Response& resp) {
-        (void)req;
-        resp.set_content(build_dashboard_status(coordinator, metrics, gpu, stats_db, uptime_seconds()).dump(),
-                         "application/json");
-    }));
-    server.Get(R"(^/api/models$)", wrap([&](const httplib::Request& req,
-                                      httplib::Response& resp) {
-        (void)req;
-        resp.set_content(build_dashboard_models(coordinator).dump(), "application/json");
-    }));
-    server.Get(R"(^/api/models/running$)", wrap([&](const httplib::Request& req,
-                                              httplib::Response& resp) {
-        (void)req;
-        resp.set_content(nlohmann::json{{"running", build_dashboard_models(coordinator)["running"]}}.dump(),
-                         "application/json");
-    }));
-    server.Post(R"(^/api/models/load$)", wrap([&](const httplib::Request& req,
-                                            httplib::Response& resp) {
-        auto body = req.body.empty() ? nlohmann::json::object() : nlohmann::json::parse(req.body);
-        const std::string model_name = body.value("model", body.value("name", ""));
-        if (model_name.empty()) {
-            write_error(resp, 400, "missing_model", "request body must include model");
-            return;
-        }
-        if (!coordinator.registry().has(model_name)) {
-            write_error(resp, 404, "model_not_found", "model not registered: " + model_name);
-            return;
-        }
-        const auto current = coordinator.get_loaded_model();
-        const auto start = std::chrono::steady_clock::now();
-        auto result = coordinator.swap_to_cancellable(model_name);
-        const auto elapsed = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - start).count();
-        if (!result) {
-            observability::SwapRecord rec{std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count(),
-                current.value_or(""), model_name, elapsed, false, result.error().message};
-            metrics.record_swap(rec);
-            stats_db.record_swap({rec.timestamp_unix_ms, rec.from_model, rec.to_model,
-                                  rec.duration_ms, rec.success, rec.error});
-            write_error(resp, 500, "swap_failed", result.error().message);
-            return;
-        }
-        observability::SwapRecord rec{std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count(),
-            current.value_or(""), model_name, elapsed, true, ""};
-        metrics.record_swap(rec);
-        stats_db.record_swap({rec.timestamp_unix_ms, rec.from_model, rec.to_model,
-                              rec.duration_ms, rec.success, rec.error});
-        resp.set_content(nlohmann::json{{"ok", true}, {"status", "running"}, {"model", model_name}}.dump(),
-                         "application/json");
-    }));
-    server.Post(R"(^/api/models/unload$)", wrap([&](const httplib::Request& req,
-                                              httplib::Response& resp) {
-        (void)req;
-        auto result = coordinator.unload_current();
-        if (!result) {
-            write_error(resp, 500, "unload_failed", result.error().message);
-            return;
-        }
-        resp.set_content(nlohmann::json{{"ok", true}, {"status", "stopped"}}.dump(),
-                         "application/json");
-    }));
-    server.Get(R"(^/api/jobs$)", wrap([&](const httplib::Request& req,
-                                    httplib::Response& resp) {
-        (void)req;
-        resp.set_content(build_dashboard_jobs(stats_db, 100).dump(), "application/json");
-    }));
-    server.Get(R"(^/api/services$)", wrap([&](const httplib::Request& req,
-                                        httplib::Response& resp) {
-        (void)req;
-        auto loaded = coordinator.get_loaded_model();
-        resp.set_content(nlohmann::json{{"services", nlohmann::json::array({
-            {{"id", "gateway"}, {"name", "Gateway"}, {"kind", "gateway"}, {"status", "running"}, {"managed", true}},
-            {{"id", "llama-cpp"}, {"name", "llama.cpp in-process"}, {"kind", "llama_cpp"}, {"status", loaded ? "running" : "stopped"}, {"managed", true}},
-            {{"id", "telemetry"}, {"name", "Hardware telemetry"}, {"kind", "observability"}, {"status", gpu.latest().available ? "running" : "degraded"}, {"managed", true}}
-        })}}.dump(), "application/json");
-    }));
-    server.Post(R"(^/api/(queue|modes|services)/(.*)$)", wrap([&](const httplib::Request& req,
-                                                               httplib::Response& resp) {
-        (void)req;
-        resp.set_content(nlohmann::json{{"ok", true}, {"status", "acknowledged"}}.dump(),
-                         "application/json");
-    }));
-    server.Get(R"(^/api/logs$)", wrap([&](const httplib::Request& req,
-                                    httplib::Response& resp) {
-        std::size_t limit = 250;
-        if (req.has_param("limit")) {
-            try { limit = std::clamp<std::size_t>(std::stoul(req.get_param_value("limit")), 1, 1000); } catch (...) {}
-        }
-        std::ifstream file(cfg.log_file.empty() ? "logs/gateway.log" : cfg.log_file);
-        std::vector<std::string> lines;
-        std::string line;
-        while (std::getline(file, line)) {
-            lines.push_back(line);
-            if (lines.size() > limit) lines.erase(lines.begin());
-        }
-        nlohmann::json logs = nlohmann::json::array();
-        for (const auto& item : lines) {
-            logs.push_back({{"timestamp", ""}, {"level", "info"}, {"service", "gateway"}, {"message", item}});
-        }
-        resp.set_content(nlohmann::json{{"logs", logs}}.dump(), "application/json");
-    }));
-    server.Get(R"(^/api/events/stream$)", [&](const httplib::Request& req,
-                                         httplib::Response& resp) {
-        (void)req;
-        LOG_INFO("http_request_begin", "method=GET path=/api/events/stream");
-        cors.apply(resp);
-        resp.status = 204;
-        resp.set_header("Cache-Control", "no-cache");
-        LOG_INFO("http_request_end", "method=GET path=/api/events/stream status=204");
-    });
+    DashboardDeps dash_deps{deps, gpu, cfg.log_file, uptime_seconds};
+    register_dashboard_routes(server, dash_deps, wrap);
     if (cors.handles_options()) {
         server.Options(".*", [&](const httplib::Request& req,
                                   httplib::Response& resp) {
@@ -758,7 +452,19 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, signal_handler);
 
     LOG_INFO("server_listening", "host={} port={}", cfg.host, cfg.port);
-    if (!server.listen(cfg.host.c_str(), cfg.port)) {
+    const bool listen_ok = server.listen(cfg.host.c_str(), cfg.port);
+
+    stats_stop.store(true);
+    events.close_all();
+    if (stats_thread.joinable()) stats_thread.join();
+
+    const auto swap_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{120};
+    while (swap_tracker.snapshot().swapping &&
+           std::chrono::steady_clock::now() < swap_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    }
+
+    if (!listen_ok) {
         LOG_ERROR("server_failed", "could not bind {}:{}", cfg.host, cfg.port);
         return 1;
     }

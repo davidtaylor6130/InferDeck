@@ -4,6 +4,7 @@ project(gateway LANGUAGES CXX)
 set(GATEWAY_SOURCES
     src/streaming_sanitizer.cpp
     src/routes.cpp
+    src/dashboard_routes.cpp
     src/metrics_builder.cpp
 )
 
