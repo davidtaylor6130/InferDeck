@@ -5,10 +5,9 @@
 
 ## What is InferDeck?
 
-A local AI gateway. Single Windows `.exe` that runs LLMs (currently
-Qwen3.6-27B and Qwen3-Coder-Next) in-process via llama.cpp, exposes
-an OpenAI-compatible HTTP API on `:11434/v1/`, and serves a React
-dashboard on `:11434/`.
+A local AI gateway. Single Windows `.exe` that runs LLMs in-process via
+llama.cpp (Vulkan), exposes an OpenAI-compatible HTTP API on
+`:11434/v1/`, and serves a React dashboard on `:11434/`.
 
 **Hard constraint:** Everything in-process. NO subprocess. NO
 `llama-server.exe` proxy. NO orphan processes. This is non-negotiable
@@ -18,329 +17,203 @@ have been a pain point.
 ## Project Structure
 
 ```
-apps/inferdeck-gateway/       HTTP routes + .exe entry (Layer 8)
-apps/benchmark-runner/        inferdeck-bench optimization harness (Layer 9)
-apps/dashboard/               React dashboard source (build into static/)
-apps/model-tester/            Swap exerciser (P3 dev tool)
-apps/hardware-adlx-helper/    ADLX wrapper for GPU telemetry — REUSE THIS
-                              in libs/observability/, do not rewrite
+apps/inferdeck-gateway/       .exe entry: config load, deps wiring, /v1 routes,
+                              static file serving, stats publisher thread
+apps/dashboard/               React dashboard source (pnpm build:dashboard
+                              outputs into apps/inferdeck-gateway/static/,
+                              which is committed)
+apps/benchmark-runner/        inferdeck-bench optimization harness
+apps/model-tester/            Swap exerciser dev tool
+apps/hardware-adlx-helper/    Optional ADLX helper for GPU telemetry
 
-libs/foundation/              asio, logging, JSON (Layer 1)
-libs/messaging/               std::variant content, role enum (Layer 2)
-libs/sampling/                common_sampler_init wrapper (Layer 3)
-libs/model/                   ModelRegistry + BackendCoordinator (Layer 4)
-libs/engine/                  Per-model slot pool (Layer 5)
-libs/scheduler/               LCP-match + queue (Layer 6)
-libs/observability/           ADLX + EMA stats + SQLite (Layer 7)
-libs/llama_cpp_wrapper/       Real LlamaCppModel — P10 wires llama.cpp C API
-libs/optimize/                In-house search (random + greedy, P9)
-libs/core/                    Legacy v1 C++20 logger — left untouched
-libs/third_party/llama.cpp    Layer 0, Vulkan build
+libs/foundation/              logging (spdlog), Result/Error, EventBus
+libs/model/                   ModelRegistry + BackendCoordinator + IModel
+libs/llama_cpp_wrapper/       LlamaCppModel — the live llama.cpp wrapper
+libs/gateway/                 HTTP routes (routes.cpp), dashboard /api routes
+                              (dashboard_routes.cpp), SSE, streaming sanitizer,
+                              SwapTracker, auth, CORS, metrics builder
+libs/observability/           GPU telemetry (PDH/DXGI), Metrics, SQLite StatsDb
+libs/optimize/                In-house search (random + greedy) for inferdeck-bench
+libs/third_party/llama.cpp    Vendored, Vulkan build (gitignored — cloned, not committed)
 
 config/gateway.yml            Active config (only this one is read)
+config/gateway.test-ralph.yml Small-model config for the mini-ralph harness (port 11435)
 config/sampler-profiles/      Per-model sampler configs
-config/bench-search-spaces.yaml
+data/pricing.json             Dashboard cost defaults, served via GET /api/pricing
 
-tests/parity/                 CI gate: parity with raw llama-server
-tests/stress/                 4h session, swap cycles
-tests/integration/            HTTP end-to-end
+Testing/                      mini-ralph.mjs streaming tool-call harness (untracked,
+                              do not delete)
+tests/integration/            Catch2 integration tests (mocked coordinator)
+tests/parity/                 Parity with raw llama-server
+tests/fixtures/               Realistic request payloads (opencode/openwebui/Anthropic)
 ```
+
+Deleted in the 2026-06 cleanup (see `docs/v2-cleanup-report.md`, history
+has the code): the entire v1 stack (`apps/gateway-service`, `libs/core`,
+`libs/backends`, `libs/vector_store`, `libs/tests`, `LlamaEngine.cpp`)
+and the never-wired layers `libs/{scheduler,engine,sampling,messaging}`.
+Queuing/LCP slot matching will be rebuilt against `BackendCoordinator`
+when multi-backend support lands — do not resurrect the old layers.
 
 ## Build Commands
 
 ```bash
-# Configure (one-time)
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_C_COMPILER=clang-cl \
-      -DCMAKE_CXX_COMPILER=clang-cl \
-      -DCMAKE_TOOLCHAIN_FILE=cmake/clang-cl-msvc.txt
+# Configure (one-time; add -DINFERDECK_BUILD_TESTS=ON for tests)
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 
-# Build everything
-cmake --build build --config Release -j
+# Build the gateway
+cmake --build build --target inferdeck-gateway --config Release -j
 
-# Build specific layer
-cmake --build build --target inferdeck-gateway
-cmake --build build --target inferdeck-bench
-
-# ASan build
-cmake -S . -B build-asan -G "Visual Studio 17 2022" -A x64 \
-      -DCMAKE_BUILD_TYPE=Debug \
-      -DCMAKE_C_FLAGS="-fsanitize=address" \
-      -DCMAKE_CXX_FLAGS="-fsanitize=address"
-cmake --build build-asan --config Debug -j
+# Dashboard (output goes to apps/inferdeck-gateway/static/, commit it)
+pnpm --filter dashboard build
 ```
 
 ## Test Commands
 
 ```bash
-# Unit tests (fast, every commit)
-ctest --test-dir build --output-on-failure -L unit
+# C++ unit + integration (use -L, NOT -LE: vendored brotli registers
+# hundreds of its own ctest entries that fail and are not ours)
+ctest --test-dir build -C Release --output-on-failure -L "unit|integration"
 
-# Integration tests (medium, every commit, includes Tier A + Tier B once P3 lands)
-ctest --test-dir build --output-on-failure -L integration
+# Dashboard unit tests
+pnpm --filter dashboard test
 
-# All non-e2e (unit + integration)
-ctest --test-dir build --output-on-failure -LE e2e
+# Streaming tool-call harness (starts nothing; needs a running gateway)
+build/bin/Release/inferdeck-gateway.exe -c config/gateway.test-ralph.yml
+GATEWAY_URL=http://127.0.0.1:11435 GATEWAY_MODEL=qwen2.5-coder-3b node Testing/mini-ralph.mjs
+# Note: the 3B model is nondeterministic; a single FAIL on one iteration
+# can be flake — rerun before assuming a regression.
 
-# Real-model end-to-end (slow, pre-release, needs test GGUF)
-bash tests/integration/run.sh e2e
-
-# All tiers including e2e
-bash tests/integration/run.sh all
-
-# Parity tests (CI gate, slow)
+# Parity (slow)
 bash tests/parity/run.sh
-
-# Swap stress test
-bash tests/stress/swap_cycle.sh 20
-
-# Real-hardware validation (4h session)
-bash tests/stress/four_hour_session.sh
 ```
 
-### Test Labels
+## HTTP API
 
-| Label         | Speed     | When          | Requires                |
-|---------------|-----------|---------------|-------------------------|
-| `unit`        | fast      | every commit  | nothing                 |
-| `integration` | medium    | every commit  | nothing (Tier A + B)    |
-| `e2e`         | slow      | pre-release   | test GGUF in `C:/Inferdeck/models/` |
+OpenAI-compatible (`/v1`):
+- `POST /v1/chat/completions` — streaming + non-streaming, tool calls,
+  reasoning_content. SSE chunks end with `data: [DONE]`.
+- `GET /v1/models`, `GET /v1/health`, `GET /v1/metrics`, `GET /v1/stats/history`
 
-### Integration Test Fixtures
+Swap control:
+- `POST /v1/swap/to/:name` — **async**: returns `202 {"status":"swapping"}`
+  immediately (200 if already loaded, 404 unknown, 409 if a swap is running).
+  Progress arrives as `model` events on the SSE stream.
+- `POST /v1/swap/cancel` — requests cancellation of the in-flight swap.
+- `GET /v1/swap/status` — loaded model, vram, active requests, SwapTracker state.
 
-Real opencode / openwebui / Anthropic payloads live in `tests/fixtures/`.
-Each fixture is a JSON file representing one realistic request body from a
-client you actually use (opencode, openwebui) or from the Anthropic Messages
-API. Tier A tests parse each fixture, round-trip through `messaging`, and
-diff against the original.
-
-Tier C uses the Qwen2.5-Coder-3B-Instruct Q4_K_M GGUF at
-`C:/Inferdeck/models/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf`
-(~2 GB, small enough for CI). Override with `INFERDECK_TEST_MODEL` env var.
-
-## Code Conventions
-
-- **C++23.** Use `co_await`, `std::expected`, `std::span`, `std::variant`,
-  `std::visit`. No raw `new`/`delete`, use `std::unique_ptr`/`std::shared_ptr`.
-- **asio awaitables** for all I/O. No callback hell.
-- **Structured logging**: `LOG_INFO("model_loaded", "name"_a=name, "vram_mb"_a=vram)`.
-  Never `std::cout`.
-- **JSON**: `nlohmann::json` or `simdjson`. Pick one and stick with it.
-- **No exceptions for control flow.** Use `std::expected<T, Error>`.
-- **Headers**: `#pragma once`, order: related -> <system> -> <std> -> third-party -> local.
-- **Naming**: PascalCase types, camelCase functions/variables, `k_` prefix
-  for constants, `_t` suffix for type aliases.
-- **File layout**: `libs/{layer}/include/{layer}/{file}.hpp`,
-  `libs/{layer}/src/{file}.cpp`, `libs/{layer}/tests/test_{file}.cpp`.
+Dashboard (`/api`, registered in `libs/gateway/src/dashboard_routes.cpp`):
+- `GET /api/status` — queue/swap/hardware/summary (incl. p50/p95 latency),
+  tokenUsage, monthlyTokenUsage
+- `GET /api/jobs`, `GET /api/logs`, `GET /api/pricing` (serves data/pricing.json)
+- `POST /api/models/load` (async, same path as /v1/swap/to), `POST /api/models/unload`
+- `GET /api/events/stream` — **SSE** (there is no WebSocket anywhere).
+  Named events, each ~1Hz or on occurrence:
+  - `stats`: gpu{utilizationPct,vramUsedMb,temperatureC,powerW}, loadedModel,
+    activeRequests, swapping, lifetime counters, uptime
+  - `model`: state=swapping|ready|failed|cancelled|unloaded, from, to, durationMs, error
+  - `request`: model, tokens, durationMs, tokensPerSecond, status
 
 ## Architecture Quick Reference
 
-When a request hits `/v1/chat/completions`:
+Request flow for `/v1/chat/completions`:
 
-1. **Layer 8** parses OAI body, extracts `model:`, `messages:`, `tools:`
-2. **Layer 2** converts to internal message representation
-3. **Layer 5** Scheduler: calls `BackendCoordinator::AcquireSlot(model_name)`
-4. **Layer 4** BackendCoordinator: ensures model loaded, returns free slot
-5. **Layer 6** Engine: tokenizes prompt, checks LCP against slot's cache
-6. **Layer 3** Sampling: builds sampler chain from model's profile
-7. **llama.cpp** does the inference
-8. **Layer 7** Observability: tracks t/s, tokens, swaps
-9. **Layer 8** streams SSE back to client
+1. `routes.cpp::handle_chat_completions` parses the OAI body
+2. (optional) auto-swap via the tracked swap path
+3. `BackendCoordinator::acquire_slot(model)` (blocks up to 30s)
+4. non-stream: `coordinator.predict(...)`; stream: inference runs on a
+   dedicated thread pushing `InferenceDelta`s through a cv-guarded queue
+   consumed by httplib's chunked content provider (2s heartbeat `: \n\n`)
+5. `LlamaCppModel` (libs/llama_cpp_wrapper) does template/tokenize/decode/sample
+6. `record_request` writes Metrics + SQLite StatsDb and publishes a
+   `request` event on the EventBus
 
-When swap is requested:
+Swap flow: `start_swap_async` (routes.cpp) → SwapTracker.begin →
+detached thread → `coordinator.swap_to_cancellable` (drains active
+requests, unloads, loads) → record + publish `model` event →
+SwapTracker.end. main.cpp waits up to 120s for an in-flight swap at
+shutdown.
 
-1. User clicks dashboard or `POST /v1/swap/to/qwen3-coder-next`
-2. **Layer 4** BackendCoordinator: drains active requests (30s timeout)
-3. **Layer 4** unloads current model (destroys contexts, frees VRAM)
-4. **Layer 4** reads new GGUF from disk
-5. **Layer 4** initializes llama_model + n_parallel contexts
-6. **Layer 7** logs swap event to SQLite
-7. WebSocket broadcasts `ready`
+Concurrency invariants:
+- `BackendCoordinator::predict/predict_stream` must NOT hold `mutex_`
+  during inference (fixed 2026-06; holding it froze /api/status and
+  second-slot acquisition for the whole generation).
+- Slot acquisition increments `active_requests_`; `unload` drains it
+  with a 30s timeout, so an IModel can't be destroyed mid-predict.
+- `StreamState` is shared_ptr-owned by both the inference thread and
+  the chunked provider; `finish_once` is idempotent via CAS.
 
-## Critical Bugs to Avoid (legacy code, fixed in v2)
+## Design rules learned the hard way (do not regress)
 
-These are the 4 bugs that v2 fixed in P0-P6. The new layers do not have
-them. **Do not reintroduce them** if you ever touch the legacy
-`LlamaEngine.cpp` or `ChatCompletions.cpp` files (v1 inheritance, kept
-unmodified).
+- KV-cache reuse must use longest-common-prefix matching, never message
+  count. Reference `server_prompt_cache` in vendored llama.cpp.
+- Use `common_sampler_init` (`common/sampling.cpp`) rather than
+  hand-rolling sampler chains that fight model defaults.
+- Streaming sanitizers must be cursor-based (scan only new bytes) —
+  the v1 O(n²) rescan was a real perf bug.
+- Never hardcode `add_bos`; use `llama_vocab_get_add_bos(vocab)`.
+- Tool-call JSON is parsed from sampler output, not regexed.
 
-| File:line | Bug | Fixed in |
-|---|---|---|
-| `libs/llama_cpp_wrapper/src/LlamaEngine.cpp:444-554` | `reuse_cache` uses message count, not LCP. **Fix:** use `server_prompt_cache::load` algorithm. | `libs/sampling/` (P2) + `libs/engine/` (P4) LCP match |
-| `libs/llama_cpp_wrapper/src/LlamaEngine.cpp:170-199` | Hand-rolled sampler chain fights Qwen3 defaults. **Fix:** use `common_sampler_init` from `libs/third_party/llama.cpp/common/sampling.cpp:187`. | `libs/sampling/` (P2) |
-| `apps/gateway-service/src/.../ChatCompletions.cpp:2175-2188` | O(n²) streaming sanitizer. **Fix:** cursor-based, only scan new tokens. | `libs/gateway/streaming` (P6) |
-| `libs/llama_cpp_wrapper/src/LlamaEngine.cpp:126` | `add_bos=true` hardcoded. **Fix:** use `llama_vocab_get_add_bos`. | `libs/llama_cpp_wrapper/llama_cpp_model.cpp` (P10) |
+## Known open items
+
+- `config/gateway.yml` has `gateway.auto_swap: true` while the original
+  design said "no auto-swap, return 503". Both paths exist in
+  `handle_chat_completions`; the config flag decides. Owner decision on
+  the default is still pending (see docs/v2-cleanup-report.md §3.9).
+- Remaining report items not yet implemented: error-code enum on
+  foundation::Error instead of message substring matching (§3.3/3.4),
+  UTF-8 hold-back in the streaming path (§3.6), god-function splits
+  (§4.1/4.2), sampler magic numbers → sampler-profiles (§3.10),
+  Vulkan SDK path from env (§3.11).
 
 ## Don'ts
 
-- **NO subprocess.** Don't call `llama-server.exe`. Don't `system()`.
-  Don't `popen()`. The user is on Windows and orphan processes are a problem.
-- **NO proxy design.** Don't make InferDeck a thin wrapper around
-  `llama-server.exe`. Use llama.cpp library directly.
-- **NO MMProj load on demand.** mmproj stays loaded permanently for Qwen3.6-27B
-  (vision is a stated use case).
-- **NO auto-swap on OAI request.** Returns 503 with hint, user must click
-  dashboard. The user explicitly chose this simpler design.
-- **NO MTP for v1.** Conflicts with n_parallel>1. Revisit in P2 future.
-- **NO comments unless asked.** Code style per system prompt.
-
-## Common Tasks
-
-### Add a new model
-
-1. Download GGUF to `C:/Users/david/Documents/00_Models/{name}-GGUF/`
-2. Add entry to `config/gateway.yml`:
-   ```yaml
-   model_registry:
-     - name: "new-model"
-       gguf_path: "C:/.../new-model-Q4_K_M.gguf"
-       mmproj_path: null  # or "C:/.../mmproj-BF16.gguf" for vision
-       family: "qwen3.6"
-       n_slots: 2
-       vram_required_mb: 22000
-   ```
-3. Add sampler profile to `config/sampler-profiles/{name}-coding.yaml`
-4. Restart InferDeck — new model appears in `/v1/models`
-5. Run parity test: `bash tests/parity/run.sh new-model`
-6. (Optional) Run optimization: click "Run Optimization" in dashboard
-
-### Run an optimization
-
-```bash
-# CLI
-./build/Release/inferdeck-bench run \
-  --model qwen3.6-27b \
-  --profile coding \
-  --suite humaneval,mbpp,bfcl \
-  --trials 30 \
-  --output ~/.inferdeck/optimization.db
-
-# Dashboard
-# Click "Run Optimization" -> select model + profile -> background job
-# Results in ~/.inferdeck/optimization.db, view in dashboard
-```
-
-### Test a swap manually
-
-```bash
-# Check current model
-curl http://localhost:11434/v1/models | jq
-
-# Trigger swap (background, returns 202)
-curl -X POST http://localhost:11434/v1/swap/to/qwen3-coder-next
-
-# Poll status
-curl http://localhost:11434/v1/swap/status | jq
-
-# Once ready, test inference
-curl -X POST http://localhost:11434/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3-coder-next","messages":[{"role":"user","content":"hello"}]}'
-```
-
-### Add a new benchmark
-
-1. Implement `Benchmark` interface in
-   `apps/benchmark-runner/src/benchmarks/{name}.cpp`:
-   ```cpp
-   class MyBench : public Benchmark {
-     std::vector<Problem> load_problems() override;
-     double score(const std::string& output, const Problem& p) override;
-   };
-   ```
-2. Register in `apps/benchmark-runner/src/main.cpp`
-3. Add to `config/bench-search-spaces.yaml` if searchable
-4. Test: `./inferdeck-bench run --suite my-bench --model qwen3.6-27b`
-
-## Observability Points
-
-- All HTTP requests logged with: timestamp, model, prompt_tokens,
-  completion_tokens, duration_ms, t/s, status_code, slot_id
-- Swap events: timestamp, from_model, to_model, duration_ms, success, error
-- GPU telemetry: every 100ms via ADLX, util%, temp°C, vram_used_mb, power_w
-- Lifetime counters: total_tokens_in, total_tokens_out, total_requests,
-  total_swaps, uptime_s
-- All persisted to `~/.inferdeck/stats.db` (SQLite)
-
-Dashboard pulls from WebSocket `/v1/stats` (live) and `/v1/stats/history`
-(aggregated from SQLite).
-
-## Testing Strategy
-
-| What | How | When |
-|---|---|---|
-| Unit | GoogleTest | Every commit, must pass |
-| Integration | custom HTTP tests | Every commit, must pass |
-| Parity | `tests/parity/run.sh` | Every commit, must pass per registered model |
-| Swap stress | `tests/stress/swap_cycle.sh 20` | Pre-release |
-| 4h session | `tests/stress/four_hour_session.sh` | Pre-release |
-| Optimization | Optuna 30 trials, results in DB | Manual trigger |
-
-## When Stuck
-
-1. **Parity failing?** Check the bug table above first.
-2. **Slow first token?** Probably LCP miss. Check `LlamaEngine.cpp:444`.
-3. **Repetition in long context?** Qwen3-A3B YaRN issue. Check context size.
-4. **Tool calls failing?** Check grammar sampler init in P6.
-5. **Swap stuck?** Check ADLX VRAM. Probably mmproj still loaded.
-6. **mmproj not found?** Verify path in `config/gateway.yml` and the GGUF
-   actually has vision enabled (Unsloth Dynamic GGUFs do).
-7. **Swap cancellation** is exposed via
-   `BackendCoordinator::request_swap_cancel()` /
-   `swap_to_cancellable(name, timeout)`. The dashboard "Cancel swap" button
-   wires `request_swap_cancel()`. Honour the flag after every long-running
-   step inside `swap_to_cancellable`; do not roll back VRAM on a successful
-   cancel — partial state is acceptable, the next swap will re-unload.
-
-## Useful llama.cpp Functions
-
-| Task | Function |
-|---|---|
-| Load model | `llama_model_load_from_file` |
-| Init context | `llama_init_from_model` |
-| Tokenize | `llama_tokenize` |
-| BOS handling | `llama_vocab_get_add_bos(llama_model_get_vocab(model))` |
-| Detokenize | `llama_token_to_piece` |
-| Decode batch | `llama_decode` |
-| KV cache prefix match | `llama_kv_cache_seq_rm` to trim divergent tail |
-| Sampler init | `common_sampler_init` (see `common/sampling.cpp:187`) |
-| Grammar lazy | `llama_sampler_init_grammar_lazy_patterns` |
-| Tool call JSON | parse from sampler output (don't regex) |
-| Multimodal | `mtmd_*` functions in `mtmd.h` |
-
-## Useful Files in llama.cpp to Reference
-
-- `libs/third_party/llama.cpp/tools/server/server-context.cpp` —
-  slot pool, LCP cache, prompt eval
-- `libs/third_party/llama.cpp/tools/server/server-task.h` —
-  `server_prompt_cache` struct
-- `libs/third_party/llama.cpp/common/sampling.cpp:187` —
-  `common_sampler_init` for sampler chain
-- `libs/third_party/llama.cpp/common/chat.cpp` —
-  OAI chat template parsing
+- **NO subprocess.** Don't call `llama-server.exe`. Don't `system()` or `popen()`.
+- **NO proxy design.** Use the llama.cpp library directly.
+- **NO MMProj load on demand.** mmproj stays loaded for vision models.
+- **NO MTP for now.** Conflicts with n_parallel>1.
+- **NO comments unless asked.**
 
 ## Dashboard
 
-React app in `apps/dashboard/`. WebSocket to `/v1/stats` and
-`/v1/swap/status`. Build with `npm run build`, output to
-`apps/inferdeck-gateway/src/static/`.
+React 19 + Vite + Tailwind in `apps/dashboard/`. Four pages:
+**Overview** (model card + swap progress/cancel, live SSE sparklines,
+lifetime counters, activity feed), **Models** (registry table with
+async load/cancel/unload, swap history), **Usage & Cost** (token/cost
+graph, per-model table; price defaults come from `GET /api/pricing`,
+user overrides persist in localStorage under
+`inferdeck:model-token-costs`), **System** (hardware meters, log
+viewer).
 
-Panels:
-- **Models:** current model, target model, "Switch" button
-- **Live stats:** t/s, GPU util, temp, lifetime tokens
-- **Optimization:** per-model history, "Run Optimization" button
-- **Swap history:** timestamp, from, to, duration, success
+State comes from one `EventSource('/api/events/stream')` in
+`src/gateway.tsx` with a connected/reconnecting/offline state machine
+and a 30s `/api/status` polling fallback. API base is same-origin
+(`VITE_API_BASE` override for `pnpm dev`, which proxies /api and /v1
+to :11434).
 
-## Release Checklist
+Build with `pnpm --filter dashboard build`; the output in
+`apps/inferdeck-gateway/static/` is committed and copied next to the
+exe post-build by CMake.
 
-- [ ] All unit tests pass
-- [ ] All integration tests pass
-- [ ] Parity >= 0.95 for all registered models
-- [ ] Swap stress test passes (20 cycles, no leaks)
-- [ ] 4h opencode session completes (zero OOM, zero crash)
-- [ ] Optimization applied to coding profile
-- [ ] Dashboard shows all stats correctly
-- [ ] `PLAN.md` and `AGENTS.md` up to date
-- [ ] No comments in code (per system prompt convention)
-- [ ] `config/gateway.yml` final form
+## Observability
+
+- Requests: timestamp, model, prompt/completion tokens, duration, t/s,
+  status, slot — in-memory `Metrics` + SQLite `StatsDb`
+  (`observability.stats_db` path in gateway.yml) + `request` SSE event.
+- Swaps: from, to, duration, success, error — same three sinks.
+- GPU: PDH/DXGI polling (`telemetry_poll_ms`), optional ADLX helper for
+  temperature/power (`observability.adlx_helper`).
+
+## When Stuck
+
+1. **Tool calls failing?** Check which process owns :11434 first
+   (`Get-NetTCPConnection -LocalPort 11434`); a stale process serving the
+   old code has burned hours before.
+2. **Slow first token?** LCP miss — check prompt-cache behavior in
+   llama_cpp_model.cpp.
+3. **Swap stuck?** `GET /v1/swap/status`, then `POST /v1/swap/cancel`.
+   Partial state after a cancel is acceptable; the next swap re-unloads.
+4. **Dashboard frozen during generation?** That bug was the coordinator
+   holding `mutex_` across predict — do not reintroduce it.
+5. **ctest reports hundreds of failures?** You ran `-LE e2e` and hit
+   vendored brotli's tests. Use `-L "unit|integration"`.

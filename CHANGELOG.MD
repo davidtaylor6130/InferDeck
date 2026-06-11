@@ -1,4 +1,40 @@
-# r9700 AI Gateway - Changelog
+# InferDeck - Changelog
+
+## [2.1.0] - 2026-06-11
+
+### Added
+- Real SSE event stream at `GET /api/events/stream`: `stats` (1Hz GPU/
+  requests/lifetime counters), `model` (swap lifecycle), and `request`
+  (completion) events, backed by a new foundation EventBus
+- Non-blocking model swaps: `POST /v1/swap/to/:name` returns 202 and
+  publishes progress events; new `POST /v1/swap/cancel`; SwapTracker
+  state exposed via `GET /v1/swap/status` and `/api/status`
+- `GET /api/pricing` serving `data/pricing.json` for dashboard cost defaults
+- p50/p95 latency and per-model average t/s in `/api/status`
+- Dashboard vitest suite (cost engine + page rendering)
+
+### Changed
+- Dashboard fully redesigned: four pages (Overview, Models, Usage & Cost,
+  System), SSE-first state with connected/reconnecting/offline handling
+  and a 30s polling fallback (was 4s polling), async swap progress with
+  cancel, same-origin API base, cost UI preserved with localStorage
+  overrides intact
+- All `/api` routes moved from main.cpp into `libs/gateway/src/dashboard_routes.cpp`
+- BackendCoordinator no longer holds its mutex across predict/predict_stream,
+  so status queries and additional slots work during generation
+- Root CMake installs `inferdeck-gateway` (was the dead `gateway-service`)
+  and drops the broken `certs/` install rule
+
+### Removed
+- Entire v1 stack: `apps/gateway-service`, `libs/core`, `libs/backends`,
+  `libs/vector_store`, `libs/tests`, legacy wrapper sources
+  (LlamaEngine, LlamaServerManager, GGUFParser, VulkanDevice), cypress
+- Never-wired v2 layers: `libs/scheduler`, `libs/engine`, `libs/sampling`,
+  `libs/messaging` (and their messaging round-trip tests)
+- Duplicate/no-op routes: `/api/health`, `/api/models`, `/api/models/running`,
+  `/api/services`, `POST /api/(queue|modes|services)/*` (returned fake 200s),
+  dashboard stub panels (Services/Queue/Settings)
+- ~70 MB of committed binaries, logs, debug payloads, and stale configs
 
 ## [0.1.0] - 2025-05-10
 
