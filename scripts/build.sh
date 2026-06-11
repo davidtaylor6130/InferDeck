@@ -1,5 +1,5 @@
-#!/bin/bash
-# build.sh — Build script for InferDeck gateway service
+﻿#!/bin/bash
+# build.sh â€” Build script for InferDeck gateway service
 # Usage: ./scripts/build.sh [debug|release]
 set -euo pipefail
 
@@ -108,7 +108,7 @@ package() {
     mkdir -p "$pkg_dir"
 
     # Copy executable
-    cp "${BUILD_DIR}/apps/gateway-service/inferdeck-gateway.exe" "$pkg_dir/" 2>/dev/null || true
+    cp "${BUILD_DIR}/bin/Release/inferdeck-gateway.exe" "$pkg_dir/" 2>/dev/null || true
     # Copy certs
     cp -r "${BUILD_DIR}/certs" "$pkg_dir/" 2>/dev/null || true
     # Copy config

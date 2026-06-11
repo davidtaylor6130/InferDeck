@@ -7,8 +7,6 @@ if(MSVC)
 endif()
 
 add_library(llama_cpp_wrapper STATIC
-    src/LlamaEngine.cpp
-    src/LlamaServerManager.cpp
     src/llama_cpp_model.cpp
 )
 
@@ -19,7 +17,6 @@ target_include_directories(llama_cpp_wrapper PUBLIC
     ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/tools/mtmd
     ${CMAKE_SOURCE_DIR}/libs/model/include
     ${CMAKE_SOURCE_DIR}/libs/foundation/include
-    ${CMAKE_SOURCE_DIR}/libs/core/include
 )
 
 target_link_libraries(llama_cpp_wrapper

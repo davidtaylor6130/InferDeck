@@ -105,21 +105,12 @@ if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests/integration)
     add_subdirectory(tests/parity)
 endif()
-add_subdirectory(libs/core)
 add_subdirectory(libs/llama_cpp_wrapper)
-add_subdirectory(libs/backends)
-add_subdirectory(libs/vector_store)
-add_subdirectory(apps/gateway-service)
 add_subdirectory(apps/model-tester)
 
-if(INFERDECK_BUILD_TESTS)
-    add_subdirectory(libs/tests)
-endif()
-
-install(TARGETS gateway-service
+install(TARGETS inferdeck-gateway
         RUNTIME DESTINATION .
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib/static)
 
-install(DIRECTORY certs/ DESTINATION certs)
 install(DIRECTORY config/ DESTINATION config)
