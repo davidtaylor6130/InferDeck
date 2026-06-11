@@ -11,9 +11,7 @@ add_executable(route_tests
 target_link_libraries(sanitizer_tests
     PRIVATE
         gateway
-        scheduler
         model
-        engine
         foundation
         nlohmann_json::nlohmann_json
         Catch2::Catch2WithMain
@@ -22,9 +20,7 @@ target_link_libraries(sanitizer_tests
 target_link_libraries(route_tests
     PRIVATE
         gateway
-        scheduler
         model
-        engine
         foundation
         nlohmann_json::nlohmann_json
         httplib::httplib

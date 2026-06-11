@@ -10,8 +10,6 @@ find_package(yaml-cpp REQUIRED)
 target_link_libraries(inferdeck-gateway PRIVATE
     gateway
     model
-    scheduler
-    engine
     foundation
     llama_cpp_wrapper
     llama

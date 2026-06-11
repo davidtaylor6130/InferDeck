@@ -38,7 +38,6 @@
 #include "observability/gpu_telemetry.hpp"
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
-#include "scheduler/scheduler.hpp"
 
 namespace fs = std::filesystem;
 
@@ -286,7 +285,6 @@ int main(int argc, char** argv) {
     LOG_INFO("factory_set", "LlamaCppModel factory installed");
 
     model::BackendCoordinator coordinator(registry);
-    scheduler::Scheduler scheduler(coordinator);
 
     observability::Metrics metrics;
     observability::GpuTelemetry gpu;
@@ -301,7 +299,7 @@ int main(int argc, char** argv) {
 
     foundation::EventBus events;
     SwapTracker swap_tracker;
-    GatewayDeps deps{coordinator, scheduler, "15", cfg.auto_swap, &metrics, &stats_db,
+    GatewayDeps deps{coordinator, "15", cfg.auto_swap, &metrics, &stats_db,
                      &events, &swap_tracker};
 
     auto uptime_seconds = [&] {

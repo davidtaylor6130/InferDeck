@@ -3,14 +3,12 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
-#include "engine/token_sequence.hpp"
 #include "foundation/event_bus.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
-#include "scheduler/scheduler.hpp"
 
 #include <chrono>
 #include <string>
@@ -19,7 +17,6 @@ namespace inferdeck::gateway {
 
 struct GatewayDeps {
     model::BackendCoordinator& coordinator;
-    scheduler::Scheduler& scheduler;
     std::string default_swap_timeout_s{"15"};
     bool auto_swap{true};
     observability::Metrics* metrics{nullptr};

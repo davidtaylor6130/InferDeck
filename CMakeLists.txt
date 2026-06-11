@@ -91,11 +91,7 @@ add_subdirectory(${llama_cpp_SOURCE_DIR}/tools/mtmd EXCLUDE_FROM_ALL)
 
 # --- Our libraries and app ---
 add_subdirectory(libs/foundation)
-add_subdirectory(libs/messaging)
-add_subdirectory(libs/sampling)
 add_subdirectory(libs/model)
-add_subdirectory(libs/engine)
-add_subdirectory(libs/scheduler)
 add_subdirectory(libs/gateway)
 add_subdirectory(libs/observability)
 add_subdirectory(libs/optimize)

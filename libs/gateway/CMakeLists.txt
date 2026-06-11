@@ -19,7 +19,6 @@ target_link_libraries(gateway
     PUBLIC
         foundation
         model
-        scheduler
         observability
         nlohmann_json::nlohmann_json
         httplib::httplib

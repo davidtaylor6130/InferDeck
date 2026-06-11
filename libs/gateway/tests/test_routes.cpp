@@ -1,6 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "engine/token_sequence.hpp"
 #include "foundation/result.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
@@ -11,7 +10,6 @@
 #include "model/model_registry.hpp"
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
-#include "scheduler/scheduler.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -20,9 +18,7 @@
 #include <thread>
 
 using namespace inferdeck;
-using namespace inferdeck::engine;
 using namespace inferdeck::model;
-using namespace inferdeck::scheduler;
 using namespace inferdeck::gateway;
 
 using inferdeck::foundation::ErrorCode;
@@ -149,14 +145,14 @@ ModelInfo make_info(const std::string& name) {
 struct TestServer {
     ModelRegistry registry;
     BackendCoordinator coordinator;
-    Scheduler scheduler;
+    SwapTracker swap_tracker;
     observability::Metrics metrics;
     observability::StatsDb stats_db{":memory:"};
     httplib::Server server;
     std::thread th;
     int port{0};
 
-    TestServer() : coordinator(registry), scheduler(coordinator) {
+    TestServer() : coordinator(registry) {
         registry.set_factory([](const ModelInfo& info) {
             return std::make_unique<IModelMock>(info);
         });
@@ -178,10 +174,11 @@ struct TestServer {
     }
 
     GatewayDeps make_deps() {
-        GatewayDeps deps{coordinator, scheduler, "10"};
+        GatewayDeps deps{coordinator, "10"};
         deps.auto_swap = false;
         deps.metrics = &metrics;
         deps.stats_db = &stats_db;
+        deps.swap_tracker = &swap_tracker;
         return deps;
     }
 
