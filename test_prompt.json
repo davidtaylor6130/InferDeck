@@ -1,1 +1,0 @@
-{"model":"qwen3.6-27b","messages":[{"role":"user","content":"Write a detailed explanation of how transformer attention works, including mathematical formulas for Q, K, V matrices, multi-head attention, and the complete forward pass. Make it comprehensive."}],"stream":true,"max_tokens":2048}

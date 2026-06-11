@@ -1,1 +1,0 @@
-"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.50.35717\bin\Hostx64\x64\cl.exe" /std:c++17 C:\Users\david\Documents\GitHub\InferDeck\test_debug.cpp /FeC:\Users\david\Documents\GitHub\InferDeck\test_debug.exe
