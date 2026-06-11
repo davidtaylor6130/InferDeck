@@ -250,6 +250,22 @@ model::InferenceRequest make_inference_request(const nlohmann::json& body) {
     return ir;
 }
 
+struct ErrorClass {
+    int status;
+    std::string type;
+    std::string code;
+};
+
+ErrorClass classify_inference_error(foundation::ErrorCode code, const std::string& message) {
+    const bool invalid = code == foundation::ErrorCode::InvalidArgument ||
+                         code == foundation::ErrorCode::ParseError;
+    if (!invalid) return {500, "server_error", "inference_error"};
+    if (message.find("maximum context length") != std::string::npos) {
+        return {400, "invalid_request_error", "context_length_exceeded"};
+    }
+    return {400, "invalid_request_error", "invalid_request_error"};
+}
+
 nlohmann::json delta_json(const model::InferenceDelta& delta) {
     nlohmann::json out = nlohmann::json::object();
     if (!delta.reasoning_text.empty()) out["reasoning_content"] = delta.reasoning_text;
@@ -481,17 +497,13 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         try {
             auto pres = deps.coordinator.predict(model_name, slot_id, ir);
             if (!pres) {
-                const bool invalid_request =
-                    pres.error().code == foundation::ErrorCode::InvalidArgument;
-                const int status = invalid_request ? 400 : 500;
-                const std::string code = invalid_request
-                    ? (pres.error().message.find("maximum context length") != std::string::npos
-                           ? "context_length_exceeded"
-                           : "invalid_request_error")
-                    : "inference_error";
+                const auto ec = classify_inference_error(pres.error().code, pres.error().message);
+                LOG_ERROR("inference_failed",
+                          "model={} slot_id={} status={} code={} error={}",
+                          model_name, slot_id, ec.status, ec.code, pres.error().message);
                 model::InferenceResult failed;
-                record_request(deps, model_name, failed, status, slot_id);
-                write_error(resp, status, code, pres.error().message);
+                record_request(deps, model_name, failed, ec.status, slot_id);
+                write_error(resp, ec.status, ec.code, pres.error().message);
                 return;
             }
             pr = std::move(*pres);
@@ -561,7 +573,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         std::deque<model::InferenceDelta> delta_queue;
         bool inference_done{false};
         bool inference_error{false};
-        bool invalid_request{false};
+        foundation::ErrorCode error_code{foundation::ErrorCode::Internal};
         std::string error_msg;
         std::shared_ptr<model::InferenceResult> final_result;
         std::atomic<bool> aborted{false};
@@ -650,20 +662,23 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     state->final_result = std::make_shared<model::InferenceResult>(std::move(*result));
                 } else {
                     state->inference_error = true;
-                    state->invalid_request =
-                        result.error().code == foundation::ErrorCode::InvalidArgument;
+                    state->error_code = result.error().code;
                     state->error_msg = result.error().message;
                 }
                 state->inference_done = true;
             }
             state->cv.notify_all();
         } catch (const std::exception& e) {
+            LOG_ERROR("inference_thread_exception", "model={} slot_id={} what={}",
+                      state->model_name, state->slot_id, e.what());
             std::lock_guard<std::mutex> lk(state->mtx);
             state->inference_error = true;
             state->error_msg = e.what();
             state->inference_done = true;
             state->cv.notify_all();
         } catch (...) {
+            LOG_ERROR("inference_thread_exception", "model={} slot_id={} what=unknown",
+                      state->model_name, state->slot_id);
             std::lock_guard<std::mutex> lk(state->mtx);
             state->inference_error = true;
             state->error_msg = "unknown exception";
@@ -730,22 +745,20 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             }
 
             const bool inference_error = state->inference_error;
-            const bool invalid_request = state->invalid_request;
+            const auto error_code = state->error_code;
             const std::string error_msg = state->error_msg;
             const auto final_result = state->final_result;
             lk.unlock();
 
             if (inference_error) {
-                const std::string err_type = invalid_request ? "invalid_request_error" : "server_error";
-                const std::string err_code = invalid_request
-                    ? (error_msg.find("maximum context length") != std::string::npos
-                           ? "context_length_exceeded"
-                           : "invalid_request_error")
-                    : "inference_error";
+                const auto ec = classify_inference_error(error_code, error_msg);
+                LOG_ERROR("inference_failed",
+                          "model={} slot_id={} status={} code={} error={}",
+                          state->model_name, state->slot_id, ec.status, ec.code, error_msg);
                 std::string err = "data: " + nlohmann::json{{"error", {
                     {"message", error_msg},
-                    {"type", err_type},
-                    {"code", err_code},
+                    {"type", ec.type},
+                    {"code", ec.code},
                 }}}.dump() + "\n\n";
                 if (!sink.write(err.data(), err.size())) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=error_write_failed",
@@ -753,7 +766,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     state->finish_once(true, 499, "error_write_failed");
                     return false;
                 }
-                state->finish_once(false, invalid_request ? 400 : 500, "inference_error");
+                state->finish_once(false, ec.status, "inference_error");
             } else {
                 const bool has_tool_calls = final_result && !final_result->tool_calls.empty();
                 const std::string finish_reason = has_tool_calls ? "tool_calls" :

@@ -1,0 +1,5 @@
+﻿{"model":"qwen3.6-35b-a3b","stream":false,"max_tokens":32,"messages":[
+  {"role":"system","content":"Summarize."},
+  {"role":"tool","tool_call_id":"call_orphan","content":"main.c util.c"},
+  {"role":"user","content":"Summarize the conversation."}
+]}

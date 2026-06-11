@@ -116,9 +116,11 @@ static int prepare_prompt_cache(
   }
   if (!llama_memory_seq_rm(mem, seq_id, n_past, -1)) {
     LOG_WARN("llama_prompt_cache_fallback",
-             "model={} cached_prompt_tokens={} reason=seq_rm_failed",
+             "model={} cached_prompt_tokens={} reason=seq_rm_failed pos_min={} pos_max={}",
              model_name,
-             n_past);
+             n_past,
+             llama_memory_seq_pos_min(mem, seq_id),
+             llama_memory_seq_pos_max(mem, seq_id));
     llama_memory_clear(mem, true);
     return 0;
   }
@@ -958,6 +960,11 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
   inputs.parallel_tool_calls = caps["supports_parallel_tool_calls"];
 
   if (body.contains("messages") && body["messages"].is_array()) {
+    for (auto& m : body["messages"]) {
+      if (m.is_object() && !m.contains("content") && !m.contains("tool_calls")) {
+        m["content"] = "";
+      }
+    }
     try {
       inputs.messages = common_chat_msgs_parse_oaicompat(body["messages"]);
     } catch (const std::exception& e) {
@@ -1026,6 +1033,7 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
     }
   }
 
+  try {
   auto chat_params = common_chat_templates_apply(chat_templates_, inputs);
 
   ChatTemplateMeta meta;
@@ -1078,6 +1086,11 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
   result.meta = std::move(meta);
 
   return Result<ChatTemplateResult>(std::move(result));
+  } catch (const std::exception& e) {
+    LOG_WARN("chat_template_failed", "model={} error={}", info_.name, e.what());
+    return Result<ChatTemplateResult>(std::unexpect,
+        make_error(ErrorCode::ParseError, std::string("chat template failed: ") + e.what()));
+  }
 }
 
 Result<void> LlamaCppModel::build_sampler_locked(
