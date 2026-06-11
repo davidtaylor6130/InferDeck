@@ -9,6 +9,11 @@
   content now defaults to "", template application is exception-guarded,
   and parse/template failures return 400 invalid_request_error instead
   of an opaque 500
+- Oversized prompts are now truncated llama-server style (keep first
+  1024 tokens + most recent tail, drop the middle, logged as
+  llama_prompt_truncated) instead of erroring, so sessions that grew
+  past n_ctx can still compact and continue; disable with
+  gateway.truncate_prompt: false
 - Inference failures are now logged with status, code, and full message
   (previously only `reason=inference_error`)
 - Follow-up turns that strictly extend the prompt cache no longer rewind
