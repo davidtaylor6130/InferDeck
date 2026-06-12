@@ -113,6 +113,8 @@ export interface StatusPayload {
   };
   tokenUsage: UsageRow[];
   monthlyTokenUsage: MonthlyUsageRow[];
+  dailyTokenUsage?: MonthlyUsageRow[];
+  hourlyTokenUsage?: MonthlyUsageRow[];
   models: Array<Omit<ModelInfo, 'id'> & { id: string }>;
   current: string;
   uptime: number;

@@ -194,18 +194,24 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
         });
     }
 
-    nlohmann::json monthly = nlohmann::json::array();
-    for (const auto& row : stats_db.monthly_usage()) {
-        monthly.push_back({
-            {"bucket", row.bucket},
-            {"model", row.model},
-            {"promptTokens", row.prompt_tokens},
-            {"completionTokens", row.completion_tokens},
-            {"totalTokens", row.total_tokens},
-            {"requests", row.requests},
-            {"successfulRequests", row.successful_requests}
-        });
-    }
+    auto bucket_json = [](const std::vector<observability::UsageBucketRow>& rows) {
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto& row : rows) {
+            out.push_back({
+                {"bucket", row.bucket},
+                {"model", row.model},
+                {"promptTokens", row.prompt_tokens},
+                {"completionTokens", row.completion_tokens},
+                {"totalTokens", row.total_tokens},
+                {"requests", row.requests},
+                {"successfulRequests", row.successful_requests}
+            });
+        }
+        return out;
+    };
+    auto monthly = bucket_json(stats_db.monthly_usage());
+    auto daily = bucket_json(stats_db.daily_usage(31));
+    auto hourly = bucket_json(stats_db.hourly_usage(24));
 
     std::vector<double> latencies;
     for (const auto& row : stats_db.recent_requests(500)) {
@@ -250,6 +256,8 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
         }},
         {"tokenUsage", usage},
         {"monthlyTokenUsage", monthly},
+        {"dailyTokenUsage", daily},
+        {"hourlyTokenUsage", hourly},
         {"models", model_json["models"]},
         {"current", model_json["current"]},
         {"uptime", deps.uptime_seconds ? deps.uptime_seconds() : 0}

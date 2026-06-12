@@ -279,4 +279,42 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
   return out;
 }
 
+std::vector<UsageBucketRow> StatsDb::daily_usage(int days) const {
+  return bucketed_usage("%Y-%m-%d", now_ms() - static_cast<std::int64_t>(days) * 86'400'000);
+}
+
+std::vector<UsageBucketRow> StatsDb::hourly_usage(int hours) const {
+  return bucketed_usage("%Y-%m-%dT%H", now_ms() - static_cast<std::int64_t>(hours) * 3'600'000);
+}
+
+std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_t since_ms) const {
+  std::vector<UsageBucketRow> out;
+  if (!healthy_) return out;
+  std::lock_guard lk(mtx_);
+  sqlite3_stmt* stmt = nullptr;
+  const char* sql =
+    "SELECT strftime(?, ts / 1000, 'unixepoch', 'localtime') AS bucket, model, "
+    "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
+    "COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0) "
+    "FROM requests WHERE ts >= ? "
+    "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
+  if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
+  sqlite3_bind_text(stmt, 1, fmt, -1, SQLITE_STATIC);
+  sqlite3_bind_int64(stmt, 2, since_ms);
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    UsageBucketRow r;
+    r.bucket = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    r.model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+    r.prompt_tokens = sqlite3_column_int64(stmt, 2);
+    r.completion_tokens = sqlite3_column_int64(stmt, 3);
+    r.total_tokens = sqlite3_column_int64(stmt, 4);
+    r.requests = sqlite3_column_int64(stmt, 5);
+    r.successful_requests = sqlite3_column_int64(stmt, 6);
+    out.push_back(std::move(r));
+  }
+  sqlite3_finalize(stmt);
+  return out;
+}
+
 }

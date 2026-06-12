@@ -66,6 +66,8 @@ public:
   std::vector<SwapRow>    recent_swaps(int limit = 100) const;
   std::vector<ModelUsageRow> model_usage() const;
   std::vector<UsageBucketRow> monthly_usage(int months = 0) const;
+  std::vector<UsageBucketRow> daily_usage(int days = 30) const;
+  std::vector<UsageBucketRow> hourly_usage(int hours = 24) const;
 
   bool healthy() const noexcept { return healthy_; }
   const std::string& path() const noexcept { return path_; }
@@ -73,6 +75,7 @@ public:
 private:
   void open();
   void close();
+  std::vector<UsageBucketRow> bucketed_usage(const char* fmt, std::int64_t since_ms) const;
 
   std::string path_;
   void* db_{nullptr};

@@ -25,7 +25,7 @@ export interface TokenSeries {
   cost: number[];
 }
 
-export type TokenRange = 'week' | 'month' | 'year' | 'all';
+export type TokenRange = 'day' | 'week' | 'month' | 'year' | 'all';
 
 export const ALL_MODELS = 'All tracked models';
 export const COST_STORAGE_KEY = 'inferdeck:model-token-costs';
@@ -33,6 +33,7 @@ export const DEFAULT_BREAK_EVEN_TARGET = 1739;
 export const MODEL_COST_DEFAULTS_VERSION = 4;
 
 export const TOKEN_RANGE_LABELS: Record<TokenRange, string> = {
+  day: '24h',
   week: 'Week',
   month: 'Month',
   year: 'Year',
@@ -182,14 +183,24 @@ export function buildTokenSeries(
   defaults: CostDefaults,
   fallback: ModelCostConfig,
   range: TokenRange,
+  daily: MonthlyUsageRow[] = [],
+  hourly: MonthlyUsageRow[] = [],
 ): TokenSeries {
   const buckets = buildTokenBuckets(range, jobs, model, persisted);
   const byBucket = new Map(buckets.map(bucket => [bucket.key, { prompt: 0, output: 0, total: 0, cost: 0 }]));
-  const usePersisted = persisted.length > 0 && (range === 'all' || range === 'year');
+  const persistedRows =
+    range === 'day' ? hourly :
+    range === 'week' || range === 'month' ? daily :
+    persisted;
+  const usePersisted = persistedRows.length > 0;
   if (usePersisted) {
-    for (const row of persisted) {
+    for (const row of persistedRows) {
       if (model !== ALL_MODELS && row.model !== model) continue;
-      const bucket = byBucket.get(row.bucket);
+      let bucket = byBucket.get(row.bucket);
+      if (!bucket && range !== 'all' && range !== 'year') {
+        const chartBucket = findTokenBucket(buckets, bucketStartDate(row.bucket));
+        bucket = chartBucket ? byBucket.get(chartBucket.key) : undefined;
+      }
       if (!bucket) continue;
       const prompt = Number(row.promptTokens ?? 0);
       const output = Number(row.completionTokens ?? 0);
@@ -240,9 +251,31 @@ export function tokenUsageFromSeries(model: string, series: TokenSeries): ModelT
 }
 
 function buildTokenBuckets(range: TokenRange, jobs: JobRecord[], model: string, persisted: MonthlyUsageRow[]): TokenBucket[] {
+  if (range === 'day') return fixedHourBuckets(24);
   if (range === 'week') return fixedDayBuckets(7);
   if (range === 'month') return fixedDayBuckets(30, 5);
   return monthlyTokenBuckets(range, jobs, model, persisted);
+}
+
+function fixedHourBuckets(hours: number): TokenBucket[] {
+  const now = new Date();
+  const currentHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
+  return Array.from({ length: hours }, (_, index) => {
+    const start = new Date(currentHour.getTime() - (hours - 1 - index) * 3_600_000);
+    const end = new Date(start.getTime() + 3_600_000);
+    return {
+      key: `${dateKey(start)}T${String(start.getHours()).padStart(2, '0')}`,
+      label: index % 4 === 0 || index === hours - 1 ? `${String(start.getHours()).padStart(2, '0')}:00` : '',
+      start,
+      end,
+    };
+  });
+}
+
+function bucketStartDate(bucket: string): Date {
+  const [datePart, hourPart] = bucket.split('T');
+  const [year, month, day] = datePart.split('-').map(Number);
+  return new Date(year, (month || 1) - 1, day || 1, Number(hourPart || 0));
 }
 
 function fixedDayBuckets(days: number, spanDays = 1): TokenBucket[] {

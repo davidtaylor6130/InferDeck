@@ -43,6 +43,8 @@ export const UsagePage: React.FC = () => {
 
   const usage = status?.tokenUsage ?? [];
   const monthly = status?.monthlyTokenUsage ?? [];
+  const daily = status?.dailyTokenUsage ?? [];
+  const hourly = status?.hourlyTokenUsage ?? [];
 
   const modelNames = useMemo(() => {
     const names = new Set<string>([ALL_MODELS]);
@@ -59,8 +61,8 @@ export const UsagePage: React.FC = () => {
   const portfolioCost = getCostConfigForModel(ALL_MODELS, saved, defaults.defaults, defaults.fallback);
 
   const series = useMemo(
-    () => buildTokenSeries(jobs, selectedModel, selectedCost, monthly, saved, defaults.defaults, defaults.fallback, range),
-    [jobs, selectedModel, selectedCost, monthly, saved, defaults, range],
+    () => buildTokenSeries(jobs, selectedModel, selectedCost, monthly, saved, defaults.defaults, defaults.fallback, range, daily, hourly),
+    [jobs, selectedModel, selectedCost, monthly, saved, defaults, range, daily, hourly],
   );
   const seriesUsage = useMemo(() => tokenUsageFromSeries(selectedModel, series), [selectedModel, series]);
 
