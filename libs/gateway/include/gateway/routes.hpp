@@ -11,6 +11,7 @@
 #include "observability/stats_db.hpp"
 
 #include <chrono>
+#include <map>
 #include <string>
 
 namespace inferdeck::gateway {
@@ -19,11 +20,26 @@ struct GatewayDeps {
     model::BackendCoordinator& coordinator;
     std::string default_swap_timeout_s{"15"};
     bool auto_swap{true};
+    std::string default_model{};
+    std::map<std::string, std::string> anthropic_model_aliases{};
     observability::Metrics* metrics{nullptr};
     observability::StatsDb* stats_db{nullptr};
     foundation::EventBus* events{nullptr};
     SwapTracker* swap_tracker{nullptr};
 };
+
+void record_request(observability::Metrics* metrics,
+                    observability::StatsDb* stats_db,
+                    foundation::EventBus* events,
+                    const std::string& model_name,
+                    const model::InferenceResult& result,
+                    int status_code,
+                    int slot_id);
+void record_request(const GatewayDeps& deps,
+                    const std::string& model_name,
+                    const model::InferenceResult& result,
+                    int status_code,
+                    int slot_id);
 
 void write_json(httplib::Response& resp, int status, const nlohmann::json& body);
 void write_error(httplib::Response& resp, int status, const std::string& code,

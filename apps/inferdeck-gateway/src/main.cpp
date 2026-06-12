@@ -24,6 +24,7 @@
 #include "config.hpp"
 #include "foundation/event_bus.hpp"
 #include "foundation/logging.hpp"
+#include "gateway/anthropic_routes.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
 #include "gateway/dashboard_routes.hpp"
@@ -300,8 +301,9 @@ int main(int argc, char** argv) {
 
     foundation::EventBus events;
     SwapTracker swap_tracker;
-    GatewayDeps deps{coordinator, "15", cfg.auto_swap, &metrics, &stats_db,
-                     &events, &swap_tracker};
+    GatewayDeps deps{coordinator, "15", cfg.auto_swap,
+                     cfg.default_model, cfg.anthropic_model_aliases,
+                     &metrics, &stats_db, &events, &swap_tracker};
 
     auto uptime_seconds = [&] {
         const auto now = std::chrono::steady_clock::now();
@@ -366,7 +368,13 @@ int main(int argc, char** argv) {
                             httplib::Response& resp) {
             LOG_INFO("http_request_begin", "method={} path={}", req.method, req.path);
             cors.apply(resp);
-            if (auth.required() && !auth.check(header_value(req, "Authorization"))) {
+            std::string auth_header = header_value(req, "Authorization");
+            if (auth_header.empty()) {
+                // Anthropic SDK clients (e.g. Claude Code) authenticate via x-api-key.
+                const std::string api_key = header_value(req, "x-api-key");
+                if (!api_key.empty()) auth_header = "Bearer " + api_key;
+            }
+            if (auth.required() && !auth.check(auth_header)) {
                 resp.status = 401;
                 resp.set_header("WWW-Authenticate", "Bearer");
                 write_json(resp, 401, {{"error", {{"code", "unauthorized"},
@@ -412,6 +420,14 @@ int main(int argc, char** argv) {
     server.Post(R"(^/v1/chat/completions$)", wrap([&](const httplib::Request& req,
                                                  httplib::Response& resp) {
         handle_chat_completions(req, resp, deps);
+    }));
+    server.Post(R"(^/v1/messages$)", wrap([&](const httplib::Request& req,
+                                         httplib::Response& resp) {
+        handle_anthropic_messages(req, resp, deps);
+    }));
+    server.Post(R"(^/v1/messages/count_tokens$)", wrap([&](const httplib::Request& req,
+                                                      httplib::Response& resp) {
+        handle_anthropic_count_tokens(req, resp, deps);
     }));
     server.Get(R"(^/v1/metrics$)", wrap([&](const httplib::Request& req,
                                        httplib::Response& resp) {

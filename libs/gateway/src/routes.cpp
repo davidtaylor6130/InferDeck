@@ -33,6 +33,8 @@ std::int64_t now_ms() {
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
+} // namespace
+
 void record_request(observability::Metrics* metrics,
                     observability::StatsDb* stats_db,
                     foundation::EventBus* events,
@@ -93,6 +95,8 @@ void record_request(const GatewayDeps& deps,
     record_request(deps.metrics, deps.stats_db, deps.events,
                    model_name, result, status_code, slot_id);
 }
+
+namespace {
 
 void record_swap(const GatewayDeps& deps,
                  const std::string& from_model,

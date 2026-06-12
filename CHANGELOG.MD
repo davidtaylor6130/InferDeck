@@ -1,5 +1,24 @@
 # InferDeck - Changelog
 
+## [2.2.0] - 2026-06-12
+
+### Added
+- Anthropic Messages API support so Claude Code can run local models:
+  POST /v1/messages (streaming + non-streaming) and
+  POST /v1/messages/count_tokens. Translates Anthropic requests
+  (system, content blocks, tool_use/tool_result, images, tools,
+  tool_choice, stop_sequences) to the internal OpenAI-shaped pipeline
+  and emits Anthropic SSE events (message_start, content_block_start/
+  delta/stop with input_json_delta for tool calls, message_delta,
+  message_stop, ping heartbeat) with Anthropic error envelopes
+- Model resolution for Anthropic clients: exact registry match >
+  anthropic.model_aliases config map > currently loaded model >
+  default_model, so claude-* model names just work
+- x-api-key header accepted as auth (Anthropic SDK convention),
+  mapped onto the existing Bearer token check
+- Usage: ANTHROPIC_BASE_URL=http://localhost:11434
+  ANTHROPIC_AUTH_TOKEN=anything claude
+
 ## [2.1.1] - 2026-06-11
 
 ### Fixed

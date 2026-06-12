@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -39,6 +40,7 @@ struct GatewayConfig {
     std::string cache_type_v{"q8_0"};
     bool swa_full{false};
     bool truncate_prompt{true};
+    std::map<std::string, std::string> anthropic_model_aliases{};
 };
 
 inline std::string read_text_file(const std::filesystem::path& path) {
@@ -120,6 +122,13 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["cache_type_v"]) cfg.cache_type_v = g["cache_type_v"].as<std::string>();
         if (g["swa_full"]) cfg.swa_full = g["swa_full"].as<bool>();
         if (g["truncate_prompt"]) cfg.truncate_prompt = g["truncate_prompt"].as<bool>();
+    }
+    if (root["anthropic"] && root["anthropic"]["model_aliases"] &&
+        root["anthropic"]["model_aliases"].IsMap()) {
+        for (const auto& kv : root["anthropic"]["model_aliases"]) {
+            cfg.anthropic_model_aliases[kv.first.as<std::string>()] =
+                kv.second.as<std::string>();
+        }
     }
     if (root["model_registry"] && root["model_registry"].IsSequence()) {
         for (const auto& m : root["model_registry"]) {
