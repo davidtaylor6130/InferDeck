@@ -88,6 +88,23 @@ GATEWAY_URL=http://127.0.0.1:11435 GATEWAY_MODEL=qwen2.5-coder-3b node Testing/m
 bash tests/parity/run.sh
 ```
 
+## Deployment
+
+The live server runs from `C:\InferDeck\bin\`, launched by
+`C:\InferDeck\Start-InferDeck.ps1` (scheduled tasks at startup/logon
+plus a 15-min watchdog). A deploy requires copying **both** artifacts —
+updating only one leaves a mismatched install:
+
+- `build/bin/Release/inferdeck-gateway.exe` → `C:\InferDeck\bin\gateway-service.exe`
+- `apps/inferdeck-gateway/static/` (index.html + assets) → `C:\InferDeck\bin\static/`
+
+The gateway serves the dashboard from `executable_dir()/static`, so the
+exe and its static dir must come from the same build. Replacing just the
+exe makes the new gateway serve the old dashboard. The exe can't be
+overwritten while running — stop the process (or rename the file aside)
+first. Clear stale hashed bundles in `bin/static/assets/` so only the
+current `index-*.js`/`index-*.css` remain.
+
 ## HTTP API
 
 OpenAI-compatible (`/v1`):
