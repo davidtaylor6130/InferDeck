@@ -1,0 +1,52 @@
+<svg width="1200" height="260" viewBox="0 0 1200 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="InferDeck — self-hosted AI gateway for Windows">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b27"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#7c3aed"/>
+      <stop offset="50%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1c2333"/>
+      <stop offset="100%" stop-color="#141a28"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="260" rx="12" fill="url(#bg)"/>
+  <rect x="0.5" y="0.5" width="1199" height="259" rx="12" fill="none" stroke="#2a3243" stroke-width="1"/>
+
+  <!-- deck glyph: stacked cards -->
+  <g transform="translate(78,62)">
+    <rect x="22" y="0"  width="120" height="76" rx="9" fill="url(#card)" stroke="#39415a" stroke-width="1.5" transform="rotate(6 82 38)"/>
+    <rect x="11" y="22" width="120" height="76" rx="9" fill="url(#card)" stroke="#454e6b" stroke-width="1.5" transform="rotate(3 71 60)"/>
+    <rect x="0"  y="44" width="120" height="76" rx="9" fill="#1d2435" stroke="url(#accent)" stroke-width="2"/>
+    <!-- token stream lines on top card -->
+    <rect x="16" y="62" width="56" height="7" rx="3.5" fill="#7c3aed" opacity="0.95"/>
+    <rect x="78" y="62" width="26" height="7" rx="3.5" fill="#3b4258"/>
+    <rect x="16" y="78" width="34" height="7" rx="3.5" fill="#2563eb" opacity="0.95"/>
+    <rect x="56" y="78" width="48" height="7" rx="3.5" fill="#3b4258"/>
+    <rect x="16" y="94" width="70" height="7" rx="3.5" fill="#06b6d4" opacity="0.95"/>
+    <rect x="92" y="94" width="12" height="7" rx="3.5" fill="#3b4258"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="268" y="124" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif" font-size="64" font-weight="700" fill="#e6edf3" letter-spacing="-1">Infer<tspan fill="#58a6ff">Deck</tspan></text>
+  <rect x="272" y="142" width="330" height="4" rx="2" fill="url(#accent)"/>
+  <text x="270" y="180" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif" font-size="22" fill="#9aa7b8">Self-hosted AI gateway for Windows — in-process llama.cpp,</text>
+  <text x="270" y="208" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif" font-size="22" fill="#9aa7b8">OpenAI-compatible API, live dashboard. One executable.</text>
+
+  <!-- right-side terminal hint -->
+  <g transform="translate(880,70)" font-family="Consolas, 'Courier New', monospace" font-size="15">
+    <rect width="252" height="120" rx="8" fill="#10151f" stroke="#2a3243"/>
+    <circle cx="18" cy="18" r="4.5" fill="#f87171"/>
+    <circle cx="34" cy="18" r="4.5" fill="#fbbf24"/>
+    <circle cx="50" cy="18" r="4.5" fill="#34d399"/>
+    <text x="16" y="52" fill="#7ee787">$</text>
+    <text x="30" y="52" fill="#c9d1d9">inferdeck-gateway.exe</text>
+    <text x="16" y="76" fill="#8b949e">listening on :11434</text>
+    <text x="16" y="100" fill="#8b949e">model loaded · 2 slots</text>
+  </g>
+</svg>
