@@ -1,8 +1,5 @@
 <div align="center">
 
-<!-- TODO(assets): official logo — drop it at docs/assets/logo.png (transparent
-     background, ≥512px wide) and replace the banner line below with:
-     <img src="docs/assets/logo.png" alt="InferDeck" width="360"/>           -->
 <img src="docs/assets/banner.svg" alt="InferDeck — self-hosted AI gateway for Windows" width="100%"/>
 
 <br/>
@@ -33,10 +30,21 @@ exposes OpenAI- and Anthropic-compatible APIs on `:11434`, and serves a live Rea
 
 ## Why InferDeck
 
-InferDeck started as a deep dive into what it actually takes to build
-production-grade inference infrastructure from scratch — modern C++,
-GPU scheduling, streaming protocols, and the llama.cpp internals that most
-wrappers hide. It has since grown into the daily driver for my workstation.
+My "AI server" is also my gaming and dev PC — a Windows machine upgraded with
+a Radeon AI PRO R9700. I wasn't willing to switch it to Linux or maintain a
+dual boot just to serve models, and I was already building
+[Universal Agent Manager](https://github.com/davidtaylor6130/Universal-Agent-Manager),
+which needed a local inference backend it could control over the network and
+trust to run unattended.
+
+None of the existing options fit that setup. **LM Studio**'s server ate too
+much system RAM. **Ollama** was slow and a faff to control programmatically.
+Raw **llama-server.exe** generates well but is hard to manage over the
+network. **vLLM** is built for a different scale than a single-GPU Windows
+box. So I built my own gateway that matches `llama-server.exe`'s behaviour
+token-for-token — the ≥ 0.95 parity gate in CI exists for exactly this
+reason — while adding the control layer the others lacked. It was also a
+welcome excuse to get back into a serious modern-C++ project.
 
 The guiding idea is simple: **one GPU, fully under your control, never
 dropping work.** Most local-LLM setups on Windows are a stack of loosely
@@ -59,6 +67,13 @@ single gateway where **one GPU time-shares every local AI workload** — LLM
 inference, speech-to-text, text-to-speech, image and video generation, and
 post-training/quantization jobs — all behind the same API, the same scheduler,
 and the same dashboard. See the [roadmap](#roadmap).
+
+> [!NOTE]
+> InferDeck is a working daily-driver, but it's also deliberately a
+> **learning project**. Part of the goal is to explore the problem space, so
+> some subsystems take the experimental route where a boring, conventional one
+> would do — that's a feature, not an accident. The parity gate and test
+> suites are there to keep the experiments honest.
 
 ## Features
 
@@ -204,8 +219,6 @@ bash tests/parity/run.sh
 | `GET /api/status` · `/api/jobs` · `/api/logs` · `/api/pricing` | dashboard data |
 | `GET /api/events/stream` | SSE: `stats` (~1 Hz), `model`, `request` events |
 
-Full reference in [`docs/api/`](docs/api/).
-
 ## Roadmap
 
 The destination: **one GPU, every modality, zero dropped requests** — a single
@@ -259,8 +272,8 @@ Suggestions and issues are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 | --- | --- |
 | [`AGENTS.md`](AGENTS.md) | Engineering guide: build/test commands, architecture quick reference, concurrency invariants, design rules learned the hard way |
 | [`docs/architecture.md`](docs/architecture.md) | Layer-by-layer architecture notes |
-| [`docs/BUILD.md`](docs/BUILD.md) · [`docs/DEPLOY.md`](docs/DEPLOY.md) | Build details and unattended-deployment guide |
-| [`docs/api/`](docs/api/) | Full API reference |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Unattended Windows deployment (scheduled tasks + watchdog) |
+| [`docs/opencode-setup-guide.md`](docs/opencode-setup-guide.md) | Pointing opencode at InferDeck |
 | [`CHANGELOG.MD`](CHANGELOG.MD) | Release history |
 
 ## Acknowledgements
