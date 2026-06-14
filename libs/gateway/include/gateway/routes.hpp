@@ -53,6 +53,19 @@ struct SwapStartResult {
 
 SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name);
 
+struct EnsureLoadedResult {
+    bool ok{false};
+    int status{503};
+    std::string code{};
+    std::string message{};
+};
+
+// Ensure `model_name` is loaded, waiting out any in-progress swap (e.g. two
+// concurrent requests racing on a cold model) rather than returning 503. On
+// failure, `status`/`code`/`message` describe the error for the caller to emit.
+EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
+                                       const std::string& model_name);
+
 void handle_models(const httplib::Request& req, httplib::Response& resp,
                    const GatewayDeps& deps);
 

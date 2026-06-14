@@ -361,6 +361,55 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
                   {"from", from}}};
 }
 
+EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
+                                       const std::string& model_name) {
+    if (deps.coordinator.is_loaded(model_name)) {
+        return {true, 200, "", ""};
+    }
+    if (!deps.auto_swap) {
+        return {false, 503, "model_not_loaded",
+                "model not loaded; POST /v1/swap/to/" + model_name + " then retry"};
+    }
+
+    LOG_INFO("auto_swap_begin", "requested={}", model_name);
+    // Wait out any in-progress swap rather than failing fast with 503. A cold-start
+    // race (e.g. a client firing a title + main request at the same time) resolves
+    // when the first swap finishes and the target becomes loaded -- no redundant
+    // swap, no 503.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes{5};
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (deps.coordinator.is_loaded(model_name)) {
+            return {true, 200, "", ""};
+        }
+
+        auto started = start_swap_async(deps, model_name);
+        if (started.status == 404) {
+            return {false, 404, "model_not_found",
+                    "model not registered: " + model_name};
+        }
+        // status 200 (already loaded), 202 (we started the swap), or 409 (another
+        // swap already in progress): in every case wait for the model to load.
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (deps.coordinator.is_loaded(model_name)) {
+                return {true, 200, "", ""};
+            }
+            const auto snap =
+                deps.swap_tracker ? deps.swap_tracker->snapshot() : SwapSnapshot{};
+            if (!snap.swapping && !deps.coordinator.swap_in_progress()) {
+                // The in-progress swap settled. If it targeted our model and failed,
+                // surface that; otherwise re-evaluate and start our own swap.
+                if (snap.target == model_name && !snap.last_error.empty()) {
+                    return {false, 503, "swap_failed",
+                            "model load failed: " + snap.last_error};
+                }
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+    }
+    return {false, 503, "swap_in_progress", "model load timed out: " + model_name};
+}
+
 void handle_swap_to(const httplib::Request& req, httplib::Response& resp,
                     const GatewayDeps& deps, const std::string& model_name) {
     (void)req;
@@ -422,29 +471,13 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     "model not registered: " + model_name);
         return;
     }
-    if (!deps.coordinator.is_loaded(model_name)) {
-        if (deps.auto_swap) {
-            LOG_INFO("auto_swap_begin", "requested={}", model_name);
-            const auto from_model = deps.coordinator.get_loaded_model();
-            if (!begin_tracked_swap(deps, from_model.value_or(""), model_name)) {
+    {
+        auto loaded = ensure_model_loaded(deps, model_name);
+        if (!loaded.ok) {
+            if (loaded.status == 503) {
                 resp.set_header("Retry-After", deps.default_swap_timeout_s);
-                write_error(resp, 503, "swap_in_progress",
-                            "another model swap is in progress; retry shortly");
-                return;
             }
-            auto swap_result = perform_swap(deps, from_model.value_or(""), model_name);
-            if (!swap_result) {
-                LOG_ERROR("auto_swap_failed", "model={} error={}", model_name, swap_result.error().message);
-                write_error(resp, 500, "swap_failed", swap_result.error().message);
-                return;
-            }
-            LOG_INFO("auto_swap_complete", "model={}", model_name);
-        } else {
-            resp.status = 503;
-            resp.set_header("Retry-After", deps.default_swap_timeout_s);
-            write_error(resp, 503, "model_not_loaded",
-                        "model not loaded; POST /v1/swap/to/" + model_name +
-                        " then retry");
+            write_error(resp, loaded.status, loaded.code, loaded.message);
             return;
         }
     }
