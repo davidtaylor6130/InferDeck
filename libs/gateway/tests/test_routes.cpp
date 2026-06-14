@@ -33,6 +33,7 @@ public:
     std::atomic<bool> loaded{false};
     std::atomic<int> vram_mb{4096};
     std::atomic<int> max_slots{2};
+    std::atomic<int> load_delay_ms{0};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
     ChatTemplateMeta chat_meta_{};
@@ -44,7 +45,12 @@ public:
     const ModelInfo& info() const override { return model_info; }
     const ChatTemplateMeta& chat_template_meta() const override { return chat_meta_; }
 
-    Result<void> load() override { loaded.store(true); return Ok(); }
+    Result<void> load() override {
+        const int delay = load_delay_ms.load();
+        if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds{delay});
+        loaded.store(true);
+        return Ok();
+    }
     Result<void> unload() override {
         loaded.store(false);
         std::lock_guard<std::mutex> lock(mtx);
@@ -436,4 +442,72 @@ TEST_CASE("Routes: streaming tool call emits llama-server shaped SSE",
     REQUIRE(usage[0].prompt_tokens == 8);
     REQUIRE(usage[0].completion_tokens == 12);
     ts.stop();
+}
+
+TEST_CASE("ensure_model_loaded: already-loaded model returns ok immediately", "[routes][swap]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load("a"));
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+
+    auto r = ensure_model_loaded(deps, "a");
+    REQUIRE(r.ok);
+    REQUIRE(r.status == 200);
+}
+
+TEST_CASE("ensure_model_loaded: auto_swap disabled yields 503 for a cold model", "[routes][swap]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = false;
+    deps.swap_tracker = &tracker;
+
+    auto r = ensure_model_loaded(deps, "a");
+    REQUIRE_FALSE(r.ok);
+    REQUIRE(r.status == 503);
+    REQUIRE(r.code == "model_not_loaded");
+}
+
+// Regression for issue #19: two requests racing on a cold model (e.g. OpenCode's
+// title + main calls) must both succeed; the second waits out the in-progress
+// swap instead of getting 503 swap_in_progress.
+TEST_CASE("ensure_model_loaded: concurrent callers wait out the swap, no 503", "[routes][swap]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto m = std::make_unique<IModelMock>(info);
+        m->load_delay_ms.store(300);  // make the swap slow enough to overlap
+        return m;
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+
+    REQUIRE_FALSE(coordinator.is_loaded("a"));
+
+    EnsureLoadedResult r0, r1;
+    std::thread t0([&]() { r0 = ensure_model_loaded(deps, "a"); });
+    std::thread t1([&]() { r1 = ensure_model_loaded(deps, "a"); });
+    t0.join();
+    t1.join();
+
+    REQUIRE(r0.ok);
+    REQUIRE(r1.ok);
+    REQUIRE(r0.status == 200);
+    REQUIRE(r1.status == 200);
+    REQUIRE(coordinator.is_loaded("a"));
 }

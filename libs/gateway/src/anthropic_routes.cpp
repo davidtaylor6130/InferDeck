@@ -402,38 +402,15 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
         return;
     }
 
-    if (!deps.coordinator.is_loaded(model_name)) {
-        if (deps.auto_swap) {
-            auto started = start_swap_async(deps, model_name);
-            if (started.status >= 400) {
-                write_anthropic_error(resp, 503, "overloaded_error",
-                                      started.body.dump());
-                return;
+    {
+        auto loaded = ensure_model_loaded(deps, model_name);
+        if (!loaded.ok) {
+            if (loaded.status == 503) {
+                resp.set_header("Retry-After", deps.default_swap_timeout_s);
             }
-            // start_swap_async runs in the background; wait for the load,
-            // bailing early if the tracker reports the swap ended in failure.
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes{5};
-            while (!deps.coordinator.is_loaded(model_name) &&
-                   std::chrono::steady_clock::now() < deadline) {
-                if (deps.swap_tracker) {
-                    const auto snap = deps.swap_tracker->snapshot();
-                    if (!snap.swapping && !snap.last_error.empty()) {
-                        write_anthropic_error(resp, 503, "overloaded_error",
-                                              "model load failed: " + snap.last_error);
-                        return;
-                    }
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds{200});
-            }
-            if (!deps.coordinator.is_loaded(model_name)) {
-                write_anthropic_error(resp, 503, "overloaded_error",
-                                      "model load timed out: " + model_name);
-                return;
-            }
-        } else {
-            resp.set_header("Retry-After", deps.default_swap_timeout_s);
-            write_anthropic_error(resp, 503, "overloaded_error",
-                                  "model not loaded: " + model_name);
+            const char* type =
+                loaded.status == 404 ? "not_found_error" : "overloaded_error";
+            write_anthropic_error(resp, loaded.status, type, loaded.message);
             return;
         }
     }
