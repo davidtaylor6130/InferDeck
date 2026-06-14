@@ -185,3 +185,98 @@ TEST_CASE("LlamaCppModel: slot_busy out-of-range returns false", "[llama][slots]
   REQUIRE_FALSE(m.slot_busy(99));
   REQUIRE_FALSE(m.slot_busy(0));
 }
+
+// ---------------------------------------------------------------------------
+// Recurrent-checkpoint tests — require a real model.
+// Run with: ctest -L unit -R "recurrent" --tests-regex . -V
+// Or explicitly: ./llama_cpp_model_tests "[requires_model]"
+// ---------------------------------------------------------------------------
+
+namespace {
+// Returns the gguf path from INFERDECK_TEST_MODEL env var, or empty string.
+std::string test_model_path() {
+  const char* p = std::getenv("INFERDECK_TEST_MODEL");
+  return p ? std::string(p) : std::string{};
+}
+}  // namespace
+
+TEST_CASE("recurrent checkpoint: second predict on same slot reuses cache",
+          "[llama][recurrent][.][requires_model]") {
+  const auto gguf = test_model_path();
+  if (gguf.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+
+  LlamaCppModel::init_backend();
+  ModelInfo minfo;
+  minfo.name            = "test-checkpoint-noop";
+  minfo.gguf_path       = gguf;
+  minfo.n_slots         = 1;
+  minfo.context_size    = 512;
+  minfo.vram_required_mb = 0;
+  LlamaCppModel lm(minfo);
+  REQUIRE(lm.load().has_value());
+
+  auto slot_r = lm.acquire_slot();
+  REQUIRE(slot_r.has_value());
+  const int slot_id = slot_r.value();
+
+  InferenceRequest req;
+  req.messages = {ChatMessage{"user", "Say hello."}};
+  req.max_tokens = 4;
+  auto r1 = lm.predict(slot_id, req);
+  REQUIRE(r1.has_value());
+
+  // Second identical request: for full-attention models this exercises KV reuse;
+  // for recurrent models it exercises the checkpoint no-op path (size == 0).
+  // Either way the result must succeed and not crash.
+  auto r2 = lm.predict(slot_id, req);
+  REQUIRE(r2.has_value());
+  REQUIRE(r2->cached_prompt_tokens > 0);
+
+  (void)lm.release_slot(slot_id);
+  (void)lm.unload();
+  LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("recurrent checkpoint: multi-turn conversation reuses cache on second turn",
+          "[llama][recurrent][.][requires_model]") {
+  const auto gguf = test_model_path();
+  if (gguf.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+
+  LlamaCppModel::init_backend();
+  ModelInfo minfo;
+  minfo.name            = "test-checkpoint-restore";
+  minfo.gguf_path       = gguf;
+  minfo.n_slots         = 1;
+  minfo.context_size    = 512;
+  minfo.vram_required_mb = 0;
+  LlamaCppModel lm(minfo);
+  REQUIRE(lm.load().has_value());
+
+  auto slot_r = lm.acquire_slot();
+  REQUIRE(slot_r.has_value());
+  const int slot_id = slot_r.value();
+
+  InferenceRequest req1;
+  req1.messages = {ChatMessage{"user", "Count to three."}};
+  req1.max_tokens = 8;
+  auto r1 = lm.predict(slot_id, req1);
+  REQUIRE(r1.has_value());
+
+  // Second turn extends the conversation. For recurrent models this hits the
+  // checkpoint restore path; for full-attention models it hits normal seq_rm.
+  // cached_prompt_tokens > 0 confirms neither path did a full re-prefill from 0.
+  InferenceRequest req2;
+  req2.messages = {
+      ChatMessage{"user",      "Count to three."},
+      ChatMessage{"assistant", r1->text},
+      ChatMessage{"user",      "Now count to five."},
+  };
+  req2.max_tokens = 8;
+  auto r2 = lm.predict(slot_id, req2);
+  REQUIRE(r2.has_value());
+  REQUIRE(r2->cached_prompt_tokens > 0);
+
+  (void)lm.release_slot(slot_id);
+  (void)lm.unload();
+  LlamaCppModel::shutdown_backend();
+}

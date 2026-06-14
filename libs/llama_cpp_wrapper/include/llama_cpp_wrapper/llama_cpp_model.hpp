@@ -91,6 +91,8 @@ private:
     bool busy{false};
     std::unique_ptr<llama_context, void(*)(llama_context*)> ctx{nullptr, nullptr};
     std::vector<int> last_prompt_tokens;
+    std::vector<uint8_t> recurrent_checkpoint;
+    int checkpoint_pos{0};
   };
 
   inferdeck::foundation::Result<void> init_contexts_locked();
