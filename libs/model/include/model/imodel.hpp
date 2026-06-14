@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <optional>
@@ -118,8 +119,13 @@ public:
     virtual foundation::Result<InferenceResult> predict(
         int slot_id, const InferenceRequest& req) = 0;
 
+    // `cancel`, when non-null and set to true, requests that an in-flight
+    // generation stop as soon as possible (checked between tokens / after
+    // prefill). Defaulted so non-streaming implementations need not override.
     virtual foundation::Result<InferenceResult> predict_stream(
-        int slot_id, const InferenceRequest& req, const TokenCallback& callback) {
+        int slot_id, const InferenceRequest& req, const TokenCallback& callback,
+        const std::atomic<bool>* cancel = nullptr) {
+        (void)cancel;
         return foundation::Err<InferenceResult>(foundation::ErrorCode::Internal,
             "streaming not implemented");
     }

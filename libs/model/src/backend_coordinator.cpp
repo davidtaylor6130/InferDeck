@@ -276,7 +276,7 @@ foundation::Result<InferenceResult> BackendCoordinator::predict(
 
 foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
     const std::string& name, int slot_id, const InferenceRequest& req,
-    const IModel::TokenCallback& callback) {
+    const IModel::TokenCallback& callback, const std::atomic<bool>* cancel) {
     IModel* inst = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -287,7 +287,7 @@ foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
         }
         inst = it->second.get();
     }
-    return inst->predict_stream(slot_id, req, callback);
+    return inst->predict_stream(slot_id, req, callback, cancel);
 }
 
 void BackendCoordinator::drain_active(std::chrono::milliseconds timeout) {

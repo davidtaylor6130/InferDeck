@@ -34,6 +34,7 @@ public:
     std::atomic<int> vram_mb{4096};
     std::atomic<int> max_slots{2};
     std::atomic<int> load_delay_ms{0};
+    std::atomic<bool> block_until_cancel{false};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
     ChatTemplateMeta chat_meta_{};
@@ -103,7 +104,15 @@ public:
     }
 
     Result<InferenceResult> predict_stream(
-        int, const InferenceRequest&, const TokenCallback& callback) override {
+        int, const InferenceRequest&, const TokenCallback& callback,
+        const std::atomic<bool>* cancel = nullptr) override {
+        if (block_until_cancel.load()) {
+            // Simulate a long generation that only ends when cancelled.
+            while (!(cancel && cancel->load())) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            }
+            return Ok(InferenceResult{});
+        }
         InferenceDelta reasoning;
         reasoning.reasoning_text = "need a tool";
         if (!callback(reasoning)) return Ok(InferenceResult{});
@@ -510,4 +519,39 @@ TEST_CASE("ensure_model_loaded: concurrent callers wait out the swap, no 503", "
     REQUIRE(r0.status == 200);
     REQUIRE(r1.status == 200);
     REQUIRE(coordinator.is_loaded("a"));
+}
+
+// Regression for issue #28: an in-flight predict_stream must stop promptly when
+// the cancel flag is set (forwarded coordinator -> model), so an aborted turn
+// releases its slot instead of hanging.
+TEST_CASE("predict_stream honors the cancel flag and returns promptly", "[routes][cancel]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto m = std::make_unique<IModelMock>(info);
+        m->block_until_cancel.store(true);  // hang until cancelled
+        return m;
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load("a"));
+    auto slot = coordinator.acquire_slot("a");
+    REQUIRE(slot);
+
+    std::atomic<bool> cancel{false};
+    std::atomic<bool> done{false};
+    InferenceRequest req;
+    std::thread worker([&]() {
+        (void)coordinator.predict_stream(
+            "a", *slot, req,
+            [](const InferenceDelta&) { return true; }, &cancel);
+        done.store(true);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{60});
+    REQUIRE_FALSE(done.load());  // still running without a cancel
+
+    cancel.store(true);
+    worker.join();
+    REQUIRE(done.load());
+    REQUIRE(coordinator.release_slot("a", *slot));
 }

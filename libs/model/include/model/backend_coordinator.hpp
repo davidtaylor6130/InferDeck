@@ -52,7 +52,8 @@ public:
 
     foundation::Result<InferenceResult> predict_stream(
         const std::string& name, int slot_id, const InferenceRequest& req,
-        const IModel::TokenCallback& callback);
+        const IModel::TokenCallback& callback,
+        const std::atomic<bool>* cancel = nullptr);
 
     void drain_active(std::chrono::milliseconds timeout = std::chrono::milliseconds{30000});
     int active_request_count() const;

@@ -79,7 +79,8 @@ public:
       int slot_id, const inferdeck::model::InferenceRequest& req) override;
   inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict_stream(
       int slot_id, const inferdeck::model::InferenceRequest& req,
-      const inferdeck::model::IModel::TokenCallback& callback) override;
+      const inferdeck::model::IModel::TokenCallback& callback,
+      const std::atomic<bool>* cancel = nullptr) override;
 
   static std::string version();
   static void init_backend();
@@ -101,7 +102,8 @@ private:
   inferdeck::model::ModelInfo info_;
   LlamaCppConfig cfg_;
   std::atomic<bool> loaded_{false};
-  mutable std::mutex mtx_;
+  mutable std::mutex mtx_;        // guards model/slot state (acquire/release/status)
+  std::mutex decode_mtx_;         // serializes prefill+decode; NOT held during acquire/status
   llama_model* model_{nullptr};
   const llama_vocab* vocab_{nullptr};
   std::vector<SlotState> slots_;

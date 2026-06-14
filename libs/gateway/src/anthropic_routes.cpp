@@ -565,7 +565,8 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
                     }
                     state->cv.notify_one();
                     return !state->aborted.load();
-                });
+                },
+                &state->aborted);
             {
                 std::lock_guard<std::mutex> lk(state->mtx);
                 if (result) {
