@@ -693,7 +693,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     }
                     state->cv.notify_one();
                 return !state->aborted.load();
-            });
+            },
+            &state->aborted);
             {
                 std::lock_guard<std::mutex> lk(state->mtx);
                 if (result) {

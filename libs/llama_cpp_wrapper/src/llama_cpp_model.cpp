@@ -1168,16 +1168,26 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::InvalidArgument, "slot_id out of range"));
   }
-  std::lock_guard lk(mtx_);
-  if (!loaded_.load()) {
-    return Result<InferenceResult>(std::unexpect,
-        make_error(ErrorCode::Internal, "model not loaded"));
+  SlotState* slot_ptr = nullptr;
+  {
+    std::lock_guard lk(mtx_);
+    if (!loaded_.load()) {
+      return Result<InferenceResult>(std::unexpect,
+          make_error(ErrorCode::Internal, "model not loaded"));
+    }
+    slot_ptr = &slots_[slot_id];
+    if (!slot_ptr->busy || !slot_ptr->ctx) {
+      return Result<InferenceResult>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument, "slot not acquired or no context"));
+    }
   }
-  auto& slot = slots_[slot_id];
-  if (!slot.busy || !slot.ctx) {
-    return Result<InferenceResult>(std::unexpect,
-        make_error(ErrorCode::InvalidArgument, "slot not acquired or no context"));
-  }
+  // Run inference without the state mutex so acquire_slot/release_slot/status
+  // stay responsive during generation; serialize the decode itself since the
+  // backend is not safe for concurrent submission across contexts. The slot is
+  // marked busy (active_requests > 0), so unload() drains before it can be torn
+  // down -- the slot's ctx and last_prompt_tokens are exclusively ours here.
+  std::lock_guard decode_lk(decode_mtx_);
+  auto& slot = *slot_ptr;
 
   auto tmpl_res = apply_chat_template(req);
   if (!tmpl_res.has_value()) {
@@ -1349,21 +1359,30 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
 }
 
 Result<InferenceResult> LlamaCppModel::predict_stream(
-    int slot_id, const InferenceRequest& req, const TokenCallback& callback) {
+    int slot_id, const InferenceRequest& req, const TokenCallback& callback,
+    const std::atomic<bool>* cancel) {
   if (slot_id < 0 || slot_id >= static_cast<int>(slots_.size())) {
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::InvalidArgument, "slot_id out of range"));
   }
-  std::lock_guard lk(mtx_);
-  if (!loaded_.load()) {
-    return Result<InferenceResult>(std::unexpect,
-        make_error(ErrorCode::Internal, "model not loaded"));
+  SlotState* slot_ptr = nullptr;
+  {
+    std::lock_guard lk(mtx_);
+    if (!loaded_.load()) {
+      return Result<InferenceResult>(std::unexpect,
+          make_error(ErrorCode::Internal, "model not loaded"));
+    }
+    slot_ptr = &slots_[slot_id];
+    if (!slot_ptr->busy || !slot_ptr->ctx) {
+      return Result<InferenceResult>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument, "slot not acquired or no context"));
+    }
   }
-  auto& slot = slots_[slot_id];
-  if (!slot.busy || !slot.ctx) {
-    return Result<InferenceResult>(std::unexpect,
-        make_error(ErrorCode::InvalidArgument, "slot not acquired or no context"));
-  }
+  // Run inference without the state mutex so acquire_slot/release_slot/status
+  // stay responsive during generation; serialize the decode itself since the
+  // backend is not safe for concurrent submission across contexts.
+  std::lock_guard decode_lk(decode_mtx_);
+  auto& slot = *slot_ptr;
 
   auto tmpl_res = apply_chat_template(req);
   if (!tmpl_res.has_value()) {
@@ -1441,6 +1460,15 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   bool stopped = false;
   bool truncated = false;
   for (int i = 0; i < max_tokens; ++i) {
+    // Honor an external cancellation request (client aborted / stream torn down)
+    // promptly, even when the token callback is not the abort signal. The first
+    // iteration runs right after prefill, so this also bounds cancel latency for
+    // a request aborted during prompt processing.
+    if (cancel && cancel->load()) {
+      stopped = true;
+      out.finish_reason = "stop";
+      break;
+    }
     const llama_token id = common_sampler_sample(smp, slot.ctx.get(), -1);
     bool is_stop = llama_vocab_is_eog(vocab_, id);
     if (!is_stop) {
