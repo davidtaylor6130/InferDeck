@@ -39,6 +39,22 @@ gateway:
   swa_full: false
   truncate_prompt: true
 
+# Map Anthropic model names to local models so Anthropic-API clients
+# (e.g. Claude Code) route to the right local model. Unmapped names fall back
+# to the loaded model, then default_model. Keys must be the exact model IDs the
+# client sends. Tier intent: Opus = smartest, Sonnet = mid, Haiku = fast;
+# Fable is Anthropic's most capable model -> map to the largest local model.
+anthropic:
+  model_aliases:
+    claude-opus-4-8: "qwen3.6-27b"
+    claude-opus-4-7: "qwen3.6-27b"
+    claude-opus-4-6: "qwen3.6-27b"
+    claude-fable-5: "qwen3-coder-next"
+    claude-sonnet-4-6: "qwen3.6-35b-a3b"
+    claude-sonnet-4-5: "qwen3.6-35b-a3b"
+    claude-haiku-4-5: "gpt-oss-20b"
+    claude-haiku-4-5-20251001: "gpt-oss-20b"
+
 model_registry:
   - name: "qwen3.6-27b"
     family: "qwen3.6"

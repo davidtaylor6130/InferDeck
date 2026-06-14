@@ -93,6 +93,10 @@ and the same dashboard. See the [roadmap](#roadmap).
   tool calls, `reasoning_content`, llama-server-style prompt truncation on
   context overflow instead of a hard error.
 - **Anthropic Messages API** at `POST /v1/messages`.
+- **Anthropic model aliases.** Map requested Claude model names (`claude-*`) to
+  local models via `anthropic.model_aliases` in `config/gateway.yml`, so
+  Anthropic-API clients (e.g. Claude Code) route to the right local model;
+  unmapped names fall back to the loaded model, then the configured default.
 - Discovery and ops endpoints: `/v1/models`, `/v1/health`, `/v1/metrics`.
 
 ### Live dashboard
@@ -248,6 +252,10 @@ completions today.
   time alongside inference.
 
 **Expanding the engine**
+- [ ] **True parallel slots (continuous batching).** Decode multiple concurrent
+  requests against one resident model in a single batched `llama_decode` loop
+  (one shared context, `n_seq_max` sequences) instead of serializing them behind
+  a per-model lock — turning today's slot *queue* into real concurrency.
 - [ ] **Speculative decoding** (draft-model and MTP) once it coexists with
   parallel slots.
 - [ ] **Embeddings endpoint** (`/v1/embeddings`) for local RAG pipelines.
