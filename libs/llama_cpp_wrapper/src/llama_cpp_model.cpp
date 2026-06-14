@@ -99,12 +99,27 @@ static int common_prefix_length(
   return static_cast<int>(i);
 }
 
+static void take_recurrent_checkpoint(
+    llama_context* ctx, int seq_id, int pos,
+    std::vector<uint8_t>& out_buf, int& out_pos) {
+  const size_t sz = llama_state_seq_get_size_ext(
+      ctx, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+  if (sz == 0) { out_buf.clear(); return; }
+  out_buf.resize(sz);
+  const size_t written = llama_state_seq_get_data_ext(
+      ctx, out_buf.data(), sz, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+  if (written != sz) { out_buf.clear(); return; }
+  out_pos = pos;
+}
+
 static int prepare_prompt_cache(
     llama_context* ctx,
     const std::vector<int>& previous_prompt_tokens,
     const std::vector<llama_token>& prompt_tokens,
     int seq_id,
-    const std::string& model_name) {
+    const std::string& model_name,
+    const std::vector<uint8_t>& checkpoint_buf,
+    int checkpoint_pos) {
   int n_past = common_prefix_length(previous_prompt_tokens, prompt_tokens);
   if (n_past >= static_cast<int>(prompt_tokens.size()) && n_past > 0) {
     --n_past;
@@ -124,6 +139,21 @@ static int prepare_prompt_cache(
     return n_past;
   }
   if (!llama_memory_seq_rm(mem, seq_id, n_past, -1)) {
+    if (!checkpoint_buf.empty() && checkpoint_pos <= n_past) {
+      llama_memory_clear(mem, true);
+      const size_t restored = llama_state_seq_set_data_ext(
+          ctx, checkpoint_buf.data(), checkpoint_buf.size(),
+          seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+      if (restored > 0) {
+        LOG_INFO("llama_prompt_cache_checkpoint_restore",
+                 "model={} checkpoint_pos={} n_past={} prompt_tokens={}",
+                 model_name,
+                 checkpoint_pos,
+                 n_past,
+                 prompt_tokens.size());
+        return checkpoint_pos;
+      }
+    }
     LOG_WARN("llama_prompt_cache_fallback",
              "model={} cached_prompt_tokens={} reason=seq_rm_failed pos_min={} pos_max={}",
              model_name,
@@ -1254,17 +1284,24 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
     n_tokens = static_cast<int>(prompt_tokens.size());
   }
   const int cached_prompt_tokens = prepare_prompt_cache(
-      slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name);
+      slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name,
+      slot.recurrent_checkpoint, slot.checkpoint_pos);
 
   if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, cached_prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch), info_.name)) {
     slot.last_prompt_tokens.clear();
+    slot.recurrent_checkpoint.clear();
+    slot.checkpoint_pos = 0;
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
   }
+  take_recurrent_checkpoint(slot.ctx.get(), seq_id, n_tokens,
+                            slot.recurrent_checkpoint, slot.checkpoint_pos);
 
   common_sampler* smp = common_sampler_init(model_, sampling_params);
   if (smp == nullptr) {
     slot.last_prompt_tokens.clear();
+    slot.recurrent_checkpoint.clear();
+    slot.checkpoint_pos = 0;
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "common_sampler_init returned null"));
   }
@@ -1449,17 +1486,24 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
     n_tokens = static_cast<int>(prompt_tokens.size());
   }
   const int cached_prompt_tokens = prepare_prompt_cache(
-      slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name);
+      slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name,
+      slot.recurrent_checkpoint, slot.checkpoint_pos);
 
   if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, cached_prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch), info_.name)) {
     slot.last_prompt_tokens.clear();
+    slot.recurrent_checkpoint.clear();
+    slot.checkpoint_pos = 0;
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
   }
+  take_recurrent_checkpoint(slot.ctx.get(), seq_id, n_tokens,
+                            slot.recurrent_checkpoint, slot.checkpoint_pos);
 
   common_sampler* smp = common_sampler_init(model_, sampling_params);
   if (smp == nullptr) {
     slot.last_prompt_tokens.clear();
+    slot.recurrent_checkpoint.clear();
+    slot.checkpoint_pos = 0;
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::Internal, "common_sampler_init returned null"));
   }
