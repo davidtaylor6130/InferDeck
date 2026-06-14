@@ -78,7 +78,7 @@ model_registry:
     family: "qwen3.6"
     gguf_path: "C:/Inferdeck/models/DevQuasar/Qwen.Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen.Qwen3-Coder-30B-A3B-Instruct.Q4_K_M.gguf"
     mmproj_path: ""
-    n_slots: 2
+    n_slots: 1
     vram_required_mb: 20000
     context_size: 262144
     has_vision: false

@@ -759,9 +759,22 @@ LlamaCppModel::LlamaCppModel(inferdeck::model::ModelInfo info, LlamaCppConfig cf
 }
 
 LlamaCppModel::~LlamaCppModel() {
-  if (loaded_.load()) {
-    (void)unload();
+  std::lock_guard lk(mtx_);
+  for (auto& s : slots_) {
+    s.ctx.reset();
+    s.busy = false;
   }
+  slots_.clear();
+  if (chat_templates_) {
+    common_chat_templates_free(chat_templates_);
+    chat_templates_ = nullptr;
+  }
+  if (model_) {
+    llama_model_free(model_);
+    model_ = nullptr;
+  }
+  vocab_ = nullptr;
+  loaded_.store(false);
 }
 
 Result<void> LlamaCppModel::load() {
@@ -832,6 +845,11 @@ Result<void> LlamaCppModel::load() {
   }
   auto ctx_res = init_contexts_locked();
   if (!ctx_res.has_value()) {
+    for (auto& s : slots_) {
+      s.ctx.reset();
+      s.busy = false;
+    }
+    slots_.clear();
     llama_model_free(model_);
     model_ = nullptr;
     return ctx_res;
