@@ -57,16 +57,15 @@ jobs:
           # Dashboard static assets (copied post-build by CMake)
           Copy-Item -Recurse build\bin\Release\static dist\
 
-          # vcpkg runtime DLLs (x64-windows is a dynamic triplet)
+          # llama.cpp + ggml DLLs built from source (live alongside the exe)
+          Copy-Item build\bin\Release\*.dll dist\
+
+          # vcpkg runtime DLLs (x64-windows is a dynamic triplet) — already
+          # included above since vcpkg copies them to bin\Release\ on Windows,
+          # but copy from vcpkg_installed as a fallback in case any are missing.
           $vcpkgBin = "build\vcpkg_installed\x64-windows\bin"
           if (Test-Path $vcpkgBin) {
-            Copy-Item "$vcpkgBin\*.dll" dist\
-          }
-
-          # Vulkan loader — prefer the one from the SDK (matches glslc version)
-          $vulkanDll = "$env:VULKAN_SDK\Bin\vulkan-1.dll"
-          if (Test-Path $vulkanDll) {
-            Copy-Item $vulkanDll dist\
+            Copy-Item "$vcpkgBin\*.dll" dist\ -ErrorAction SilentlyContinue
           }
 
           Write-Host "=== dist contents ==="
