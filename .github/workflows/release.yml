@@ -23,24 +23,25 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install Vulkan SDK
+      - name: Ensure Vulkan SDK
         shell: pwsh
         run: |
-          $version = "1.3.268.0"
-          $sdkPath = "C:\VulkanSDK\$version"
-
-          if (Test-Path "$sdkPath\Include\vulkan\vulkan.h") {
-            Write-Host "Vulkan SDK $version already present"
-          } else {
-            $installer = "$env:TEMP\VulkanSDK-$version-Installer.exe"
-            $url = "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
-            Write-Host "Downloading Vulkan SDK $version..."
-            Invoke-WebRequest $url -OutFile $installer
-            Write-Host "Installing..."
-            Start-Process $installer -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait -NoNewWindow
+          # Use whatever version the runner already has (VS2026 image ships with one)
+          $sdkRoot = "C:\VulkanSDK"
+          $existing = if (Test-Path $sdkRoot) {
+            Get-ChildItem $sdkRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
           }
 
-          echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
+          if ($existing) {
+            Write-Host "Using pre-installed Vulkan SDK: $($existing.FullName)"
+            echo "VULKAN_SDK=$($existing.FullName)" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "Vulkan SDK not found — installing via Chocolatey..."
+            choco install vulkan-sdk -y --no-progress
+            $installed = Get-ChildItem $sdkRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+            Write-Host "Installed: $($installed.FullName)"
+            echo "VULKAN_SDK=$($installed.FullName)" >> $env:GITHUB_ENV
+          }
 
       - name: Cache vcpkg packages
         uses: actions/cache@v4
