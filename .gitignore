@@ -21,8 +21,7 @@ apps/gateway-service/deps/
 apps/gateway-service/dist-bundle/
 apps/gateway-service/public/
 
-# Third-party submodules (cloned, not git submodules)
-libs/third_party/
+# Third-party deps are now proper git submodules — not ignored
 runtime/llama-*/
 build-asan/
 *.gguf

@@ -1,0 +1,6 @@
+[submodule "libs/third_party/llama.cpp"]
+	path = libs/third_party/llama.cpp
+	url = https://github.com/ggerganov/llama.cpp.git
+[submodule "libs/third_party/Vulkan-Headers"]
+	path = libs/third_party/Vulkan-Headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers.git
