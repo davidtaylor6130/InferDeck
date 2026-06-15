@@ -24,11 +24,23 @@ jobs:
           submodules: recursive
 
       - name: Install Vulkan SDK
-        uses: humbletim/setup-vulkan-sdk@v1.2.0
-        with:
-          vulkan-query-version: 1.3.268.0
-          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang, SPIRV-Headers
-          vulkan-use-cache: false
+        shell: pwsh
+        run: |
+          $version = "1.3.268.0"
+          $sdkPath = "C:\VulkanSDK\$version"
+
+          if (Test-Path "$sdkPath\Include\vulkan\vulkan.h") {
+            Write-Host "Vulkan SDK $version already present"
+          } else {
+            $installer = "$env:TEMP\VulkanSDK-$version-Installer.exe"
+            $url = "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
+            Write-Host "Downloading Vulkan SDK $version..."
+            Invoke-WebRequest $url -OutFile $installer
+            Write-Host "Installing..."
+            Start-Process $installer -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait -NoNewWindow
+          }
+
+          echo "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
 
       - name: Cache vcpkg packages
         uses: actions/cache@v4
