@@ -47,12 +47,18 @@ set(GGML_SYCL OFF CACHE BOOL "" FORCE)
 set(GGML_METAL OFF CACHE BOOL "" FORCE)
 
 # Set up Vulkan BEFORE adding llama.cpp subdirectory
-set(Vulkan_LIBRARY "C:/VulkanSDK/1.4.309.0/Lib/vulkan-1.lib" CACHE FILEPATH "" FORCE)
-set(Vulkan_INCLUDE_DIR "C:/VulkanSDK/1.4.309.0/Include" CACHE PATH "" FORCE)
-set(Vulkan_GLSLC_EXECUTABLE "C:/VulkanSDK/1.4.309.0/Bin/glslc.exe" CACHE FILEPATH "" FORCE)
+# Prefer VULKAN_SDK env var (set by CI / VulkanSDK installer); fall back to local dev path.
+if(DEFINED ENV{VULKAN_SDK})
+    set(_vulkan_root "$ENV{VULKAN_SDK}")
+else()
+    set(_vulkan_root "C:/VulkanSDK/1.4.309.0")
+endif()
+set(Vulkan_LIBRARY "${_vulkan_root}/Lib/vulkan-1.lib" CACHE FILEPATH "" FORCE)
+set(Vulkan_INCLUDE_DIR "${_vulkan_root}/Include" CACHE PATH "" FORCE)
+set(Vulkan_GLSLC_EXECUTABLE "${_vulkan_root}/Bin/glslc.exe" CACHE FILEPATH "" FORCE)
 set(Vulkan_FOUND ON CACHE INTERNAL "")
-set(Vulkan_INCLUDE_DIRS "C:/VulkanSDK/1.4.309.0/Include" CACHE INTERNAL "")
-set(Vulkan_LIBRARIES "C:/VulkanSDK/1.4.309.0/Lib/vulkan-1.lib" CACHE INTERNAL "")
+set(Vulkan_INCLUDE_DIRS "${_vulkan_root}/Include" CACHE INTERNAL "")
+set(Vulkan_LIBRARIES "${_vulkan_root}/Lib/vulkan-1.lib" CACHE INTERNAL "")
 set(Vulkan_VERSION "1.4" CACHE INTERNAL "")
 
 # Create Vulkan::Vulkan imported target before llama.cpp subdirectory
@@ -60,9 +66,9 @@ if (NOT TARGET Vulkan::Vulkan)
     # Use SHARED IMPORTED instead of INTERFACE IMPORTED so the library gets linked
     add_library(Vulkan::Vulkan SHARED IMPORTED)
     set_target_properties(Vulkan::Vulkan PROPERTIES
-        IMPORTED_IMPLIB "C:/VulkanSDK/1.4.309.0/Lib/vulkan-1.lib"
-        IMPORTED_LOCATION "C:/VulkanSDK/1.4.309.0/Bin/vulkan-1.dll"
-        INTERFACE_INCLUDE_DIRECTORIES "C:/VulkanSDK/1.4.309.0/Include"
+        IMPORTED_IMPLIB "${_vulkan_root}/Lib/vulkan-1.lib"
+        IMPORTED_LOCATION "${_vulkan_root}/Bin/vulkan-1.dll"
+        INTERFACE_INCLUDE_DIRECTORIES "${_vulkan_root}/Include"
     )
 endif()
 
