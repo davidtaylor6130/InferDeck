@@ -238,7 +238,7 @@ completions today.
   models instead of re-prefilling every turn.
 - [ ] **Structured error codes** across the API surface and UTF-8 hold-back in
   the streaming path for clean multi-byte output.
-- [ ] **GitHub Actions CI** running the unit/integration suites on every push.
+- [x] **GitHub Actions CI** running the unit/integration suites on every push.
 
 **Beyond text — the multi-modal gateway**
 - [ ] **Speech-to-text** (`/v1/audio/transcriptions`, whisper.cpp) and
@@ -252,7 +252,7 @@ completions today.
   time alongside inference.
 
 **Expanding the engine**
-- [ ] **True parallel slots (continuous batching).** Decode multiple concurrent
+- [x] **True parallel slots (continuous batching).** Decode multiple concurrent
   requests against one resident model in a single batched `llama_decode` loop
   (one shared context, `n_seq_max` sequences) instead of serializing them behind
   a per-model lock — turning today's slot *queue* into real concurrency.

@@ -107,9 +107,9 @@ int main(int argc, char** argv) {
   using namespace inferdeck::optimize;
   const Args args = parse_args(argc, argv);
   if (args.show_help) { print_help(); return 0; }
-  if (args.show_version) { std::cout << "inferdeck-bench 2.0.0\n"; return 0; }
+  if (args.show_version) { std::cout << "inferdeck-bench 0.2.1\n"; return 0; }
 
-  std::cout << "inferdeck-bench 2.0.0\n"
+  std::cout << "inferdeck-bench 0.2.1\n"
             << "  model=" << args.model
             << " suite=" << args.suite
             << " trials=" << args.trials
