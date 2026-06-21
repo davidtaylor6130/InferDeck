@@ -1,4 +1,5 @@
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
+#include "llama_cpp_wrapper/continuous_batch_scheduler.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -789,12 +790,18 @@ LlamaCppModel::LlamaCppModel(inferdeck::model::ModelInfo info, LlamaCppConfig cf
 }
 
 LlamaCppModel::~LlamaCppModel() {
-  std::lock_guard lk(mtx_);
-  for (auto& s : slots_) {
-    s.ctx.reset();
-    s.busy = false;
+  // Stop scheduler before taking the mutex so no decode races with cleanup.
+  if (scheduler_) {
+    scheduler_->stop();
+    scheduler_.reset();
   }
+  std::lock_guard lk(mtx_);
+  for (auto& s : slots_) s.busy = false;
   slots_.clear();
+  if (shared_ctx_) {
+    llama_free(shared_ctx_);
+    shared_ctx_ = nullptr;
+  }
   if (chat_templates_) {
     common_chat_templates_free(chat_templates_);
     chat_templates_ = nullptr;
@@ -873,16 +880,20 @@ Result<void> LlamaCppModel::load() {
     return Result<void>(std::unexpect,
         make_error(ErrorCode::ParseError, "common_chat_templates_init returned null"));
   }
-  auto ctx_res = init_contexts_locked();
+  auto ctx_res = init_shared_context_locked();
   if (!ctx_res.has_value()) {
-    for (auto& s : slots_) {
-      s.ctx.reset();
-      s.busy = false;
-    }
+    if (shared_ctx_) { llama_free(shared_ctx_); shared_ctx_ = nullptr; }
     slots_.clear();
     llama_model_free(model_);
     model_ = nullptr;
     return ctx_res;
+  }
+  // Populate chat_template_meta_ once from the model's Jinja template.
+  {
+    InferenceRequest dummy;
+    dummy.messages.push_back({"user", "hello"});
+    auto meta_res = apply_chat_template(dummy);
+    if (meta_res.has_value()) chat_template_meta_ = std::move(meta_res->meta);
   }
   loaded_.store(true);
   log_memory_snapshot("llama_contexts_initialized_memory_after", info_.name);
@@ -890,58 +901,69 @@ Result<void> LlamaCppModel::load() {
   return Result<void>{};
 }
 
-Result<void> LlamaCppModel::init_contexts_locked() {
-  slots_.clear();
-  slots_.resize(info_.n_slots);
-  for (int i = 0; i < info_.n_slots; ++i) {
-    llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx = static_cast<std::uint32_t>(std::max(512, info_.context_size));
-    cparams.n_threads = cfg_.n_threads;
-    cparams.n_batch = static_cast<std::uint32_t>(std::max(1, cfg_.n_batch));
-    cparams.n_ubatch = static_cast<std::uint32_t>(std::max(1, cfg_.n_ubatch));
-    cparams.n_seq_max = 1;
-    cparams.flash_attn_type = flash_attn_from_string(cfg_.flash_attn);
-    cparams.offload_kqv = cfg_.kv_offload;
-    cparams.op_offload = cfg_.op_offload;
-    cparams.swa_full = cfg_.swa_full;
-    cparams.type_k = cache_type_from_string(cfg_.cache_type_k);
-    cparams.type_v = cache_type_from_string(cfg_.cache_type_v);
-    LOG_INFO("llama_context_config",
-             "model={} slot={} n_ctx={} n_batch={} n_ubatch={} n_seq_max={} flash_attn={} kv_offload={} op_offload={} cache_type_k={} cache_type_v={} swa_full={}",
-             info_.name,
-             i,
-             cparams.n_ctx,
-             cparams.n_batch,
-             cparams.n_ubatch,
-             cparams.n_seq_max,
-             cfg_.flash_attn,
-             cfg_.kv_offload,
-             cfg_.op_offload,
-             cfg_.cache_type_k,
-             cfg_.cache_type_v,
-             cfg_.swa_full);
-    auto* ctx = llama_init_from_model(model_, cparams);
-    if (ctx == nullptr) {
-      return Result<void>(std::unexpect,
-          make_error(ErrorCode::OutOfMemory,
-                     "llama_init_from_model returned null for slot " + std::to_string(i)));
-    }
-    slots_[i].ctx = std::unique_ptr<llama_context, void(*)(llama_context*)>(
-        ctx, [](llama_context* c) { if (c) llama_free(c); });
-    slots_[i].busy = false;
+Result<void> LlamaCppModel::init_shared_context_locked() {
+  // One shared context for all slots.
+  // n_ctx = context_size * n_slots so each slot gets its own context window via sequence IDs.
+  // n_seq_max = n_slots so the KV cache can track each slot's sequence independently.
+  const int n_slots = std::max(1, info_.n_slots);
+  const int ctx_per_slot = std::max(512, info_.context_size);
+  const int total_ctx = ctx_per_slot * n_slots;
+
+  llama_context_params cparams = llama_context_default_params();
+  cparams.n_ctx      = static_cast<std::uint32_t>(total_ctx);
+  cparams.n_seq_max  = static_cast<std::uint32_t>(n_slots);
+  cparams.n_threads  = cfg_.n_threads;
+  cparams.n_batch    = static_cast<std::uint32_t>(std::max(1, cfg_.n_batch));
+  cparams.n_ubatch   = static_cast<std::uint32_t>(std::max(1, cfg_.n_ubatch));
+  cparams.flash_attn_type = flash_attn_from_string(cfg_.flash_attn);
+  cparams.offload_kqv = cfg_.kv_offload;
+  cparams.op_offload  = cfg_.op_offload;
+  cparams.swa_full    = cfg_.swa_full;
+  cparams.type_k      = cache_type_from_string(cfg_.cache_type_k);
+  cparams.type_v      = cache_type_from_string(cfg_.cache_type_v);
+
+  LOG_INFO("llama_shared_context_config",
+           "model={} n_slots={} ctx_per_slot={} total_ctx={} n_seq_max={} "
+           "n_batch={} n_ubatch={} flash_attn={} kv_offload={} op_offload={} "
+           "cache_type_k={} cache_type_v={} swa_full={}",
+           info_.name, n_slots, ctx_per_slot, total_ctx, n_slots,
+           cparams.n_batch, cparams.n_ubatch,
+           cfg_.flash_attn, cfg_.kv_offload, cfg_.op_offload,
+           cfg_.cache_type_k, cfg_.cache_type_v, cfg_.swa_full);
+
+  shared_ctx_ = llama_init_from_model(model_, cparams);
+  if (shared_ctx_ == nullptr) {
+    return Result<void>(std::unexpect,
+        make_error(ErrorCode::OutOfMemory,
+                   "llama_init_from_model returned null (shared context, total_ctx=" +
+                   std::to_string(total_ctx) + ")"));
   }
+
+  slots_.clear();
+  slots_.resize(n_slots);
+
+  // Spawn the scheduler that owns the decode loop for this context.
+  scheduler_ = std::make_unique<ContinuousBatchScheduler>(
+      shared_ctx_, model_, vocab_, cfg_.n_batch);
+
   return Result<void>{};
 }
 
 Result<void> LlamaCppModel::unload() {
+  // Stop the scheduler first (joins its thread) so no decode can race with teardown.
+  if (scheduler_) {
+    scheduler_->stop();
+    scheduler_.reset();
+  }
   std::lock_guard lk(mtx_);
   if (!loaded_.load()) return Result<void>{};
   log_memory_snapshot("llama_model_unload_memory_before", info_.name);
-  for (auto& s : slots_) {
-    s.ctx.reset();
-    s.busy = false;
-  }
+  for (auto& s : slots_) s.busy = false;
   slots_.clear();
+  if (shared_ctx_) {
+    llama_free(shared_ctx_);
+    shared_ctx_ = nullptr;
+  }
   if (chat_templates_) {
     common_chat_templates_free(chat_templates_);
     chat_templates_ = nullptr;
@@ -1002,13 +1024,21 @@ bool LlamaCppModel::slot_busy(int slot_id) const noexcept {
 
 Result<void> LlamaCppModel::reset_all_slots() noexcept {
   std::lock_guard lk(mtx_);
-  for (auto& s : slots_) {
-    if (s.ctx) {
-      llama_memory_t mem = llama_get_memory(s.ctx.get());
-      llama_memory_clear(mem, false);
+  if (shared_ctx_) {
+    // Clear KV entries for every slot's sequence individually.
+    // This avoids llama_memory_clear which would also clear non-slot sequences.
+    auto* mem = llama_get_memory(shared_ctx_);
+    if (mem) {
+      for (int i = 0; i < static_cast<int>(slots_.size()); ++i) {
+        llama_memory_seq_rm(mem, i, 0, -1);
+      }
     }
+  }
+  for (auto& s : slots_) {
     s.busy = false;
     s.last_prompt_tokens.clear();
+    s.recurrent_checkpoint.clear();
+    s.checkpoint_pos = 0;
   }
   return Result<void>{};
 }
@@ -1211,205 +1241,187 @@ Result<void> LlamaCppModel::build_sampler_locked(
   return Result<void>{};
 }
 
+// Tokenizes the request, checks context limits, snapshots per-slot KV state,
+// and initialises a sampler. All of this runs on the HTTP handler thread
+// before the task is handed off to the scheduler.
+Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
+    int slot_id, const InferenceRequest& req) {
+  PredictSetup s;
+  auto tmpl_res = apply_chat_template(req);
+  if (!tmpl_res.has_value())
+    return Result<PredictSetup>(std::unexpect, tmpl_res.error());
+
+  s.parser_params   = std::move(tmpl_res->parser_params);
+  s.sampling_params = std::move(tmpl_res->sampling_params);
+  s.stop_strings    = std::move(tmpl_res->stop_strings);
+  s.stop_tokens     = tokenize_stop_strings(vocab_, s.stop_strings);
+
+  const std::string& prompt = tmpl_res->prompt;
+  s.prompt_tokens.resize(prompt.size() + 16);
+  const bool add_bos = llama_vocab_get_add_bos(vocab_);
+  int n_tokens = llama_tokenize(vocab_, prompt.data(), static_cast<int>(prompt.size()),
+                                s.prompt_tokens.data(), static_cast<int>(s.prompt_tokens.size()),
+                                add_bos, true);
+  if (n_tokens < 0) {
+    s.prompt_tokens.resize(static_cast<std::size_t>(-n_tokens));
+    n_tokens = llama_tokenize(vocab_, prompt.data(), static_cast<int>(prompt.size()),
+                              s.prompt_tokens.data(), static_cast<int>(s.prompt_tokens.size()),
+                              add_bos, true);
+    if (n_tokens < 0)
+      return Result<PredictSetup>(std::unexpect, make_error(ErrorCode::Internal, "tokenization failed"));
+  }
+  s.prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
+
+  // Per-slot context window = n_ctx_seq (total context / n_slots as set during load)
+  s.n_ctx_seq = static_cast<int>(llama_n_ctx_seq(shared_ctx_));
+
+  if (n_tokens >= s.n_ctx_seq) {
+    if (!cfg_.truncate_prompt)
+      return Result<PredictSetup>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument,
+                     "This model's maximum context length is " + std::to_string(s.n_ctx_seq) +
+                     " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
+                     " tokens. Please reduce the length of the messages."));
+    maybe_truncate_prompt(s.prompt_tokens, s.n_ctx_seq, req.max_tokens, info_.name);
+    n_tokens = static_cast<int>(s.prompt_tokens.size());
+  }
+
+  const int ctx_budget = std::max(1, s.n_ctx_seq - n_tokens - 1);
+  s.max_tokens = req.max_tokens > 0 ? std::min(req.max_tokens, ctx_budget) : ctx_budget;
+
+  // Snapshot per-slot KV state under the mutex (scheduler may touch these after submit)
+  {
+    std::lock_guard lk(mtx_);
+    s.last_prompt_tokens   = slots_[slot_id].last_prompt_tokens;
+    s.recurrent_checkpoint = slots_[slot_id].recurrent_checkpoint;
+    s.checkpoint_pos       = slots_[slot_id].checkpoint_pos;
+  }
+
+  common_sampler* smp = common_sampler_init(model_, s.sampling_params);
+  if (smp == nullptr)
+    return Result<PredictSetup>(std::unexpect,
+        make_error(ErrorCode::Internal, "common_sampler_init returned null"));
+  s.smp = smp;
+
+  return Result<PredictSetup>(std::move(s));
+}
+
+// Drain task.out_queue until the done event, calling on_token for each token.
+// Returns error if the scheduler reported one.
+Result<void> LlamaCppModel::drain_task(SlotTask& task, const OnToken& on_token) {
+  while (true) {
+    TokenEvent ev;
+    {
+      std::unique_lock lk(task.out_mtx);
+      task.out_cv.wait(lk, [&task] { return !task.out_queue.empty(); });
+      ev = std::move(task.out_queue.front());
+      task.out_queue.pop();
+    }
+    if (ev.is_error)
+      return Result<void>(std::unexpect, make_error(ErrorCode::Internal, ev.error_msg));
+    if (ev.is_done)
+      return Result<void>{};
+    if (!on_token(ev.id)) {
+      // Caller wants to stop early (stop string hit, client disconnect, etc.)
+      task.caller_cancel.store(true);
+      // Continue draining until the scheduler acknowledges with a done event
+    }
+  }
+}
+
 Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceRequest& req) {
   if (slot_id < 0 || slot_id >= static_cast<int>(slots_.size())) {
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::InvalidArgument, "slot_id out of range"));
   }
-  SlotState* slot_ptr = nullptr;
   {
     std::lock_guard lk(mtx_);
-    if (!loaded_.load()) {
-      return Result<InferenceResult>(std::unexpect,
-          make_error(ErrorCode::Internal, "model not loaded"));
-    }
-    slot_ptr = &slots_[slot_id];
-    if (!slot_ptr->busy || !slot_ptr->ctx) {
-      return Result<InferenceResult>(std::unexpect,
-          make_error(ErrorCode::InvalidArgument, "slot not acquired or no context"));
-    }
+    if (!loaded_.load())
+      return Result<InferenceResult>(std::unexpect, make_error(ErrorCode::Internal, "model not loaded"));
+    if (!slots_[slot_id].busy)
+      return Result<InferenceResult>(std::unexpect, make_error(ErrorCode::InvalidArgument, "slot not acquired"));
   }
-  // Run inference without the state mutex so acquire_slot/release_slot/status
-  // stay responsive during generation; serialize the decode itself since the
-  // backend is not safe for concurrent submission across contexts. The slot is
-  // marked busy (active_requests > 0), so unload() drains before it can be torn
-  // down -- the slot's ctx and last_prompt_tokens are exclusively ours here.
-  std::lock_guard decode_lk(decode_mtx_);
-  auto& slot = *slot_ptr;
 
-  auto tmpl_res = apply_chat_template(req);
-  if (!tmpl_res.has_value()) {
-    return Result<InferenceResult>(std::unexpect, tmpl_res.error());
-  }
-  std::string prompt = std::move(tmpl_res->prompt);
-  auto parser_params = std::move(tmpl_res->parser_params);
-  auto sampling_params = std::move(tmpl_res->sampling_params);
-  auto stop_strings = std::move(tmpl_res->stop_strings);
-  auto stop_tokens = tokenize_stop_strings(vocab_, stop_strings);
-  chat_template_meta_ = std::move(tmpl_res->meta);
+  auto setup_res = prepare_inference(slot_id, req);
+  if (!setup_res.has_value())
+    return Result<InferenceResult>(std::unexpect, setup_res.error());
+  auto& setup = *setup_res;
 
-  std::vector<llama_token> prompt_tokens(prompt.size() + 16);
-  const bool add_bos = llama_vocab_get_add_bos(vocab_);
-  int n_tokens = llama_tokenize(vocab_,
-                                prompt.data(),
-                                static_cast<int>(prompt.size()),
-                                prompt_tokens.data(),
-                                static_cast<int>(prompt_tokens.size()),
-                                add_bos, true);
-  if (n_tokens < 0) {
-    prompt_tokens.resize(static_cast<std::size_t>(-n_tokens));
-    n_tokens = llama_tokenize(vocab_,
-                              prompt.data(),
-                              static_cast<int>(prompt.size()),
-                              prompt_tokens.data(),
-                              static_cast<int>(prompt_tokens.size()),
-                              add_bos, true);
-    if (n_tokens < 0) {
-      return Result<InferenceResult>(std::unexpect,
-          make_error(ErrorCode::Internal, "tokenization failed"));
-    }
-  }
-  prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
-  const int seq_id = 0;
-  const auto n_ctx = llama_n_ctx_seq(slot.ctx.get());
-  if (n_tokens >= static_cast<int>(n_ctx)) {
-    if (!cfg_.truncate_prompt) {
-      return Result<InferenceResult>(std::unexpect,
-          make_error(ErrorCode::InvalidArgument,
-                     "This model's maximum context length is " + std::to_string(n_ctx) +
-                     " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
-                     " tokens. Please reduce the length of the messages."));
-    }
-    maybe_truncate_prompt(prompt_tokens, static_cast<int>(n_ctx), req.max_tokens, info_.name);
-    n_tokens = static_cast<int>(prompt_tokens.size());
-  }
-  const int cached_prompt_tokens = prepare_prompt_cache(
-      slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name,
-      slot.recurrent_checkpoint, slot.checkpoint_pos);
-
-  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, cached_prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch), info_.name)) {
-    slot.last_prompt_tokens.clear();
-    slot.recurrent_checkpoint.clear();
-    slot.checkpoint_pos = 0;
-    return Result<InferenceResult>(std::unexpect,
-        make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
-  }
-  take_recurrent_checkpoint(slot.ctx.get(), seq_id, n_tokens,
-                            slot.recurrent_checkpoint, slot.checkpoint_pos);
-
-  common_sampler* smp = common_sampler_init(model_, sampling_params);
-  if (smp == nullptr) {
-    slot.last_prompt_tokens.clear();
-    slot.recurrent_checkpoint.clear();
-    slot.checkpoint_pos = 0;
-    return Result<InferenceResult>(std::unexpect,
-        make_error(ErrorCode::Internal, "common_sampler_init returned null"));
-  }
-  InferenceResult out;
-  out.prompt_tokens = n_tokens;
-  out.cached_prompt_tokens = cached_prompt_tokens;
-  const int ctx_budget = std::max(1, static_cast<int>(n_ctx) - n_tokens - 1);
-  const int max_tokens = req.max_tokens > 0 ? std::min(req.max_tokens, ctx_budget) : ctx_budget;
   const auto start = std::chrono::steady_clock::now();
   std::string generated;
   generated.reserve(4096);
   std::vector<llama_token> decoded_ids;
-  int n_cur = n_tokens;
-  int n_decoded = 0;
-  bool stopped = false;
-  bool truncated = false;
-  for (int i = 0; i < max_tokens; ++i) {
-    const llama_token id = common_sampler_sample(smp, slot.ctx.get(), -1);
-    bool is_stop = llama_vocab_is_eog(vocab_, id);
-    if (!is_stop) {
-      for (auto t : stop_tokens) {
-        if (t == id) { is_stop = true; break; }
-      }
-    }
-    if (is_stop) {
-      stopped = true;
-      break;
-    }
+  bool string_stopped = false;
 
+  SlotTask task;
+  task.slot_id             = slot_id;
+  task.prompt_tokens       = setup.prompt_tokens;
+  task.last_prompt_tokens  = setup.last_prompt_tokens;
+  task.sampler             = setup.smp;   // scheduler takes ownership
+  task.max_tokens          = setup.max_tokens;
+  task.stop_tokens         = setup.stop_tokens;
+
+  scheduler_->submit(&task);
+
+  auto drain_res = drain_task(task, [&](llama_token id) -> bool {
+    if (string_stopped) return false; // already stopping
     char buf[256];
     const int n = llama_token_to_piece(vocab_, id, buf, sizeof(buf), 0, true);
     if (n > 0) generated.append(buf, static_cast<std::size_t>(n));
-    bool string_stop = false;
-    for (const auto& stop : stop_strings) {
+    for (const auto& stop : setup.stop_strings) {
       if (!stop.empty() && generated.size() >= stop.size() &&
           generated.compare(generated.size() - stop.size(), stop.size(), stop) == 0) {
         generated.resize(generated.size() - stop.size());
-        string_stop = true;
-        break;
+        string_stopped = true;
+        return false; // do NOT push this token — it's part of the stop string
       }
     }
-    out.completion_tokens += 1;
-    n_decoded += 1;
-    common_sampler_accept(smp, id, true);
-    if (string_stop) {
-      stopped = true;
-      break;
-    }
-    if (n_cur + 1 >= static_cast<int>(n_ctx)) {
-      truncated = true;
-      stopped = true;
-      out.finish_reason = "length";
-      LOG_INFO("llama_context_limit",
-               "model={} n_tokens={} truncated={} n_decoded={} n_ctx={}",
-               info_.name,
-               n_cur,
-               truncated,
-               n_decoded,
-               n_ctx);
-      break;
-    }
-    llama_batch one = llama_batch_init(1, 0, 1);
-    one.token[0] = id;
-    one.pos[0] = n_cur;
-    one.n_seq_id[0] = 1;
-    one.seq_id[0][0] = seq_id;
-    one.logits[0] = 1;
-    one.n_tokens = 1;
-    const int rc = llama_decode(slot.ctx.get(), one);
-    if (rc != 0) {
-      log_token_decode_failed(info_.name, rc, i, id, one.pos[0], n_cur, static_cast<int>(n_ctx), n_decoded);
-      llama_batch_free(one);
-      common_sampler_free(smp);
-      slot.last_prompt_tokens.clear();
-      return Result<InferenceResult>(std::unexpect,
-          make_error(ErrorCode::Internal, "llama_decode (token) failed"));
-    }
-    n_cur += 1;
     decoded_ids.push_back(id);
-    llama_batch_free(one);
-  }
-  log_slot_release(info_.name, n_cur, truncated, n_decoded, static_cast<int>(n_ctx));
+    return true;
+  });
+  if (!drain_res.has_value())
+    return Result<InferenceResult>(std::unexpect, drain_res.error());
+
   const auto end = std::chrono::steady_clock::now();
+
+  // Update per-slot KV state
+  {
+    std::lock_guard lk(mtx_);
+    auto& slot = slots_[slot_id];
+    slot.last_prompt_tokens.assign(setup.prompt_tokens.begin(), setup.prompt_tokens.end());
+    slot.last_prompt_tokens.insert(slot.last_prompt_tokens.end(),
+                                   decoded_ids.begin(), decoded_ids.end());
+    slot.recurrent_checkpoint = std::move(task.out_recurrent_checkpoint);
+    slot.checkpoint_pos       = task.out_checkpoint_pos;
+  }
+
+  log_slot_release(info_.name,
+                   static_cast<int>(setup.prompt_tokens.size()),
+                   false,
+                   static_cast<int>(decoded_ids.size()),
+                   setup.n_ctx_seq);
+
+  InferenceResult out;
+  out.prompt_tokens         = static_cast<int>(setup.prompt_tokens.size());
+  out.cached_prompt_tokens  = task.out_cached_prompt_tokens;
+  out.completion_tokens     = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
-  if (out.completion_tokens > 0 && out.duration_ms > 0.0f) {
+  if (out.completion_tokens > 0 && out.duration_ms > 0.0f)
     out.tokens_per_second = (out.completion_tokens * 1000.0f) / out.duration_ms;
-  }
-  if (!stopped && out.completion_tokens >= max_tokens) {
+  if (out.completion_tokens >= setup.max_tokens)
     out.finish_reason = "length";
-  }
+
   try {
-    auto msg = parse_final_message_with_ids(generated, parser_params);
+    auto msg = parse_final_message_with_ids(generated, setup.parser_params);
     apply_parsed_message(out, msg);
-    if (parser_params.parse_tool_calls && out.tool_calls.empty()) {
+    if (setup.parser_params.parse_tool_calls && out.tool_calls.empty())
       apply_fallback_tool_calls(out, generated);
-    }
   } catch (const std::exception& e) {
     LOG_ERROR("chat_parse_failed", "model={} error={}", info_.name, e.what());
     out.text = std::move(generated);
-    if (parser_params.parse_tool_calls) {
+    if (setup.parser_params.parse_tool_calls)
       apply_fallback_tool_calls(out, out.text);
-    }
   }
-  slot.last_prompt_tokens.assign(prompt_tokens.begin(), prompt_tokens.end());
-  slot.last_prompt_tokens.insert(slot.last_prompt_tokens.end(),
-                                 decoded_ids.begin(), decoded_ids.end());
-
-  common_sampler_free(smp);
   return Result<InferenceResult>(std::move(out));
 }
 
@@ -1420,253 +1432,146 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::InvalidArgument, "slot_id out of range"));
   }
-  SlotState* slot_ptr = nullptr;
   {
     std::lock_guard lk(mtx_);
-    if (!loaded_.load()) {
-      return Result<InferenceResult>(std::unexpect,
-          make_error(ErrorCode::Internal, "model not loaded"));
-    }
-    slot_ptr = &slots_[slot_id];
-    if (!slot_ptr->busy || !slot_ptr->ctx) {
-      return Result<InferenceResult>(std::unexpect,
-          make_error(ErrorCode::InvalidArgument, "slot not acquired or no context"));
-    }
+    if (!loaded_.load())
+      return Result<InferenceResult>(std::unexpect, make_error(ErrorCode::Internal, "model not loaded"));
+    if (!slots_[slot_id].busy)
+      return Result<InferenceResult>(std::unexpect, make_error(ErrorCode::InvalidArgument, "slot not acquired"));
   }
-  // Run inference without the state mutex so acquire_slot/release_slot/status
-  // stay responsive during generation; serialize the decode itself since the
-  // backend is not safe for concurrent submission across contexts.
-  std::lock_guard decode_lk(decode_mtx_);
-  auto& slot = *slot_ptr;
 
-  auto tmpl_res = apply_chat_template(req);
-  if (!tmpl_res.has_value()) {
-    return Result<InferenceResult>(std::unexpect, tmpl_res.error());
-  }
-  std::string prompt = std::move(tmpl_res->prompt);
-  auto parser_params = std::move(tmpl_res->parser_params);
-  auto sampling_params = std::move(tmpl_res->sampling_params);
-  auto stop_strings = std::move(tmpl_res->stop_strings);
-  auto stop_tokens = tokenize_stop_strings(vocab_, stop_strings);
-  chat_template_meta_ = std::move(tmpl_res->meta);
+  auto setup_res = prepare_inference(slot_id, req);
+  if (!setup_res.has_value())
+    return Result<InferenceResult>(std::unexpect, setup_res.error());
+  auto& setup = *setup_res;
 
-  std::vector<llama_token> prompt_tokens(prompt.size() + 16);
-  const bool add_bos = llama_vocab_get_add_bos(vocab_);
-  int n_tokens = llama_tokenize(vocab_,
-                                prompt.data(),
-                                static_cast<int>(prompt.size()),
-                                prompt_tokens.data(),
-                                static_cast<int>(prompt_tokens.size()),
-                                add_bos, true);
-  if (n_tokens < 0) {
-    prompt_tokens.resize(static_cast<std::size_t>(-n_tokens));
-    n_tokens = llama_tokenize(vocab_,
-                              prompt.data(),
-                              static_cast<int>(prompt.size()),
-                              prompt_tokens.data(),
-                              static_cast<int>(prompt_tokens.size()),
-                              add_bos, true);
-    if (n_tokens < 0) {
-      return Result<InferenceResult>(std::unexpect,
-          make_error(ErrorCode::Internal, "tokenization failed"));
-    }
-  }
-  prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
-  const int seq_id = 0;
-  const auto n_ctx = llama_n_ctx_seq(slot.ctx.get());
-  if (n_tokens >= static_cast<int>(n_ctx)) {
-    if (!cfg_.truncate_prompt) {
-      return Result<InferenceResult>(std::unexpect,
-          make_error(ErrorCode::InvalidArgument,
-                     "This model's maximum context length is " + std::to_string(n_ctx) +
-                     " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
-                     " tokens. Please reduce the length of the messages."));
-    }
-    maybe_truncate_prompt(prompt_tokens, static_cast<int>(n_ctx), req.max_tokens, info_.name);
-    n_tokens = static_cast<int>(prompt_tokens.size());
-  }
-  const int cached_prompt_tokens = prepare_prompt_cache(
-      slot.ctx.get(), slot.last_prompt_tokens, prompt_tokens, seq_id, info_.name,
-      slot.recurrent_checkpoint, slot.checkpoint_pos);
-
-  if (!process_prompt_chunks(slot.ctx.get(), prompt_tokens, cached_prompt_tokens, seq_id, static_cast<int>(cfg_.n_batch), info_.name)) {
-    slot.last_prompt_tokens.clear();
-    slot.recurrent_checkpoint.clear();
-    slot.checkpoint_pos = 0;
-    return Result<InferenceResult>(std::unexpect,
-        make_error(ErrorCode::Internal, "llama_decode (prompt) failed"));
-  }
-  take_recurrent_checkpoint(slot.ctx.get(), seq_id, n_tokens,
-                            slot.recurrent_checkpoint, slot.checkpoint_pos);
-
-  common_sampler* smp = common_sampler_init(model_, sampling_params);
-  if (smp == nullptr) {
-    slot.last_prompt_tokens.clear();
-    slot.recurrent_checkpoint.clear();
-    slot.checkpoint_pos = 0;
-    return Result<InferenceResult>(std::unexpect,
-        make_error(ErrorCode::Internal, "common_sampler_init returned null"));
-  }
-  InferenceResult out;
-  out.prompt_tokens = n_tokens;
-  out.cached_prompt_tokens = cached_prompt_tokens;
-  const int ctx_budget = std::max(1, static_cast<int>(n_ctx) - n_tokens - 1);
-  const int max_tokens = req.max_tokens > 0 ? std::min(req.max_tokens, ctx_budget) : ctx_budget;
   const auto start = std::chrono::steady_clock::now();
   std::string generated;
   generated.reserve(4096);
   std::vector<llama_token> decoded_ids;
-  StreamingChatParserState parser_state(parser_params);
-  int n_cur = n_tokens;
-  int n_decoded = 0;
-  bool stopped = false;
-  bool truncated = false;
-  for (int i = 0; i < max_tokens; ++i) {
-    // Honor an external cancellation request (client aborted / stream torn down)
-    // promptly, even when the token callback is not the abort signal. The first
-    // iteration runs right after prefill, so this also bounds cancel latency for
-    // a request aborted during prompt processing.
-    if (cancel && cancel->load()) {
-      stopped = true;
-      out.finish_reason = "stop";
-      break;
-    }
-    const llama_token id = common_sampler_sample(smp, slot.ctx.get(), -1);
-    bool is_stop = llama_vocab_is_eog(vocab_, id);
-    if (!is_stop) {
-      for (auto t : stop_tokens) {
-        if (t == id) { is_stop = true; break; }
-      }
-    }
-    if (is_stop) {
-      stopped = true;
-      break;
-    }
+  StreamingChatParserState parser_state(setup.parser_params);
+  bool callback_aborted = false;
+  bool string_stopped = false;
+
+  SlotTask task;
+  task.slot_id            = slot_id;
+  task.prompt_tokens      = setup.prompt_tokens;
+  task.last_prompt_tokens = setup.last_prompt_tokens;
+  task.sampler            = setup.smp;
+  task.max_tokens         = setup.max_tokens;
+  task.stop_tokens        = setup.stop_tokens;
+  task.ext_cancel         = cancel;
+
+  scheduler_->submit(&task);
+
+  auto drain_res = drain_task(task, [&](llama_token id) -> bool {
+    if (callback_aborted || string_stopped) return false;
 
     char buf[256];
     const int n = llama_token_to_piece(vocab_, id, buf, sizeof(buf), 0, true);
-    bool string_stop = false;
     if (n > 0) {
-      std::string token(buf, static_cast<std::size_t>(n));
-      generated.append(token);
-      for (const auto& stop : stop_strings) {
+      std::string piece(buf, static_cast<std::size_t>(n));
+      generated.append(piece);
+
+      for (const auto& stop : setup.stop_strings) {
         if (!stop.empty() && generated.size() >= stop.size() &&
             generated.compare(generated.size() - stop.size(), stop.size(), stop) == 0) {
           generated.resize(generated.size() - stop.size());
-          string_stop = true;
-          break;
+          string_stopped = true;
+          return false; // do NOT push this token — it's part of the stop string
         }
       }
+
+      decoded_ids.push_back(id);
       std::vector<common_chat_msg_diff> diffs;
       try {
-        diffs = parser_state.update(token, true, parser_params.parse_tool_calls);
-      } catch (...) {
-      }
+        diffs = parser_state.update(piece, /*is_partial=*/true,
+                                    setup.parser_params.parse_tool_calls);
+      } catch (...) {}
+
       for (const auto& diff : diffs) {
         auto delta = to_delta(diff);
-        if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty()) continue;
+        if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty())
+          continue;
         if (!callback(delta)) {
-          common_sampler_free(smp);
-          slot.last_prompt_tokens.clear();
-          return Result<InferenceResult>(std::move(out));
+          callback_aborted = true;
+          return false;
         }
       }
     }
-    common_sampler_accept(smp, id, true);
-    out.completion_tokens += 1;
-    n_decoded += 1;
-    if (string_stop) {
-      stopped = true;
-      break;
-    }
-    if (n_cur + 1 >= static_cast<int>(n_ctx)) {
-      truncated = true;
-      stopped = true;
-      out.finish_reason = "length";
-      LOG_INFO("llama_context_limit",
-               "model={} n_tokens={} truncated={} n_decoded={} n_ctx={}",
-               info_.name,
-               n_cur,
-               truncated,
-               n_decoded,
-               n_ctx);
-      break;
-    }
-    llama_batch one = llama_batch_init(1, 0, 1);
-    one.token[0] = id;
-    one.pos[0] = n_cur;
-    one.n_seq_id[0] = 1;
-    one.seq_id[0][0] = seq_id;
-    one.logits[0] = 1;
-    one.n_tokens = 1;
-    const int rc = llama_decode(slot.ctx.get(), one);
-    if (rc != 0) {
-      log_token_decode_failed(info_.name, rc, i, id, one.pos[0], n_cur, static_cast<int>(n_ctx), n_decoded);
-      llama_batch_free(one);
-      common_sampler_free(smp);
-      slot.last_prompt_tokens.clear();
-      return Result<InferenceResult>(std::unexpect,
-          make_error(ErrorCode::Internal, "llama_decode (token) failed"));
-    }
-    n_cur += 1;
-    decoded_ids.push_back(id);
-    llama_batch_free(one);
-  }
-  log_slot_release(info_.name, n_cur, truncated, n_decoded, static_cast<int>(n_ctx));
+    return true;
+  });
+  if (!drain_res.has_value())
+    return Result<InferenceResult>(std::unexpect, drain_res.error());
+
   const auto end = std::chrono::steady_clock::now();
+
+  // Update per-slot KV state
+  {
+    std::lock_guard lk(mtx_);
+    auto& slot = slots_[slot_id];
+    slot.last_prompt_tokens.assign(setup.prompt_tokens.begin(), setup.prompt_tokens.end());
+    slot.last_prompt_tokens.insert(slot.last_prompt_tokens.end(),
+                                   decoded_ids.begin(), decoded_ids.end());
+    slot.recurrent_checkpoint = std::move(task.out_recurrent_checkpoint);
+    slot.checkpoint_pos       = task.out_checkpoint_pos;
+  }
+
+  log_slot_release(info_.name,
+                   static_cast<int>(setup.prompt_tokens.size()),
+                   false,
+                   static_cast<int>(decoded_ids.size()),
+                   setup.n_ctx_seq);
+
+  InferenceResult out;
+  out.prompt_tokens        = static_cast<int>(setup.prompt_tokens.size());
+  out.cached_prompt_tokens = task.out_cached_prompt_tokens;
+  out.completion_tokens    = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
-  if (out.completion_tokens > 0 && out.duration_ms > 0.0f) {
+  if (out.completion_tokens > 0 && out.duration_ms > 0.0f)
     out.tokens_per_second = (out.completion_tokens * 1000.0f) / out.duration_ms;
-  }
-  if (!stopped && out.completion_tokens >= max_tokens) {
+  if (out.completion_tokens >= setup.max_tokens)
     out.finish_reason = "length";
-  }
+
+  if (callback_aborted) return Result<InferenceResult>(std::move(out));
+
   bool fallback_tool_calls_used = false;
   try {
-    std::vector<common_chat_msg_diff> final_diffs;
-    final_diffs = parser_state.update("", false, parser_params.parse_tool_calls);
+    auto final_diffs = parser_state.update("", /*is_partial=*/false,
+                                            setup.parser_params.parse_tool_calls);
     for (const auto& diff : final_diffs) {
       auto delta = to_delta(diff);
-      if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty()) continue;
-      if (!callback(delta)) {
-        common_sampler_free(smp);
-        slot.last_prompt_tokens.clear();
-        return Result<InferenceResult>(std::move(out));
-      }
+      if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty())
+        continue;
+      if (!callback(delta)) return Result<InferenceResult>(std::move(out));
     }
-    auto msg = parse_final_message_with_ids(generated, parser_params);
+    auto msg = parse_final_message_with_ids(generated, setup.parser_params);
     apply_parsed_message(out, msg);
-    if (parser_params.parse_tool_calls && out.tool_calls.empty()) {
+    if (setup.parser_params.parse_tool_calls && out.tool_calls.empty()) {
       apply_fallback_tool_calls(out, generated);
       fallback_tool_calls_used = !out.tool_calls.empty();
     }
   } catch (const std::exception& e) {
     LOG_ERROR("chat_parse_failed", "model={} error={}", info_.name, e.what());
     out.text = std::move(generated);
-    if (parser_params.parse_tool_calls) {
+    if (setup.parser_params.parse_tool_calls) {
       apply_fallback_tool_calls(out, out.text);
       fallback_tool_calls_used = !out.tool_calls.empty();
     }
   }
+
   if (fallback_tool_calls_used) {
     for (std::size_t i = 0; i < out.tool_calls.size(); ++i) {
       const auto& tc = out.tool_calls[i];
       InferenceDelta delta;
       ToolCallDelta tcd;
-      tcd.index = i;
-      tcd.id = tc.id;
-      tcd.type = "function";
+      tcd.index = i; tcd.id = tc.id; tcd.type = "function";
       tcd.function_name = tc.function_name;
       tcd.function_arguments = tc.function_arguments;
       delta.tool_calls.push_back(std::move(tcd));
       if (!callback(delta)) break;
     }
   }
-  slot.last_prompt_tokens.assign(prompt_tokens.begin(), prompt_tokens.end());
-  slot.last_prompt_tokens.insert(slot.last_prompt_tokens.end(),
-                                 decoded_ids.begin(), decoded_ids.end());
-
-  common_sampler_free(smp);
   return Result<InferenceResult>(std::move(out));
 }
 
