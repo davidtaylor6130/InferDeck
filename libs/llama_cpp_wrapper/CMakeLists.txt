@@ -8,6 +8,7 @@ endif()
 
 add_library(llama_cpp_wrapper STATIC
     src/llama_cpp_model.cpp
+    src/continuous_batch_scheduler.cpp
 )
 
 target_include_directories(llama_cpp_wrapper PUBLIC

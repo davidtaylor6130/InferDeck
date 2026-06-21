@@ -12,6 +12,7 @@
 #include "chat.h"
 #include "common.h"
 #include "model/imodel.hpp"
+#include "llama_cpp_wrapper/continuous_batch_scheduler.hpp"
 
 struct llama_model;
 struct llama_context;
@@ -87,27 +88,51 @@ public:
   static void shutdown_backend();
 
 private:
+  // Per-slot bookkeeping (no llama_context here — all slots share shared_ctx_)
   struct SlotState {
     bool busy{false};
-    std::unique_ptr<llama_context, void(*)(llama_context*)> ctx{nullptr, nullptr};
     std::vector<int> last_prompt_tokens;
     std::vector<uint8_t> recurrent_checkpoint;
     int checkpoint_pos{0};
   };
 
-  inferdeck::foundation::Result<void> init_contexts_locked();
+  inferdeck::foundation::Result<void> init_shared_context_locked();
   inferdeck::foundation::Result<void> build_sampler_locked(
       llama_sampler** out, const inferdeck::model::InferenceRequest& req);
   inferdeck::foundation::Result<ChatTemplateResult> apply_chat_template(
       const inferdeck::model::InferenceRequest& req);
 
+  // Per-inference setup: tokenize, KV-state snapshot, sampler construction.
+  struct PredictSetup {
+    std::vector<llama_token> prompt_tokens;
+    std::vector<std::string> stop_strings;
+    std::vector<llama_token> stop_tokens;
+    common_chat_parser_params parser_params;
+    common_params_sampling sampling_params;
+    common_sampler* smp{nullptr};
+    int max_tokens{0};
+    int n_ctx_seq{0};
+    std::vector<int> last_prompt_tokens;
+    std::vector<uint8_t> recurrent_checkpoint;
+    int checkpoint_pos{0};
+  };
+  inferdeck::foundation::Result<PredictSetup> prepare_inference(
+      int slot_id, const inferdeck::model::InferenceRequest& req);
+
+  // Drain task.out_queue until done, calling on_token for each produced token.
+  // on_token returns false to request early stop (sets task.caller_cancel).
+  using OnToken = std::function<bool(llama_token)>;
+  inferdeck::foundation::Result<void> drain_task(SlotTask& task, const OnToken& on_token);
+
   inferdeck::model::ModelInfo info_;
   LlamaCppConfig cfg_;
   std::atomic<bool> loaded_{false};
-  mutable std::mutex mtx_;        // guards model/slot state (acquire/release/status)
-  std::mutex decode_mtx_;         // serializes prefill+decode; NOT held during acquire/status
+  mutable std::mutex mtx_;        // guards slot state (acquire/release/status/last_prompt_tokens)
   llama_model* model_{nullptr};
   const llama_vocab* vocab_{nullptr};
+  // Shared context: n_ctx = context_size * n_slots, n_seq_max = n_slots
+  llama_context* shared_ctx_{nullptr};
+  std::unique_ptr<ContinuousBatchScheduler> scheduler_;
   std::vector<SlotState> slots_;
   std::filesystem::path resolved_gguf_path_;
   common_chat_templates* chat_templates_{nullptr};
