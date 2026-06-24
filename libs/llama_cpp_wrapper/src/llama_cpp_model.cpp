@@ -179,7 +179,11 @@ static bool maybe_truncate_prompt(
     const std::string& model_name) {
   const int n_tokens = static_cast<int>(prompt_tokens.size());
   if (n_tokens < n_ctx) return false;
-  const int reserve = std::clamp(req_max_tokens > 0 ? req_max_tokens : 1024, 256, n_ctx / 4);
+  // Guard the clamp bounds: when n_ctx < 1024 the upper bound (n_ctx/4) falls
+  // below 256, so std::clamp(x, 256, hi) would have lo > hi, which is UB.
+  const int reserve_hi = n_ctx / 4;
+  const int reserve = std::clamp(req_max_tokens > 0 ? req_max_tokens : 1024,
+                                 std::min(256, reserve_hi), reserve_hi);
   const int target = n_ctx - reserve - 1;
   const int keep_head = std::min(1024, target / 4);
   const int keep_tail = target - keep_head;
@@ -1044,7 +1048,7 @@ Result<void> LlamaCppModel::reset_all_slots() noexcept {
 }
 
 Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
-    const InferenceRequest& req) {
+    const InferenceRequest& req, int max_prompt_tokens) {
   if (!chat_templates_) {
     return Result<ChatTemplateResult>(std::unexpect, make_error(ErrorCode::Internal, "chat templates not initialized"));
   }
@@ -1150,6 +1154,42 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
   try {
   auto chat_params = common_chat_templates_apply(chat_templates_, inputs);
 
+  // History-aware truncation (issue #38): rather than middle-dropping the raw
+  // token stream (which severs conversation history and defeats KV prefix
+  // reuse), drop the oldest *whole* non-system messages and re-template until
+  // the prompt fits the budget. The leading system block and the most recent
+  // turn are always preserved.
+  if (max_prompt_tokens > 0) {
+    auto count_prompt_tokens = [&](const std::string& p) -> int {
+      if (p.empty()) return 0;
+      const int n = llama_tokenize(vocab_, p.data(), static_cast<int>(p.size()),
+                                   nullptr, 0, llama_vocab_get_add_bos(vocab_), true);
+      return n < 0 ? -n : n;
+    };
+    std::size_t sys_end = 0;
+    while (sys_end < inputs.messages.size() && inputs.messages[sys_end].role == "system")
+      ++sys_end;
+    int dropped = 0;
+    while (count_prompt_tokens(chat_params.prompt) >= max_prompt_tokens &&
+           inputs.messages.size() - sys_end > 1) {
+      inputs.messages.erase(inputs.messages.begin() + static_cast<std::ptrdiff_t>(sys_end));
+      ++dropped;
+      // Drop any now-orphaned tool results whose assistant tool_call was removed.
+      while (inputs.messages.size() - sys_end > 1 &&
+             inputs.messages[sys_end].role == "tool") {
+        inputs.messages.erase(inputs.messages.begin() + static_cast<std::ptrdiff_t>(sys_end));
+        ++dropped;
+      }
+      chat_params = common_chat_templates_apply(chat_templates_, inputs);
+    }
+    if (dropped > 0) {
+      LOG_WARN("chat_history_truncated",
+               "model={} dropped_messages={} kept_messages={} prompt_tokens={} budget={}",
+               info_.name, dropped, inputs.messages.size(),
+               count_prompt_tokens(chat_params.prompt), max_prompt_tokens);
+    }
+  }
+
   ChatTemplateMeta meta;
   meta.thinking_start_tag = chat_params.thinking_start_tag;
   meta.thinking_end_tag = chat_params.thinking_end_tag;
@@ -1247,7 +1287,21 @@ Result<void> LlamaCppModel::build_sampler_locked(
 Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
     int slot_id, const InferenceRequest& req) {
   PredictSetup s;
-  auto tmpl_res = apply_chat_template(req);
+  // Compute the prompt-token budget so apply_chat_template can drop whole
+  // oldest messages (history-aware truncation, issue #38) before tokenizing.
+  // Mirrors the reserve/target maths in maybe_truncate_prompt, which remains as
+  // a hard safety net for the pathological single-oversized-message case.
+  const int n_ctx_seq = static_cast<int>(llama_n_ctx_seq(shared_ctx_));
+  int budget = 0;
+  if (cfg_.truncate_prompt && n_ctx_seq > 0) {
+    // See maybe_truncate_prompt: clamp bounds must satisfy lo <= hi (UB
+    // otherwise) when n_ctx_seq < 1024.
+    const int reserve_hi = n_ctx_seq / 4;
+    const int reserve = std::clamp(req.max_tokens > 0 ? req.max_tokens : 1024,
+                                   std::min(256, reserve_hi), reserve_hi);
+    budget = n_ctx_seq - reserve - 1;
+  }
+  auto tmpl_res = apply_chat_template(req, budget);
   if (!tmpl_res.has_value())
     return Result<PredictSetup>(std::unexpect, tmpl_res.error());
 
