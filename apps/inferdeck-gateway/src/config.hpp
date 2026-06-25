@@ -40,8 +40,30 @@ struct GatewayConfig {
     std::string cache_type_v{"q8_0"};
     bool swa_full{false};
     bool truncate_prompt{true};
+    model::SamplingConfig sampling{};  // global sampler defaults (issue #42)
     std::map<std::string, std::string> anthropic_model_aliases{};
 };
+
+// Overlay any sampler keys present in `node` onto `s` (keys left unspecified
+// keep their current value, so per-model blocks inherit the global defaults).
+inline void parse_sampling(const YAML::Node& node, model::SamplingConfig& s) {
+    if (!node || !node.IsMap()) return;
+    if (node["temperature"]) s.temperature = node["temperature"].as<float>();
+    if (node["top_p"]) s.top_p = node["top_p"].as<float>();
+    if (node["top_k"]) s.top_k = node["top_k"].as<int>();
+    if (node["min_p"]) s.min_p = node["min_p"].as<float>();
+    if (node["repeat_penalty"]) s.repeat_penalty = node["repeat_penalty"].as<float>();
+    if (node["repeat_last_n"]) s.repeat_last_n = node["repeat_last_n"].as<int>();
+    if (node["dry_multiplier"]) s.dry_multiplier = node["dry_multiplier"].as<float>();
+    if (node["dry_base"]) s.dry_base = node["dry_base"].as<float>();
+    if (node["dry_allowed_length"]) s.dry_allowed_length = node["dry_allowed_length"].as<int>();
+    if (node["dry_penalty_last_n"]) s.dry_penalty_last_n = node["dry_penalty_last_n"].as<int>();
+    if (node["dry_seq_breakers"] && node["dry_seq_breakers"].IsSequence()) {
+        s.dry_seq_breakers.clear();
+        for (const auto& b : node["dry_seq_breakers"])
+            s.dry_seq_breakers.push_back(b.as<std::string>());
+    }
+}
 
 inline std::string read_text_file(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary);
@@ -122,6 +144,7 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["cache_type_v"]) cfg.cache_type_v = g["cache_type_v"].as<std::string>();
         if (g["swa_full"]) cfg.swa_full = g["swa_full"].as<bool>();
         if (g["truncate_prompt"]) cfg.truncate_prompt = g["truncate_prompt"].as<bool>();
+        if (g["sampling"]) parse_sampling(g["sampling"], cfg.sampling);
     }
     if (root["anthropic"] && root["anthropic"]["model_aliases"] &&
         root["anthropic"]["model_aliases"].IsMap()) {
@@ -149,6 +172,10 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             }
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
             info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";
+            // Per-model sampling overrides inherit the global block, then apply
+            // any keys present in this entry (issue #42).
+            info.sampling = cfg.sampling;
+            if (m["sampling"]) parse_sampling(m["sampling"], info.sampling);
             cfg.models.push_back(std::move(info));
         }
     }

@@ -277,6 +277,7 @@ int main(int argc, char** argv) {
         lc.swa_full = cfg.swa_full;
         lc.truncate_prompt = cfg.truncate_prompt;
         lc.reasoning_format = info.reasoning_format.empty() ? "auto" : info.reasoning_format;
+        lc.sampling = info.sampling;  // per-model merged over global (issue #42)
         return std::make_unique<llama_wrapper::LlamaCppModel>(info, lc);
     });
     for (const auto& m : cfg.models) {
