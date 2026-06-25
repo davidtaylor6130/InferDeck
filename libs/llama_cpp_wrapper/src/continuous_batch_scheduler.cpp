@@ -85,37 +85,39 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
         return;
     }
 
-    // Check against what is actually in the cache
-    const auto pos_max = llama_memory_seq_pos_max(mem, seq_id);
-    if (n_past > pos_max) {
-        // Cache has fewer tokens than the common prefix; use what is there
-        task->prompt_pos = n_past;
-        task->n_pos = n_past;
-        task->out_cached_prompt_tokens = n_past;
-        LOG_INFO("scheduler_kv_reuse",
-                 "slot={} cached_tokens={} prompt_tokens={}",
-                 seq_id, n_past, (int)task->prompt_tokens.size());
+    // Only reuse what is *physically* present in this slot's KV cache. The
+    // cached token arrays (last_prompt_tokens) can claim a longer common
+    // prefix than the cache actually holds — after a prior turn evicted
+    // entries, or with a SWA cache. Skipping past the real cache contents
+    // would decode the tail against an empty KV and silently drop the earlier
+    // context (system prompt, tool definitions, history) — see issue #43.
+    const int pos_max = static_cast<int>(llama_memory_seq_pos_max(mem, seq_id));
+    n_past = std::min(n_past, pos_max + 1);
+    if (n_past <= 0) {
+        llama_memory_seq_rm(mem, seq_id, 0, -1);
+        task->prompt_pos = 0;
+        task->n_pos = 0;
+        task->out_cached_prompt_tokens = 0;
         return;
     }
 
-    // Trim the cache to keep positions 0..n_past-1
-    if (llama_memory_seq_rm(mem, seq_id, n_past, -1)) {
-        task->prompt_pos = n_past;
-        task->n_pos = n_past;
-        task->out_cached_prompt_tokens = n_past;
-        LOG_INFO("scheduler_kv_reuse",
-                 "slot={} cached_tokens={} prompt_tokens={}",
-                 seq_id, n_past, (int)task->prompt_tokens.size());
+    // Trim any cached tokens beyond the reused prefix, then decode the rest.
+    if (!llama_memory_seq_rm(mem, seq_id, n_past, -1)) {
+        // seq_rm failed (e.g. SWA cache): clear this slot and start fresh.
+        LOG_WARN("scheduler_kv_clear",
+                 "slot={} seq_rm_failed clearing slot sequence", seq_id);
+        llama_memory_seq_rm(mem, seq_id, 0, -1);
+        task->prompt_pos = 0;
+        task->n_pos = 0;
+        task->out_cached_prompt_tokens = 0;
         return;
     }
-
-    // seq_rm failed (e.g. SWA cache): clear this slot and start fresh
-    LOG_WARN("scheduler_kv_clear",
-             "slot={} seq_rm_failed clearing slot sequence", seq_id);
-    llama_memory_seq_rm(mem, seq_id, 0, -1);
-    task->prompt_pos = 0;
-    task->n_pos = 0;
-    task->out_cached_prompt_tokens = 0;
+    task->prompt_pos = n_past;
+    task->n_pos = n_past;
+    task->out_cached_prompt_tokens = n_past;
+    LOG_INFO("scheduler_kv_reuse",
+             "slot={} cached_tokens={} prompt_tokens={}",
+             seq_id, n_past, (int)task->prompt_tokens.size());
 }
 
 void ContinuousBatchScheduler::run_loop() {
@@ -300,12 +302,14 @@ void ContinuousBatchScheduler::run_loop() {
             }
         }
 
-        // Remove completed slots and clear their KV entries
+        // Remove completed slots from the active set, but keep their KV cache
+        // intact so the next request on this slot can reuse the shared prefix
+        // (init_task trims any divergent suffix). Wiping here forces a full
+        // re-decode every turn and, with init_task's prefix assumptions, drops
+        // conversation context — the root cause of issue #43.
         if (!completed.empty()) {
-            auto* mem = llama_get_memory(ctx_);
             std::lock_guard lk(sub_mtx_);
             for (auto* t : completed) {
-                if (mem) llama_memory_seq_rm(mem, t->slot_id, 0, -1);
                 active_.erase(std::remove(active_.begin(), active_.end(), t), active_.end());
             }
         }
