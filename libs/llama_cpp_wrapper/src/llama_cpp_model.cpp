@@ -1101,6 +1101,28 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
     }
   }
 
+  // DEBUG: log incoming request shape so we can compare OpenCode vs direct Ollama.
+  {
+    std::size_t sys_chars = 0, user_chars = 0, tool_result_chars = 0;
+    int n_sys = 0, n_user = 0, n_assistant = 0, n_tool = 0;
+    for (const auto& m : inputs.messages) {
+      const std::size_t len = m.content.size();
+      if (m.role == "system")    { ++n_sys; sys_chars += len; }
+      else if (m.role == "user") { ++n_user; user_chars += len; }
+      else if (m.role == "assistant") { ++n_assistant; }
+      else if (m.role == "tool") { ++n_tool; tool_result_chars += len; }
+    }
+    const int n_tools_defined = body.contains("tools") && body["tools"].is_array()
+                                  ? static_cast<int>(body["tools"].size()) : 0;
+    const int max_tok = body.value("max_tokens", -1);
+    LOG_INFO("request_shape",
+             "model={} msgs={} [sys={} sys_chars={} user={} asst={} tool_results={} tool_result_chars={}] "
+             "tools_defined={} max_tokens={}",
+             info_.name, inputs.messages.size(),
+             n_sys, sys_chars, n_user, n_assistant, n_tool, tool_result_chars,
+             n_tools_defined, max_tok);
+  }
+
   if (body.contains("tools") && body["tools"].is_array()) {
     try {
       inputs.tools = common_chat_tools_parse_oaicompat(body["tools"]);
@@ -1215,12 +1237,42 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
       }
     }
   }
-  result.sampling_params.temp = req.temperature;
-  result.sampling_params.top_p = req.top_p;
-  result.sampling_params.top_k = req.top_k;
-  result.sampling_params.penalty_repeat = req.repeat_penalty;
-  result.sampling_params.penalty_last_n = req.repeat_last_n;
+  // Sampler params: explicit per-request (OpenAI body) values win; otherwise
+  // fall back to the server-side SamplingConfig defaults (issue #42), which
+  // mirror stock llama-server (DRY off, repeat_penalty neutral).
+  const auto& sc = cfg_.sampling;
+  result.sampling_params.temp          = req.temperature.value_or(sc.temperature);
+  result.sampling_params.top_p         = req.top_p.value_or(sc.top_p);
+  result.sampling_params.top_k         = req.top_k.value_or(sc.top_k);
+  result.sampling_params.min_p         = sc.min_p;
+  result.sampling_params.penalty_repeat = req.repeat_penalty.value_or(sc.repeat_penalty);
+  result.sampling_params.penalty_last_n = req.repeat_last_n.value_or(sc.repeat_last_n);
+  result.sampling_params.dry_multiplier     = sc.dry_multiplier;
+  result.sampling_params.dry_base           = sc.dry_base;
+  result.sampling_params.dry_allowed_length = sc.dry_allowed_length;
+  result.sampling_params.dry_penalty_last_n = sc.dry_penalty_last_n;
+  result.sampling_params.dry_sequence_breakers = sc.dry_seq_breakers;
   result.sampling_params.seed = req.seed >= 0 ? static_cast<std::uint32_t>(req.seed) : LLAMA_DEFAULT_SEED;
+
+  // DEBUG (issue #42 diagnosis): log what the client sent vs what was resolved,
+  // so we can see whether OpenCode/Claude Code override the server-side config.
+  auto opt_f = [](const std::optional<float>& v) {
+    return v.has_value() ? std::to_string(*v) : std::string("unset");
+  };
+  auto opt_i = [](const std::optional<int>& v) {
+    return v.has_value() ? std::to_string(*v) : std::string("unset");
+  };
+  LOG_INFO("sampling_resolved",
+           "model={} client[temp={} top_p={} top_k={} repeat_penalty={} repeat_last_n={}] "
+           "resolved[temp={:.3f} top_p={:.3f} top_k={} min_p={:.3f} repeat_penalty={:.3f} "
+           "repeat_last_n={} dry_mult={:.3f}]",
+           info_.name, opt_f(req.temperature), opt_f(req.top_p), opt_i(req.top_k),
+           opt_f(req.repeat_penalty), opt_i(req.repeat_last_n),
+           result.sampling_params.temp, result.sampling_params.top_p,
+           result.sampling_params.top_k, result.sampling_params.min_p,
+           result.sampling_params.penalty_repeat, result.sampling_params.penalty_last_n,
+           result.sampling_params.dry_multiplier);
+
   if (!chat_params.grammar.empty()) {
     if (!inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
       result.sampling_params.grammar = {COMMON_GRAMMAR_TYPE_TOOL_CALLS, chat_params.grammar};
@@ -1245,40 +1297,6 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
     return Result<ChatTemplateResult>(std::unexpect,
         make_error(ErrorCode::ParseError, std::string("chat template failed: ") + e.what()));
   }
-}
-
-Result<void> LlamaCppModel::build_sampler_locked(
-    llama_sampler** out, const InferenceRequest& req) {
-  const std::uint32_t seed = req.seed >= 0 ? static_cast<std::uint32_t>(req.seed)
-                                           : static_cast<std::uint32_t>(0xFFFFFFFFu);
-  llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
-  llama_sampler* chain = llama_sampler_chain_init(sparams);
-  if (chain == nullptr) {
-    return Result<void>(std::unexpect, make_error(ErrorCode::Internal, "llama_sampler_chain_init returned null"));
-  }
-  auto append = [&](llama_sampler* s) {
-    if (s) llama_sampler_chain_add(chain, s);
-  };
-
-  const char* dry_seq_breakers[] = {"\n", ":", "\"", "*"};
-  append(llama_sampler_init_dry(
-      vocab_, llama_model_n_ctx_train(model_),
-      0.8f,    // dry_multiplier
-      1.75f,   // dry_base
-      2,       // dry_allowed_length
-      1024,    // dry_penalty_last_n
-      dry_seq_breakers, 4));
-
-  append(llama_sampler_init_penalties(
-      req.repeat_last_n, req.repeat_penalty, 0.0f, 0.0f));
-
-  append(llama_sampler_init_top_k(static_cast<int32_t>(req.top_k)));
-  append(llama_sampler_init_top_p(req.top_p, 1));
-  append(llama_sampler_init_min_p(0.05f, 1));
-  append(llama_sampler_init_temp(req.temperature));
-  append(llama_sampler_init_dist(seed));
-  *out = chain;
-  return Result<void>{};
 }
 
 // Tokenizes the request, checks context limits, snapshots per-slot KV state,

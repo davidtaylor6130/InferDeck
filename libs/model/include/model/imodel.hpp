@@ -11,6 +11,25 @@
 
 namespace inferdeck::model {
 
+// Server-side sampler defaults (issue #42). Values here mirror stock
+// llama-server defaults: DRY off, repeat_penalty neutral. Explicit per-request
+// (OpenAI body) values override these; see make_inference_request /
+// apply_chat_template. Settable globally under `gateway.sampling` and
+// overridable per entry in `model_registry`.
+struct SamplingConfig {
+    float temperature{0.8f};
+    float top_p{0.95f};
+    int   top_k{40};
+    float min_p{0.05f};
+    float repeat_penalty{1.0f};   // 1.0 = disabled
+    int   repeat_last_n{64};
+    float dry_multiplier{0.0f};   // 0.0 = disabled
+    float dry_base{1.75f};
+    int   dry_allowed_length{2};
+    int   dry_penalty_last_n{-1};  // -1 = context size
+    std::vector<std::string> dry_seq_breakers{"\n", ":", "\"", "*"};
+};
+
 struct ModelInfo {
     std::string name{};
     std::string family{};
@@ -22,6 +41,7 @@ struct ModelInfo {
     std::optional<int> n_gpu_layers{};
     bool has_vision{false};
     std::string reasoning_format{};  // "auto", "deepseek", "deepseek_legacy", "none"
+    SamplingConfig sampling{};       // per-model defaults (merged over global at parse time)
 };
 
 struct ChatMessage {
@@ -58,11 +78,14 @@ struct InferenceRequest {
     std::string tools_json{};
     std::string openai_body_json{};
     int max_tokens{512};
-    float temperature{0.7f};
-    float top_p{0.95f};
-    int top_k{40};
-    float repeat_penalty{1.1f};
-    int repeat_last_n{64};
+    // Sampler params are optional so the server can tell an explicit client
+    // value apart from "unset" (issue #42). When unset, the server-side
+    // SamplingConfig default applies; when set, the client value wins.
+    std::optional<float> temperature{};
+    std::optional<float> top_p{};
+    std::optional<int> top_k{};
+    std::optional<float> repeat_penalty{};
+    std::optional<int> repeat_last_n{};
     int seed{-1};
     std::optional<std::string> tool_format{};
     std::optional<std::string> grammar{};

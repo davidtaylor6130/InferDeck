@@ -245,11 +245,18 @@ model::InferenceRequest make_inference_request(const nlohmann::json& body) {
     model::InferenceRequest ir;
     ir.openai_body_json = body.dump();
     ir.max_tokens = body.value("max_tokens", body.value("max_completion_tokens", -1));
-    ir.temperature = static_cast<float>(body.value("temperature", 0.7));
-    ir.top_p = static_cast<float>(body.value("top_p", 0.95));
-    ir.top_k = body.value("top_k", 40);
-    ir.repeat_penalty = static_cast<float>(body.value("repeat_penalty", 1.1));
-    ir.repeat_last_n = body.value("repeat_last_n", 64);
+    // Only carry sampler params the client explicitly set; unset ones fall back
+    // to the server-side SamplingConfig defaults downstream (issue #42).
+    if (body.contains("temperature") && !body["temperature"].is_null())
+        ir.temperature = body["temperature"].get<float>();
+    if (body.contains("top_p") && !body["top_p"].is_null())
+        ir.top_p = body["top_p"].get<float>();
+    if (body.contains("top_k") && !body["top_k"].is_null())
+        ir.top_k = body["top_k"].get<int>();
+    if (body.contains("repeat_penalty") && !body["repeat_penalty"].is_null())
+        ir.repeat_penalty = body["repeat_penalty"].get<float>();
+    if (body.contains("repeat_last_n") && !body["repeat_last_n"].is_null())
+        ir.repeat_last_n = body["repeat_last_n"].get<int>();
     ir.seed = body.value("seed", -1);
     return ir;
 }

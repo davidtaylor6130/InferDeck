@@ -49,6 +49,7 @@ struct LlamaCppConfig {
   bool truncate_prompt{true};
   std::string chat_template{};
   std::string reasoning_format{};  // "auto", "deepseek", "deepseek_legacy", "none"
+  inferdeck::model::SamplingConfig sampling{};  // server-side sampler defaults (issue #42)
 };
 
 class LlamaCppModel final : public inferdeck::model::IModel {
@@ -97,8 +98,6 @@ private:
   };
 
   inferdeck::foundation::Result<void> init_shared_context_locked();
-  inferdeck::foundation::Result<void> build_sampler_locked(
-      llama_sampler** out, const inferdeck::model::InferenceRequest& req);
   // max_prompt_tokens > 0 enables history-aware truncation: oldest whole
   // non-system messages are dropped (preserving recency + coherence) until the
   // templated prompt fits the budget. 0 disables truncation.
