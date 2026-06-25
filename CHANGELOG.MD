@@ -1,5 +1,24 @@
 # InferDeck - Changelog
 
+## [0.3.0] - 2026-06-25
+
+### Added
+- **Server-side configurable sampling with per-model overrides.** A
+  `gateway.sampling` block sets global sampler defaults (temperature, top_p,
+  top_k, min_p, repeat/DRY penalties) mirroring stock llama-server, with
+  per-entry overrides under `model_registry`. Explicit per-request values still
+  take precedence. Closes [#42](https://github.com/davidtaylor6130/InferDeck/issues/42)
+
+### Fixed
+- **Scheduler KV reuse clamped to cached tokens; slot KV preserved across turns**,
+  preventing context loss between requests. Closes [#43](https://github.com/davidtaylor6130/InferDeck/issues/43)
+- **History-aware prompt truncation and raised context sizes**, so long
+  conversations are trimmed correctly instead of overflowing the context window.
+  Closes [#38](https://github.com/davidtaylor6130/InferDeck/issues/38),
+  [#40](https://github.com/davidtaylor6130/InferDeck/issues/40)
+
+---
+
 ## [0.2.1] - 2026-06-21
 
 ### Versioning note

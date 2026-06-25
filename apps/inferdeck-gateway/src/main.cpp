@@ -230,7 +230,7 @@ int main(int argc, char** argv) {
             std::cout << "Usage: " << argv[0] << " [-c config.yml]\n";
             return 0;
         } else if (a == "-v" || a == "--version") {
-            std::cout << "inferdeck-gateway 0.2.1\n";
+            std::cout << "inferdeck-gateway 0.3.0\n";
             return 0;
         }
     }
@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
     AddVectoredExceptionHandler(0, CrashHandler);
 #endif
 
-    LOG_INFO("startup", "inferdeck-gateway 0.2.1 starting");
+    LOG_INFO("startup", "inferdeck-gateway 0.3.0 starting");
     LOG_INFO("config", "loaded from {}", config_path.string());
     LOG_INFO("vulkan_test", "About to initialize llama backend");
     std::cerr << "DEBUG: About to call llama_backend_init()" << std::endl;
