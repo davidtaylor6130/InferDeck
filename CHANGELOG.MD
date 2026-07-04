@@ -1,5 +1,30 @@
 # InferDeck - Changelog
 
+## [0.4.0] - 2026-07-04
+
+### Added
+- **Dashboard visual hierarchy and metric context.** Hero-sized primary stat on
+  Overview, context sub-lines on stats/sparklines (VRAM budget, token share),
+  text status badges (OK/Warm/Hot) so state never relies on color alone, and
+  explicit time windows on every section title.
+  Closes [#46](https://github.com/davidtaylor6130/InferDeck/issues/46)
+- **Usage chart hover tooltip** showing per-bucket time, token breakdown, and
+  cost, with guide line and point highlights.
+- **Per-model `chat_template_path` override** in `gateway.yml` for models whose
+  GGUF-embedded chat template is broken; corrected Qwen3.6 and gpt-oss-20b
+  templates shipped in `config/templates/`.
+  Closes [#49](https://github.com/davidtaylor6130/InferDeck/issues/49)
+
+### Fixed
+- **Usage chart tick labels aligned to plotted points** and the line now spans
+  the full chart width (was inset and misaligned).
+  Closes [#47](https://github.com/davidtaylor6130/InferDeck/issues/47)
+- **Multi-step tool calling no longer 400s** on Qwen3.6 ("No user query found
+  in messages.") and gpt-oss-20b ("Message has tool role...") via the template
+  overrides above.
+
+---
+
 ## [0.3.0] - 2026-06-25
 
 ### Added
