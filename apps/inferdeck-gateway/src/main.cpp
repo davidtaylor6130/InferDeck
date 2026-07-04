@@ -278,6 +278,21 @@ int main(int argc, char** argv) {
         lc.truncate_prompt = cfg.truncate_prompt;
         lc.reasoning_format = info.reasoning_format.empty() ? "auto" : info.reasoning_format;
         lc.sampling = info.sampling;  // per-model merged over global (issue #42)
+        // Optional per-model chat-template override (.jinja). Empty path keeps the
+        // template embedded in the GGUF. Used to fix the Qwen3.6 multi-step tool
+        // calling crash ("No user query found in messages.").
+        if (!info.chat_template_path.empty()) {
+            lc.chat_template = read_text_file(info.chat_template_path);
+            if (lc.chat_template.empty()) {
+                LOG_ERROR("chat_template_missing",
+                          "chat_template_path set but file empty/unreadable for {}: {} -- falling back to embedded template",
+                          info.name, info.chat_template_path);
+            } else {
+                LOG_INFO("chat_template_override",
+                         "loaded chat template for {} from {} ({} bytes)",
+                         info.name, info.chat_template_path, lc.chat_template.size());
+            }
+        }
         return std::make_unique<llama_wrapper::LlamaCppModel>(info, lc);
     });
     for (const auto& m : cfg.models) {

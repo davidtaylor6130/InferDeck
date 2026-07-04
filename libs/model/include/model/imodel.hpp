@@ -41,6 +41,7 @@ struct ModelInfo {
     std::optional<int> n_gpu_layers{};
     bool has_vision{false};
     std::string reasoning_format{};  // "auto", "deepseek", "deepseek_legacy", "none"
+    std::string chat_template_path{};  // optional .jinja override; empty = use template embedded in GGUF
     SamplingConfig sampling{};       // per-model defaults (merged over global at parse time)
 };
 

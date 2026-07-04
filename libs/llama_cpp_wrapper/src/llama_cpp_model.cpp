@@ -877,7 +877,10 @@ Result<void> LlamaCppModel::load() {
     return Result<void>(std::unexpect,
         make_error(ErrorCode::ParseError, "llama_model_get_vocab returned null"));
   }
-  chat_templates_ = common_chat_templates_init(model_, "").release();
+  // Empty cfg_.chat_template => use the template embedded in the GGUF; a non-empty
+  // value is a literal Jinja override (e.g. the corrected Qwen3.6 template that avoids
+  // the "No user query found in messages." crash during multi-step tool calling).
+  chat_templates_ = common_chat_templates_init(model_, cfg_.chat_template).release();
   if (chat_templates_ == nullptr) {
     llama_model_free(model_);
     model_ = nullptr;
