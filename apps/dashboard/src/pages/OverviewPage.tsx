@@ -22,6 +22,9 @@ export const OverviewPage: React.FC = () => {
   const history = statsHistory.slice(-60);
   const summary = status?.summary;
   const swapElapsed = swap.swapping && swap.startedUnixMs > 0 ? Date.now() - swap.startedUnixMs : 0;
+  const tokensIn = stats?.lifetimeTokensIn ?? summary?.promptTokens ?? 0;
+  const tokensOut = stats?.lifetimeTokensOut ?? summary?.completionTokens ?? 0;
+  const totalLifetimeTokens = tokensIn + tokensOut;
 
   return (
     <div className="space-y-4">
@@ -49,11 +52,17 @@ export const OverviewPage: React.FC = () => {
                   <Badge label="Loaded" tone="good" />
                   {loadedInfo?.has_vision && <Badge label="Vision" tone="violet" />}
                 </div>
-                <dl className="grid grid-cols-2 gap-3 text-sm">
+                <Stat
+                  label="Active requests"
+                  value={String(stats?.activeRequests ?? 0)}
+                  tone={(stats?.activeRequests ?? 0) > 0 ? 'info' : 'idle'}
+                  sub={(stats?.avgTokensPerSecond ?? 0) > 0 ? `${(stats?.avgTokensPerSecond ?? 0).toFixed(1)} avg t/s` : 'awaiting requests'}
+                  size="hero"
+                />
+                <dl className="grid grid-cols-3 gap-3 text-sm">
                   <ModelFact label="Context" value={loadedInfo ? `${formatTokenCount(loadedInfo.context_size)} tokens` : 'N/A'} />
                   <ModelFact label="Slots" value={loadedInfo ? String(loadedInfo.n_slots) : 'N/A'} />
                   <ModelFact label="VRAM budget" value={loadedInfo ? formatMb(loadedInfo.vram_required_mb) : 'N/A'} />
-                  <ModelFact label="Active requests" value={String(stats?.activeRequests ?? 0)} />
                 </dl>
                 <div className="grid grid-cols-2 gap-2">
                   <Button onClick={() => void unload()}>Unload</Button>
@@ -82,12 +91,14 @@ export const OverviewPage: React.FC = () => {
               values={history.map(item => item.gpu.utilizationPct)}
               tone={threshold(gpu?.utilizationPct)}
               yMax={100}
+              statusLabel
             />
             <Sparkline
               label="VRAM used"
               display={gpu ? formatMb(gpu.vramUsedMb) : 'N/A'}
               values={history.map(item => item.gpu.vramUsedMb)}
               tone="violet"
+              sub={loadedInfo ? `of ${formatMb(loadedInfo.vram_required_mb)} budget` : undefined}
             />
             <Sparkline
               label="GPU temp"
@@ -95,6 +106,7 @@ export const OverviewPage: React.FC = () => {
               values={history.map(item => item.gpu.temperatureC)}
               tone={temperatureTone(gpu?.temperatureC)}
               yMax={100}
+              statusLabel
             />
             <Sparkline
               label="Active requests"
@@ -108,20 +120,33 @@ export const OverviewPage: React.FC = () => {
       </section>
 
       <Panel>
-        <SectionTitle title="Lifetime" aside={stats ? `up ${formatUptime(stats.uptimeSeconds)}` : undefined} />
+        <SectionTitle title="Lifetime" aside={stats ? `since start · up ${formatUptime(stats.uptimeSeconds)}` : undefined} />
         <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4 xl:grid-cols-7">
           <Stat label="Requests" value={String(stats?.totalRequests ?? summary?.totalRequests ?? 0)} />
-          <Stat label="Tokens in" value={formatTokenCount(stats?.lifetimeTokensIn ?? summary?.promptTokens)} />
-          <Stat label="Tokens out" value={formatTokenCount(stats?.lifetimeTokensOut ?? summary?.completionTokens)} />
+          <Stat
+            label="Tokens in"
+            value={formatTokenCount(stats?.lifetimeTokensIn ?? summary?.promptTokens)}
+            sub={tokenShare(stats?.lifetimeTokensIn ?? summary?.promptTokens, totalLifetimeTokens)}
+          />
+          <Stat
+            label="Tokens out"
+            value={formatTokenCount(stats?.lifetimeTokensOut ?? summary?.completionTokens)}
+            sub={tokenShare(stats?.lifetimeTokensOut ?? summary?.completionTokens, totalLifetimeTokens)}
+          />
           <Stat label="Avg t/s" value={(stats?.avgTokensPerSecond ?? 0).toFixed(1)} />
           <Stat label="p50 latency" value={formatDuration(summary?.p50LatencyMs)} />
           <Stat label="p95 latency" value={formatDuration(summary?.p95LatencyMs)} />
-          <Stat label="Swaps" value={String(stats?.totalSwaps ?? 0)} />
+          <Stat
+            label="Swaps"
+            value={String(stats?.totalSwaps ?? 0)}
+            tone={swap.lastError ? 'critical' : 'idle'}
+            sub={swap.lastError ? 'last swap failed' : undefined}
+          />
         </div>
       </Panel>
 
       <Panel>
-        <SectionTitle title="Recent activity" />
+        <SectionTitle title="Recent activity" aside="last 10" />
         <div className="mt-2 divide-y divide-white/10">
           {activity.length === 0 ? (
             <div className="py-4"><EmptyState title="No activity yet" detail="Completed requests and model swaps appear here in real time." /></div>
@@ -149,3 +174,8 @@ const ModelFact: React.FC<{ label: string; value: string }> = ({ label, value })
     <dd className="mt-0.5 truncate text-sm text-text-primary" title={value}>{value}</dd>
   </div>
 );
+
+function tokenShare(part: number | undefined, total: number): string | undefined {
+  if (!total || part == null) return undefined;
+  return `${Math.round((part / total) * 100)}% of total`;
+}

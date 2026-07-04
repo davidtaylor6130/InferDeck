@@ -175,7 +175,7 @@ export const UsagePage: React.FC = () => {
       </Panel>
 
       <Panel>
-        <SectionTitle title="Per-model usage" />
+        <SectionTitle title="Per-model usage" aside="lifetime" />
         {usage.length === 0 ? (
           <p className="mt-3 text-sm text-text-muted">No persisted usage yet.</p>
         ) : (

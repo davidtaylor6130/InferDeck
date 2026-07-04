@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getLogs } from '../api';
-import { Button, Panel, ProgressBar, SectionTitle, Stat } from '../components/ui';
+import { Badge, Button, Panel, ProgressBar, SectionTitle, Stat } from '../components/ui';
 import { useGateway } from '../gateway';
-import { clamp, formatBytes, formatMb, formatUptime, temperatureTone, threshold, toneText } from '../utils';
+import { clamp, formatBytes, formatMb, formatUptime, temperatureTone, threshold, toneLabel, toneText } from '../utils';
 
 const LOG_POLL_MS = 5_000;
 
@@ -36,6 +36,7 @@ export const SystemPage: React.FC = () => {
                 label="Temperature"
                 value={gpu && gpu.temperatureC > 0 ? `${Math.round(gpu.temperatureC)}°C` : 'N/A'}
                 tone={temperatureTone(gpu?.temperatureC)}
+                statusLabel
               />
               <Stat label="Power" value={gpu && gpu.powerW > 0 ? `${Math.round(gpu.powerW)} W` : 'N/A'} />
             </div>
@@ -73,15 +74,22 @@ const MeterRow: React.FC<{
   percent: number;
   toneValue?: number | null;
   hideBar?: boolean;
-}> = ({ label, display, percent, toneValue, hideBar }) => (
-  <div>
-    <div className="mb-1 flex items-baseline justify-between gap-3">
-      <span className="text-xs text-text-muted">{label}</span>
-      <span className={`text-sm font-semibold ${toneValue != null ? toneText(threshold(toneValue)) : 'text-text-primary'}`}>{display}</span>
+}> = ({ label, display, percent, toneValue, hideBar }) => {
+  const tone = threshold(toneValue);
+  const badgeLabel = toneValue != null ? toneLabel(tone) : '';
+  return (
+    <div>
+      <div className="mb-1 flex items-baseline justify-between gap-3">
+        <span className="text-xs text-text-muted">{label}</span>
+        <span className="flex items-center gap-2">
+          <span className={`text-sm font-semibold ${toneValue != null ? toneText(tone) : 'text-text-primary'}`}>{display}</span>
+          {badgeLabel && <Badge label={badgeLabel} tone={tone} />}
+        </span>
+      </div>
+      {!hideBar && <ProgressBar percent={percent} tone={tone} />}
     </div>
-    {!hideBar && <ProgressBar percent={percent} tone={threshold(toneValue)} />}
-  </div>
-);
+  );
+};
 
 const LogPanel: React.FC = () => {
   const [lines, setLines] = useState<string[]>([]);

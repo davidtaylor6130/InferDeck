@@ -92,7 +92,7 @@ export const ModelsPage: React.FC = () => {
       </Panel>
 
       <Panel>
-        <SectionTitle title="Swap history" aside="latest 100" />
+        <SectionTitle title="Swap history" aside="latest 25" />
         {swaps.length === 0 ? (
           <div className="mt-3"><EmptyState title="No swaps recorded" /></div>
         ) : (
