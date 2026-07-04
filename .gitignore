@@ -100,3 +100,4 @@ session-*.md
 *.bak
 /rocblas/
 /hipblaslt/
+/.agents

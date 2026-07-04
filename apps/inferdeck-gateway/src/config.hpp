@@ -172,6 +172,7 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             }
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
             info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";
+            info.chat_template_path = m["chat_template_path"] ? m["chat_template_path"].as<std::string>() : "";
             // Per-model sampling overrides inherit the global block, then apply
             // any keys present in this entry (issue #42).
             info.sampling = cfg.sampling;

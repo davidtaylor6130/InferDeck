@@ -81,6 +81,9 @@ model_registry:
     vram_required_mb: 31000
     context_size: 40960
     has_vision: true
+    # Corrected Qwen3.6 chat template: avoids the "No user query found in messages."
+    # crash during multi-step tool calling (e.g. OpenCode). See config/templates/.
+    chat_template_path: "C:/Inferdeck/config/templates/qwen3.6-fixed.jinja"
     # Per-model sampler overrides inherit the global `gateway.sampling` block
     # above and override only the keys listed here (issue #42).
     # Qwen3 thinking/reasoning sweet spot (Qwen team): temp 0.6, top_p 0.95,
@@ -100,6 +103,9 @@ model_registry:
     vram_required_mb: 24000
     context_size: 100096
     has_vision: false
+    # Corrected Qwen3.6 chat template: avoids the "No user query found in messages."
+    # crash during multi-step tool calling (e.g. OpenCode). See config/templates/.
+    chat_template_path: "C:/Inferdeck/config/templates/qwen3.6-fixed.jinja"
     # Qwen3 thinking/reasoning sweet spot (Qwen team).
     sampling:
       temperature: 0.6
@@ -183,6 +189,10 @@ model_registry:
     vram_required_mb: 13000
     context_size: 32768
     has_vision: false
+    # Corrected gpt-oss harmony template: replaces the "Message has tool role, but there
+    # was no previous assistant message with a tool call!" raise_exception with a graceful
+    # fallback, so multi-step tool calling (OpenCode) no longer 400s. See config/templates/.
+    chat_template_path: "C:/Inferdeck/config/templates/gpt-oss-20b-fixed.jinja"
     # gpt-oss recommended sampling (OpenAI): temp 1.0, top_p 1.0, top_k disabled,
     # min_p 0. Repetition controls off.
     sampling:
