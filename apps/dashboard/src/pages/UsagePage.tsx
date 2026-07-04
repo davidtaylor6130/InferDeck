@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getJobs, getPricing } from '../api';
-import { Panel, ProgressBar, SectionTitle, Stat, linePath } from '../components/ui';
+import { Panel, ProgressBar, SectionTitle, Stat, linePath, pickTickIndices } from '../components/ui';
 import {
   ALL_MODELS,
   DEFAULT_COST_CONFIG,
@@ -17,7 +17,7 @@ import {
 import type { CostDefaults, ModelCostConfig, TokenRange, TokenSeries } from '../cost';
 import { useGateway } from '../gateway';
 import type { JobRecord } from '../types';
-import { compactModel, formatCurrency, formatTokenCount } from '../utils';
+import { clamp, compactModel, formatCurrency, formatTokenCount } from '../utils';
 
 export const UsagePage: React.FC = () => {
   const { status, models } = useGateway();
@@ -221,23 +221,85 @@ export const UsagePage: React.FC = () => {
 const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
   const tokenMax = Math.max(1, ...series.total, ...series.prompt, ...series.output);
   const costMax = Math.max(1, ...series.cost);
-  const monthX = (index: number) => series.months.length <= 1 ? 340 : (680 / (series.months.length - 1)) * index;
+  const lastIndex = series.months.length - 1;
+  const monthX = (index: number) => lastIndex <= 0 ? 340 : (680 / lastIndex) * index;
+  const pointY = (value: number, max: number) => 150 - (clamp(value, 0, max) / max) * 150;
+  const tickIndices = pickTickIndices(series.months.length);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  const handlePointerMove = (event: React.MouseEvent<SVGSVGElement>) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect || series.months.length === 0) return;
+    const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+    setHoverIndex(lastIndex <= 0 ? 0 : Math.round(ratio * lastIndex));
+  };
+  const handlePointerLeave = () => setHoverIndex(null);
+  // -50% centers the label/tooltip on the point; edges anchor inward so they don't overflow the chart.
+  const edgeTranslateX = (index: number) => index === 0 ? '0%' : index === lastIndex ? '-100%' : '-50%';
+
   return (
     <div className="mt-5">
       <div className="grid grid-cols-[34px_1fr_42px] gap-2 text-xs text-text-muted">
         <div className="flex flex-col justify-between py-2"><span>{formatTokenCount(tokenMax)}</span><span>{formatTokenCount(tokenMax / 2)}</span><span>0</span></div>
         <div>
-          <svg viewBox="0 0 680 150" className="h-[150px] w-full overflow-visible" role="img" aria-label="token usage graph">
-            <g stroke="rgba(148,163,184,0.14)" strokeDasharray="4 5">
-              {[0, 75, 150].map(y => <line key={y} x1="0" y1={y} x2="680" y2={y} />)}
-              {series.months.map((_, index) => <line key={index} x1={monthX(index)} y1="0" x2={monthX(index)} y2="150" />)}
-            </g>
-            <path d={linePath(series.total, 680, 150, tokenMax)} fill="none" stroke="#60A5FA" strokeWidth="3" />
-            <path d={linePath(series.prompt, 680, 150, tokenMax)} fill="none" stroke="#34D399" strokeWidth="3" />
-            <path d={linePath(series.output, 680, 150, tokenMax)} fill="none" stroke="#A78BFA" strokeWidth="3" />
-            <path d={linePath(series.cost, 680, 150, costMax)} fill="none" stroke="#22C55E" strokeWidth="3" strokeDasharray="8 6" />
-          </svg>
-          <div className="mt-1 flex justify-between text-xs text-text-muted">{series.months.map(month => <span key={month}>{month}</span>)}</div>
+          <div className="relative">
+            <svg
+              ref={svgRef}
+              viewBox="0 0 680 150"
+              className="h-[150px] w-full overflow-visible"
+              role="img"
+              aria-label="token usage graph"
+              onMouseMove={handlePointerMove}
+              onMouseLeave={handlePointerLeave}
+            >
+              <g stroke="rgba(148,163,184,0.14)" strokeDasharray="4 5">
+                {[0, 75, 150].map(y => <line key={y} x1="0" y1={y} x2="680" y2={y} />)}
+                {series.months.map((_, index) => <line key={index} x1={monthX(index)} y1="0" x2={monthX(index)} y2="150" />)}
+              </g>
+              <path d={linePath(series.total, 680, 150, tokenMax)} fill="none" stroke="#60A5FA" strokeWidth="3" />
+              <path d={linePath(series.prompt, 680, 150, tokenMax)} fill="none" stroke="#34D399" strokeWidth="3" />
+              <path d={linePath(series.output, 680, 150, tokenMax)} fill="none" stroke="#A78BFA" strokeWidth="3" />
+              <path d={linePath(series.cost, 680, 150, costMax)} fill="none" stroke="#22C55E" strokeWidth="3" strokeDasharray="8 6" />
+              {hoverIndex !== null && (
+                <g pointerEvents="none">
+                  <line x1={monthX(hoverIndex)} y1="0" x2={monthX(hoverIndex)} y2="150" stroke="rgba(226,232,240,0.35)" strokeWidth="1" />
+                  <circle cx={monthX(hoverIndex)} cy={pointY(series.total[hoverIndex], tokenMax)} r="3.5" fill="#60A5FA" />
+                  <circle cx={monthX(hoverIndex)} cy={pointY(series.prompt[hoverIndex], tokenMax)} r="3.5" fill="#34D399" />
+                  <circle cx={monthX(hoverIndex)} cy={pointY(series.output[hoverIndex], tokenMax)} r="3.5" fill="#A78BFA" />
+                </g>
+              )}
+            </svg>
+            {hoverIndex !== null && (
+              <div
+                className="pointer-events-none absolute z-10 whitespace-nowrap rounded-md border border-white/10 bg-[#0b1626] px-2.5 py-1.5 text-xs shadow-deck"
+                style={{
+                  left: `${(monthX(hoverIndex) / 680) * 100}%`,
+                  top: `${(pointY(series.total[hoverIndex], tokenMax) / 150) * 100}%`,
+                  transform: `translate(${edgeTranslateX(hoverIndex)}, calc(-100% - 10px))`,
+                }}
+              >
+                <div className="font-medium text-text-primary">{series.months[hoverIndex] || 'Bucket'}</div>
+                <div className="mt-1 space-y-0.5 text-text-secondary">
+                  <div>Total: <span className="text-text-primary">{formatTokenCount(series.total[hoverIndex])}</span></div>
+                  <div>Prompt: <span className="text-text-primary">{formatTokenCount(series.prompt[hoverIndex])}</span></div>
+                  <div>Output: <span className="text-text-primary">{formatTokenCount(series.output[hoverIndex])}</span></div>
+                  <div>Cost: <span className="text-success-green">{formatCurrency(series.cost[hoverIndex])}</span></div>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="relative mt-1 h-4 text-xs text-text-muted">
+            {series.months.map((month, index) => tickIndices.includes(index) && (
+              <span
+                key={index}
+                className="absolute whitespace-nowrap"
+                style={{ left: `${lastIndex <= 0 ? 50 : (index / lastIndex) * 100}%`, transform: `translateX(${edgeTranslateX(index)})` }}
+              >
+                {month}
+              </span>
+            ))}
+          </div>
         </div>
         <div className="flex flex-col justify-between py-2 text-right"><span>{formatCurrency(costMax)}</span><span>{formatCurrency(costMax / 2)}</span><span>$0</span></div>
       </div>

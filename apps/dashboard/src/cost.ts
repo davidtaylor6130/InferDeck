@@ -265,7 +265,7 @@ function fixedHourBuckets(hours: number): TokenBucket[] {
     const end = new Date(start.getTime() + 3_600_000);
     return {
       key: `${dateKey(start)}T${String(start.getHours()).padStart(2, '0')}`,
-      label: index % 4 === 0 || index === hours - 1 ? `${String(start.getHours()).padStart(2, '0')}:00` : '',
+      label: `${String(start.getHours()).padStart(2, '0')}:00`,
       start,
       end,
     };

@@ -90,6 +90,16 @@ export function linePath(values: number[], width: number, height: number, max: n
   }).join(' ');
 }
 
+// Picks up to maxTicks bucket indices, evenly spaced by index, always including the first and last.
+// Kept separate from label text so axis-tick thinning never drifts from the plotted point positions.
+export function pickTickIndices(count: number, maxTicks = 8): number[] {
+  if (count <= 0) return [];
+  if (count <= maxTicks) return Array.from({ length: count }, (_, i) => i);
+  const indices = new Set<number>();
+  for (let i = 0; i < maxTicks; i++) indices.add(Math.round((i * (count - 1)) / (maxTicks - 1)));
+  return Array.from(indices).sort((a, b) => a - b);
+}
+
 export const Sparkline: React.FC<{
   label: string;
   display: string;
