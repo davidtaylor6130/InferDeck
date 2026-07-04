@@ -60,7 +60,8 @@ export function formatTokenCount(value?: number | null): string {
 }
 
 export function formatCurrency(value: number): string {
-  return `$${value.toLocaleString(undefined, { maximumFractionDigits: value < 10 ? 2 : 0 })}`;
+  const digits = value < 10 ? 2 : 0;
+  return `$${value.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 }
 
 export function compactModel(model: string): string {
@@ -111,4 +112,12 @@ export function toneHex(tone: Tone): string {
   if (tone === 'info') return '#60A5FA';
   if (tone === 'violet') return '#8B5CF6';
   return '#64748B';
+}
+
+// Explicit text for tone-mapped values so status never rides on color alone.
+export function toneLabel(tone: Tone): string {
+  if (tone === 'good') return 'OK';
+  if (tone === 'warn') return 'Warm';
+  if (tone === 'critical') return 'Hot';
+  return '';
 }

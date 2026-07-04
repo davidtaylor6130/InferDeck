@@ -1,6 +1,6 @@
 import React from 'react';
 import type { Tone } from '../types';
-import { clamp, toneBg, toneHex, toneText } from '../utils';
+import { clamp, toneBg, toneHex, toneLabel, toneText } from '../utils';
 
 export const Panel: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className = '' }) => (
   <div className={`rounded-lg border border-white/10 bg-[#0b1626]/88 p-4 shadow-deck ${className}`}>{children}</div>
@@ -22,13 +22,26 @@ export const Badge: React.FC<{ label: string; tone: Tone }> = ({ label, tone }) 
   </span>
 );
 
-export const Stat: React.FC<{ label: string; value: string; tone?: Tone; sub?: string }> = ({ label, value, tone = 'idle', sub }) => (
-  <div className="min-w-0">
-    <p className="truncate text-xs text-text-muted">{label}</p>
-    <p className={`mt-0.5 truncate text-lg font-semibold ${tone === 'idle' ? 'text-text-primary' : toneText(tone)}`}>{value}</p>
-    {sub && <p className="truncate text-xs text-text-muted">{sub}</p>}
-  </div>
-);
+export const Stat: React.FC<{
+  label: string;
+  value: string;
+  tone?: Tone;
+  sub?: string;
+  statusLabel?: boolean;
+  size?: 'hero';
+}> = ({ label, value, tone = 'idle', sub, statusLabel, size }) => {
+  const badgeLabel = statusLabel ? toneLabel(tone) : '';
+  return (
+    <div className="min-w-0">
+      <div className="flex items-center gap-2">
+        <p className={`truncate text-text-muted ${size === 'hero' ? 'text-sm' : 'text-xs'}`}>{label}</p>
+        {badgeLabel && <Badge label={badgeLabel} tone={tone} />}
+      </div>
+      <p className={`mt-0.5 truncate font-semibold ${size === 'hero' ? 'text-4xl' : 'text-lg'} ${tone === 'idle' ? 'text-text-primary' : toneText(tone)}`}>{value}</p>
+      {sub && <p className="truncate text-xs text-text-muted">{sub}</p>}
+    </div>
+  );
+};
 
 export const Button: React.FC<{
   children: React.ReactNode;
@@ -77,26 +90,40 @@ export function linePath(values: number[], width: number, height: number, max: n
   }).join(' ');
 }
 
+// Picks up to maxTicks bucket indices, evenly spaced by index, always including the first and last.
+// Kept separate from label text so axis-tick thinning never drifts from the plotted point positions.
+export function pickTickIndices(count: number, maxTicks = 8): number[] {
+  if (count <= 0) return [];
+  if (count <= maxTicks) return Array.from({ length: count }, (_, i) => i);
+  const indices = new Set<number>();
+  for (let i = 0; i < maxTicks; i++) indices.add(Math.round((i * (count - 1)) / (maxTicks - 1)));
+  return Array.from(indices).sort((a, b) => a - b);
+}
+
 export const Sparkline: React.FC<{
   label: string;
   display: string;
   values: number[];
   tone: Tone;
   yMax?: number;
-}> = ({ label, display, values, tone, yMax }) => {
+  sub?: string;
+  statusLabel?: boolean;
+}> = ({ label, display, values, tone, yMax, sub, statusLabel }) => {
   const width = 220;
   const height = 64;
   const max = yMax ?? Math.max(1, ...values);
   const path = linePath(values, width, height, max);
   const area = `${path} L ${width} ${height} L 0 ${height} Z`;
+  const badgeLabel = statusLabel ? toneLabel(tone) : '';
   return (
     <div className="rounded-lg border border-white/10 bg-[#07101d] p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-xs font-medium text-text-secondary">{label}</p>
           <p className="mt-0.5 truncate text-lg font-semibold text-text-primary">{display}</p>
+          {sub && <p className="truncate text-xs text-text-muted">{sub}</p>}
         </div>
-        <span className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ background: toneHex(tone) }} />
+        {badgeLabel ? <Badge label={badgeLabel} tone={tone} /> : <span className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ background: toneHex(tone) }} />}
       </div>
       <svg viewBox={`0 0 ${width} ${height}`} className="mt-2 h-16 w-full" role="img" aria-label={`${label} sparkline`}>
         <path d={area} fill={toneHex(tone)} opacity="0.1" />
