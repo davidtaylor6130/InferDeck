@@ -247,23 +247,24 @@ const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
             <svg
               ref={svgRef}
               viewBox="0 0 680 150"
+              preserveAspectRatio="none"
               className="h-[150px] w-full overflow-visible"
               role="img"
               aria-label="token usage graph"
               onMouseMove={handlePointerMove}
               onMouseLeave={handlePointerLeave}
             >
-              <g stroke="rgba(148,163,184,0.14)" strokeDasharray="4 5">
-                {[0, 75, 150].map(y => <line key={y} x1="0" y1={y} x2="680" y2={y} />)}
-                {series.months.map((_, index) => <line key={index} x1={monthX(index)} y1="0" x2={monthX(index)} y2="150" />)}
+              <g stroke="rgba(148,163,184,0.14)" strokeDasharray="4 5" vectorEffect="non-scaling-stroke">
+                {[0, 75, 150].map(y => <line key={y} x1="0" y1={y} x2="680" y2={y} vectorEffect="non-scaling-stroke" />)}
+                {series.months.map((_, index) => <line key={index} x1={monthX(index)} y1="0" x2={monthX(index)} y2="150" vectorEffect="non-scaling-stroke" />)}
               </g>
-              <path d={linePath(series.total, 680, 150, tokenMax)} fill="none" stroke="#60A5FA" strokeWidth="3" />
-              <path d={linePath(series.prompt, 680, 150, tokenMax)} fill="none" stroke="#34D399" strokeWidth="3" />
-              <path d={linePath(series.output, 680, 150, tokenMax)} fill="none" stroke="#A78BFA" strokeWidth="3" />
-              <path d={linePath(series.cost, 680, 150, costMax)} fill="none" stroke="#22C55E" strokeWidth="3" strokeDasharray="8 6" />
+              <path d={linePath(series.total, 680, 150, tokenMax)} fill="none" stroke="#60A5FA" strokeWidth="3" vectorEffect="non-scaling-stroke" />
+              <path d={linePath(series.prompt, 680, 150, tokenMax)} fill="none" stroke="#34D399" strokeWidth="3" vectorEffect="non-scaling-stroke" />
+              <path d={linePath(series.output, 680, 150, tokenMax)} fill="none" stroke="#A78BFA" strokeWidth="3" vectorEffect="non-scaling-stroke" />
+              <path d={linePath(series.cost, 680, 150, costMax)} fill="none" stroke="#22C55E" strokeWidth="3" strokeDasharray="8 6" vectorEffect="non-scaling-stroke" />
               {hoverIndex !== null && (
                 <g pointerEvents="none">
-                  <line x1={monthX(hoverIndex)} y1="0" x2={monthX(hoverIndex)} y2="150" stroke="rgba(226,232,240,0.35)" strokeWidth="1" />
+                  <line x1={monthX(hoverIndex)} y1="0" x2={monthX(hoverIndex)} y2="150" stroke="rgba(226,232,240,0.35)" strokeWidth="1" vectorEffect="non-scaling-stroke" />
                   <circle cx={monthX(hoverIndex)} cy={pointY(series.total[hoverIndex], tokenMax)} r="3.5" fill="#60A5FA" />
                   <circle cx={monthX(hoverIndex)} cy={pointY(series.prompt[hoverIndex], tokenMax)} r="3.5" fill="#34D399" />
                   <circle cx={monthX(hoverIndex)} cy={pointY(series.output[hoverIndex], tokenMax)} r="3.5" fill="#A78BFA" />
