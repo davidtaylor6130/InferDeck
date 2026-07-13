@@ -38,6 +38,7 @@ public:
     [[nodiscard]] bool is_loaded(const std::string& name) const;
     [[nodiscard]] std::optional<std::string> get_loaded_model() const;
     [[nodiscard]] int get_vram_usage() const;
+    [[nodiscard]] const IBackend* get_backend(const std::string& name) const;
     [[nodiscard]] const IModel* get_model(const std::string& name) const;
 
     [[nodiscard]] ModelRegistry& registry() noexcept { return registry_; }
@@ -79,7 +80,7 @@ private:
 
     mutable std::mutex mutex_;
     ModelRegistry& registry_;
-    std::unordered_map<std::string, std::unique_ptr<IModel>> instances_;
+    std::unordered_map<std::string, std::unique_ptr<IBackend>> instances_;
     std::optional<std::string> current_loaded_;
     int active_requests_{0};
     std::condition_variable cv_;

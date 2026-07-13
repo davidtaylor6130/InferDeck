@@ -8,42 +8,9 @@
 #include <vector>
 
 #include "foundation/result.hpp"
+#include "model/ibackend.hpp"
 
 namespace inferdeck::model {
-
-// Server-side sampler defaults (issue #42). Values here mirror stock
-// llama-server defaults: DRY off, repeat_penalty neutral. Explicit per-request
-// (OpenAI body) values override these; see make_inference_request /
-// apply_chat_template. Settable globally under `gateway.sampling` and
-// overridable per entry in `model_registry`.
-struct SamplingConfig {
-    float temperature{0.8f};
-    float top_p{0.95f};
-    int   top_k{40};
-    float min_p{0.05f};
-    float repeat_penalty{1.0f};   // 1.0 = disabled
-    int   repeat_last_n{64};
-    float dry_multiplier{0.0f};   // 0.0 = disabled
-    float dry_base{1.75f};
-    int   dry_allowed_length{2};
-    int   dry_penalty_last_n{-1};  // -1 = context size
-    std::vector<std::string> dry_seq_breakers{"\n", ":", "\"", "*"};
-};
-
-struct ModelInfo {
-    std::string name{};
-    std::string family{};
-    std::string gguf_path{};
-    std::string mmproj_path{};
-    int n_slots{2};
-    int vram_required_mb{0};
-    int context_size{65536};
-    std::optional<int> n_gpu_layers{};
-    bool has_vision{false};
-    std::string reasoning_format{};  // "auto", "deepseek", "deepseek_legacy", "none"
-    std::string chat_template_path{};  // optional .jinja override; empty = use template embedded in GGUF
-    SamplingConfig sampling{};       // per-model defaults (merged over global at parse time)
-};
 
 struct ChatMessage {
     std::string role{};
@@ -112,31 +79,15 @@ struct InferenceResult {
     std::vector<ToolCall> tool_calls{};
 };
 
-class IModel {
+class IModel : public IBackend {
 public:
     virtual ~IModel() = default;
-
-    virtual const ModelInfo& info() const = 0;
 
     virtual const ChatTemplateMeta& chat_template_meta() const {
         static const ChatTemplateMeta meta{};
         return meta;
     }
 
-    virtual foundation::Result<void> load() = 0;
-    virtual foundation::Result<void> unload() = 0;
-    virtual bool is_loaded() const = 0;
-
-    virtual int vram_usage_mb() const = 0;
-    virtual int n_slots() const = 0;
-    virtual int n_free_slots() const = 0;
-
-    virtual foundation::Result<int> acquire_slot() = 0;
-    virtual foundation::Result<void> release_slot(int slot_id) = 0;
-    virtual bool slot_busy(int slot_id) const = 0;
-    virtual foundation::Result<void> reset_all_slots() {
-        return foundation::Ok();
-    }
 
     using TokenCallback = std::function<bool(const InferenceDelta& delta)>;
 

@@ -158,6 +158,14 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             model::ModelInfo info;
             info.name = m["name"].as<std::string>();
             info.family = m["family"] ? m["family"].as<std::string>() : "unknown";
+            info.runtime = m["runtime"] ? m["runtime"].as<std::string>() : "llama_cpp";
+            info.modality = m["modality"] ? m["modality"].as<std::string>() : "text";
+            if (m["capabilities"] && m["capabilities"].IsSequence()) {
+                info.capabilities.clear();
+                for (const auto& capability : m["capabilities"]) {
+                    info.capabilities.push_back(capability.as<std::string>());
+                }
+            }
             info.gguf_path = m["gguf_path"].as<std::string>();
             if (m["mmproj_path"] && !m["mmproj_path"].IsNull()) {
                 info.mmproj_path = m["mmproj_path"].as<std::string>();

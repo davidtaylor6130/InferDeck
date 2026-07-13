@@ -262,7 +262,7 @@ int main(int argc, char** argv) {
     }
 
     model::ModelRegistry registry;
-    registry.set_factory([cfg](const model::ModelInfo& info) -> std::unique_ptr<model::IModel> {
+    registry.register_factory("llama_cpp", [cfg](const model::ModelInfo& info) -> std::unique_ptr<model::IBackend> {
         llama_wrapper::LlamaCppConfig lc;
         lc.n_batch = cfg.n_batch;
         lc.n_ubatch = cfg.n_ubatch;

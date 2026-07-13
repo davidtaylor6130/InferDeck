@@ -125,6 +125,35 @@ public:
     }
 };
 
+class IBackendMock : public IBackend {
+public:
+    explicit IBackendMock(ModelInfo info) : info_(std::move(info)) {}
+
+    const ModelInfo& info() const override { return info_; }
+    Result<void> load() override { loaded_ = true; return Ok(); }
+    Result<void> unload() override { loaded_ = false; busy_ = false; return Ok(); }
+    bool is_loaded() const override { return loaded_; }
+    int vram_usage_mb() const override { return loaded_ ? info_.vram_required_mb : 0; }
+    int n_slots() const override { return 1; }
+    int n_free_slots() const override { return busy_ ? 0 : 1; }
+    Result<int> acquire_slot() override {
+        if (busy_) return Err<int>(ErrorCode::Unavailable, "busy");
+        busy_ = true;
+        return Ok(0);
+    }
+    Result<void> release_slot(int slot_id) override {
+        if (slot_id != 0) return Err<void>(ErrorCode::InvalidArgument, "invalid slot");
+        busy_ = false;
+        return Ok();
+    }
+    bool slot_busy(int slot_id) const override { return slot_id == 0 && busy_; }
+
+private:
+    ModelInfo info_;
+    bool loaded_{false};
+    bool busy_{false};
+};
+
 IModelMock* as_mock(IModel* m) { return static_cast<IModelMock*>(m); }
 
 ModelInfo make_info(const std::string& name, const std::string& family = "qwen3.6") {
@@ -191,6 +220,40 @@ TEST_CASE("ModelRegistry: create uses factory", "[model][registry]") {
     REQUIRE(none == nullptr);
 }
 
+TEST_CASE("ModelRegistry: selects runtime factory", "[model][registry]") {
+    ModelRegistry reg;
+    reg.register_factory("llama_cpp", [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->text_to_return = "llama";
+        return backend;
+    });
+    reg.register_factory("image_cpp", [](const ModelInfo& info) {
+        return std::make_unique<IBackendMock>(info);
+    });
+    auto text = make_info("text");
+    auto image = make_info("image");
+    image.runtime = "image_cpp";
+    image.modality = "image";
+    image.capabilities = {"image_generation"};
+    reg.register_model(text);
+    reg.register_model(image);
+
+    REQUIRE(reg.has_factory("llama_cpp"));
+    REQUIRE(reg.has_factory("image_cpp"));
+    REQUIRE(dynamic_cast<IModel*>(reg.create("text").get()) != nullptr);
+    REQUIRE(dynamic_cast<IModel*>(reg.create("image").get()) == nullptr);
+}
+
+TEST_CASE("ModelRegistry: reports missing runtime", "[model][registry]") {
+    ModelRegistry reg;
+    auto info = make_info("missing-runtime");
+    info.runtime = "unknown";
+    reg.register_model(info);
+    auto result = reg.create_result(info.name);
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::Unavailable);
+}
+
 TEST_CASE("ModelRegistry: register rejects empty name", "[model][registry]") {
     ModelRegistry reg;
     REQUIRE_THROWS_AS(reg.register_model(ModelInfo{}), std::invalid_argument);
@@ -208,6 +271,26 @@ TEST_CASE("BackendCoordinator: load marks current_loaded_", "[model][coordinator
     REQUIRE(c.get_loaded_model().has_value());
     REQUIRE(c.get_loaded_model().value() == "a");
     REQUIRE(c.get_vram_usage() == 4096);
+}
+
+TEST_CASE("BackendCoordinator: rejects text execution on non-text backend", "[model][coordinator]") {
+    ModelRegistry reg;
+    reg.register_factory("image_cpp", [](const ModelInfo& info) {
+        return std::make_unique<IBackendMock>(info);
+    });
+    auto info = make_info("image");
+    info.runtime = "image_cpp";
+    info.modality = "image";
+    info.capabilities = {"image_generation"};
+    reg.register_model(info);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load(info.name).has_value());
+    auto slot = coordinator.acquire_slot(info.name);
+    REQUIRE(slot.has_value());
+    auto result = coordinator.predict(info.name, slot.value(), InferenceRequest{});
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::InvalidArgument);
+    REQUIRE(coordinator.release_slot(info.name, slot.value()).has_value());
 }
 
 TEST_CASE("BackendCoordinator: load of unregistered model fails", "[model][coordinator]") {

@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.27)
 project(model LANGUAGES CXX)
 
 set(MODEL_SOURCES
+    src/model_info.cpp
     src/model_registry.cpp
     src/backend_coordinator.cpp
 )

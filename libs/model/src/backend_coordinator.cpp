@@ -47,12 +47,11 @@ foundation::Result<void> BackendCoordinator::load(const std::string& name) {
         }
         auto existing = instances_.find(name);
         if (existing == instances_.end() || !existing->second) {
-            auto model = registry_.create(name);
-            if (!model) {
-                return foundation::Err<void>(foundation::ErrorCode::NotFound,
-                                              "model not registered: " + name);
+            auto backend = registry_.create_result(name);
+            if (!backend) {
+                return foundation::Err<void>(backend.error().code, backend.error().message);
             }
-            instances_[name] = std::move(model);
+            instances_[name] = std::move(backend.value());
         }
     }
     auto& inst = instances_[name];
@@ -193,11 +192,15 @@ int BackendCoordinator::get_vram_usage() const {
     return total;
 }
 
-const IModel* BackendCoordinator::get_model(const std::string& name) const {
+const IBackend* BackendCoordinator::get_backend(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = instances_.find(name);
     if (it == instances_.end() || !it->second) return nullptr;
     return it->second.get();
+}
+
+const IModel* BackendCoordinator::get_model(const std::string& name) const {
+    return dynamic_cast<const IModel*>(get_backend(name));
 }
 
 foundation::Result<int> BackendCoordinator::acquire_slot(
@@ -267,7 +270,11 @@ foundation::Result<InferenceResult> BackendCoordinator::predict(
             return foundation::Err<InferenceResult>(foundation::ErrorCode::NotFound,
                                                       "model not loaded: " + name);
         }
-        inst = it->second.get();
+        inst = dynamic_cast<IModel*>(it->second.get());
+        if (!inst) {
+            return foundation::Err<InferenceResult>(foundation::ErrorCode::InvalidArgument,
+                                                      "backend does not support text generation: " + name);
+        }
     }
     // Safe to call unlocked: the caller holds a slot, so unload() drains before
     // the instance can be destroyed.
@@ -285,7 +292,11 @@ foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
             return foundation::Err<InferenceResult>(foundation::ErrorCode::NotFound,
                                                       "model not loaded: " + name);
         }
-        inst = it->second.get();
+        inst = dynamic_cast<IModel*>(it->second.get());
+        if (!inst) {
+            return foundation::Err<InferenceResult>(foundation::ErrorCode::InvalidArgument,
+                                                      "backend does not support text generation: " + name);
+        }
     }
     return inst->predict_stream(slot_id, req, callback, cancel);
 }
