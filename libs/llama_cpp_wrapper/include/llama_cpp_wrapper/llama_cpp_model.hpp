@@ -71,11 +71,15 @@ public:
   int vram_usage_mb() const noexcept override;
   int n_slots() const noexcept override { return info_.n_slots; }
   int n_free_slots() const noexcept override;
+  int min_slots() const noexcept override { return info_.min_slots; }
+  bool can_resize_slots() const noexcept override;
+  int estimate_vram_mb(int slots) const noexcept override;
+  inferdeck::foundation::Result<void> resize_slots(int slots) override;
 
   inferdeck::foundation::Result<int> acquire_slot() override;
   inferdeck::foundation::Result<void> release_slot(int slot_id) override;
   bool slot_busy(int slot_id) const noexcept override;
-  inferdeck::foundation::Result<void> reset_all_slots() noexcept;
+  inferdeck::foundation::Result<void> reset_all_slots() noexcept override;
 
   inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict(
       int slot_id, const inferdeck::model::InferenceRequest& req) override;

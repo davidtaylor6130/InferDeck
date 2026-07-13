@@ -67,8 +67,8 @@ export function cancelSwap(): Promise<{ status: string }> {
   return postJson<{ status: string }>('/v1/swap/cancel');
 }
 
-export function unloadModel(): Promise<{ ok: boolean }> {
-  return postJson<{ ok: boolean }>('/api/models/unload');
+export function unloadModel(model?: string): Promise<{ ok: boolean }> {
+  return postJson<{ ok: boolean }>('/api/models/unload', model ? { model } : undefined);
 }
 
 export function eventStreamUrl(): string {

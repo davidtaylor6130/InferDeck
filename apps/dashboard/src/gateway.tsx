@@ -29,7 +29,7 @@ export interface GatewayValue {
   refresh: () => Promise<void>;
   swapTo: (model: string) => Promise<string | null>;
   cancelSwap: () => Promise<string | null>;
-  unload: () => Promise<string | null>;
+  unload: (model?: string) => Promise<string | null>;
 }
 
 const idleSwap: SwapState = { swapping: false, target: '', from: '', startedUnixMs: 0, lastError: '' };
@@ -185,9 +185,9 @@ export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, []);
 
-  const unloadAction = useCallback(async () => {
+  const unloadAction = useCallback(async (model?: string) => {
     try {
-      await api.unloadModel();
+      await api.unloadModel(model);
       await refresh();
       return null;
     } catch (error) {

@@ -220,6 +220,7 @@ void GpuTelemetry::run_loop() {
       s.vram_mb = used_bytes ? static_cast<double>(*used_bytes) / (1024.0 * 1024.0) : 0.0;
       if (adapter && adapter->second > 0) {
         const double total_mb = static_cast<double>(adapter->second) / (1024.0 * 1024.0);
+        s.vram_total_mb = total_mb;
         if (s.vram_mb <= 0.0) s.vram_mb = 0.0;
         s.reason = "vram_total_mb=" + std::to_string(static_cast<int>(total_mb));
       }

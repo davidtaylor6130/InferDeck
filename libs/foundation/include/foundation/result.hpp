@@ -12,6 +12,7 @@ enum class ErrorCode {
     Ok = 0,
     InvalidArgument,
     NotFound,
+    NotLoaded,
     AlreadyExists,
     IoError,
     ParseError,

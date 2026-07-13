@@ -3,6 +3,7 @@
 #include "gateway/streaming_sanitizer.hpp"
 #include "foundation/logging.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -14,6 +15,7 @@
 #include <mutex>
 #include <random>
 #include <thread>
+#include <unordered_map>
 
 namespace inferdeck::gateway {
 
@@ -316,9 +318,31 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
                    const GatewayDeps& deps) {
     (void)req;
     nlohmann::json data = nlohmann::json::array();
-    auto loaded = deps.coordinator.get_loaded_model();
+    std::unordered_map<std::string, model::ResidencyInfo> residency;
+    for (const auto& resident : deps.coordinator.residency()) {
+        residency.emplace(resident.name, resident);
+    }
     for (const auto& name : deps.coordinator.registry().list()) {
         const auto& info = deps.coordinator.registry().get_info(name);
+        const auto resident = residency.find(name);
+        const bool loaded = resident != residency.end();
+        const auto residency_json = loaded ? nlohmann::json{
+            {"loaded", true},
+            {"primary", resident->second.primary},
+            {"slots", resident->second.slots},
+            {"free_slots", resident->second.free_slots},
+            {"active_requests", resident->second.active_requests},
+            {"estimated_vram_mb", resident->second.estimated_vram_mb},
+            {"resizing", resident->second.resizing},
+        } : nlohmann::json{
+            {"loaded", false},
+            {"primary", false},
+            {"slots", 0},
+            {"free_slots", 0},
+            {"active_requests", 0},
+            {"estimated_vram_mb", 0},
+            {"resizing", false},
+        };
         nlohmann::json entry = {
             {"id", name},
             {"object", "model"},
@@ -331,7 +355,23 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
             {"limit", {{"context", info.context_size}}},
             {"n_slots", info.n_slots},
             {"has_vision", info.has_vision},
-            {"loaded", loaded && *loaded == name},
+            {"runtime", info.runtime},
+            {"modality", info.modality},
+            {"capabilities", info.capabilities},
+            {"loaded", loaded},
+            {"inferdeck", {
+                {"runtime", info.runtime},
+                {"modality", info.modality},
+                {"capabilities", info.capabilities},
+                {"resources", {
+                    {"vram_required_mb", info.vram_required_mb},
+                    {"vram_fixed_mb", info.vram_fixed_mb},
+                    {"vram_per_slot_mb", info.vram_per_slot_mb},
+                    {"configured_slots", info.n_slots},
+                    {"minimum_slots", info.min_slots},
+                }},
+                {"residency", residency_json},
+            }},
         };
         data.push_back(entry);
     }
@@ -444,7 +484,12 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
     const auto snap = deps.swap_tracker ? deps.swap_tracker->snapshot() : SwapSnapshot{};
     nlohmann::json body = {
         {"loaded_model", current ? *current : ""},
+        {"loaded_models", deps.coordinator.get_loaded_models()},
+        {"residency", nlohmann::json::array()},
         {"vram_usage_mb", deps.coordinator.get_vram_usage()},
+        {"vram_budget_mb", deps.coordinator.vram_budget_mb()},
+        {"vram_available_mb", deps.coordinator.vram_available_mb()},
+        {"resource_decision", deps.coordinator.last_resource_decision()},
         {"active_requests", deps.coordinator.active_request_count()},
         {"swapping", snap.swapping},
         {"target", snap.target},
@@ -452,6 +497,19 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
         {"started_unix_ms", snap.started_unix_ms},
         {"last_error", snap.last_error},
     };
+    for (const auto& resident : deps.coordinator.residency()) {
+        body["residency"].push_back({
+            {"name", resident.name},
+            {"runtime", resident.runtime},
+            {"modality", resident.modality},
+            {"slots", resident.slots},
+            {"free_slots", resident.free_slots},
+            {"active_requests", resident.active_requests},
+            {"estimated_vram_mb", resident.estimated_vram_mb},
+            {"primary", resident.primary},
+            {"resizing", resident.resizing},
+        });
+    }
     write_json(resp, 200, body);
 }
 
@@ -478,24 +536,24 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     "model not registered: " + model_name);
         return;
     }
-    {
-        auto loaded = ensure_model_loaded(deps, model_name);
-        if (!loaded.ok) {
-            if (loaded.status == 503) {
-                resp.set_header("Retry-After", deps.default_swap_timeout_s);
-            }
-            write_error(resp, loaded.status, loaded.code, loaded.message);
-            return;
-        }
-    }
-
     bool stream = body.value("stream", false);
 
     int slot_id = -1;
     {
         model::AcquireSlotOptions opts;
-        opts.timeout = std::chrono::milliseconds{30000};
+        opts.timeout = std::chrono::minutes{5};
         opts.block = true;
+        opts.priority = body.contains("priority") && body["priority"].is_number_integer()
+            ? std::clamp(body["priority"].get<int>(), -100, 100) : 0;
+        opts.cancelled = [&req] { return req.is_connection_closed(); };
+        opts.prepare = [&deps, &model_name] {
+            auto loaded = ensure_model_loaded(deps, model_name);
+            if (loaded.ok) return foundation::Ok();
+            const auto code = loaded.status == 404 ? foundation::ErrorCode::NotFound
+                : loaded.code == "model_not_loaded" ? foundation::ErrorCode::NotLoaded
+                : foundation::ErrorCode::Unavailable;
+            return foundation::Err<void>(code, loaded.message);
+        };
         auto sr = deps.coordinator.acquire_slot(model_name, opts);
         if (!sr) {
             int status = 503;
@@ -509,8 +567,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             } else if (sr.error().code == foundation::ErrorCode::NotFound) {
                 status = 404;
                 code = "model_not_loaded";
+            } else if (sr.error().code == foundation::ErrorCode::NotLoaded) {
+                code = "model_not_loaded";
             }
-            resp.set_header("Retry-After", "1");
+            resp.set_header("Retry-After",
+                sr.error().code == foundation::ErrorCode::NotLoaded
+                    ? deps.default_swap_timeout_s : "1");
             model::InferenceResult failed;
             record_request(deps, model_name, failed, status, -1);
             write_error(resp, status, code, sr.error().message);

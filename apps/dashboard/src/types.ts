@@ -5,11 +5,17 @@ export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'off
 export interface ModelInfo {
   id: string;
   family?: string;
+  runtime?: string;
+  modality?: string;
+  capabilities?: string[];
   context_size: number;
   vram_required_mb: number;
   n_slots: number;
   has_vision: boolean;
   loaded: boolean;
+  primary?: boolean;
+  free_slots?: number;
+  active_requests?: number;
 }
 
 export interface GpuSample {
@@ -17,6 +23,7 @@ export interface GpuSample {
   name: string;
   utilizationPct: number;
   vramUsedMb: number;
+  vramTotalMb?: number;
   temperatureC: number;
   powerW: number;
 }
@@ -87,7 +94,16 @@ export interface MonthlyUsageRow {
 
 export interface StatusPayload {
   status: string;
-  queue: { running: number; gpuLocked: boolean; lockOwner: string };
+  queue: {
+    running: number;
+    queued?: number;
+    gpuLocked: boolean;
+    lockOwner: string;
+    vramBudgetMb?: number;
+    vramAvailableMb?: number;
+    resourceDecision?: string;
+    requests?: Array<{ id: number; model: string; priority: number; position: number; queuedMs: number; remainingMs: number }>;
+  };
   swap: SwapState;
   hardware: {
     available?: boolean;

@@ -2,6 +2,7 @@
 
 #include "foundation/logging.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -407,29 +408,29 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
         return;
     }
 
-    {
-        auto loaded = ensure_model_loaded(deps, model_name);
-        if (!loaded.ok) {
-            if (loaded.status == 503) {
-                resp.set_header("Retry-After", deps.default_swap_timeout_s);
-            }
-            const char* type =
-                loaded.status == 404 ? "not_found_error" : "overloaded_error";
-            write_anthropic_error(resp, loaded.status, type, loaded.message);
-            return;
-        }
-    }
-
     const bool stream = body.value("stream", false);
 
     int slot_id = -1;
     {
         model::AcquireSlotOptions opts;
-        opts.timeout = std::chrono::milliseconds{30000};
+        opts.timeout = std::chrono::minutes{5};
         opts.block = true;
+        opts.priority = body.contains("priority") && body["priority"].is_number_integer()
+            ? std::clamp(body["priority"].get<int>(), -100, 100) : 0;
+        opts.cancelled = [&req] { return req.is_connection_closed(); };
+        opts.prepare = [&deps, &model_name] {
+            auto loaded = ensure_model_loaded(deps, model_name);
+            if (loaded.ok) return foundation::Ok();
+            const auto code = loaded.status == 404 ? foundation::ErrorCode::NotFound
+                : loaded.code == "model_not_loaded" ? foundation::ErrorCode::NotLoaded
+                : foundation::ErrorCode::Unavailable;
+            return foundation::Err<void>(code, loaded.message);
+        };
         auto sr = deps.coordinator.acquire_slot(model_name, opts);
         if (!sr) {
-            resp.set_header("Retry-After", "1");
+            resp.set_header("Retry-After",
+                sr.error().code == foundation::ErrorCode::NotLoaded
+                    ? deps.default_swap_timeout_s : "1");
             write_anthropic_error(resp, 503, "overloaded_error", sr.error().message);
             return;
         }

@@ -29,7 +29,10 @@ struct ModelInfo {
     std::string gguf_path{};
     std::string mmproj_path{};
     int n_slots{2};
+    int min_slots{1};
     int vram_required_mb{0};
+    int vram_fixed_mb{0};
+    int vram_per_slot_mb{0};
     int context_size{65536};
     std::optional<int> n_gpu_layers{};
     bool has_vision{false};

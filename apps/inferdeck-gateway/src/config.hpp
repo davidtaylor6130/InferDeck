@@ -40,6 +40,9 @@ struct GatewayConfig {
     std::string cache_type_v{"q8_0"};
     bool swa_full{false};
     bool truncate_prompt{true};
+    int vram_budget_mb{0};
+    int vram_safety_margin_mb{1024};
+    int max_queue_size{128};
     model::SamplingConfig sampling{};  // global sampler defaults (issue #42)
     std::map<std::string, std::string> anthropic_model_aliases{};
 };
@@ -144,6 +147,9 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["cache_type_v"]) cfg.cache_type_v = g["cache_type_v"].as<std::string>();
         if (g["swa_full"]) cfg.swa_full = g["swa_full"].as<bool>();
         if (g["truncate_prompt"]) cfg.truncate_prompt = g["truncate_prompt"].as<bool>();
+        if (g["vram_budget_mb"]) cfg.vram_budget_mb = g["vram_budget_mb"].as<int>();
+        if (g["vram_safety_margin_mb"]) cfg.vram_safety_margin_mb = g["vram_safety_margin_mb"].as<int>();
+        if (g["max_queue_size"]) cfg.max_queue_size = g["max_queue_size"].as<int>();
         if (g["sampling"]) parse_sampling(g["sampling"], cfg.sampling);
     }
     if (root["anthropic"] && root["anthropic"]["model_aliases"] &&
@@ -171,8 +177,11 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
                 info.mmproj_path = m["mmproj_path"].as<std::string>();
             }
             info.n_slots = m["n_slots"] ? m["n_slots"].as<int>() : 2;
+            info.min_slots = m["min_slots"] ? m["min_slots"].as<int>() : 1;
             info.vram_required_mb =
                 m["vram_required_mb"] ? m["vram_required_mb"].as<int>() : 0;
+            info.vram_fixed_mb = m["vram_fixed_mb"] ? m["vram_fixed_mb"].as<int>() : 0;
+            info.vram_per_slot_mb = m["vram_per_slot_mb"] ? m["vram_per_slot_mb"].as<int>() : 0;
             info.context_size =
                 m["context_size"] ? m["context_size"].as<int>() : 65536;
             if (m["n_gpu_layers"] && !m["n_gpu_layers"].IsNull()) {

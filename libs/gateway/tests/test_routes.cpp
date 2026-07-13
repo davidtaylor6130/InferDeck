@@ -233,6 +233,11 @@ TEST_CASE("Routes: GET /v1/models lists registered models", "[routes][models]") 
     REQUIRE(body["data"][0]["context_length"] == 65536);
     REQUIRE(body["data"][0]["max_context_length"] == 65536);
     REQUIRE(body["data"][0]["limit"]["context"] == 65536);
+    REQUIRE(body["data"][0]["object"] == "model");
+    REQUIRE(body["data"][0]["runtime"] == "llama_cpp");
+    REQUIRE(body["data"][0]["modality"] == "text");
+    REQUIRE(body["data"][0]["inferdeck"]["capabilities"].is_array());
+    REQUIRE(body["data"][0]["inferdeck"]["resources"]["configured_slots"] == 2);
     ts.stop();
 }
 
@@ -249,6 +254,8 @@ TEST_CASE("Routes: GET /v1/models marks loaded model", "[routes][models]") {
     auto body = nlohmann::json::parse(res->body);
     REQUIRE(body["data"].size() == 1);
     REQUIRE(body["data"][0]["loaded"] == true);
+    REQUIRE(body["data"][0]["inferdeck"]["residency"]["primary"] == true);
+    REQUIRE(body["data"][0]["inferdeck"]["residency"]["free_slots"] == 2);
     ts.stop();
 }
 
@@ -287,6 +294,9 @@ TEST_CASE("Routes: GET /v1/swap/status returns 200 with model info", "[routes][s
     REQUIRE(res->status == 200);
     auto body = nlohmann::json::parse(res->body);
     REQUIRE(body["loaded_model"] == "qwen3.6-27b");
+    REQUIRE(body["loaded_models"] == nlohmann::json::array({"qwen3.6-27b"}));
+    REQUIRE(body["residency"].size() == 1);
+    REQUIRE(body["residency"][0]["runtime"] == "llama_cpp");
     REQUIRE(body["active_requests"] == 0);
     ts.stop();
 }

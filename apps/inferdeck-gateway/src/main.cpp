@@ -303,6 +303,10 @@ int main(int argc, char** argv) {
     LOG_INFO("factory_set", "LlamaCppModel factory installed");
 
     model::BackendCoordinator coordinator(registry);
+    coordinator.set_max_queue_size(static_cast<std::size_t>(std::max(1, cfg.max_queue_size)));
+    if (cfg.vram_budget_mb > 0) {
+        coordinator.set_vram_budget(cfg.vram_budget_mb, cfg.vram_safety_margin_mb);
+    }
 
     observability::Metrics metrics;
     observability::GpuTelemetry gpu;
@@ -329,8 +333,12 @@ int main(int argc, char** argv) {
     std::atomic<bool> stats_stop{false};
     std::thread stats_thread([&] {
         while (!stats_stop.load()) {
+            const auto g = gpu.latest();
+            if (cfg.vram_budget_mb <= 0 && g.vram_total_mb > 0.0) {
+                coordinator.set_vram_budget(static_cast<int>(g.vram_total_mb),
+                                            cfg.vram_safety_margin_mb);
+            }
             if (events.subscriber_count() > 0) {
-                const auto g = gpu.latest();
                 const auto swap = swap_tracker.snapshot();
                 events.publish("stats", nlohmann::json{
                     {"timestampUnixMs", std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -340,11 +348,14 @@ int main(int argc, char** argv) {
                         {"name", g.gpu_name},
                         {"utilizationPct", g.utilization_pct},
                         {"vramUsedMb", g.vram_mb},
+                        {"vramTotalMb", g.vram_total_mb},
                         {"temperatureC", g.temperature_c},
                         {"powerW", g.power_w},
                     }},
                     {"loadedModel", coordinator.get_loaded_model().value_or("")},
                     {"activeRequests", coordinator.active_request_count()},
+                    {"queuedRequests", coordinator.queued_request_count()},
+                    {"resourceDecision", coordinator.last_resource_decision()},
                     {"swapping", swap.swapping},
                     {"swapTarget", swap.target},
                     {"totalRequests", metrics.total_requests()},

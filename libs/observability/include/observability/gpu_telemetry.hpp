@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 
 namespace inferdeck::observability {
 
@@ -17,6 +18,7 @@ struct GpuStats {
   std::string gpu_name;
   double utilization_pct{};
   double vram_mb{};
+  double vram_total_mb{};
   double temperature_c{};
   double power_w{};
   double fan_speed_pct{};

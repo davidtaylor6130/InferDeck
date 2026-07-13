@@ -4,21 +4,26 @@ Branch: `alpha-v2` from `main`/`origin/main` at `798b2ef` (`v0.4.0`).
 
 ## Status by issue
 
-- #52 runtime architecture: in progress. Added the shared `IBackend` lifecycle/capacity contract, runtime-keyed factories, runtime/modality/capability metadata, configuration parsing, and typed rejection of text execution on non-text backends.
+- #52 runtime architecture: portable implementation complete. Added the shared `IBackend` lifecycle/capacity contract, runtime-keyed factories, runtime/modality/capability metadata, configuration parsing, and typed rejection of text execution on non-text backends.
 - #53 image generation: pending native runtime integration.
 - #54 text-to-speech: pending native runtime integration.
 - #55 speech-to-text: pending native runtime integration.
-- #56 resource-aware residency: pending.
+- #56 resource-aware residency: portable implementation complete. Windows VRAM calibration and live multi-model validation remain.
 - #57 model store: pending.
 - #58 GUI configuration: pending.
-- #59 cross-modality queue: pending.
+- #59 cross-modality queue: portable implementation complete. Admission is bounded, priority-aware with aging, cancellable, visible in status, and spans tracked swaps.
 - #60 embeddings: pending.
 - #61 Responses API: pending.
-- #62 capability discovery: pending.
+- #62 capability discovery: portable implementation complete through `/v1/models`, swap/status, SSE stats, dashboard status, and the Models page.
 
 ## Verification run
 
-- Portable model tests compiled directly with Apple Clang 21 and the repository's installed Catch2 libraries: 31 test cases, 129 assertions passed.
+- Portable model tests compiled directly with Apple Clang 21 and the repository's installed Catch2 libraries: 41 test cases, 184 assertions passed.
+- OpenAI route tests: 15 test cases, 106 assertions passed. The binary requires unsandboxed loopback access for its local HTTP servers.
+- Anthropic route tests: 9 test cases, 46 assertions passed with loopback access.
+- Dashboard tests: 15 tests passed.
+- Dashboard TypeScript check and production Vite build: passed; committed static output rebuilt.
+- `main.cpp`, `llama_cpp_model.cpp`, dashboard routes, and GPU telemetry sources passed Apple Clang syntax/object compilation where link-free checks were possible.
 - `git diff --check`: passed.
 - Root CMake configure on macOS: unavailable. The project forces the Windows Vulkan loader and the local environment lacks the required SPIR-V package. This is not evidence of a Windows build failure.
 
@@ -43,4 +48,5 @@ Do not deploy Alpha V2 artifacts to `C:\InferDeck` until the complete issue set 
 
 - No Windows compilation, Vulkan execution, VRAM measurement, or real-model inference has been performed on this branch yet.
 - Runtime identifiers default to `llama_cpp`, preserving existing YAML files.
-- The coordinator still has single-resident-model behavior until #56 is implemented.
+- Multi-residency activates only after DXGI reports total VRAM or `gateway.vram_budget_mb` is configured. With no budget, legacy single-resident swap behavior remains.
+- Automatic slot shrinking requires calibrated `vram_fixed_mb` and `vram_per_slot_mb` values per model. Without them, the planner can keep models resident when declared totals fit and can evict idle residents, but it will not guess unsafe slot savings.

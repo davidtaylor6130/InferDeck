@@ -44,6 +44,7 @@ export const ModelsPage: React.FC = () => {
                 <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
                   <th className="py-2 pr-4 font-medium">Model</th>
                   <th className="py-2 pr-4 font-medium">Family</th>
+                  <th className="py-2 pr-4 font-medium">Runtime</th>
                   <th className="py-2 pr-4 font-medium">Context</th>
                   <th className="py-2 pr-4 font-medium">VRAM</th>
                   <th className="py-2 pr-4 font-medium">Slots</th>
@@ -63,19 +64,20 @@ export const ModelsPage: React.FC = () => {
                         </div>
                       </td>
                       <td className="py-2.5 pr-4 text-text-secondary">{model.family || '—'}</td>
+                      <td className="py-2.5 pr-4 text-text-secondary">{model.runtime || 'llama_cpp'} · {model.modality || 'text'}</td>
                       <td className="py-2.5 pr-4 text-text-secondary">{formatTokenCount(model.context_size)}</td>
                       <td className="py-2.5 pr-4 text-text-secondary">{formatMb(model.vram_required_mb)}</td>
-                      <td className="py-2.5 pr-4 text-text-secondary">{model.n_slots}</td>
+                      <td className="py-2.5 pr-4 text-text-secondary">{model.loaded ? `${model.free_slots ?? 0}/${model.n_slots}` : model.n_slots}</td>
                       <td className="py-2.5 pr-4">
                         {model.loaded
-                          ? <Badge label="Loaded" tone="good" />
+                          ? <Badge label={model.primary ? 'Primary' : 'Loaded'} tone="good" />
                           : isTarget
                             ? <Badge label="Swapping…" tone="info" />
                             : <Badge label="On disk" tone="idle" />}
                       </td>
                       <td className="py-2.5 text-right">
                         {model.loaded ? (
-                          <Button onClick={() => void unload()}>Unload</Button>
+                          <Button onClick={() => void unload(model.id)}>Unload</Button>
                         ) : isTarget ? (
                           <Button tone="danger" onClick={() => void cancelSwap()}>Cancel</Button>
                         ) : (

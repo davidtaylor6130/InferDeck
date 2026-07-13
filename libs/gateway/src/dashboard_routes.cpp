@@ -9,6 +9,7 @@
 #include <ctime>
 #include <fstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -29,14 +30,7 @@ namespace model = inferdeck::model;
 namespace observability = inferdeck::observability;
 
 nlohmann::json gpu_hardware_json(const observability::GpuStats& gpu) {
-    double total_mb = 0.0;
-    if (!gpu.reason.empty()) {
-        const std::string key = "vram_total_mb=";
-        auto pos = gpu.reason.find(key);
-        if (pos != std::string::npos) {
-            try { total_mb = std::stod(gpu.reason.substr(pos + key.size())); } catch (...) { total_mb = 0.0; }
-        }
-    }
+    const double total_mb = gpu.vram_total_mb;
     const double memory_percent = total_mb > 0.0 ? std::clamp((gpu.vram_mb / total_mb) * 100.0, 0.0, 100.0) : 0.0;
     nlohmann::json gpu_json = {
         {"name", gpu.gpu_name.empty() ? "Windows GPU" : gpu.gpu_name},
@@ -92,28 +86,38 @@ nlohmann::json system_hardware_json() {
 nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
     nlohmann::json models = nlohmann::json::array();
     auto loaded = coordinator.get_loaded_model();
+    std::unordered_map<std::string, model::ResidencyInfo> residency;
+    for (const auto& resident : coordinator.residency()) residency.emplace(resident.name, resident);
     for (const auto& name : coordinator.registry().list()) {
         const auto& info = coordinator.registry().get_info(name);
+        const auto resident = residency.find(name);
         models.push_back({
             {"id", name},
             {"name", name},
             {"family", info.family},
-            {"loaded", loaded && *loaded == name},
+            {"runtime", info.runtime},
+            {"modality", info.modality},
+            {"capabilities", info.capabilities},
+            {"loaded", resident != residency.end()},
+            {"primary", resident != residency.end() && resident->second.primary},
             {"context_size", info.context_size},
             {"vram_required_mb", info.vram_required_mb},
-            {"n_slots", info.n_slots},
+            {"n_slots", resident == residency.end() ? info.n_slots : resident->second.slots},
+            {"free_slots", resident == residency.end() ? 0 : resident->second.free_slots},
+            {"active_requests", resident == residency.end() ? 0 : resident->second.active_requests},
             {"has_vision", info.has_vision},
         });
     }
     nlohmann::json running = nlohmann::json::array();
-    if (loaded) {
-        const auto& info = coordinator.registry().get_info(*loaded);
+    for (const auto& resident : coordinator.residency()) {
+        const auto& info = coordinator.registry().get_info(resident.name);
         running.push_back({
-            {"id", *loaded},
-            {"name", *loaded},
+            {"id", resident.name},
+            {"name", resident.name},
             {"loaded", true},
+            {"primary", resident.primary},
             {"context_size", info.context_size},
-            {"vram_required_mb", info.vram_required_mb},
+            {"vram_required_mb", resident.estimated_vram_mb},
         });
     }
     return {{"models", models}, {"running", running}, {"current", loaded.value_or("")}};
@@ -224,12 +228,28 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
     const auto swap = deps.gw.swap_tracker ? deps.gw.swap_tracker->snapshot() : SwapSnapshot{};
     auto loaded = coordinator.get_loaded_model();
     auto model_json = build_dashboard_models(coordinator);
+    nlohmann::json queued_requests = nlohmann::json::array();
+    for (const auto& item : coordinator.queue()) {
+        queued_requests.push_back({
+            {"id", item.id},
+            {"model", item.model},
+            {"priority", item.priority},
+            {"position", item.position},
+            {"queuedMs", item.queued_ms},
+            {"remainingMs", item.remaining_ms},
+        });
+    }
     return {
         {"status", "ok"},
         {"queue", {
             {"running", coordinator.active_request_count()},
+            {"queued", coordinator.queued_request_count()},
+            {"requests", queued_requests},
             {"gpuLocked", coordinator.active_request_count() > 0},
-            {"lockOwner", loaded.value_or("")}
+            {"lockOwner", loaded.value_or("")},
+            {"vramBudgetMb", coordinator.vram_budget_mb()},
+            {"vramAvailableMb", coordinator.vram_available_mb()},
+            {"resourceDecision", coordinator.last_resource_decision()},
         }},
         {"swap", {
             {"swapping", swap.swapping},
@@ -297,17 +317,18 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
 
     server.Post(R"(^/api/models/unload$)", wrap([deps](const httplib::Request& req,
                                                        httplib::Response& resp) {
-        (void)req;
+        const auto body = req.body.empty() ? nlohmann::json::object() : nlohmann::json::parse(req.body);
         const auto current = deps.gw.coordinator.get_loaded_model();
-        auto result = deps.gw.coordinator.unload_current();
+        const std::string model_name = body.value("model", current.value_or(""));
+        auto result = model_name.empty() ? foundation::Ok() : deps.gw.coordinator.unload(model_name);
         if (!result) {
             write_error(resp, 500, "unload_failed", result.error().message);
             return;
         }
-        if (deps.gw.events && current) {
+        if (deps.gw.events && !model_name.empty()) {
             deps.gw.events->publish("model", nlohmann::json{
                 {"state", "unloaded"},
-                {"from", *current},
+                {"from", model_name},
                 {"to", ""},
                 {"durationMs", 0.0},
                 {"error", ""},

@@ -986,7 +986,47 @@ Result<void> LlamaCppModel::unload() {
 }
 
 int LlamaCppModel::vram_usage_mb() const noexcept {
+  return estimate_vram_mb(info_.n_slots);
+}
+
+bool LlamaCppModel::can_resize_slots() const noexcept {
+  return info_.vram_fixed_mb > 0 && info_.vram_per_slot_mb > 0 &&
+         info_.n_slots > info_.min_slots;
+}
+
+int LlamaCppModel::estimate_vram_mb(int slots) const noexcept {
+  if (info_.vram_fixed_mb > 0 && info_.vram_per_slot_mb > 0) {
+    return info_.vram_fixed_mb + info_.vram_per_slot_mb * std::max(info_.min_slots, slots);
+  }
   return info_.vram_required_mb;
+}
+
+Result<void> LlamaCppModel::resize_slots(int slots) {
+  if (slots < info_.min_slots || slots > info_.n_slots) {
+    return Result<void>(std::unexpect,
+        make_error(ErrorCode::InvalidArgument, "invalid slot capacity: " + std::to_string(slots)));
+  }
+  if (slots == info_.n_slots) return Result<void>{};
+  {
+    std::lock_guard lk(mtx_);
+    if (std::any_of(slots_.begin(), slots_.end(), [](const SlotState& slot) { return slot.busy; })) {
+      return Result<void>(std::unexpect,
+          make_error(ErrorCode::Unavailable, "cannot resize while slots are active"));
+    }
+  }
+  const int previous = info_.n_slots;
+  const bool was_loaded = loaded_.load();
+  if (was_loaded) {
+    auto unloaded = unload();
+    if (!unloaded) return unloaded;
+  }
+  info_.n_slots = slots;
+  if (!was_loaded) return Result<void>{};
+  auto loaded = load();
+  if (loaded) return loaded;
+  info_.n_slots = previous;
+  (void)load();
+  return loaded;
 }
 
 int LlamaCppModel::n_free_slots() const noexcept {
