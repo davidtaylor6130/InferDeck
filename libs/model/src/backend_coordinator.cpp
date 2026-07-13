@@ -439,7 +439,7 @@ foundation::Result<InferenceResult> BackendCoordinator::predict(
                                                       "model not loaded: " + name);
         }
         inst = dynamic_cast<IModel*>(it->second.get());
-        if (!inst) {
+        if (!inst || !it->second->info().supports("chat_completions")) {
             return foundation::Err<InferenceResult>(foundation::ErrorCode::InvalidArgument,
                                                       "backend does not support text generation: " + name);
         }
@@ -461,12 +461,32 @@ foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
                                                       "model not loaded: " + name);
         }
         inst = dynamic_cast<IModel*>(it->second.get());
-        if (!inst) {
+        if (!inst || !it->second->info().supports("chat_completions")) {
             return foundation::Err<InferenceResult>(foundation::ErrorCode::InvalidArgument,
                                                       "backend does not support text generation: " + name);
         }
     }
     return inst->predict_stream(slot_id, req, callback, cancel);
+}
+
+foundation::Result<EmbeddingResult> BackendCoordinator::embed(
+    const std::string& name, int slot_id, const EmbeddingRequest& request,
+    const std::function<bool()>& cancelled) {
+    IEmbeddingBackend* backend = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second) {
+            return foundation::Err<EmbeddingResult>(foundation::ErrorCode::NotFound,
+                                                      "model not loaded: " + name);
+        }
+        backend = dynamic_cast<IEmbeddingBackend*>(it->second.get());
+        if (!backend || !it->second->info().supports("embeddings")) {
+            return foundation::Err<EmbeddingResult>(foundation::ErrorCode::InvalidArgument,
+                                                      "backend does not support embeddings: " + name);
+        }
+    }
+    return backend->embed(slot_id, request, cancelled);
 }
 
 void BackendCoordinator::drain_active(std::chrono::milliseconds timeout) {

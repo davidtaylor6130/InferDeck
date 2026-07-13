@@ -52,7 +52,8 @@ struct LlamaCppConfig {
   inferdeck::model::SamplingConfig sampling{};  // server-side sampler defaults (issue #42)
 };
 
-class LlamaCppModel final : public inferdeck::model::IModel {
+class LlamaCppModel final : public inferdeck::model::IModel,
+                            public inferdeck::model::IEmbeddingBackend {
 public:
   LlamaCppModel(inferdeck::model::ModelInfo info, LlamaCppConfig cfg = {});
   ~LlamaCppModel() override;
@@ -87,6 +88,9 @@ public:
       int slot_id, const inferdeck::model::InferenceRequest& req,
       const inferdeck::model::IModel::TokenCallback& callback,
       const std::atomic<bool>* cancel = nullptr) override;
+  inferdeck::foundation::Result<inferdeck::model::EmbeddingResult> embed(
+      int slot_id, const inferdeck::model::EmbeddingRequest& request,
+      const std::function<bool()>& cancelled = {}) override;
 
   static std::string version();
   static void init_backend();

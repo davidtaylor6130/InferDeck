@@ -3,6 +3,7 @@
 #include "foundation/result.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
+#include "gateway/openai_routes.hpp"
 #include "gateway/routes.hpp"
 #include "httplib.h"
 #include "model/backend_coordinator.hpp"
@@ -27,7 +28,7 @@ using inferdeck::foundation::Result;
 
 namespace {
 
-class IModelMock : public IModel {
+class IModelMock : public IModel, public IEmbeddingBackend {
 public:
     ModelInfo model_info{};
     std::atomic<bool> loaded{false};
@@ -37,6 +38,7 @@ public:
     std::atomic<bool> block_until_cancel{false};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
+    std::string last_request_json;
     ChatTemplateMeta chat_meta_{};
 
     explicit IModelMock(ModelInfo info) : model_info(std::move(info)) {
@@ -95,9 +97,25 @@ public:
         return busy_slots[slot_id] != 0;
     }
 
-    Result<InferenceResult> predict(int, const InferenceRequest&) override {
+    Result<InferenceResult> predict(int, const InferenceRequest& request) override {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            last_request_json = request.openai_body_json;
+        }
         InferenceResult r;
-        r.text = "Hello from model";
+        const auto body = request.openai_body_json.empty()
+            ? nlohmann::json::object() : nlohmann::json::parse(request.openai_body_json);
+        if (body.contains("tools") && !body["tools"].empty()) {
+            r.reasoning_text = "need a tool";
+            ToolCall call;
+            call.id = "call_test";
+            call.type = "function";
+            call.function_name = "list_workspace";
+            call.function_arguments = "{\"path\":\".\"}";
+            r.tool_calls.push_back(std::move(call));
+        } else {
+            r.text = "Hello from model";
+        }
         r.prompt_tokens = 3;
         r.completion_tokens = 4;
         return Ok(std::move(r));
@@ -144,6 +162,23 @@ public:
         r.tool_calls.push_back(std::move(call));
         return Ok(std::move(r));
     }
+
+    Result<EmbeddingResult> embed(
+        int, const EmbeddingRequest& request,
+        const std::function<bool()>& cancelled = {}) override {
+        if (cancelled && cancelled()) {
+            return inferdeck::foundation::Err<EmbeddingResult>(ErrorCode::Cancelled, "cancelled");
+        }
+        EmbeddingResult result;
+        const int dimensions = request.dimensions.value_or(3);
+        for (std::size_t i = 0; i < request.inputs.size(); ++i) {
+            result.embeddings.emplace_back(static_cast<std::size_t>(dimensions),
+                                           static_cast<float>(i + 1));
+            result.prompt_tokens += static_cast<int>(request.inputs[i].size());
+        }
+        result.duration_ms = 2.0f;
+        return Ok(std::move(result));
+    }
 };
 
 ModelInfo make_info(const std::string& name) {
@@ -185,6 +220,14 @@ struct TestServer {
         server.Post("/v1/chat/completions",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_chat_completions(req, resp, make_deps());
+                    });
+        server.Post("/v1/embeddings",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_embeddings(req, resp, make_deps());
+                    });
+        server.Post("/v1/responses",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_responses(req, resp, make_deps());
                     });
     }
 
@@ -380,6 +423,182 @@ TEST_CASE("Routes: POST /v1/chat/completions strips :latest suffix", "[routes][c
     REQUIRE(res);
     REQUIRE(res->status == 200);
     REQUIRE(nlohmann::json::parse(res->body)["model"] == "qwen3.6-27b");
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/embeddings returns ordered float vectors", "[routes][embeddings]") {
+    TestServer ts;
+    auto info = make_info("embed-model");
+    info.modality = "embedding";
+    info.capabilities = {"embeddings"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/embeddings", nlohmann::json{
+        {"model", info.name},
+        {"input", nlohmann::json::array({"one", "two"})},
+        {"dimensions", 2},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body["object"] == "list");
+    REQUIRE(body["model"] == info.name);
+    REQUIRE(body["data"].size() == 2);
+    REQUIRE(body["data"][0]["index"] == 0);
+    REQUIRE(body["data"][0]["embedding"] == nlohmann::json::array({1.0, 1.0}));
+    REQUIRE(body["data"][1]["embedding"] == nlohmann::json::array({2.0, 2.0}));
+    REQUIRE(body["usage"]["prompt_tokens"] == 6);
+    REQUIRE(body["usage"]["total_tokens"] == 6);
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/embeddings supports base64 encoding", "[routes][embeddings]") {
+    TestServer ts;
+    auto info = make_info("embed-model");
+    info.modality = "embedding";
+    info.capabilities = {"embeddings"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/embeddings", nlohmann::json{
+        {"model", info.name}, {"input", "one"}, {"encoding_format", "base64"},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto embedding = nlohmann::json::parse(response->body)["data"][0]["embedding"];
+    REQUIRE(embedding.is_string());
+    REQUIRE_FALSE(embedding.get<std::string>().empty());
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/embeddings rejects non-embedding model", "[routes][embeddings]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("chat-model"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/embeddings", nlohmann::json{
+        {"model", "chat-model"}, {"input", "one"},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 400);
+    REQUIRE(nlohmann::json::parse(response->body)["error"]["code"] == "unsupported_capability");
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/responses translates string input and output", "[routes][responses]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("chat-model"));
+    REQUIRE(ts.coordinator.load("chat-model"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/responses", nlohmann::json{
+        {"model", "chat-model"}, {"instructions", "Be concise"}, {"input", "Hello"},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body["object"] == "response");
+    REQUIRE(body["status"] == "completed");
+    REQUIRE(body["model"] == "chat-model");
+    REQUIRE(body["output"].size() == 1);
+    REQUIRE(body["output"][0]["type"] == "message");
+    REQUIRE(body["output"][0]["content"][0]["type"] == "output_text");
+    REQUIRE(body["output"][0]["content"][0]["text"] == "Hello from model");
+    REQUIRE(body["usage"]["input_tokens"] == 3);
+    REQUIRE(body["usage"]["output_tokens"] == 4);
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/responses translates function tools and reasoning", "[routes][responses]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("chat-model"));
+    REQUIRE(ts.coordinator.load("chat-model"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/responses", nlohmann::json{
+        {"model", "chat-model"}, {"input", "List files"},
+        {"tools", nlohmann::json::array({{{"type", "function"},
+            {"name", "list_workspace"}, {"parameters", nlohmann::json::object()}}})},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto output = nlohmann::json::parse(response->body)["output"];
+    REQUIRE(output.size() == 2);
+    REQUIRE(output[0]["type"] == "reasoning");
+    REQUIRE(output[0]["content"][0]["text"] == "need a tool");
+    REQUIRE(output[1]["type"] == "function_call");
+    REQUIRE(output[1]["call_id"] == "call_test");
+    REQUIRE(output[1]["name"] == "list_workspace");
+    REQUIRE(output[1]["arguments"] == "{\"path\":\".\"}");
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/responses maps structured output format", "[routes][responses]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("chat-model"));
+    REQUIRE(ts.coordinator.load("chat-model"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/responses", nlohmann::json{
+        {"model", "chat-model"}, {"input", "Return JSON"},
+        {"text", {{"format", {{"type", "json_schema"}, {"name", "answer"},
+            {"schema", {{"type", "object"}}}, {"strict", true}}}}},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    auto* model = dynamic_cast<const IModelMock*>(ts.coordinator.get_model("chat-model"));
+    REQUIRE(model != nullptr);
+    const auto translated = nlohmann::json::parse(model->last_request_json);
+    REQUIRE(translated["response_format"]["type"] == "json_schema");
+    REQUIRE(translated["response_format"]["json_schema"]["name"] == "answer");
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/responses rejects stateful fields", "[routes][responses]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("chat-model"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/responses", nlohmann::json{
+        {"model", "chat-model"}, {"input", "Hello"}, {"store", true},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 400);
+    REQUIRE(nlohmann::json::parse(response->body)["error"]["code"] == "unsupported_parameter");
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/responses streams typed reasoning and tool events", "[routes][responses]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("chat-model"));
+    REQUIRE(ts.coordinator.load("chat-model"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    client.set_read_timeout(std::chrono::seconds(5));
+    auto response = client.Post("/v1/responses", nlohmann::json{
+        {"model", "chat-model"}, {"input", "List files"}, {"stream", true},
+        {"tools", nlohmann::json::array({{{"type", "function"},
+            {"name", "list_workspace"}, {"parameters", nlohmann::json::object()}}})},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    REQUIRE(response->body.find("event: response.created") != std::string::npos);
+    REQUIRE(response->body.find("event: response.reasoning_text.delta") != std::string::npos);
+    REQUIRE(response->body.find("event: response.function_call_arguments.delta") != std::string::npos);
+    REQUIRE(response->body.find("event: response.function_call_arguments.done") != std::string::npos);
+    REQUIRE(response->body.find("event: response.completed") != std::string::npos);
+    REQUIRE(response->body.find("data: [DONE]") == std::string::npos);
     ts.stop();
 }
 

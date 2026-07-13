@@ -25,7 +25,7 @@ struct ModelInfo {
     std::string family{};
     std::string runtime{"llama_cpp"};
     std::string modality{"text"};
-    std::vector<std::string> capabilities{"chat_completions"};
+    std::vector<std::string> capabilities{"chat_completions", "responses"};
     std::string gguf_path{};
     std::string mmproj_path{};
     int n_slots{2};

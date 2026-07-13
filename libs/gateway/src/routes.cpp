@@ -199,7 +199,8 @@ std::string sse_chunk_json(const std::string& id, const std::string& model,
 }
 
 std::string sse_done(const std::string& id, const std::string& model,
-                     const std::string& finish_reason = "stop") {
+                     const std::string& finish_reason = "stop",
+                     const model::InferenceResult* result = nullptr) {
     nlohmann::json chunk = {
         {"id", id},
         {"object", "chat.completion.chunk"},
@@ -213,6 +214,14 @@ std::string sse_done(const std::string& id, const std::string& model,
             }
         })},
     };
+    if (result) {
+        chunk["usage"] = {
+            {"prompt_tokens", result->prompt_tokens},
+            {"prompt_tokens_details", {{"cached_tokens", result->cached_prompt_tokens}}},
+            {"completion_tokens", result->completion_tokens},
+            {"total_tokens", result->prompt_tokens + result->completion_tokens},
+        };
+    }
     return "data: " + chunk.dump() + "\n\ndata: [DONE]\n\n";
 }
 
@@ -537,6 +546,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
     bool stream = body.value("stream", false);
+    const bool include_stream_usage = body.contains("stream_options") &&
+        body["stream_options"].is_object() &&
+        body["stream_options"].value("include_usage", false);
 
     int slot_id = -1;
     {
@@ -797,7 +809,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
     resp.set_chunked_content_provider(
         "text/event-stream",
-        [id, stream_model, state](
+        [id, stream_model, state, include_stream_usage](
             std::size_t, httplib::DataSink& sink) mutable {
             try {
             std::unique_lock<std::mutex> lk(state->mtx);
@@ -879,7 +891,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 const bool has_tool_calls = final_result && !final_result->tool_calls.empty();
                 const std::string finish_reason = has_tool_calls ? "tool_calls" :
                     (final_result ? final_result->finish_reason : "stop");
-                std::string done = sse_done(id, stream_model, finish_reason);
+                std::string done = sse_done(id, stream_model, finish_reason,
+                    include_stream_usage && final_result ? final_result.get() : nullptr);
                 if (!sink.write(done.data(), done.size())) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=done_write_failed",
                              state->model_name, state->slot_id);

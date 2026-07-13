@@ -176,6 +176,23 @@ private:
     bool busy_{false};
 };
 
+class EmbeddingBackendMock : public IBackendMock, public IEmbeddingBackend {
+public:
+    explicit EmbeddingBackendMock(ModelInfo info) : IBackendMock(std::move(info)) {}
+
+    Result<EmbeddingResult> embed(
+        int, const EmbeddingRequest& request,
+        const std::function<bool()>& cancelled = {}) override {
+        if (cancelled && cancelled()) {
+            return Err<EmbeddingResult>(ErrorCode::Cancelled, "cancelled");
+        }
+        EmbeddingResult result;
+        result.embeddings.resize(request.inputs.size(), std::vector<float>{1.0f, 2.0f});
+        result.prompt_tokens = static_cast<int>(request.inputs.size());
+        return Ok(std::move(result));
+    }
+};
+
 IModelMock* as_mock(IModel* m) { return static_cast<IModelMock*>(m); }
 
 ModelInfo make_info(const std::string& name, const std::string& family = "qwen3.6") {
@@ -313,6 +330,29 @@ TEST_CASE("BackendCoordinator: rejects text execution on non-text backend", "[mo
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().code == ErrorCode::InvalidArgument);
     REQUIRE(coordinator.release_slot(info.name, slot.value()).has_value());
+}
+
+TEST_CASE("BackendCoordinator: routes embeddings by capability", "[model][coordinator]") {
+    ModelRegistry reg;
+    reg.register_factory("embedding_cpp", [](const ModelInfo& info) {
+        return std::make_unique<EmbeddingBackendMock>(info);
+    });
+    auto info = make_info("embedding");
+    info.runtime = "embedding_cpp";
+    info.modality = "embedding";
+    info.capabilities = {"embeddings"};
+    reg.register_model(info);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load(info.name).has_value());
+    auto slot = coordinator.acquire_slot(info.name);
+    REQUIRE(slot.has_value());
+    EmbeddingRequest request;
+    request.inputs = {"one", "two"};
+    auto result = coordinator.embed(info.name, *slot, request);
+    REQUIRE(result.has_value());
+    REQUIRE(result->embeddings.size() == 2);
+    REQUIRE(result->prompt_tokens == 2);
+    REQUIRE(coordinator.release_slot(info.name, *slot).has_value());
 }
 
 TEST_CASE("BackendCoordinator: load of unregistered model fails", "[model][coordinator]") {

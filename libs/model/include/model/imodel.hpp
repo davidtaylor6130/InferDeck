@@ -79,6 +79,25 @@ struct InferenceResult {
     std::vector<ToolCall> tool_calls{};
 };
 
+struct EmbeddingRequest {
+    std::vector<std::string> inputs;
+    std::optional<int> dimensions{};
+};
+
+struct EmbeddingResult {
+    std::vector<std::vector<float>> embeddings;
+    int prompt_tokens{0};
+    float duration_ms{0.0f};
+};
+
+class IEmbeddingBackend {
+public:
+    virtual ~IEmbeddingBackend() = default;
+    virtual foundation::Result<EmbeddingResult> embed(
+        int slot_id, const EmbeddingRequest& request,
+        const std::function<bool()>& cancelled = {}) = 0;
+};
+
 class IModel : public IBackend {
 public:
     virtual ~IModel() = default;

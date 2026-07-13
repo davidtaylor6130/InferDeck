@@ -29,6 +29,7 @@
 #include "gateway/cors.hpp"
 #include "gateway/dashboard_routes.hpp"
 #include "gateway/metrics_builder.hpp"
+#include "gateway/openai_routes.hpp"
 #include "gateway/routes.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "httplib.h"
@@ -447,6 +448,14 @@ int main(int argc, char** argv) {
     server.Post(R"(^/v1/chat/completions$)", wrap([&](const httplib::Request& req,
                                                  httplib::Response& resp) {
         handle_chat_completions(req, resp, deps);
+    }));
+    server.Post(R"(^/v1/embeddings$)", wrap([&](const httplib::Request& req,
+                                           httplib::Response& resp) {
+        handle_embeddings(req, resp, deps);
+    }));
+    server.Post(R"(^/v1/responses$)", wrap([&](const httplib::Request& req,
+                                          httplib::Response& resp) {
+        handle_responses(req, resp, deps);
     }));
     server.Post(R"(^/v1/messages$)", wrap([&](const httplib::Request& req,
                                          httplib::Response& resp) {

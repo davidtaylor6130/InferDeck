@@ -93,6 +93,10 @@ public:
         const IModel::TokenCallback& callback,
         const std::atomic<bool>* cancel = nullptr);
 
+    foundation::Result<EmbeddingResult> embed(
+        const std::string& name, int slot_id, const EmbeddingRequest& request,
+        const std::function<bool()>& cancelled = {});
+
     void drain_active(std::chrono::milliseconds timeout = std::chrono::milliseconds{30000});
     int active_request_count() const;
     int active_request_count(const std::string& name) const;

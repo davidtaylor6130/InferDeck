@@ -12,14 +12,14 @@ Branch: `alpha-v2` from `main`/`origin/main` at `798b2ef` (`v0.4.0`).
 - #57 model store: pending.
 - #58 GUI configuration: pending.
 - #59 cross-modality queue: portable implementation complete. Admission is bounded, priority-aware with aging, cancellable, visible in status, and spans tracked swaps.
-- #60 embeddings: pending.
-- #61 Responses API: pending.
+- #60 embeddings: portable implementation complete. Added typed embedding dispatch, dedicated llama.cpp embedding execution, bounded float/base64 endpoint handling, usage metrics, and capability checks. Real embedding GGUF/Vulkan validation remains.
+- #61 Responses API: portable implementation complete for stateless text/vision input, function tools, structured output translation, reasoning, non-streaming output, and typed SSE events. Stateful storage/background/conversation fields are rejected explicitly.
 - #62 capability discovery: portable implementation complete through `/v1/models`, swap/status, SSE stats, dashboard status, and the Models page.
 
 ## Verification run
 
-- Portable model tests compiled directly with Apple Clang 21 and the repository's installed Catch2 libraries: 41 test cases, 184 assertions passed.
-- OpenAI route tests: 15 test cases, 106 assertions passed. The binary requires unsandboxed loopback access for its local HTTP servers.
+- Portable model tests compiled directly with Apple Clang 21 and the repository's installed Catch2 libraries: 42 test cases, 190 assertions passed.
+- OpenAI route tests: 23 test cases, 173 assertions passed. The binary requires unsandboxed loopback access for its local HTTP servers.
 - Anthropic route tests: 9 test cases, 46 assertions passed with loopback access.
 - Dashboard tests: 15 tests passed.
 - Dashboard TypeScript check and production Vite build: passed; committed static output rebuilt.
@@ -50,3 +50,4 @@ Do not deploy Alpha V2 artifacts to `C:\InferDeck` until the complete issue set 
 - Runtime identifiers default to `llama_cpp`, preserving existing YAML files.
 - Multi-residency activates only after DXGI reports total VRAM or `gateway.vram_budget_mb` is configured. With no budget, legacy single-resident swap behavior remains.
 - Automatic slot shrinking requires calibrated `vram_fixed_mb` and `vram_per_slot_mb` values per model. Without them, the planner can keep models resident when declared totals fit and can evict idle residents, but it will not guess unsafe slot savings.
+- Responses streaming event names and shapes were checked against the official OpenAI Responses streaming reference: `https://platform.openai.com/docs/api-reference/responses-streaming/response/refusal/delta`.
