@@ -4,6 +4,7 @@ import { Badge, Button, EmptyState, Panel, SectionTitle } from '../components/ui
 import { useGateway } from '../gateway';
 import type { SwapHistoryRow } from '../types';
 import { compactModel, formatDate, formatDuration, formatMb, formatTokenCount } from '../utils';
+import { ModelStorePanel } from './ModelStorePanel';
 
 export const ModelsPage: React.FC = () => {
   const { models, swap, swapTo, cancelSwap, unload } = useGateway();
@@ -32,6 +33,7 @@ export const ModelsPage: React.FC = () => {
           Last swap failed: {swap.lastError}
         </div>
       )}
+      <ModelStorePanel />
 
       <Panel>
         <SectionTitle title="Registered models" aside={`${models.length}`} />

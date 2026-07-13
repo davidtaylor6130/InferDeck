@@ -79,6 +79,7 @@ describe('pages', () => {
     expect(html).toContain('qwen3.6-35b-a3b');
     expect(html).toContain('Loaded');
     expect(html).toContain('Swap history');
+    expect(html).toContain('Model store');
   });
 
   it('Usage renders the cost panel and per-model table', () => {

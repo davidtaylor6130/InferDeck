@@ -9,7 +9,7 @@ Branch: `alpha-v2` from `main`/`origin/main` at `798b2ef` (`v0.4.0`).
 - #54 text-to-speech: pending native runtime integration.
 - #55 speech-to-text: pending native runtime integration.
 - #56 resource-aware residency: portable implementation complete. Windows VRAM calibration and live multi-model validation remain.
-- #57 model store: pending.
+- #57 model store: portable implementation complete. Added Hugging Face search and artifact inspection, compatibility metadata, background native WinHTTP downloads, cancellation/resume, disk-space and size/SHA-256 checks, confined paths, manifest-backed runtime registration, safe removal, secret masking, and dashboard management. Windows network/download validation remains.
 - #58 GUI configuration: portable implementation complete. Added masked configuration reads, optimistic revision checks, schema validation, atomic replacement, common dashboard controls, and a complete YAML editor that retains unknown fields and comments. Saved changes are explicitly restart-required.
 - #59 cross-modality queue: portable implementation complete. Admission is bounded, priority-aware with aging, cancellable, visible in status, and spans tracked swaps.
 - #60 embeddings: portable implementation complete. Added typed embedding dispatch, dedicated llama.cpp embedding execution, bounded float/base64 endpoint handling, usage metrics, and capability checks. Real embedding GGUF/Vulkan validation remains.
@@ -22,6 +22,7 @@ Branch: `alpha-v2` from `main`/`origin/main` at `798b2ef` (`v0.4.0`).
 - OpenAI route tests: 23 test cases, 173 assertions passed. The binary requires unsandboxed loopback access for its local HTTP servers.
 - Anthropic route tests: 9 test cases, 46 assertions passed with loopback access.
 - Dashboard tests: 15 tests passed.
+- Model-store tests: 3 test cases, 14 assertions passed, including source filtering, path rejection, and corrupt-artifact non-registration.
 - Dashboard TypeScript check and production Vite build: passed; committed static output rebuilt.
 - Configuration validation, dashboard route, and gateway entry-point sources passed Apple Clang C++23 syntax checks.
 - `main.cpp`, `llama_cpp_model.cpp`, dashboard routes, and GPU telemetry sources passed Apple Clang syntax/object compilation where link-free checks were possible.
@@ -43,6 +44,7 @@ Do not deploy Alpha V2 artifacts to `C:\InferDeck` until the complete issue set 
 ## Required native runtime dependencies
 
 - Existing llama.cpp Vulkan dependency for text and embeddings.
+- The model store uses Windows WinHTTP and BCrypt directly; it adds no downloader subprocess or portable TLS dependency.
 - Image, TTS, and STT runtime choices remain pending; each must expose a native in-process Windows API and must not require a CLI/server subprocess.
 
 ## Known risks and assumptions

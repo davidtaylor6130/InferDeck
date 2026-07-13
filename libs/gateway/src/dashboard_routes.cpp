@@ -3,6 +3,7 @@
 #include "foundation/logging.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -91,19 +92,25 @@ std::string mask_config_secret(std::string text) {
     if (auto span = yaml_scalar_span(text, "auth", "token")) {
         text.replace(span->begin, span->end - span->begin, "\"__INFERDECK_SECRET__\"");
     }
+    if (auto span = yaml_scalar_span(text, "model_store", "hf_token")) {
+        text.replace(span->begin, span->end - span->begin, "\"__INFERDECK_SECRET__\"");
+    }
     return text;
 }
 
 std::string restore_config_secret(std::string submitted, const std::string& current) {
-    const auto submitted_span = yaml_scalar_span(submitted, "auth", "token");
-    const auto current_span = yaml_scalar_span(current, "auth", "token");
-    if (!submitted_span || !current_span) return submitted;
-    std::string value = submitted.substr(submitted_span->begin,
-                                         submitted_span->end - submitted_span->begin);
-    if (value == "__INFERDECK_SECRET__" || value == "\"__INFERDECK_SECRET__\"" ||
-        value == "'__INFERDECK_SECRET__'") {
-        submitted.replace(submitted_span->begin, submitted_span->end - submitted_span->begin,
-                          current.substr(current_span->begin, current_span->end - current_span->begin));
+    for (const auto& [section, key] : std::array{
+             std::pair{"auth", "token"}, std::pair{"model_store", "hf_token"}}) {
+        const auto submitted_span = yaml_scalar_span(submitted, section, key);
+        const auto current_span = yaml_scalar_span(current, section, key);
+        if (!submitted_span || !current_span) continue;
+        std::string value = submitted.substr(submitted_span->begin,
+                                             submitted_span->end - submitted_span->begin);
+        if (value == "__INFERDECK_SECRET__" || value == "\"__INFERDECK_SECRET__\"" ||
+            value == "'__INFERDECK_SECRET__'") {
+            submitted.replace(submitted_span->begin, submitted_span->end - submitted_span->begin,
+                              current.substr(current_span->begin, current_span->end - current_span->begin));
+        }
     }
     return submitted;
 }
@@ -420,6 +427,122 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
 
 void register_dashboard_routes(httplib::Server& server, const DashboardDeps& deps,
                                const RouteWrapper& wrap) {
+    server.Get(R"(^/api/model-store/search$)", wrap([deps](const httplib::Request& req,
+                                                            httplib::Response& resp) {
+        if (!deps.model_store) {
+            write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
+            return;
+        }
+        const std::string query = req.has_param("q") ? req.get_param_value("q") : "";
+        const std::string runtime = req.has_param("runtime") ? req.get_param_value("runtime") : "";
+        const std::string modality = req.has_param("modality") ? req.get_param_value("modality") : "";
+        int limit = 20;
+        if (req.has_param("limit")) {
+            try {
+                limit = std::clamp(std::stoi(req.get_param_value("limit")), 1, 100);
+            } catch (...) {
+                write_error(resp, 400, "invalid_model_search", "limit must be an integer");
+                return;
+            }
+        }
+        auto result = deps.model_store->search(query, runtime, modality, limit);
+        if (!result) {
+            write_error(resp, result.error().code == foundation::ErrorCode::InvalidArgument ? 400 : 502,
+                        "model_search_failed", result.error().message);
+            return;
+        }
+        write_json(resp, 200, {{"models", std::move(*result)}});
+    }));
+
+    server.Get(R"(^/api/model-store/inspect$)", wrap([deps](const httplib::Request& req,
+                                                             httplib::Response& resp) {
+        if (!deps.model_store) {
+            write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
+            return;
+        }
+        const std::string repo = req.has_param("repo") ? req.get_param_value("repo") : "";
+        auto result = deps.model_store->inspect(repo);
+        if (!result) {
+            const int status = result.error().code == foundation::ErrorCode::InvalidArgument ? 400 :
+                               result.error().code == foundation::ErrorCode::NotFound ? 404 : 502;
+            write_error(resp, status, "model_inspect_failed", result.error().message);
+            return;
+        }
+        write_json(resp, 200, std::move(*result));
+    }));
+
+    server.Get(R"(^/api/model-store/downloads$)", wrap([deps](const httplib::Request&,
+                                                               httplib::Response& resp) {
+        if (!deps.model_store) {
+            write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
+            return;
+        }
+        nlohmann::json downloads = nlohmann::json::array();
+        for (const auto& download : deps.model_store->downloads()) downloads.push_back(to_json(download));
+        write_json(resp, 200, {{"downloads", std::move(downloads)},
+                               {"installed", deps.model_store->installed()}});
+    }));
+
+    server.Post(R"(^/api/model-store/downloads$)", wrap([deps](const httplib::Request& req,
+                                                                httplib::Response& resp) {
+        if (!deps.model_store) {
+            write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
+            return;
+        }
+        try {
+            const auto body = nlohmann::json::parse(req.body);
+            auto result = deps.model_store->install(
+                body.value("repo", ""), body.value("filename", ""),
+                body.value("runtime", ""), body.value("modality", ""),
+                body.value("modelName", ""));
+            if (!result) {
+                const int status = result.error().code == foundation::ErrorCode::AlreadyExists ? 409 : 400;
+                write_error(resp, status, "model_install_failed", result.error().message);
+                return;
+            }
+            write_json(resp, 202, {{"id", *result}, {"state", "queued"}});
+        } catch (const std::exception& error) {
+            write_error(resp, 400, "invalid_model_install", error.what());
+        }
+    }));
+
+    server.Post(R"(^/api/model-store/downloads/([0-9]+)/(cancel|resume)$)",
+                wrap([deps](const httplib::Request& req, httplib::Response& resp) {
+        if (!deps.model_store) {
+            write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
+            return;
+        }
+        const auto id = static_cast<std::uint64_t>(std::stoull(req.matches[1].str()));
+        auto result = req.matches[2].str() == "cancel" ? deps.model_store->cancel(id) :
+                                                        deps.model_store->resume(id);
+        if (!result) {
+            write_error(resp, result.error().code == foundation::ErrorCode::NotFound ? 404 : 409,
+                        "download_control_failed", result.error().message);
+            return;
+        }
+        write_json(resp, 200, {{"ok", true}});
+    }));
+
+    server.Post(R"(^/api/model-store/remove$)", wrap([deps](const httplib::Request& req,
+                                                             httplib::Response& resp) {
+        if (!deps.model_store) {
+            write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
+            return;
+        }
+        try {
+            const auto body = nlohmann::json::parse(req.body);
+            auto result = deps.model_store->remove(body.value("model", ""));
+            if (!result) {
+                const int status = result.error().code == foundation::ErrorCode::NotFound ? 404 : 409;
+                write_error(resp, status, "model_remove_failed", result.error().message);
+                return;
+            }
+            write_json(resp, 200, {{"ok", true}});
+        } catch (const std::exception& error) {
+            write_error(resp, 400, "invalid_model_remove", error.what());
+        }
+    }));
+
     server.Get(R"(^/api/config$)", wrap([deps](const httplib::Request& req,
                                                httplib::Response& resp) {
         (void)req;

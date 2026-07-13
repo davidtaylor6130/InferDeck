@@ -8,6 +8,7 @@ set(GATEWAY_SOURCES
     src/anthropic_routes.cpp
     src/dashboard_routes.cpp
     src/metrics_builder.cpp
+    src/model_store.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})
@@ -25,6 +26,10 @@ target_link_libraries(gateway
         nlohmann_json::nlohmann_json
         httplib::httplib
 )
+
+if(WIN32)
+    target_link_libraries(gateway PRIVATE winhttp bcrypt)
+endif()
 
 set_target_properties(gateway PROPERTIES
     CXX_STANDARD 23

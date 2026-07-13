@@ -17,6 +17,10 @@ cors:
 state:
   file: "~/.inferdeck/state.json"
 
+model_store:
+  root: "models/store"
+  hf_token: ""
+
 default_model: "qwen3.6-27b"
 
 observability:

@@ -29,6 +29,7 @@
 #include "gateway/cors.hpp"
 #include "gateway/dashboard_routes.hpp"
 #include "gateway/metrics_builder.hpp"
+#include "gateway/model_store.hpp"
 #include "gateway/openai_routes.hpp"
 #include "gateway/routes.hpp"
 #include "gateway/swap_tracker.hpp"
@@ -308,6 +309,7 @@ int main(int argc, char** argv) {
     if (cfg.vram_budget_mb > 0) {
         coordinator.set_vram_budget(cfg.vram_budget_mb, cfg.vram_safety_margin_mb);
     }
+    ModelStore model_store(cfg.model_store_root, cfg.model_store_hf_token, coordinator);
 
     observability::Metrics metrics;
     observability::GpuTelemetry gpu;
@@ -483,7 +485,8 @@ int main(int argc, char** argv) {
     }));
     DashboardDeps dash_deps{
         deps, gpu, cfg.log_file, "data/pricing.json", config_path.string(),
-        [](const std::string& text) { return validate_config_text(text); }, uptime_seconds};
+        [](const std::string& text) { return validate_config_text(text); }, &model_store,
+        uptime_seconds};
     register_dashboard_routes(server, dash_deps, wrap);
     if (cors.handles_options()) {
         server.Options(".*", [&](const httplib::Request& req,

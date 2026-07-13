@@ -6,6 +6,7 @@ add_executable(sanitizer_tests
 
 add_executable(route_tests
     test_routes.cpp
+    test_model_store.cpp
 )
 
 add_executable(anthropic_route_tests

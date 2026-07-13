@@ -49,6 +49,47 @@ export interface ConfigDocument {
   secretSentinel?: string;
 }
 
+export interface StoreModel {
+  id: string;
+  pipeline: string;
+  runtime: string;
+  modality: string;
+  downloads: number;
+  likes: number;
+  private: boolean;
+  gated: boolean | string;
+}
+
+export interface StoreFile {
+  repo: string;
+  revision: string;
+  name: string;
+  size: number;
+  sha256: string;
+  runtime: string;
+  modality: string;
+  capabilities: string[];
+  format: string;
+  quantization: string;
+  compatible: boolean;
+  estimatedRamMb: number;
+  estimatedVramMb: number;
+}
+
+export interface StoreDownload {
+  id: number;
+  repo: string;
+  filename: string;
+  modelName: string;
+  runtime: string;
+  modality: string;
+  state: string;
+  error: string;
+  bytesDownloaded: number;
+  bytesTotal: number;
+  installedPath: string;
+}
+
 export function getStatus(): Promise<StatusPayload> {
   return getJson<StatusPayload>('/api/status');
 }
@@ -84,6 +125,37 @@ export function getConfig(): Promise<ConfigDocument> {
 
 export function saveConfig(yaml: string, revision: string): Promise<ConfigDocument & { ok: boolean }> {
   return putJson<ConfigDocument & { ok: boolean }>('/api/config', { yaml, revision });
+}
+
+export async function searchStore(query: string, runtime = '', modality = ''): Promise<StoreModel[]> {
+  const params = new URLSearchParams({ q: query });
+  if (runtime) params.set('runtime', runtime);
+  if (modality) params.set('modality', modality);
+  const body = await getJson<{ models: StoreModel[] }>(`/api/model-store/search?${params}`);
+  return body.models;
+}
+
+export async function inspectStoreModel(repo: string): Promise<StoreFile[]> {
+  const body = await getJson<{ files: StoreFile[] }>(`/api/model-store/inspect?repo=${encodeURIComponent(repo)}`);
+  return body.files;
+}
+
+export function installStoreModel(file: StoreFile, modelName: string): Promise<{ id: number; state: string }> {
+  return postJson<{ id: number; state: string }>('/api/model-store/downloads', {
+    repo: file.repo, filename: file.name, runtime: file.runtime, modality: file.modality, modelName,
+  });
+}
+
+export async function getStoreActivity(): Promise<{ downloads: StoreDownload[]; installed: Record<string, unknown> }> {
+  return getJson('/api/model-store/downloads');
+}
+
+export function controlStoreDownload(id: number, action: 'cancel' | 'resume'): Promise<{ ok: boolean }> {
+  return postJson<{ ok: boolean }>(`/api/model-store/downloads/${id}/${action}`);
+}
+
+export function removeStoreModel(model: string): Promise<{ ok: boolean }> {
+  return postJson<{ ok: boolean }>('/api/model-store/remove', { model });
 }
 
 export function swapTo(model: string): Promise<{ status: string }> {

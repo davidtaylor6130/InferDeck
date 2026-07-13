@@ -47,6 +47,8 @@ struct GatewayConfig {
     int max_queue_size{128};
     model::SamplingConfig sampling{};  // global sampler defaults (issue #42)
     std::map<std::string, std::string> anthropic_model_aliases{};
+    std::string model_store_root{"models/store"};
+    std::string model_store_hf_token{};
 };
 
 // Overlay any sampler keys present in `node` onto `s` (keys left unspecified
@@ -128,6 +130,11 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                                                  std::string("gateway.") + key + " cannot be negative");
                 }
             }
+        }
+        if (root["model_store"] && root["model_store"]["root"] &&
+            root["model_store"]["root"].as<std::string>().empty()) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "model_store.root cannot be empty");
         }
         std::unordered_set<std::string> names;
         if (root["model_registry"]) {
@@ -217,6 +224,11 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
     }
     if (root["state"] && root["state"]["file"]) {
         cfg.state_file = root["state"]["file"].as<std::string>();
+    }
+    if (root["model_store"]) {
+        const auto& store = root["model_store"];
+        if (store["root"]) cfg.model_store_root = store["root"].as<std::string>();
+        if (store["hf_token"]) cfg.model_store_hf_token = store["hf_token"].as<std::string>();
     }
     if (root["default_model"]) {
         cfg.default_model = root["default_model"].as<std::string>();

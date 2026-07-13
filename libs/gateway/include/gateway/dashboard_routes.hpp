@@ -3,6 +3,7 @@
 #include <httplib.h>
 
 #include "gateway/routes.hpp"
+#include "gateway/model_store.hpp"
 #include "observability/gpu_telemetry.hpp"
 
 #include <cstdint>
@@ -20,6 +21,7 @@ struct DashboardDeps {
     std::string pricing_file{"data/pricing.json"};
     std::string config_file;
     std::function<foundation::Result<void>(const std::string&)> validate_config;
+    ModelStore* model_store{nullptr};
     std::function<std::int64_t()> uptime_seconds;
 };
 
