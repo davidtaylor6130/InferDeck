@@ -29,6 +29,7 @@
 #include "gateway/cors.hpp"
 #include "gateway/dashboard_routes.hpp"
 #include "gateway/metrics_builder.hpp"
+#include "gateway/media_routes.hpp"
 #include "gateway/model_store.hpp"
 #include "gateway/openai_routes.hpp"
 #include "gateway/routes.hpp"
@@ -38,6 +39,7 @@
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
+#include "native_runtimes/runtime_factories.hpp"
 #include "observability/gpu_telemetry.hpp"
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
@@ -297,6 +299,7 @@ int main(int argc, char** argv) {
         }
         return std::make_unique<llama_wrapper::LlamaCppModel>(info, lc);
     });
+    native_runtimes::register_factories(registry);
     for (const auto& m : cfg.models) {
         registry.register_model(m);
         LOG_INFO("model_registered", "name={} vram_mb={} n_slots={}",
@@ -458,6 +461,32 @@ int main(int argc, char** argv) {
     server.Post(R"(^/v1/responses$)", wrap([&](const httplib::Request& req,
                                           httplib::Response& resp) {
         handle_responses(req, resp, deps);
+    }));
+    server.Post(R"(^/v1/images/generations$)", wrap([&](const httplib::Request& req,
+                                                        httplib::Response& resp) {
+        handle_image_generations(req, resp, deps);
+    }));
+    server.Post(R"(^/v1/audio/speech$)", wrap([&](const httplib::Request& req,
+                                                   httplib::Response& resp) {
+        handle_audio_speech(req, resp, deps);
+    }));
+    server.Post(R"(^/v1/audio/transcriptions$)", wrap([&](const httplib::Request& req,
+                                                           httplib::Response& resp) {
+        handle_audio_transcriptions(req, resp, deps);
+    }));
+    server.Get(R"(^/api/media/jobs$)", wrap([&](const httplib::Request&,
+                                                httplib::Response& resp) {
+        write_json(resp, 200, {{"jobs", media_jobs()}});
+    }));
+    server.Post(R"(^/api/media/jobs/([0-9]+)/cancel$)", wrap([&](const httplib::Request& req,
+                                                                 httplib::Response& resp) {
+        auto result = cancel_media_job(static_cast<std::uint64_t>(std::stoull(req.matches[1].str())));
+        if (!result) {
+            write_error(resp, result.error().code == foundation::ErrorCode::NotFound ? 404 : 409,
+                        "media_cancel_failed", result.error().message);
+            return;
+        }
+        write_json(resp, 200, {{"ok", true}});
     }));
     server.Post(R"(^/v1/messages$)", wrap([&](const httplib::Request& req,
                                          httplib::Response& resp) {

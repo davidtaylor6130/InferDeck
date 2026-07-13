@@ -1,184 +1,138 @@
-# InferDeck Gateway Architecture (v2 — Multimodel)
+# InferDeck Alpha V2 architecture
 
-> **v2 addendum.** The original document described a single-model
-> OpenAI-compatible gateway. v2 (branch `inferdeck-2.0-multimodel`) replaces it
-> with a layered, in-process, multimodel gateway with hot-swap, observability,
-> parity CI, and automated sampler tuning. This file documents the v2
-> multimodel story; the original v1 narrative is preserved below for reference.
+InferDeck is one native gateway process that admits, loads, executes, observes, and unloads local AI models. It does not proxy another inference server and does not launch runtime subprocesses.
 
-## v2 — Multimodel in-process gateway (current)
+## System shape
 
-### Goals
-
-- Run Qwen3.6-27B (default, vision) and Qwen3-Coder-Next (specialist, no
-  vision) in a single process, hot-swap between them.
-- Match `llama-server.exe` output for each registered model to **0.95 LCS
-  similarity** (CI gate).
-- No subprocess. Single `.exe`. No orphan `llama-server.exe` on Windows.
-- Per-model sampler search (30 trials) via `inferdeck-bench`; human-confirm
-  apply.
-- Live observability: GPU telemetry (ADLX), per-request stats, swap history,
-  SQLite persistence.
-
-### 9-layer architecture
-
-```
-Layer 0  libs/third_party/llama.cpp      — Vulkan build, library only
-Layer 1  libs/foundation/                 — asio, logging, JSON
-Layer 2  libs/messaging/                  — std::variant content, role enum
-Layer 3  libs/sampling/                   — common_sampler_init wrapper
-Layer 4  libs/model/                      — ModelRegistry + BackendCoordinator
-Layer 5  libs/engine/                     — Per-model slot pool (n_parallel=2)
-Layer 6  libs/scheduler/                  — LCP-match + 30s queue
-Layer 7  libs/observability/              — ADLX + EMA stats + SQLite
-Layer 8  apps/inferdeck-gateway/          — HTTP routes, .exe entry
-Layer 9  apps/benchmark-runner/           — inferdeck-bench optimization
+```text
+OpenAI/Anthropic clients                 React dashboard
+          │                                    │
+          └──────── HTTP + SSE ────────────────┘
+                               │
+                    apps/inferdeck-gateway
+                  validation · auth · streaming
+                               │
+               ┌───────────────┴───────────────┐
+               │ shared priority/aging queue   │
+               │ cancellation · 30s admission  │
+               └───────────────┬───────────────┘
+                               │
+                     BackendCoordinator
+          residency · slot capacity · VRAM fit · eviction
+                               │
+                         ModelRegistry
+                  runtime-keyed native factories
+                               │
+       ┌───────────────┬───────┴────────┬──────────────┐
+       │ llama.cpp     │ stable-        │ whisper.cpp  │ sherpa-onnx
+       │ text/embed    │ diffusion.cpp  │ STT          │ TTS
+       │ Vulkan        │ Vulkan         │ GPU          │ CPU/CUDA
+       └───────────────┴────────────────┴──────────────┘
 ```
 
-Each layer is a CMake subdir with `include/`, `src/`, and `tests/`. Layers
-depend downward only.
+All backends implement `IBackend`, which owns lifecycle and capacity:
 
-### Request lifecycle
+- immutable model/runtime/modality/capability metadata;
+- load and unload;
+- loaded state and estimated VRAM;
+- slot acquire/release and optional slot resizing.
 
-When a request hits `POST /v1/chat/completions`:
+Modality interfaces add only their execution contract:
 
-1. **Layer 8** parses OAI body, extracts `model:`, `messages:`, `tools:`.
-2. **Layer 2** converts to internal `Message` representation
-   (`std::variant<TextContent, ImageContent, ToolCallContent, ...>`).
-3. **Layer 5/6** Scheduler calls `BackendCoordinator::AcquireSlot(model)`.
-4. **Layer 4** Coordinator ensures target model is loaded (swap if necessary),
-   returns a free slot from the per-model pool.
-5. **Layer 5** Engine tokenizes prompt, checks LCP against the slot's KV cache
-   (`llama_kv_cache_seq_rm` to trim divergent tail).
-6. **Layer 3** Sampling builds the sampler chain from the model's profile
-   (`llama_sampler_chain_init` + `top_k` + `top_p` + `min_p` + `temp` + `dist`).
-7. **llama.cpp** runs the inference loop (`llama_decode` + sampler).
-8. **Layer 7** Observability records t/s, tokens, slot id to SQLite
-   (`~/.inferdeck/stats.db`).
-9. **Layer 8** streams SSE chunks back to the client.
+- `IModel` for chat and Responses;
+- `IEmbeddingBackend` for embeddings;
+- `IImageBackend` for image generation;
+- `ISpeechBackend` for text-to-speech;
+- `ITranscriptionBackend` for speech-to-text.
 
-### Swap lifecycle
+Routes dispatch through the coordinator and a typed modality interface. They never cast directly to a concrete runtime.
 
-When a swap is requested (dashboard click or `POST /v1/swap/to/{model}`):
+## Request lifecycle
 
-1. **Layer 4** Coordinator sets `swap_in_progress_ = true` and clears the
-   cancel flag.
-2. Drains active requests on the current model (30s timeout).
-3. Polls `swap_cancel_` after each step; returns
-   `Error{Cancelled, ...}` and rolls back if cancellation was requested.
-4. Unloads current model: destroys contexts, frees VRAM.
-5. Reads new GGUF from disk (`llama_model_load_from_file`).
-6. Initialises `n_parallel` contexts (`llama_init_from_model`).
-7. Resets `swap_in_progress_ = false` and clears the cancel flag.
-8. **Layer 7** logs the swap event to SQLite.
-9. WebSocket broadcasts `ready` to the dashboard.
+1. The route validates and bounds the complete request before admission.
+2. The shared coordinator queue records model, priority, arrival time, deadline, and cancellation callback.
+3. The head request asks the resource planner to make its model resident.
+4. The planner uses configured or DXGI-reported VRAM minus the safety margin. It may keep the current residents, shrink idle calibrated slot pools, evict an idle resident, or reject the request.
+5. A slot increments the per-model and global active-request counts. Inference runs without holding the coordinator mutex.
+6. Client disconnect or dashboard cancellation reaches the native runtime callback.
+7. The route streams or returns output, records metrics/SQLite/EventBus activity, releases the slot, and leaves model residency to policy.
 
-### Configuration
+This lifecycle is shared by text, embeddings, image, TTS, and STT. A swap or load does not create a second modality-specific queue.
 
-`config/gateway.yml` is the only config file the gateway reads at startup.
-Highlights:
+## Residency and automatic expansion
 
-- `server`: bind host/port, request timeouts.
-- `logging`: structured-log sinks, rotation.
-- `auth`: optional bearer token (default off for local use).
-- `cors`: allowed origins.
-- `model_registry[]`: per-model entry with name, gguf path, optional
-  mmproj path, family, n_slots, vram_required_mb.
-- `observability`: stats_db path, ADLX helper path, telemetry poll interval.
-- `sampler_profiles_dir`: directory of per-model sampler YAMLs.
-- `default_model`: which model to preload on startup
-  (overridden by `~/.inferdeck/state.json` last-loaded).
+`BackendCoordinator` can keep multiple models resident when their estimated footprints fit. `gateway.vram_budget_mb` overrides hardware detection; otherwise DXGI total VRAM activates multi-residency. `gateway.vram_safety_margin_mb` is always reserved.
 
-### File layout
+For a resident model with calibrated `vram_fixed_mb` and `vram_per_slot_mb`, the planner may reduce slots down to `min_slots`. It never guesses slot savings. Active models are not resized or evicted. If preparation fails, the coordinator preserves or restores the previous usable residency where possible and returns a typed error.
 
+When no VRAM budget is known, the coordinator retains the conservative single-resident swap behavior.
+
+## Runtime registration
+
+The registry maps a YAML runtime id to a factory. `llama_cpp` is always registered. Optional media factories are registered only when their native libraries were linked at build time. `/v1/models` reports `runtime_available`; attempting to load an unlinked runtime returns `runtime_unavailable` instead of starting a fake backend.
+
+This boundary supports additional in-process providers. vLLM is intentionally excluded because it requires a Python/CUDA service and conflicts with the no-subprocess/no-proxy requirement. A future provider must expose a native C/C++ library, implement `IBackend` plus the relevant modality interface, and use the same coordinator.
+
+## API surface
+
+OpenAI-compatible routes:
+
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
+- `POST /v1/embeddings`
+- `POST /v1/images/generations`
+- `POST /v1/audio/speech`
+- `POST /v1/audio/transcriptions`
+- `GET /v1/models`
+
+Anthropic compatibility remains at `POST /v1/messages` and `/v1/messages/count_tokens`.
+
+InferDeck control routes cover model load/unload, swap status/cancellation, media job cancellation, metrics, history, configuration, and the model store. Dashboard live state uses one SSE connection; there is no WebSocket layer.
+
+Responses is stateless. Storage/background/conversation parameters are rejected rather than silently retained.
+
+## Model store
+
+The model store uses Hugging Face metadata and resolver endpoints through native WinHTTP. A background job downloads to a confined `.partial` path, supports HTTP Range resume and cancellation, checks free disk space, validates exact size and SHA-256, atomically finalizes the artifact, then updates `installed.json` and the runtime registry. A partial or corrupt artifact is never registered.
+
+Removal is limited to store-managed paths. Loaded or active models cannot be removed.
+
+## Configuration
+
+`config/gateway.yml` remains the only active configuration source. The dashboard retrieves a secret-masked document and an optimistic revision. Common controls modify the YAML document while retaining comments and unknown keys; the full editor covers all settings. The server restores unchanged secret sentinels, validates the complete document, and atomically replaces the file. Changes require an operator restart and never restart the production process automatically.
+
+Model entries contain runtime-neutral fields plus an optional `artifacts` map for runtime-specific files. Native examples and build pins are in `docs/alpha-v2-native-runtimes.md`.
+
+## Persistence boundary
+
+InferDeck persists operational data only:
+
+- configured and store-installed model artifacts;
+- model-store manifest and partial downloads;
+- YAML configuration;
+- request/swap metrics and logs.
+
+Generated images, synthesized audio, uploaded audio, transcripts, chat output, and Responses state are request-scoped and are not retained.
+
+## Concurrency invariants
+
+- Inference never runs while holding the coordinator mutex.
+- Unload drains active requests before destroying a backend.
+- Slot release is idempotently owned by the route or stream state, never both.
+- Streaming state outlives both its inference thread and HTTP provider.
+- Native cancellation callbacks must terminate work and release GPU capacity.
+- stable-diffusion.cpp generation is serialized while its upstream progress callback remains process-global.
+- Runtime absence is visible; no unavailable path returns synthetic success.
+
+## Source layout
+
+```text
+apps/inferdeck-gateway/       executable wiring and static dashboard serving
+apps/dashboard/               React dashboard
+libs/model/                   contracts, registry, shared queue/coordinator
+libs/llama_cpp_wrapper/       in-process llama.cpp implementation
+libs/native_runtimes/         optional image, TTS, and STT adapters
+libs/gateway/                 protocol routes, streaming, model store, SSE
+libs/observability/           GPU telemetry, metrics, SQLite
+libs/foundation/              Result/Error, logging, EventBus
 ```
-apps/inferdeck-gateway/         HTTP routes + .exe entry (Layer 8)
-apps/benchmark-runner/          inferdeck-bench (Layer 9)
-apps/dashboard/                 React dashboard source
-apps/hardware-adlx-helper/      ADLX subprocess for GPU telemetry
-libs/foundation/                Layer 1
-libs/messaging/                 Layer 2
-libs/sampling/                  Layer 3
-libs/model/                     Layer 4
-libs/engine/                    Layer 5
-libs/scheduler/                 Layer 6
-libs/observability/             Layer 7
-libs/llama_cpp_wrapper/         Real LlamaCppModel (replaces legacy stub)
-libs/optimize/                  In-house search (random + greedy)
-libs/third_party/llama.cpp      Layer 0, Vulkan build
-config/gateway.yml              Active config
-config/sampler-profiles/        Per-model sampler YAMLs
-config/bench-search-spaces.yaml Default search space
-tests/parity/                   CI gate: parity with raw llama-server
-tests/stress/                   4h session, swap cycles
-tests/integration/              HTTP end-to-end
-```
-
----
-
-## v1 — Single-model OpenAI gateway (preserved for reference)
-
-### Overview
-
-InferDeck Gateway is a production-grade C++ 23 application that provides a
-strict OpenAI-compatible API for local LLM inference. It bridges the gap
-between `llama.cpp` and applications expecting the OpenAI API format.
-
-### Component Diagram
-
-```
-┌─────────────────────────────────────────────────┐
-│                React Dashboard                   │
-│   (apps/dashboard – unchanged, updated API      │
-│    layer to /v1/... and /inferdeck/...)         │
-└──────────────────────┬──────────────────────────┘
-                       │ HTTPS + SSE / WebSocket
-                       ▼
-┌─────────────────────────────────────────────────┐
-│              Gateway Service (.exe)              │
-│                                                 │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │  HTTP/S   │  │  SSE     │  │  Config       │  │
-│  │ Server    │  │ Stream   │  │  (YAML)       │  │
-│  │(cpp-httpl│  │ Handler  │  │  (spdlog)     │  │
-│  └──────────┘  └──────────┘  └───────────────┘  │
-│                                                 │
-│  ┌───────────────────────────────────────────┐  │
-│  │           Job Queue & Worker Pool          │  │
-│  │    (priority queue → LlamaEngine)         │  │
-│  └───────────────────────────────────────────┘  │
-│                                                 │
-│  ┌───────────────────────────────────────────┐  │
-│  │              LlamaEngine                   │  │
-│  │  (libs/llama_cpp_wrapper — legacy)         │  │
-│  └───────────────────────────────────────────┘  │
-│                                                 │
-└─────────────────────────────────────────────────┘
-```
-
-All errors follow OpenAI schema:
-
-```json
-{
-  "error": {
-    "message": "Model not found",
-    "type": "invalid_request_error",
-    "param": "model",
-    "code": "model_not_found"
-  }
-}
-```
-
-### Security
-
-- TLS 1.2+ with self-signed certs (generated during build)
-- CORS configured via `api.cors_origins` in gateway.yml
-- Request validation before inference to prevent malformed input
-- Graceful shutdown via signal handlers (SIGINT, SIGTERM)
-
-### Build System
-
-- CMake 3.27+ with C++23 standard
-- vcpkg for dependency management
-- Self-signed TLS certs generated during build
-- Coverage with gcov/lcov (CI future)

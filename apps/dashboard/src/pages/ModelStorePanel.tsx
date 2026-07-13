@@ -111,7 +111,7 @@ export const ModelStorePanel: React.FC = () => {
           <option value="llama_cpp">llama.cpp</option>
           <option value="stable_diffusion_cpp">stable-diffusion.cpp</option>
           <option value="whisper_cpp">whisper.cpp</option>
-          <option value="tts_native">Native TTS</option>
+          <option value="sherpa_onnx">sherpa-onnx TTS</option>
         </select>
         <Button tone="blue" disabled={busy || !query.trim()} onClick={() => { void search(); }}>Search</Button>
       </div>

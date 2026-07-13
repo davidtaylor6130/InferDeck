@@ -90,6 +90,14 @@ export interface StoreDownload {
   installedPath: string;
 }
 
+export interface MediaJob {
+  id: number;
+  model: string;
+  modality: string;
+  progress: number;
+  state: string;
+}
+
 export function getStatus(): Promise<StatusPayload> {
   return getJson<StatusPayload>('/api/status');
 }
@@ -156,6 +164,15 @@ export function controlStoreDownload(id: number, action: 'cancel' | 'resume'): P
 
 export function removeStoreModel(model: string): Promise<{ ok: boolean }> {
   return postJson<{ ok: boolean }>('/api/model-store/remove', { model });
+}
+
+export async function getMediaJobs(): Promise<MediaJob[]> {
+  const body = await getJson<{ jobs: MediaJob[] }>('/api/media/jobs');
+  return body.jobs;
+}
+
+export function cancelMediaJob(id: number): Promise<{ ok: boolean }> {
+  return postJson<{ ok: boolean }>(`/api/media/jobs/${id}/cancel`);
 }
 
 export function swapTo(model: string): Promise<{ status: string }> {

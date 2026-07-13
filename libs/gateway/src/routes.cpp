@@ -333,6 +333,7 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
     }
     for (const auto& name : deps.coordinator.registry().list()) {
         const auto& info = deps.coordinator.registry().get_info(name);
+        const bool runtime_available = deps.coordinator.registry().has_factory(info.runtime);
         const auto resident = residency.find(name);
         const bool loaded = resident != residency.end();
         const auto residency_json = loaded ? nlohmann::json{
@@ -365,11 +366,13 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
             {"n_slots", info.n_slots},
             {"has_vision", info.has_vision},
             {"runtime", info.runtime},
+            {"runtime_available", runtime_available},
             {"modality", info.modality},
             {"capabilities", info.capabilities},
             {"loaded", loaded},
             {"inferdeck", {
                 {"runtime", info.runtime},
+                {"runtime_available", runtime_available},
                 {"modality", info.modality},
                 {"capabilities", info.capabilities},
                 {"resources", {
@@ -395,6 +398,11 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
     if (!deps.coordinator.registry().has(model_name)) {
         return {404, {{"error", {{"code", "model_not_found"},
                                  {"message", "model not registered: " + model_name}}}}};
+    }
+    const auto info = deps.coordinator.registry().get_info_result(model_name);
+    if (!info || !deps.coordinator.registry().has_factory(info->runtime)) {
+        return {503, {{"error", {{"code", "runtime_unavailable"},
+                                  {"message", "runtime is not linked: " + (info ? info->runtime : std::string("unknown"))}}}}};
     }
     auto current = deps.coordinator.get_loaded_model();
     if (current && *current == model_name) {

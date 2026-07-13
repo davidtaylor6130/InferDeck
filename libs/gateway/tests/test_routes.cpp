@@ -4,6 +4,7 @@
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
 #include "gateway/openai_routes.hpp"
+#include "gateway/media_routes.hpp"
 #include "gateway/routes.hpp"
 #include "httplib.h"
 #include "model/backend_coordinator.hpp"
@@ -14,6 +15,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
@@ -28,7 +31,8 @@ using inferdeck::foundation::Result;
 
 namespace {
 
-class IModelMock : public IModel, public IEmbeddingBackend {
+class IModelMock : public IModel, public IEmbeddingBackend, public IImageBackend,
+                   public ISpeechBackend, public ITranscriptionBackend {
 public:
     ModelInfo model_info{};
     std::atomic<bool> loaded{false};
@@ -36,6 +40,7 @@ public:
     std::atomic<int> max_slots{2};
     std::atomic<int> load_delay_ms{0};
     std::atomic<bool> block_until_cancel{false};
+    std::atomic<bool> block_media_until_cancel{false};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
     std::string last_request_json;
@@ -179,6 +184,47 @@ public:
         result.duration_ms = 2.0f;
         return Ok(std::move(result));
     }
+
+    Result<ImageGenerationResult> generate_images(
+        int, const ImageGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) override {
+        if (block_media_until_cancel.load()) {
+            while (!progress || progress(50)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return inferdeck::foundation::Err<ImageGenerationResult>(ErrorCode::Cancelled, "cancelled");
+        }
+        if (progress && !progress(50)) return inferdeck::foundation::Err<ImageGenerationResult>(ErrorCode::Cancelled, "cancelled");
+        ImageGenerationResult result;
+        result.duration_ms = 12;
+        for (int index = 0; index < request.count; ++index) {
+            result.png_images.push_back({std::byte{0x89}, std::byte{0x50}, std::byte{0x4e}, std::byte{0x47}});
+        }
+        return Ok(std::move(result));
+    }
+
+    Result<AudioResult> synthesize(
+        int, const SpeechRequest& request,
+        const std::function<bool(const std::byte*, std::size_t)>& stream = {}) override {
+        AudioResult result;
+        result.bytes = {std::byte{0x52}, std::byte{0x49}, std::byte{0x46}, std::byte{0x46}};
+        result.content_type = request.format == "wav" ? "audio/wav" : "audio/mpeg";
+        result.duration_ms = 8;
+        if (stream && !stream(result.bytes.data(), result.bytes.size())) {
+            return inferdeck::foundation::Err<AudioResult>(ErrorCode::Cancelled, "cancelled");
+        }
+        return Ok(std::move(result));
+    }
+
+    Result<TranscriptionResult> transcribe(
+        int, const TranscriptionRequest& request,
+        const std::function<bool(int)>& progress = {}) override {
+        if (progress && !progress(75)) return inferdeck::foundation::Err<TranscriptionResult>(ErrorCode::Cancelled, "cancelled");
+        TranscriptionResult result;
+        result.text = "test transcript";
+        result.language = request.language.empty() ? "en" : request.language;
+        result.duration_seconds = static_cast<float>(request.pcm.size()) / request.sample_rate;
+        result.inference_ms = 7;
+        return Ok(std::move(result));
+    }
 };
 
 ModelInfo make_info(const std::string& name) {
@@ -190,6 +236,30 @@ ModelInfo make_info(const std::string& name) {
     m.vram_required_mb = 8192;
     m.context_size = 65536;
     return m;
+}
+
+std::string test_wav() {
+    std::string wav(44 + 320, '\0');
+    auto put16 = [&wav](std::size_t at, std::uint16_t value) {
+        wav[at] = static_cast<char>(value & 0xff);
+        wav[at + 1] = static_cast<char>((value >> 8) & 0xff);
+    };
+    auto put32 = [&wav](std::size_t at, std::uint32_t value) {
+        for (int byte = 0; byte < 4; ++byte) wav[at + byte] = static_cast<char>((value >> (8 * byte)) & 0xff);
+    };
+    std::memcpy(wav.data(), "RIFF", 4);
+    put32(4, static_cast<std::uint32_t>(wav.size() - 8));
+    std::memcpy(wav.data() + 8, "WAVEfmt ", 8);
+    put32(16, 16);
+    put16(20, 1);
+    put16(22, 1);
+    put32(24, 16000);
+    put32(28, 32000);
+    put16(32, 2);
+    put16(34, 16);
+    std::memcpy(wav.data() + 36, "data", 4);
+    put32(40, 320);
+    return wav;
 }
 
 struct TestServer {
@@ -206,6 +276,11 @@ struct TestServer {
         registry.set_factory([](const ModelInfo& info) {
             return std::make_unique<IModelMock>(info);
         });
+        for (const std::string runtime : {"stable_diffusion_cpp", "sherpa_onnx", "whisper_cpp"}) {
+            registry.register_factory(runtime, [](const ModelInfo& info) {
+                return std::make_unique<IModelMock>(info);
+            });
+        }
 
         server.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& resp) {
             handle_models(req, resp, make_deps());
@@ -228,6 +303,18 @@ struct TestServer {
         server.Post("/v1/responses",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_responses(req, resp, make_deps());
+                    });
+        server.Post("/v1/images/generations",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_image_generations(req, resp, make_deps());
+                    });
+        server.Post("/v1/audio/speech",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_audio_speech(req, resp, make_deps());
+                    });
+        server.Post("/v1/audio/transcriptions",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_audio_transcriptions(req, resp, make_deps());
                     });
     }
 
@@ -599,6 +686,123 @@ TEST_CASE("Routes: POST /v1/responses streams typed reasoning and tool events", 
     REQUIRE(response->body.find("event: response.function_call_arguments.done") != std::string::npos);
     REQUIRE(response->body.find("event: response.completed") != std::string::npos);
     REQUIRE(response->body.find("data: [DONE]") == std::string::npos);
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes][images]") {
+    TestServer ts;
+    auto info = make_info("image-model");
+    info.runtime = "stable_diffusion_cpp";
+    info.modality = "image";
+    info.capabilities = {"image_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("image-model"));
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/images/generations",
+        nlohmann::json{{"model", "image-model"}, {"prompt", "a lighthouse"},
+                       {"size", "512x512"}, {"n", 2}, {"seed", 42}}.dump(),
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body["data"].size() == 2);
+    CHECK(body["data"][0]["b64_json"] == "iVBORw==");
+    ts.stop();
+}
+
+TEST_CASE("Image jobs can be cancelled through the shared tracker", "[routes][images][cancel]") {
+    TestServer ts;
+    auto info = make_info("cancel-image");
+    info.runtime = "stable_diffusion_cpp";
+    info.modality = "image";
+    info.capabilities = {"image_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("cancel-image"));
+    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("cancel-image"));
+    REQUIRE(backend);
+    const_cast<IModelMock*>(backend)->block_media_until_cancel.store(true);
+    REQUIRE(ts.start());
+    std::atomic<int> status{0};
+    std::thread request([&] {
+        httplib::Client client("127.0.0.1", ts.port);
+        auto response = client.Post("/v1/images/generations",
+            nlohmann::json{{"model", "cancel-image"}, {"prompt", "cancel me"},
+                           {"size", "512x512"}}.dump(), "application/json");
+        status.store(response ? response->status : -1);
+    });
+    std::uint64_t job_id = 0;
+    for (int attempt = 0; attempt < 100 && job_id == 0; ++attempt) {
+        for (const auto& job : media_jobs()) {
+            if (job["model"] == "cancel-image" && job["state"] == "running") job_id = job["id"];
+        }
+        if (job_id == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(job_id > 0);
+    REQUIRE(cancel_media_job(job_id));
+    request.join();
+    CHECK(status.load() == 499);
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speech]") {
+    TestServer ts;
+    auto info = make_info("speech-model");
+    info.runtime = "sherpa_onnx";
+    info.modality = "audio_speech";
+    info.capabilities = {"audio_speech"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("speech-model"));
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/audio/speech",
+        nlohmann::json{{"model", "speech-model"}, {"input", "hello"},
+                       {"voice", "default"}, {"response_format", "wav"},
+                       {"speed", 1.0}}.dump(), "application/json");
+    REQUIRE(response);
+    CHECK(response->status == 200);
+    CHECK(response->get_header_value("Content-Type") == "audio/wav");
+    CHECK(response->body == "RIFF");
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[routes][transcriptions]") {
+    TestServer ts;
+    auto info = make_info("whisper-model");
+    info.runtime = "whisper_cpp";
+    info.modality = "audio_transcription";
+    info.capabilities = {"audio_transcription"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("whisper-model"));
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+    httplib::UploadFormDataItems items{
+        {"file", test_wav(), "test.wav", "audio/wav"},
+        {"model", "whisper-model", "", ""},
+        {"language", "en", "", ""},
+        {"response_format", "json", "", ""},
+    };
+    auto response = client.Post("/v1/audio/transcriptions", items);
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body)["text"] == "test transcript");
+    ts.stop();
+}
+
+TEST_CASE("Media routes reject unsupported request shapes", "[routes][media]") {
+    TestServer ts;
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+    auto image = client.Post("/v1/images/generations",
+        nlohmann::json{{"model", "x"}, {"prompt", "x"}, {"size", "513x512"}}.dump(),
+        "application/json");
+    REQUIRE(image);
+    CHECK(image->status == 400);
+    auto speech = client.Post("/v1/audio/speech",
+        nlohmann::json{{"model", "x"}, {"input", "x"}, {"voice", "v"}, {"speed", 8}}.dump(),
+        "application/json");
+    REQUIRE(speech);
+    CHECK(speech->status == 400);
     ts.stop();
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,7 @@ struct ModelInfo {
     bool has_vision{false};
     std::string reasoning_format{};
     std::string chat_template_path{};
+    std::map<std::string, std::string> artifacts{};
     SamplingConfig sampling{};
 
     [[nodiscard]] bool supports(const std::string& capability) const;

@@ -60,9 +60,10 @@ bool compatible_extension(const std::string& filename, const std::string& runtim
     std::transform(extension.begin(), extension.end(), extension.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (runtime == "llama_cpp") return extension == ".gguf";
-    if (runtime == "stable_diffusion_cpp") return extension == ".safetensors" || extension == ".gguf";
+    if (runtime == "stable_diffusion_cpp") return extension == ".safetensors" || extension == ".gguf" ||
+                                                    extension == ".ckpt" || extension == ".pth" || extension == ".pt";
     if (runtime == "whisper_cpp") return extension == ".bin" || extension == ".gguf";
-    if (runtime == "tts_native") return extension == ".onnx" || extension == ".bin" || extension == ".gguf";
+    if (runtime == "sherpa_onnx") return extension == ".onnx" || extension == ".bin" || extension == ".txt";
     return false;
 }
 
@@ -71,7 +72,7 @@ std::vector<std::string> capabilities_for(const std::string& runtime,
     if (modality == "embedding") return {"embeddings"};
     if (runtime == "stable_diffusion_cpp") return {"image_generation"};
     if (runtime == "whisper_cpp") return {"audio_transcription"};
-    if (runtime == "tts_native") return {"audio_speech"};
+    if (runtime == "sherpa_onnx") return {"audio_speech"};
     return {"chat_completions", "responses"};
 }
 
@@ -86,14 +87,14 @@ std::string infer_runtime(const std::string& filename, const std::string& pipeli
     const std::string tag = lower(pipeline);
     if (tag.find("text-to-image") != std::string::npos || name.ends_with(".safetensors")) return "stable_diffusion_cpp";
     if (tag.find("automatic-speech-recognition") != std::string::npos) return "whisper_cpp";
-    if (tag.find("text-to-speech") != std::string::npos) return "tts_native";
+    if (tag.find("text-to-speech") != std::string::npos) return "sherpa_onnx";
     return "llama_cpp";
 }
 
 std::string infer_modality(const std::string& runtime, const std::string& pipeline) {
     if (runtime == "stable_diffusion_cpp") return "image";
     if (runtime == "whisper_cpp") return "audio_transcription";
-    if (runtime == "tts_native") return "audio_speech";
+    if (runtime == "sherpa_onnx") return "audio_speech";
     if (lower(pipeline).find("feature-extraction") != std::string::npos) return "embedding";
     return "text";
 }

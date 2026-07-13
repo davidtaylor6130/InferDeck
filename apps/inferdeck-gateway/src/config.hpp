@@ -169,6 +169,11 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "llama_cpp model requires gguf_path: " + name);
                 }
+                if (runtime != "llama_cpp" && !entry["gguf_path"] &&
+                    (!entry["artifacts"] || !entry["artifacts"].IsMap())) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "native model requires gguf_path or artifacts: " + name);
+                }
             }
         }
         if (root["default_model"] && !root["default_model"].as<std::string>().empty() &&
@@ -275,13 +280,22 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             info.family = m["family"] ? m["family"].as<std::string>() : "unknown";
             info.runtime = m["runtime"] ? m["runtime"].as<std::string>() : "llama_cpp";
             info.modality = m["modality"] ? m["modality"].as<std::string>() : "text";
+            if (info.modality == "image") info.capabilities = {"image_generation"};
+            else if (info.modality == "audio_speech") info.capabilities = {"audio_speech"};
+            else if (info.modality == "audio_transcription") info.capabilities = {"audio_transcription"};
+            else if (info.modality == "embedding") info.capabilities = {"embeddings"};
             if (m["capabilities"] && m["capabilities"].IsSequence()) {
                 info.capabilities.clear();
                 for (const auto& capability : m["capabilities"]) {
                     info.capabilities.push_back(capability.as<std::string>());
                 }
             }
-            info.gguf_path = m["gguf_path"].as<std::string>();
+            if (m["gguf_path"]) info.gguf_path = m["gguf_path"].as<std::string>();
+            if (m["artifacts"] && m["artifacts"].IsMap()) {
+                for (const auto& artifact : m["artifacts"]) {
+                    info.artifacts[artifact.first.as<std::string>()] = artifact.second.as<std::string>();
+                }
+            }
             if (m["mmproj_path"] && !m["mmproj_path"].IsNull()) {
                 info.mmproj_path = m["mmproj_path"].as<std::string>();
             }

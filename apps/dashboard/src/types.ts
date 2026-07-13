@@ -6,6 +6,7 @@ export interface ModelInfo {
   id: string;
   family?: string;
   runtime?: string;
+  runtime_available?: boolean;
   modality?: string;
   capabilities?: string[];
   context_size: number;

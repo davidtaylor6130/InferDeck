@@ -96,6 +96,15 @@ public:
     foundation::Result<EmbeddingResult> embed(
         const std::string& name, int slot_id, const EmbeddingRequest& request,
         const std::function<bool()>& cancelled = {});
+    foundation::Result<ImageGenerationResult> generate_images(
+        const std::string& name, int slot_id, const ImageGenerationRequest& request,
+        const std::function<bool(int)>& progress = {});
+    foundation::Result<AudioResult> synthesize(
+        const std::string& name, int slot_id, const SpeechRequest& request,
+        const std::function<bool(const std::byte*, std::size_t)>& stream = {});
+    foundation::Result<TranscriptionResult> transcribe(
+        const std::string& name, int slot_id, const TranscriptionRequest& request,
+        const std::function<bool(int)>& progress = {});
 
     void drain_active(std::chrono::milliseconds timeout = std::chrono::milliseconds{30000});
     int active_request_count() const;

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -90,6 +91,74 @@ struct EmbeddingResult {
     float duration_ms{0.0f};
 };
 
+struct ImageGenerationRequest {
+    std::string prompt;
+    std::string negative_prompt;
+    int width{1024};
+    int height{1024};
+    int count{1};
+    int steps{20};
+    std::int64_t seed{-1};
+    float guidance_scale{7.0f};
+};
+
+struct ImageGenerationResult {
+    std::vector<std::vector<std::byte>> png_images;
+    float duration_ms{0.0f};
+};
+
+struct SpeechRequest {
+    std::string input;
+    std::string voice;
+    std::string format{"wav"};
+    float speed{1.0f};
+};
+
+struct AudioResult {
+    std::vector<std::byte> bytes;
+    std::string content_type;
+    float duration_ms{0.0f};
+};
+
+struct TranscriptionRequest {
+    std::vector<float> pcm;
+    int sample_rate{16000};
+    std::string language;
+    std::string prompt;
+    float temperature{0.0f};
+};
+
+struct TranscriptionResult {
+    std::string text;
+    std::string language;
+    float duration_seconds{0.0f};
+    float inference_ms{0.0f};
+};
+
+class IImageBackend {
+public:
+    virtual ~IImageBackend() = default;
+    virtual foundation::Result<ImageGenerationResult> generate_images(
+        int slot_id, const ImageGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) = 0;
+};
+
+class ISpeechBackend {
+public:
+    virtual ~ISpeechBackend() = default;
+    virtual foundation::Result<AudioResult> synthesize(
+        int slot_id, const SpeechRequest& request,
+        const std::function<bool(const std::byte*, std::size_t)>& stream = {}) = 0;
+};
+
+class ITranscriptionBackend {
+public:
+    virtual ~ITranscriptionBackend() = default;
+    virtual foundation::Result<TranscriptionResult> transcribe(
+        int slot_id, const TranscriptionRequest& request,
+        const std::function<bool(int)>& progress = {}) = 0;
+};
+
 class IEmbeddingBackend {
 public:
     virtual ~IEmbeddingBackend() = default;
@@ -119,6 +188,9 @@ public:
     virtual foundation::Result<InferenceResult> predict_stream(
         int slot_id, const InferenceRequest& req, const TokenCallback& callback,
         const std::atomic<bool>* cancel = nullptr) {
+        (void)slot_id;
+        (void)req;
+        (void)callback;
         (void)cancel;
         return foundation::Err<InferenceResult>(foundation::ErrorCode::Internal,
             "streaming not implemented");

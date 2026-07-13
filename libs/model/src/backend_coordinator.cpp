@@ -489,6 +489,66 @@ foundation::Result<EmbeddingResult> BackendCoordinator::embed(
     return backend->embed(slot_id, request, cancelled);
 }
 
+foundation::Result<ImageGenerationResult> BackendCoordinator::generate_images(
+    const std::string& name, int slot_id, const ImageGenerationRequest& request,
+    const std::function<bool(int)>& progress) {
+    IImageBackend* backend = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second) {
+            return foundation::Err<ImageGenerationResult>(foundation::ErrorCode::NotFound,
+                                                           "model not loaded: " + name);
+        }
+        backend = dynamic_cast<IImageBackend*>(it->second.get());
+        if (!backend || !it->second->info().supports("image_generation")) {
+            return foundation::Err<ImageGenerationResult>(foundation::ErrorCode::InvalidArgument,
+                                                           "backend does not support image generation: " + name);
+        }
+    }
+    return backend->generate_images(slot_id, request, progress);
+}
+
+foundation::Result<AudioResult> BackendCoordinator::synthesize(
+    const std::string& name, int slot_id, const SpeechRequest& request,
+    const std::function<bool(const std::byte*, std::size_t)>& stream) {
+    ISpeechBackend* backend = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second) {
+            return foundation::Err<AudioResult>(foundation::ErrorCode::NotFound,
+                                                 "model not loaded: " + name);
+        }
+        backend = dynamic_cast<ISpeechBackend*>(it->second.get());
+        if (!backend || !it->second->info().supports("audio_speech")) {
+            return foundation::Err<AudioResult>(foundation::ErrorCode::InvalidArgument,
+                                                 "backend does not support speech synthesis: " + name);
+        }
+    }
+    return backend->synthesize(slot_id, request, stream);
+}
+
+foundation::Result<TranscriptionResult> BackendCoordinator::transcribe(
+    const std::string& name, int slot_id, const TranscriptionRequest& request,
+    const std::function<bool(int)>& progress) {
+    ITranscriptionBackend* backend = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second) {
+            return foundation::Err<TranscriptionResult>(foundation::ErrorCode::NotFound,
+                                                         "model not loaded: " + name);
+        }
+        backend = dynamic_cast<ITranscriptionBackend*>(it->second.get());
+        if (!backend || !it->second->info().supports("audio_transcription")) {
+            return foundation::Err<TranscriptionResult>(foundation::ErrorCode::InvalidArgument,
+                                                         "backend does not support transcription: " + name);
+        }
+    }
+    return backend->transcribe(slot_id, request, progress);
+}
+
 void BackendCoordinator::drain_active(std::chrono::milliseconds timeout) {
     auto deadline = clock::now() + timeout;
     std::unique_lock<std::mutex> lock(mutex_);

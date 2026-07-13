@@ -12,6 +12,7 @@ target_link_libraries(inferdeck-gateway PRIVATE
     model
     foundation
     llama_cpp_wrapper
+    native_runtimes
     llama
     yaml-cpp::yaml-cpp
     ${CMAKE_DL_LIBS}
@@ -45,3 +46,12 @@ add_custom_command(TARGET inferdeck-gateway POST_BUILD
             "$<TARGET_FILE_DIR:inferdeck-gateway>/static"
     COMMENT "Copying InferDeck dashboard static assets"
 )
+
+if(INFERDECK_BUILD_TESTS)
+    add_executable(config_tests tests/test_config.cpp)
+    target_include_directories(config_tests PRIVATE src)
+    target_link_libraries(config_tests PRIVATE model foundation yaml-cpp::yaml-cpp Catch2::Catch2WithMain)
+    set_target_properties(config_tests PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME config_tests COMMAND config_tests)
+    set_tests_properties(config_tests PROPERTIES LABELS "unit")
+endif()

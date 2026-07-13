@@ -9,6 +9,7 @@ set(GATEWAY_SOURCES
     src/dashboard_routes.cpp
     src/metrics_builder.cpp
     src/model_store.cpp
+    src/media_routes.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})

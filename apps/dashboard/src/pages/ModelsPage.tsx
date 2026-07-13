@@ -71,14 +71,18 @@ export const ModelsPage: React.FC = () => {
                       <td className="py-2.5 pr-4 text-text-secondary">{formatMb(model.vram_required_mb)}</td>
                       <td className="py-2.5 pr-4 text-text-secondary">{model.loaded ? `${model.free_slots ?? 0}/${model.n_slots}` : model.n_slots}</td>
                       <td className="py-2.5 pr-4">
-                        {model.loaded
+                        {model.runtime_available === false
+                          ? <Badge label="Runtime unavailable" tone="critical" />
+                          : model.loaded
                           ? <Badge label={model.primary ? 'Primary' : 'Loaded'} tone="good" />
                           : isTarget
                             ? <Badge label="Swapping…" tone="info" />
                             : <Badge label="On disk" tone="idle" />}
                       </td>
                       <td className="py-2.5 text-right">
-                        {model.loaded ? (
+                        {model.runtime_available === false ? (
+                          <Button disabled>Not linked</Button>
+                        ) : model.loaded ? (
                           <Button onClick={() => void unload(model.id)}>Unload</Button>
                         ) : isTarget ? (
                           <Button tone="danger" onClick={() => void cancelSwap()}>Cancel</Button>
