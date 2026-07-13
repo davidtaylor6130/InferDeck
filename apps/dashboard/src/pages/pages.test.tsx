@@ -93,6 +93,7 @@ describe('pages', () => {
     const html = renderWith(<SystemPage />);
     expect(html).toContain('GPU');
     expect(html).toContain('System RAM');
+    expect(html).toContain('Gateway configuration');
     expect(html).toContain('Gateway log');
   });
 });

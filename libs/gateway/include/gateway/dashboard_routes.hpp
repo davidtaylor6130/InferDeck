@@ -18,6 +18,8 @@ struct DashboardDeps {
     observability::GpuTelemetry& gpu;
     std::string log_file;
     std::string pricing_file{"data/pricing.json"};
+    std::string config_file;
+    std::function<foundation::Result<void>(const std::string&)> validate_config;
     std::function<std::int64_t()> uptime_seconds;
 };
 

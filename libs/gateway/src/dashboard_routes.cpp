@@ -7,8 +7,14 @@
 #include <cmath>
 #include <cstdint>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <mutex>
+#include <optional>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -28,6 +34,132 @@ namespace {
 
 namespace model = inferdeck::model;
 namespace observability = inferdeck::observability;
+
+struct ScalarSpan {
+    std::size_t begin{0};
+    std::size_t end{0};
+};
+
+std::optional<ScalarSpan> yaml_scalar_span(const std::string& text,
+                                           const std::string& section,
+                                           const std::string& key) {
+    bool in_section = false;
+    std::size_t position = 0;
+    while (position < text.size()) {
+        const auto newline = text.find('\n', position);
+        const auto line_end = newline == std::string::npos ? text.size() : newline;
+        std::string_view line(text.data() + position, line_end - position);
+        const auto first = line.find_first_not_of(" \t\r");
+        if (first != std::string_view::npos && line[first] != '#') {
+            const auto colon = line.find(':', first);
+            if (colon != std::string_view::npos) {
+                const std::string name(line.substr(first, colon - first));
+                if (first == 0) {
+                    in_section = name == section;
+                } else if (in_section && name == key) {
+                    auto value_begin = colon + 1;
+                    while (value_begin < line.size() &&
+                           (line[value_begin] == ' ' || line[value_begin] == '\t')) ++value_begin;
+                    auto value_end = line.size();
+                    bool single = false;
+                    bool double_quote = false;
+                    for (std::size_t i = value_begin; i < line.size(); ++i) {
+                        if (line[i] == '\'' && !double_quote) single = !single;
+                        if (line[i] == '"' && !single && (i == 0 || line[i - 1] != '\\')) {
+                            double_quote = !double_quote;
+                        }
+                        if (line[i] == '#' && !single && !double_quote &&
+                            (i == value_begin || line[i - 1] == ' ' || line[i - 1] == '\t')) {
+                            value_end = i;
+                            break;
+                        }
+                    }
+                    while (value_end > value_begin &&
+                           (line[value_end - 1] == ' ' || line[value_end - 1] == '\t' ||
+                            line[value_end - 1] == '\r')) --value_end;
+                    return ScalarSpan{position + value_begin, position + value_end};
+                }
+            }
+        }
+        if (newline == std::string::npos) break;
+        position = newline + 1;
+    }
+    return std::nullopt;
+}
+
+std::string mask_config_secret(std::string text) {
+    if (auto span = yaml_scalar_span(text, "auth", "token")) {
+        text.replace(span->begin, span->end - span->begin, "\"__INFERDECK_SECRET__\"");
+    }
+    return text;
+}
+
+std::string restore_config_secret(std::string submitted, const std::string& current) {
+    const auto submitted_span = yaml_scalar_span(submitted, "auth", "token");
+    const auto current_span = yaml_scalar_span(current, "auth", "token");
+    if (!submitted_span || !current_span) return submitted;
+    std::string value = submitted.substr(submitted_span->begin,
+                                         submitted_span->end - submitted_span->begin);
+    if (value == "__INFERDECK_SECRET__" || value == "\"__INFERDECK_SECRET__\"" ||
+        value == "'__INFERDECK_SECRET__'") {
+        submitted.replace(submitted_span->begin, submitted_span->end - submitted_span->begin,
+                          current.substr(current_span->begin, current_span->end - current_span->begin));
+    }
+    return submitted;
+}
+
+std::string config_revision(const std::string& text) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (unsigned char byte : text) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    std::ostringstream output;
+    output << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return output.str();
+}
+
+foundation::Result<void> write_config_atomic(const std::filesystem::path& path,
+                                              const std::string& text) {
+    const auto temporary = path.string() + ".tmp";
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            return foundation::Err<void>(foundation::ErrorCode::IoError,
+                                         "cannot open temporary configuration file");
+        }
+        output.write(text.data(), static_cast<std::streamsize>(text.size()));
+        output.flush();
+        if (!output) {
+            return foundation::Err<void>(foundation::ErrorCode::IoError,
+                                         "cannot write temporary configuration file");
+        }
+    }
+#ifdef _WIN32
+    if (!MoveFileExA(temporary.c_str(), path.string().c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::filesystem::remove(temporary);
+        return foundation::Err<void>(foundation::ErrorCode::IoError,
+                                     "cannot replace configuration file");
+    }
+#else
+    std::error_code error;
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::filesystem::remove(temporary);
+        return foundation::Err<void>(foundation::ErrorCode::IoError, error.message());
+    }
+#endif
+    return foundation::Ok();
+}
+
+std::string read_text(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return {};
+    std::ostringstream output;
+    output << input.rdbuf();
+    return output.str();
+}
 
 nlohmann::json gpu_hardware_json(const observability::GpuStats& gpu) {
     const double total_mb = gpu.vram_total_mb;
@@ -288,6 +420,78 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
 
 void register_dashboard_routes(httplib::Server& server, const DashboardDeps& deps,
                                const RouteWrapper& wrap) {
+    server.Get(R"(^/api/config$)", wrap([deps](const httplib::Request& req,
+                                               httplib::Response& resp) {
+        (void)req;
+        if (deps.config_file.empty()) {
+            write_error(resp, 503, "config_unavailable", "configuration path is unavailable");
+            return;
+        }
+        const std::string current = read_text(deps.config_file);
+        if (current.empty()) {
+            write_error(resp, 500, "config_read_failed", "configuration file is empty or unreadable");
+            return;
+        }
+        write_json(resp, 200, {
+            {"yaml", mask_config_secret(current)},
+            {"revision", config_revision(current)},
+            {"restartRequired", false},
+            {"secretSentinel", "__INFERDECK_SECRET__"},
+        });
+    }));
+
+    server.Put(R"(^/api/config$)", wrap([deps](const httplib::Request& req,
+                                               httplib::Response& resp) {
+        static std::mutex write_mutex;
+        std::lock_guard lock(write_mutex);
+        nlohmann::json body;
+        try {
+            body = nlohmann::json::parse(req.body);
+        } catch (const std::exception& error) {
+            write_error(resp, 400, "invalid_json", error.what());
+            return;
+        }
+        if (!body.contains("yaml") || !body["yaml"].is_string() ||
+            !body.contains("revision") || !body["revision"].is_string()) {
+            write_error(resp, 400, "invalid_config_update", "yaml and revision are required");
+            return;
+        }
+        std::string submitted = body["yaml"].get<std::string>();
+        if (submitted.empty() || submitted.size() > 2 * 1024 * 1024) {
+            write_error(resp, 400, "invalid_config_update", "configuration size is invalid");
+            return;
+        }
+        const std::string current = read_text(deps.config_file);
+        if (current.empty()) {
+            write_error(resp, 500, "config_read_failed", "configuration file is empty or unreadable");
+            return;
+        }
+        if (body["revision"].get<std::string>() != config_revision(current)) {
+            write_error(resp, 409, "config_conflict", "configuration changed; reload before saving");
+            return;
+        }
+        submitted = restore_config_secret(std::move(submitted), current);
+        if (!deps.validate_config) {
+            write_error(resp, 503, "config_validation_unavailable", "configuration validator is unavailable");
+            return;
+        }
+        auto valid = deps.validate_config(submitted);
+        if (!valid) {
+            write_error(resp, 400, "invalid_configuration", valid.error().message);
+            return;
+        }
+        auto written = write_config_atomic(deps.config_file, submitted);
+        if (!written) {
+            write_error(resp, 500, "config_write_failed", written.error().message);
+            return;
+        }
+        write_json(resp, 200, {
+            {"ok", true},
+            {"revision", config_revision(submitted)},
+            {"restartRequired", true},
+        });
+    }));
+
     server.Get(R"(^/api/status$)", wrap([deps](const httplib::Request& req,
                                                httplib::Response& resp) {
         (void)req;

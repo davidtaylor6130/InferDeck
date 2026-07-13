@@ -30,6 +30,25 @@ async function postJson<T>(path: string, body?: unknown, timeoutMs = 30_000): Pr
   return payload;
 }
 
+async function putJson<T>(path: string, body: unknown, timeoutMs = 30_000): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'PUT',
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
+  if (!response.ok) throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
+  return payload;
+}
+
+export interface ConfigDocument {
+  yaml: string;
+  revision: string;
+  restartRequired: boolean;
+  secretSentinel?: string;
+}
+
 export function getStatus(): Promise<StatusPayload> {
   return getJson<StatusPayload>('/api/status');
 }
@@ -57,6 +76,14 @@ export async function getLogs(limit = 250): Promise<string[]> {
 export async function getPricing(): Promise<PricingEntry[]> {
   const body = await getJson<PricingEntry[]>('/api/pricing');
   return Array.isArray(body) ? body : [];
+}
+
+export function getConfig(): Promise<ConfigDocument> {
+  return getJson<ConfigDocument>('/api/config');
+}
+
+export function saveConfig(yaml: string, revision: string): Promise<ConfigDocument & { ok: boolean }> {
+  return putJson<ConfigDocument & { ok: boolean }>('/api/config', { yaml, revision });
 }
 
 export function swapTo(model: string): Promise<{ status: string }> {

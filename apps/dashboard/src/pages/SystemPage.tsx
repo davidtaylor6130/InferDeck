@@ -3,6 +3,7 @@ import { getLogs } from '../api';
 import { Badge, Button, Panel, ProgressBar, SectionTitle, Stat } from '../components/ui';
 import { useGateway } from '../gateway';
 import { clamp, formatBytes, formatMb, formatUptime, temperatureTone, threshold, toneLabel, toneText } from '../utils';
+import { ConfigPanel } from './ConfigPanel';
 
 const LOG_POLL_MS = 5_000;
 
@@ -63,6 +64,7 @@ export const SystemPage: React.FC = () => {
         </Panel>
       </section>
 
+      <ConfigPanel />
       <LogPanel />
     </div>
   );

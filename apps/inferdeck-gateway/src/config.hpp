@@ -6,7 +6,9 @@
 #include <map>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <unordered_set>
 
 #include "foundation/logging.hpp"
 #include "model/model_registry.hpp"
@@ -88,6 +90,99 @@ inline std::filesystem::path default_config_path() {
     return candidates[0];
 }
 
+inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
+    try {
+        if (!root || !root.IsMap()) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "configuration root must be a mapping");
+        }
+        if (root["server"] && root["server"]["port"]) {
+            const int port = root["server"]["port"].as<int>();
+            if (port < 1 || port > 65535) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "server.port must be between 1 and 65535");
+            }
+        }
+        if (root["observability"] && root["observability"]["telemetry_poll_ms"] &&
+            root["observability"]["telemetry_poll_ms"].as<int>() < 10) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "observability.telemetry_poll_ms must be at least 10");
+        }
+        if (root["auth"] && root["auth"]["required"] &&
+            root["auth"]["required"].as<bool>() &&
+            (!root["auth"]["token"] || root["auth"]["token"].as<std::string>().empty())) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "auth.token is required when authentication is enabled");
+        }
+        if (root["gateway"]) {
+            const auto& gateway = root["gateway"];
+            for (const char* key : {"n_batch", "n_ubatch", "max_queue_size"}) {
+                if (gateway[key] && gateway[key].as<int>() < 1) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 std::string("gateway.") + key + " must be positive");
+                }
+            }
+            for (const char* key : {"vram_budget_mb", "vram_safety_margin_mb"}) {
+                if (gateway[key] && gateway[key].as<int>() < 0) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 std::string("gateway.") + key + " cannot be negative");
+                }
+            }
+        }
+        std::unordered_set<std::string> names;
+        if (root["model_registry"]) {
+            if (!root["model_registry"].IsSequence()) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "model_registry must be a sequence");
+            }
+            for (const auto& entry : root["model_registry"]) {
+                if (!entry["name"] || entry["name"].as<std::string>().empty()) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "every model requires a name");
+                }
+                const std::string name = entry["name"].as<std::string>();
+                if (!names.insert(name).second) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "duplicate model name: " + name);
+                }
+                const std::string runtime = entry["runtime"]
+                    ? entry["runtime"].as<std::string>() : "llama_cpp";
+                if (runtime.empty()) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "model runtime cannot be empty: " + name);
+                }
+                const int slots = entry["n_slots"] ? entry["n_slots"].as<int>() : 2;
+                const int minimum = entry["min_slots"] ? entry["min_slots"].as<int>() : 1;
+                if (minimum < 1 || slots < minimum) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "invalid slot bounds for model: " + name);
+                }
+                if (runtime == "llama_cpp" &&
+                    (!entry["gguf_path"] || entry["gguf_path"].as<std::string>().empty())) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "llama_cpp model requires gguf_path: " + name);
+                }
+            }
+        }
+        if (root["default_model"] && !root["default_model"].as<std::string>().empty() &&
+            !names.contains(root["default_model"].as<std::string>())) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "default_model must exist in model_registry");
+        }
+        return foundation::Ok();
+    } catch (const std::exception& error) {
+        return foundation::Err<void>(foundation::ErrorCode::ParseError, error.what());
+    }
+}
+
+inline foundation::Result<void> validate_config_text(const std::string& text) {
+    try {
+        return validate_config_node(YAML::Load(text));
+    } catch (const std::exception& error) {
+        return foundation::Err<void>(foundation::ErrorCode::ParseError, error.what());
+    }
+}
+
 inline GatewayConfig load_config(const std::filesystem::path& path) {
     GatewayConfig cfg;
     if (!std::filesystem::exists(path)) {
@@ -95,6 +190,8 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         return cfg;
     }
     YAML::Node root = YAML::LoadFile(path.string());
+    auto valid = validate_config_node(root);
+    if (!valid) throw std::runtime_error(valid.error().message);
     if (root["server"]) {
         const auto& s = root["server"];
         if (s["host"]) cfg.host = s["host"].as<std::string>();
