@@ -2,14 +2,31 @@ export type Tone = 'good' | 'warn' | 'critical' | 'idle' | 'info' | 'violet';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline';
 
+export interface ModelOptimizationInfo {
+  status: string;
+  measured_at?: string;
+  quality_passes?: number;
+  quality_total?: number;
+  single_tokens_per_second?: number;
+  parallel_tokens_per_second?: number;
+}
+
 export interface ModelInfo {
   id: string;
   family?: string;
+  runtime?: string;
+  runtime_available?: boolean;
+  modality?: string;
+  capabilities?: string[];
   context_size: number;
   vram_required_mb: number;
   n_slots: number;
   has_vision: boolean;
   loaded: boolean;
+  primary?: boolean;
+  free_slots?: number;
+  active_requests?: number;
+  optimization?: ModelOptimizationInfo;
 }
 
 export interface GpuSample {
@@ -17,6 +34,7 @@ export interface GpuSample {
   name: string;
   utilizationPct: number;
   vramUsedMb: number;
+  vramTotalMb?: number;
   temperatureC: number;
   powerW: number;
 }
@@ -51,8 +69,11 @@ export interface RequestEvent {
   promptTokens: number;
   completionTokens: number;
   durationMs: number;
+  generationDurationMs?: number;
   tokensPerSecond: number;
   status: number;
+  inputAudioSeconds?: number;
+  inputCharacters?: number;
 }
 
 export interface SwapState {
@@ -73,6 +94,8 @@ export interface UsageRow {
   peakTokensPerSecond: number;
   avgTokensPerSecond: number;
   lastTimestampUnixMs: number;
+  inputAudioSeconds?: number;
+  inputCharacters?: number;
 }
 
 export interface MonthlyUsageRow {
@@ -83,11 +106,22 @@ export interface MonthlyUsageRow {
   totalTokens: number;
   requests: number;
   successfulRequests: number;
+  inputAudioSeconds?: number;
+  inputCharacters?: number;
 }
 
 export interface StatusPayload {
   status: string;
-  queue: { running: number; gpuLocked: boolean; lockOwner: string };
+  queue: {
+    running: number;
+    queued?: number;
+    gpuLocked: boolean;
+    lockOwner: string;
+    vramBudgetMb?: number;
+    vramAvailableMb?: number;
+    resourceDecision?: string;
+    requests?: Array<{ id: number; model: string; priority: number; position: number; queuedMs: number; remainingMs: number }>;
+  };
   swap: SwapState;
   hardware: {
     available?: boolean;
@@ -114,6 +148,7 @@ export interface StatusPayload {
   tokenUsage: UsageRow[];
   monthlyTokenUsage: MonthlyUsageRow[];
   dailyTokenUsage?: MonthlyUsageRow[];
+  dailyTokenUsageAllTime?: boolean;
   hourlyTokenUsage?: MonthlyUsageRow[];
   models: Array<Omit<ModelInfo, 'id'> & { id: string }>;
   current: string;
@@ -134,6 +169,8 @@ export interface JobRecord {
   durationMs: number;
   httpStatus: number;
   slotId: number;
+  inputAudioSeconds?: number;
+  inputCharacters?: number;
 }
 
 export interface SwapHistoryRow {
@@ -151,6 +188,9 @@ export interface PricingEntry {
   completion_price_per_million: number;
   equivalent_api_model?: string | null;
   currency?: string;
+  billing_unit?: 'tokens' | 'audio_minute' | 'million_characters';
+  price_per_unit?: number;
+  source_url?: string;
 }
 
 export interface ActivityItem {

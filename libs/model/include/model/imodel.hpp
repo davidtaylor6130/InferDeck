@@ -2,48 +2,18 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "foundation/result.hpp"
+#include "model/ibackend.hpp"
 
 namespace inferdeck::model {
 
-// Server-side sampler defaults (issue #42). Values here mirror stock
-// llama-server defaults: DRY off, repeat_penalty neutral. Explicit per-request
-// (OpenAI body) values override these; see make_inference_request /
-// apply_chat_template. Settable globally under `gateway.sampling` and
-// overridable per entry in `model_registry`.
-struct SamplingConfig {
-    float temperature{0.8f};
-    float top_p{0.95f};
-    int   top_k{40};
-    float min_p{0.05f};
-    float repeat_penalty{1.0f};   // 1.0 = disabled
-    int   repeat_last_n{64};
-    float dry_multiplier{0.0f};   // 0.0 = disabled
-    float dry_base{1.75f};
-    int   dry_allowed_length{2};
-    int   dry_penalty_last_n{-1};  // -1 = context size
-    std::vector<std::string> dry_seq_breakers{"\n", ":", "\"", "*"};
-};
-
-struct ModelInfo {
-    std::string name{};
-    std::string family{};
-    std::string gguf_path{};
-    std::string mmproj_path{};
-    int n_slots{2};
-    int vram_required_mb{0};
-    int context_size{65536};
-    std::optional<int> n_gpu_layers{};
-    bool has_vision{false};
-    std::string reasoning_format{};  // "auto", "deepseek", "deepseek_legacy", "none"
-    std::string chat_template_path{};  // optional .jinja override; empty = use template embedded in GGUF
-    SamplingConfig sampling{};       // per-model defaults (merged over global at parse time)
-};
+inline constexpr int k_max_tokens_use_context_budget = -1;
 
 struct ChatMessage {
     std::string role{};
@@ -78,7 +48,7 @@ struct InferenceRequest {
     std::vector<ChatMessage> messages{};
     std::string tools_json{};
     std::string openai_body_json{};
-    int max_tokens{512};
+    int max_tokens{k_max_tokens_use_context_budget};
     // Sampler params are optional so the server can tell an explicit client
     // value apart from "unset" (issue #42). When unset, the server-side
     // SamplingConfig default applies; when set, the client value wins.
@@ -107,36 +77,119 @@ struct InferenceResult {
     int cached_prompt_tokens{0};
     int completion_tokens{0};
     float duration_ms{0.0f};
+    float generation_duration_ms{0.0f};
     float tokens_per_second{0.0f};
     std::vector<std::string> tool_calls_json{};
     std::vector<ToolCall> tool_calls{};
 };
 
-class IModel {
+struct EmbeddingRequest {
+    std::vector<std::string> inputs;
+    std::optional<int> dimensions{};
+};
+
+struct EmbeddingResult {
+    std::vector<std::vector<float>> embeddings;
+    int prompt_tokens{0};
+    float duration_ms{0.0f};
+};
+
+struct ImageGenerationRequest {
+    std::string prompt;
+    std::string negative_prompt;
+    int width{1024};
+    int height{1024};
+    int count{1};
+    int steps{20};
+    std::int64_t seed{-1};
+    float guidance_scale{7.0f};
+};
+
+struct ImageGenerationResult {
+    std::vector<std::vector<std::byte>> png_images;
+    float duration_ms{0.0f};
+};
+
+struct SpeechRequest {
+    std::string input;
+    std::string voice;
+    std::string format{"wav"};
+    float speed{1.0f};
+};
+
+struct AudioResult {
+    std::vector<std::byte> bytes;
+    std::string content_type;
+    float duration_ms{0.0f};
+};
+
+struct TranscriptionRequest {
+    std::vector<float> pcm;
+    int sample_rate{16000};
+    std::string language;
+    std::string prompt;
+    float temperature{0.0f};
+};
+
+struct TranscriptionSegment {
+    int id{0};
+    float start_seconds{0.0f};
+    float end_seconds{0.0f};
+    std::string text;
+    std::vector<int> tokens;
+    float avg_logprob{0.0f};
+    float no_speech_probability{0.0f};
+};
+
+struct TranscriptionResult {
+    std::string text;
+    std::string language;
+    float duration_seconds{0.0f};
+    float inference_ms{0.0f};
+    std::vector<TranscriptionSegment> segments;
+};
+
+class IImageBackend {
+public:
+    virtual ~IImageBackend() = default;
+    virtual foundation::Result<ImageGenerationResult> generate_images(
+        int slot_id, const ImageGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) = 0;
+};
+
+class ISpeechBackend {
+public:
+    virtual ~ISpeechBackend() = default;
+    virtual foundation::Result<AudioResult> synthesize(
+        int slot_id, const SpeechRequest& request,
+        const std::function<bool(const std::byte*, std::size_t)>& stream = {}) = 0;
+};
+
+class ITranscriptionBackend {
+public:
+    virtual ~ITranscriptionBackend() = default;
+    virtual foundation::Result<TranscriptionResult> transcribe(
+        int slot_id, const TranscriptionRequest& request,
+        const std::function<bool(int)>& progress = {}) = 0;
+};
+
+class IEmbeddingBackend {
+public:
+    virtual ~IEmbeddingBackend() = default;
+    virtual foundation::Result<EmbeddingResult> embed(
+        int slot_id, const EmbeddingRequest& request,
+        const std::function<bool()>& cancelled = {}) = 0;
+};
+
+class IModel : public IBackend {
 public:
     virtual ~IModel() = default;
-
-    virtual const ModelInfo& info() const = 0;
 
     virtual const ChatTemplateMeta& chat_template_meta() const {
         static const ChatTemplateMeta meta{};
         return meta;
     }
 
-    virtual foundation::Result<void> load() = 0;
-    virtual foundation::Result<void> unload() = 0;
-    virtual bool is_loaded() const = 0;
-
-    virtual int vram_usage_mb() const = 0;
-    virtual int n_slots() const = 0;
-    virtual int n_free_slots() const = 0;
-
-    virtual foundation::Result<int> acquire_slot() = 0;
-    virtual foundation::Result<void> release_slot(int slot_id) = 0;
-    virtual bool slot_busy(int slot_id) const = 0;
-    virtual foundation::Result<void> reset_all_slots() {
-        return foundation::Ok();
-    }
 
     using TokenCallback = std::function<bool(const InferenceDelta& delta)>;
 
@@ -149,6 +202,9 @@ public:
     virtual foundation::Result<InferenceResult> predict_stream(
         int slot_id, const InferenceRequest& req, const TokenCallback& callback,
         const std::atomic<bool>* cancel = nullptr) {
+        (void)slot_id;
+        (void)req;
+        (void)callback;
         (void)cancel;
         return foundation::Err<InferenceResult>(foundation::ErrorCode::Internal,
             "streaming not implemented");

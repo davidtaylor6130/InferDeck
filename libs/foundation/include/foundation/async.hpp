@@ -2,8 +2,8 @@
 
 #include <chrono>
 #include <future>
+#include <functional>
 #include <string>
-#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -12,22 +12,11 @@ namespace inferdeck::foundation {
 template <typename F>
 auto run_async(F&& f)
     -> std::future<std::invoke_result_t<std::decay_t<F>>> {
-    using R = std::invoke_result_t<std::decay_t<F>>;
-    std::promise<R> promise;
-    auto future = promise.get_future();
-    std::thread([p = std::move(promise), fn = std::forward<F>(f)]() mutable {
-        try {
-            if constexpr (std::is_void_v<R>) {
-                fn();
-                p.set_value();
-            } else {
-                p.set_value(fn());
-            }
-        } catch (...) {
-            p.set_exception(std::current_exception());
-        }
-    }).detach();
-    return future;
+    return std::async(std::launch::async,
+                      [fn = std::forward<F>(f)]() mutable
+                          -> std::invoke_result_t<std::decay_t<F>> {
+                          return std::invoke(std::move(fn));
+                      });
 }
 
 class StopWatch {

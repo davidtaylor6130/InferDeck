@@ -5,6 +5,7 @@ find_package(Catch2 REQUIRED)
 set(TEST_SRCS
     test_logger.cpp
     test_gpu_telemetry.cpp
+    test_metrics.cpp
     test_stats_db.cpp
 )
 
@@ -26,5 +27,5 @@ include(CTest)
 include(Catch)
 catch_discover_tests(observability_tests
     TEST_PREFIX "observability_"
-    LABELS "unit"
+    PROPERTIES LABELS "unit"
 )

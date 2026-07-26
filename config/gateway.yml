@@ -1,4 +1,6 @@
 server:
+  # Home-lab contract: accept connections on LAN and overlay-network interfaces.
+  # Covered by the automated [config][lan] regression test.
   host: "0.0.0.0"
   port: 11434
 
@@ -17,17 +19,22 @@ cors:
 state:
   file: "~/.inferdeck/state.json"
 
+model_store:
+  root: "models/store"
+  hf_token: ""
+
 default_model: "qwen3.6-27b"
 
 observability:
-  stats_db: "~/.inferdeck/stats.db"
+  # Keep lifetime usage independent of the Windows service account and cwd.
+  stats_db: "C:/InferDeck/data/stats.db"
   adlx_helper: ""
   telemetry_poll_ms: 100
 
 gateway:
   auto_swap: true
-  n_batch: 512
-  n_ubatch: 512
+  n_batch: 2048
+  n_ubatch: 2048
   use_mmap: false
   use_mlock: false
   n_gpu_layers: null
@@ -59,8 +66,8 @@ gateway:
 # Map Anthropic model names to local models so Anthropic-API clients
 # (e.g. Claude Code) route to the right local model. Unmapped names fall back
 # to the loaded model, then default_model. Keys must be the exact model IDs the
-# client sends. Tier intent: Opus = smartest, Sonnet = mid, Haiku = fast;
-# Fable is Anthropic's most capable model -> map to the largest local model.
+# client sends. Unmapped non-empty model IDs are rejected instead of silently
+# switching to a different local model.
 anthropic:
   model_aliases:
     claude-opus-4-8: "qwen3.6-27b"
@@ -73,14 +80,70 @@ anthropic:
     claude-haiku-4-5-20251001: "gpt-oss-20b"
 
 model_registry:
+  - name: "supertonic-3"
+    family: "supertonic"
+    runtime: "sherpa_onnx"
+    modality: "audio_speech"
+    capabilities:
+      - "audio_speech"
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 0
+    artifacts:
+      engine: "supertonic"
+      duration_predictor: "C:/InferDeck/models/tts/supertonic-3/duration_predictor.int8.onnx"
+      text_encoder: "C:/InferDeck/models/tts/supertonic-3/text_encoder.int8.onnx"
+      vector_estimator: "C:/InferDeck/models/tts/supertonic-3/vector_estimator.int8.onnx"
+      vocoder: "C:/InferDeck/models/tts/supertonic-3/vocoder.int8.onnx"
+      tts_json: "C:/InferDeck/models/tts/supertonic-3/tts.json"
+      unicode_indexer: "C:/InferDeck/models/tts/supertonic-3/unicode_indexer.bin"
+      voice_style: "C:/InferDeck/models/tts/supertonic-3/voice.bin"
+      provider: "cpu"
+      num_threads: "4"
+
+  - name: "parakeet-tdt-0.6b-v3"
+    family: "parakeet"
+    runtime: "sherpa_onnx"
+    modality: "audio_transcription"
+    capabilities:
+      - "audio_transcription"
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 0
+    artifacts:
+      encoder: "C:/InferDeck/models/stt/parakeet-tdt-0.6b-v3/encoder.int8.onnx"
+      decoder: "C:/InferDeck/models/stt/parakeet-tdt-0.6b-v3/decoder.int8.onnx"
+      joiner: "C:/InferDeck/models/stt/parakeet-tdt-0.6b-v3/joiner.int8.onnx"
+      tokens: "C:/InferDeck/models/stt/parakeet-tdt-0.6b-v3/tokens.txt"
+      model_type: "nemo_transducer"
+      provider: "cpu"
+      num_threads: "4"
+
   - name: "qwen3.6-27b"
     family: "qwen3.6"
-    gguf_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
+    gguf_path: "E:/InferDeck/models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
     mmproj_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/mmproj-BF16.gguf"
-    n_slots: 3
-    vram_required_mb: 31000
-    context_size: 40960
-    has_vision: true
+    n_slots: 4
+    min_slots: 4
+    vram_required_mb: 29791
+    context_size: 100000
+    n_batch: 2048
+    n_ubatch: 2048
+    cache_type_k: "q4_0"
+    cache_type_v: "q4_0"
+    speculative:
+      type: "mtp"
+      draft_tokens: 2
+      p_min: 0.0
+      max_active_requests: 1
+    optimization:
+      status: "measured"
+      measured_at: "2026-07-26"
+      quality_passes: 3
+      quality_total: 3
+      single_tokens_per_second: 50.16
+      parallel_tokens_per_second: 51.24
+    has_vision: false
     # Corrected Qwen3.6 chat template: avoids the "No user query found in messages."
     # crash during multi-step tool calling (e.g. OpenCode). See config/templates/.
     chat_template_path: "C:/Inferdeck/config/templates/qwen3.6-fixed.jinja"
@@ -170,10 +233,25 @@ model_registry:
     mmproj_path: "C:/Inferdeck/models/unsloth/gemma-4-26B-A4B-it-GGUF/mmproj-F32.gguf"
     n_slots: 4
     vram_required_mb: 13000
-    context_size: 32768
-    has_vision: true
+    context_size: 100000
+    has_vision: false
     # Gemma recommended sampling (Google): temp 1.0, top_k 64, top_p 0.95,
     # min_p 0.
+    sampling:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 64
+      min_p: 0.0
+      repeat_penalty: 1.0
+
+  - name: "gemma-4-31b"
+    family: "gemma4"
+    gguf_path: "C:/Inferdeck/models/unsloth/gemma-4-31B-it-GGUF/gemma-4-31B-it-UD-Q4_K_XL.gguf"
+    mmproj_path: "C:/Inferdeck/models/unsloth/gemma-4-31B-it-GGUF/mmproj-BF16.gguf"
+    n_slots: 1
+    vram_required_mb: 29000
+    context_size: 65536
+    has_vision: false
     sampling:
       temperature: 1.0
       top_p: 0.95

@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.27)
 find_package(Catch2 REQUIRED)
 
 add_executable(optimize_tests
+    test_profile_optimizer.cpp
     test_search_space.cpp
     test_study.cpp
     test_yaml_loader.cpp
@@ -26,5 +27,5 @@ include(CTest)
 include(Catch)
 catch_discover_tests(optimize_tests
     TEST_PREFIX "optimize_"
-    LABELS "unit"
+    PROPERTIES LABELS "unit"
 )

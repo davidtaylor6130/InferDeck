@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 
 namespace inferdeck::observability {
 
@@ -17,6 +19,7 @@ struct GpuStats {
   std::string gpu_name;
   double utilization_pct{};
   double vram_mb{};
+  double vram_total_mb{};
   double temperature_c{};
   double power_w{};
   double fan_speed_pct{};
@@ -51,7 +54,10 @@ private:
   std::chrono::milliseconds poll_interval_{100};
   std::chrono::milliseconds max_staleness_{2000};
 
+  mutable std::mutex lifecycle_mtx_;
   mutable std::mutex mtx_;
+  std::condition_variable sample_cv_;
+  std::condition_variable poll_cv_;
   GpuStats latest_;
 
   std::atomic<bool> running_{false};

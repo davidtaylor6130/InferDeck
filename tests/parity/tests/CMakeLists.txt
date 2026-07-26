@@ -26,5 +26,5 @@ include(CTest)
 include(Catch)
 catch_discover_tests(parity_tests
     TEST_PREFIX "parity_"
-    LABELS "integration"
+    PROPERTIES LABELS "integration"
 )

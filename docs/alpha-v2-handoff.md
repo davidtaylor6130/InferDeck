@@ -1,0 +1,60 @@
+# InferDeck Alpha V2 handoff
+
+Branch: `alpha-v2` from `main`/`origin/main` at `798b2ef` (`v0.4.0`).
+
+## Status by issue
+
+- #52 runtime architecture: portable implementation complete. Added the shared `IBackend` lifecycle/capacity contract, runtime-keyed factories, runtime/modality/capability metadata, configuration parsing, and typed rejection of text execution on non-text backends.
+- #53 image generation: portable implementation complete. Added the OpenAI image route, shared admission and metrics, PNG/base64 output, progress, client/dashboard cancellation, and a compile-gated in-process stable-diffusion.cpp Vulkan adapter. Windows model validation remains.
+- #54 text-to-speech: portable implementation complete. Added the OpenAI speech route, chunked output, shared admission and metrics, disconnect/dashboard cancellation, request-scoped audio, and a compile-gated in-process sherpa-onnx VITS adapter. Windows native validation remains; sherpa's AMD/Vulkan provider gap is documented.
+- #55 speech-to-text: portable implementation complete. Added bounded multipart RIFF/WAVE parsing, JSON/text output, shared admission and metrics, progress/cancellation, and a compile-gated in-process whisper.cpp GPU adapter. Windows model validation remains.
+- #56 resource-aware residency: portable implementation complete. Windows VRAM calibration and live multi-model validation remain.
+- #57 model store: portable implementation complete. Added Hugging Face search and artifact inspection, compatibility metadata, background native WinHTTP downloads, cancellation/resume, disk-space and size/SHA-256 checks, confined paths, manifest-backed runtime registration, safe removal, secret masking, and dashboard management. Windows network/download validation remains.
+- #58 GUI configuration: portable implementation complete. Added masked configuration reads, optimistic revision checks, schema validation, atomic replacement, common dashboard controls, and a complete YAML editor that retains unknown fields and comments. Saved changes are explicitly restart-required.
+- #59 cross-modality queue: portable implementation complete. Admission is bounded, priority-aware with aging, cancellable, visible in status, and spans tracked swaps.
+- #60 embeddings: portable implementation complete. Added typed embedding dispatch, dedicated llama.cpp embedding execution, bounded float/base64 endpoint handling, usage metrics, and capability checks. Real embedding GGUF/Vulkan validation remains.
+- #61 Responses API: portable implementation complete for stateless text/vision input, function tools, structured output translation, reasoning, non-streaming output, and typed SSE events. Stateful storage/background/conversation fields are rejected explicitly.
+- #62 capability discovery: portable implementation complete through `/v1/models`, swap/status, SSE stats, dashboard status, and the Models page.
+
+## Verification run
+
+- Portable model tests compiled directly with Apple Clang 21 and the repository's installed Catch2 libraries: 42 test cases, 190 assertions passed.
+- OpenAI and media route tests plus model-store tests: 31 test cases, 215 assertions passed. The binary requires unsandboxed loopback access for its local HTTP servers.
+- Anthropic route tests: 9 test cases, 46 assertions passed with loopback access.
+- Dashboard tests: 15 tests passed.
+- Model-store tests: 3 test cases, 14 assertions passed, including source filtering, path rejection, and corrupt-artifact non-registration.
+- Configuration tests: 2 test cases, 4 assertions passed for native artifacts and invalid operational values.
+- Native PNG encoder test: 1 test case, 7 assertions passed.
+- Dashboard TypeScript check and production Vite build: passed; committed static output rebuilt.
+- Configuration validation, dashboard route, and gateway entry-point sources passed Apple Clang C++23 syntax checks.
+- All three optional native adapter sources passed C++23 syntax checks against shallow clones of the pinned upstream headers; the adapters were not linked or executed.
+- `main.cpp`, `llama_cpp_model.cpp`, dashboard routes, and GPU telemetry sources passed Apple Clang syntax/object compilation where link-free checks were possible.
+- `git diff --check`: passed.
+- Root CMake configure on macOS: unavailable. The project forces the Windows Vulkan loader and the local environment lacks the required SPIR-V package. This is not evidence of a Windows build failure.
+
+## Windows validation still required
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DINFERDECK_BUILD_TESTS=ON
+cmake --build build --target inferdeck-gateway --config Release -j
+ctest --test-dir build -C Release --output-on-failure -L "unit|integration"
+pnpm --filter dashboard test
+pnpm --filter dashboard build
+```
+
+Do not deploy Alpha V2 artifacts to `C:\InferDeck` until the complete issue set has passed Windows/Vulkan and real-model validation.
+
+## Required native runtime dependencies
+
+- Existing llama.cpp Vulkan dependency for text and embeddings.
+- The model store uses Windows WinHTTP and BCrypt directly; it adds no downloader subprocess or portable TLS dependency.
+- Image uses stable-diffusion.cpp, TTS uses sherpa-onnx, and STT uses whisper.cpp. Exact pins, CMake inputs, model YAML, and provider limitations are in `docs/alpha-v2-native-runtimes.md`.
+
+## Known risks and assumptions
+
+- No Windows compilation, Vulkan execution, VRAM measurement, or real-model inference has been performed on this branch yet.
+- Runtime identifiers default to `llama_cpp`, preserving existing YAML files.
+- Multi-residency activates only after DXGI reports total VRAM or `gateway.vram_budget_mb` is configured. With no budget, legacy single-resident swap behavior remains.
+- Automatic slot shrinking requires calibrated `vram_fixed_mb` and `vram_per_slot_mb` values per model. Without them, the planner can keep models resident when declared totals fit and can evict idle residents, but it will not guess unsafe slot savings.
+- Responses streaming event names and shapes were checked against the official OpenAI Responses streaming reference: `https://platform.openai.com/docs/api-reference/responses-streaming/response/refusal/delta`.
+- GUI configuration intentionally has no restart button: saving production server configuration is separated from process lifecycle control, and no change is applied until the operator restarts the Alpha V2 executable.

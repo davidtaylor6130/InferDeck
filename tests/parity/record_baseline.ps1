@@ -4,10 +4,11 @@
   Records parity baseline by sending prompts to llama-server.exe.
 
 .DESCRIPTION
-  Reads prompts from tests/parity/prompts.yaml (or .json), sends each one to
+  Reads prompts from tests/parity/prompts.json, sends each one to
   a running llama-server.exe at $BaseUrl, captures the response, and writes
-  the results as JSONL to the output file. Each line: {id, category, prompt,
-  reference, response_text, response_ms, timestamp_unix_ms}.
+  the results as JSONL to the output file. Each line preserves the system
+  prompt, user prompt, per-case minimum score, and complete request body so
+  the candidate can replay the same request shape.
 
 .PARAMETER BaseUrl
   llama-server base URL (default http://127.0.0.1:8080).
@@ -51,14 +52,18 @@ $prompts = Get-Content $PromptsPath -Raw | ConvertFrom-Json
 
 $results = New-Object System.Collections.Generic.List[object]
 foreach ($p in $prompts) {
-    $body = @{
+    if ($p.PSObject.Properties.Match('min_score').Count -eq 0) {
+        throw "Prompt '$($p.id)' is missing min_score"
+    }
+    $request = [ordered]@{
         model    = $Model
         stream   = $false
         messages = @(
             if ($p.system) { @{ role = "system"; content = $p.system } }
             @{ role = "user"; content = $p.user }
         )
-    } | ConvertTo-Json -Depth 8 -Compress
+    }
+    $body = $request | ConvertTo-Json -Depth 8 -Compress
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $resp = Invoke-RestMethod -Uri "$BaseUrl/v1/chat/completions" `
@@ -78,8 +83,11 @@ foreach ($p in $prompts) {
     $entry = [ordered]@{
         id                  = $p.id
         category            = $p.category
+        system              = [string]$p.system
         prompt              = $p.user
         reference           = $p.reference
+        min_score           = [double]$p.min_score
+        request             = $request
         response_text       = $text
         response_ms         = [int64]$sw.ElapsedMilliseconds
         timestamp_unix_ms   = [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())

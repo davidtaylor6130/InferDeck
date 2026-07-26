@@ -1,8 +1,7 @@
 param(
-    [string]$GatewayBaseUrl = "http://127.0.0.1:11434",
-    [string]$DashboardBaseUrl = "http://127.0.0.1:8080",
-    [int]$BackendPort = 18080,
-    [string]$RuntimePath = "$PSScriptRoot\..\runtime\llama-b9276-vulkan\llama-server.exe",
+    [string]$BaseUrl = "http://127.0.0.1:11434",
+    [string]$Model = "qwen3.6-27b",
+    [string]$ExpectedExecutablePath = "",
     [switch]$SkipGeneration,
     [switch]$RunDisconnectSmoke
 )
@@ -16,189 +15,116 @@ function Assert-True {
     }
 }
 
-function Get-Listener {
-    param([int]$Port)
-    Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalPort -eq $Port } |
-        Select-Object -First 1
+function Invoke-Json {
+    param(
+        [string]$Method,
+        [string]$Uri,
+        [object]$Body = $null,
+        [int]$TimeoutSec = 30
+    )
+    $parameters = @{
+        Method = $Method
+        Uri = $Uri
+        TimeoutSec = $TimeoutSec
+    }
+    if ($null -ne $Body) {
+        $parameters.Body = $Body | ConvertTo-Json -Depth 16 -Compress
+        $parameters.ContentType = "application/json"
+    }
+    Invoke-RestMethod @parameters
 }
 
-$gatewayUri = [Uri]$GatewayBaseUrl
-$gatewayPort = $gatewayUri.Port
-$gatewayListener = Get-Listener -Port $gatewayPort
-$backendListener = Get-Listener -Port $BackendPort
-
-Assert-True ($null -ne $gatewayListener) "No gateway listener found on port $gatewayPort."
-Assert-True ($null -ne $backendListener) "No llama.cpp backend listener found on port $BackendPort."
-
-$resolvedRuntime = [System.IO.Path]::GetFullPath($RuntimePath)
-$runtimeProcesses = Get-CimInstance Win32_Process |
+$uri = [Uri]$BaseUrl
+$listener = Get-NetTCPConnection -LocalPort $uri.Port -State Listen -ErrorAction SilentlyContinue |
     Where-Object {
-        $_.Name -eq "llama-server.exe" -and
-        $_.ExecutablePath -and
-        ([System.IO.Path]::GetFullPath($_.ExecutablePath) -ieq $resolvedRuntime)
-    }
+        $_.LocalAddress -eq $uri.Host -or
+        ($uri.Host -eq "127.0.0.1" -and $_.LocalAddress -in @("0.0.0.0", "::"))
+    } |
+    Select-Object -First 1
+Assert-True ($null -ne $listener) "No InferDeck listener found on port $($uri.Port)."
 
-Assert-True (($runtimeProcesses | Measure-Object).Count -eq 1) "Expected exactly one InferDeck llama-server process, found $(($runtimeProcesses | Measure-Object).Count)."
-Assert-True ($backendListener.OwningProcess -eq $runtimeProcesses[0].ProcessId) "Backend port $BackendPort is owned by PID $($backendListener.OwningProcess), not tracked InferDeck llama-server PID $($runtimeProcesses[0].ProcessId)."
+$process = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)"
+Assert-True ($null -ne $process) "The InferDeck listener owner could not be inspected."
+$executableName = [System.IO.Path]::GetFileName($process.ExecutablePath)
+Assert-True ($executableName -in @("inferdeck-gateway.exe", "gateway-service.exe")) `
+    "Port $($uri.Port) is owned by $executableName, not InferDeck."
+if ($ExpectedExecutablePath) {
+    $expected = [System.IO.Path]::GetFullPath($ExpectedExecutablePath)
+    $actual = [System.IO.Path]::GetFullPath($process.ExecutablePath)
+    Assert-True ($actual -ieq $expected) "InferDeck is running from $actual, expected $expected."
+}
 
-$models = Invoke-RestMethod -Method Get -Uri "$GatewayBaseUrl/v1/models" -TimeoutSec 10
+$health = Invoke-Json -Method Get -Uri "$BaseUrl/v1/health"
+Assert-True ($health.ok -eq $true) "/v1/health did not report ok=true."
+
+$models = Invoke-Json -Method Get -Uri "$BaseUrl/v1/models"
 Assert-True ($models.object -eq "list") "/v1/models did not return an OpenAI-compatible list."
+Assert-True ($null -ne ($models.data | Where-Object { $_.id -eq $Model })) `
+    "Model $Model is not registered."
 
 if (-not $SkipGeneration) {
-    $openCodeUserAgent = "opencode/1.14.48"
-
-    function Invoke-OpenAiTinyChat {
-        param([string]$Model, [string]$Expected)
-        $body = @{
-            model = $Model
-            messages = @(@{ role = "user"; content = "Reply with exactly: $Expected" })
-            max_tokens = 12
-            stream = $false
-        } | ConvertTo-Json -Depth 8
-        $response = Invoke-RestMethod -Method Post -Uri "$GatewayBaseUrl/v1/chat/completions" -Body $body -ContentType "application/json" -TimeoutSec 180
-        Assert-True ($response.choices.Count -gt 0) "/v1/chat/completions returned no choices for $Model."
-        return $response
+    $chat = Invoke-Json -Method Post -Uri "$BaseUrl/v1/chat/completions" -TimeoutSec 300 -Body @{
+        model = $Model
+        messages = @(@{
+            role = "user"
+            content = "Reply with exactly: inferdeck opencode ok"
+        })
+        max_tokens = 24
+        stream = $false
     }
+    Assert-True ($chat.choices.Count -gt 0) "Non-streaming chat returned no choices."
+    Assert-True ($chat.choices[0].message.role -eq "assistant") `
+        "Non-streaming chat did not return an assistant message."
 
-    $chatBody = @{
-        model = "qwen3.6-35b-a3b"
-        messages = @(@{ role = "user"; content = "Reply with exactly: inferdeck opencode ok" })
-        max_tokens = 12
-        stream = $false
-    } | ConvertTo-Json -Depth 8
-    $chat = Invoke-RestMethod -Method Post -Uri "$GatewayBaseUrl/v1/chat/completions" -Body $chatBody -ContentType "application/json" -TimeoutSec 180
-    Assert-True ($chat.choices.Count -gt 0) "/v1/chat/completions returned no choices."
-
-    $ollamaBody = @{
-        model = "qwen3.6-35b-a3b"
-        messages = @(@{ role = "user"; content = "Reply with exactly: inferdeck webui ok" })
-        stream = $false
-        options = @{ num_predict = 12 }
-    } | ConvertTo-Json -Depth 8
-    $ollama = Invoke-RestMethod -Method Post -Uri "$GatewayBaseUrl/api/chat" -Body $ollamaBody -ContentType "application/json" -TimeoutSec 180
-    Assert-True ($ollama.message.role -eq "assistant") "/api/chat did not return an Ollama-compatible assistant message."
-
-    $ollamaToolBody = @{
-        model = "qwen3.6-35b-a3b"
-        messages = @(@{ role = "user"; content = "Use the provided read tool if you need to inspect a TSX file." })
-        stream = $false
-        options = @{ num_predict = 64 }
-        tools = @(@{
-            type = "function"
-            function = @{
-                name = "read"
-                description = "Read a local file"
-                parameters = @{
-                    type = "object"
-                    properties = @{ filePath = @{ type = "string" } }
-                    required = @("filePath")
-                }
-            }
+    $streamBody = @{
+        model = $Model
+        messages = @(@{
+            role = "user"
+            content = "Reply with exactly: inferdeck stream ok"
         })
-    } | ConvertTo-Json -Depth 14 -Compress
-    $ollamaTool = Invoke-RestMethod -Method Post -Uri "$GatewayBaseUrl/api/chat" -Body $ollamaToolBody -ContentType "application/json" -TimeoutSec 180
-    Assert-True ($ollamaTool.message.role -eq "assistant") "/api/chat stream:false tools did not return an Ollama assistant message."
-
-    $ollamaToolStreamBody = @{
-        model = "qwen3.6-35b-a3b"
-        messages = @(@{ role = "user"; content = "Use the provided read tool if you need to inspect App.tsx and Panel.jsx." })
-        stream = $true
-        options = @{ num_predict = 64 }
-        tools = @(@{
-            type = "function"
-            function = @{
-                name = "read"
-                description = "Read a local file"
-                parameters = @{
-                    type = "object"
-                    properties = @{ filePath = @{ type = "string" } }
-                    required = @("filePath")
-                }
-            }
-        })
-    } | ConvertTo-Json -Depth 14 -Compress
-    $ollamaToolStream = $ollamaToolStreamBody | curl.exe -N -sS --max-time 180 -A "opencode/1.14.48 ai-sdk-ollama" -H "Content-Type: application/json" --data-binary "@-" "$GatewayBaseUrl/api/chat"
-    Assert-True ($ollamaToolStream -match '"done":true' -and $ollamaToolStream -notmatch 'data: ') "/api/chat stream:true tools did not emit Ollama NDJSON framing."
-
-    $plainStreamBody = @{
-        model = "qwen3.6-35b-a3b"
-        messages = @(@{ role = "user"; content = "Reply with exactly: inferdeck stream ok" })
         max_tokens = 24
         stream = $true
-    } | ConvertTo-Json -Depth 8 -Compress
-    $plainStream = $plainStreamBody | curl.exe -N -sS --max-time 180 -A $openCodeUserAgent -H "Content-Type: application/json" --data-binary "@-" "$GatewayBaseUrl/v1/chat/completions"
-    Assert-True ($plainStream -match "data: " -and $plainStream -match "chat.completion.chunk" -and $plainStream -match "data: \[DONE\]") "Plain OpenCode stream:true did not emit OpenAI SSE chunks and [DONE]."
-
-    $statusAfterPlainStream = Invoke-RestMethod -Method Get -Uri "$DashboardBaseUrl/api/status" -TimeoutSec 10
-    Assert-True ($null -ne $statusAfterPlainStream.observability.lastOpenCodeRequest) "Plain stream did not update lastOpenCodeRequest."
-    Assert-True ($statusAfterPlainStream.observability.lastOpenCodeRequest.client -eq "OpenCode") "Plain stream lastOpenCodeRequest client was $($statusAfterPlainStream.observability.lastOpenCodeRequest.client), expected OpenCode."
-    Assert-True ($statusAfterPlainStream.observability.lastOpenCodeRequest.responseMode -eq "backend-stream") "Plain stream responseMode was $($statusAfterPlainStream.observability.lastOpenCodeRequest.responseMode), expected backend-stream."
-    Assert-True ([int]$statusAfterPlainStream.observability.lastOpenCodeRequest.sseChunks -gt 0) "Plain stream did not record SSE chunks."
-
-    $toolStreamBody = @{
-        model = "qwen3.6-35b-a3b"
-        messages = @(@{ role = "user"; content = "Plan a file read using the provided tool." })
-        max_tokens = 64
-        stream = $true
-        tools = @(@{
-            type = "function"
-            function = @{
-                name = "read"
-                description = "Read a local file"
-                parameters = @{
-                    type = "object"
-                    properties = @{ path = @{ type = "string" } }
-                    required = @("path")
-                }
-            }
-        })
     } | ConvertTo-Json -Depth 12 -Compress
-    $toolStream = $toolStreamBody | curl.exe -N -sS --max-time 180 -A $openCodeUserAgent -H "Content-Type: application/json" --data-binary "@-" "$GatewayBaseUrl/v1/chat/completions"
-    Assert-True ($toolStream -match "data: " -and $toolStream -match "chat.completion.chunk" -and $toolStream -match "data: \[DONE\]") "Tool stream:true did not emit synthetic OpenAI SSE and [DONE]."
-
-    $statusAfterToolStream = Invoke-RestMethod -Method Get -Uri "$DashboardBaseUrl/api/status" -TimeoutSec 10
-    Assert-True ($null -ne $statusAfterToolStream.observability.lastOpenCodeRequest) "Tool stream did not update lastOpenCodeRequest."
-    Assert-True ($statusAfterToolStream.observability.lastOpenCodeRequest.client -eq "OpenCode") "Tool stream lastOpenCodeRequest client was $($statusAfterToolStream.observability.lastOpenCodeRequest.client), expected OpenCode."
-    Assert-True ($statusAfterToolStream.observability.lastOpenCodeRequest.responseMode -eq "guarded-synthetic-sse") "Tool stream responseMode was $($statusAfterToolStream.observability.lastOpenCodeRequest.responseMode), expected guarded-synthetic-sse."
-    Assert-True ([int]$statusAfterToolStream.observability.lastOpenCodeRequest.sseChunks -gt 0) "Tool stream did not record SSE chunks."
-    Assert-True ($statusAfterToolStream.observability.openCodeWaitingOnBackendOrToolFormatting -eq $false) "OpenCode observability still shows a formatting wait after tool stream completion."
-
-    Invoke-OpenAiTinyChat -Model "gpt-oss:20b" -Expected "gpt ok" | Out-Null
-    Invoke-OpenAiTinyChat -Model "qwen3.6-35b-a3b" -Expected "qwen ok" | Out-Null
-
-    $webUiAfterBody = @{
-        model = "qwen3.6-35b-a3b"
-        messages = @(@{ role = "user"; content = "Reply with exactly: inferdeck webui still ok" })
-        stream = $false
-        options = @{ num_predict = 12 }
-    } | ConvertTo-Json -Depth 8
-    $webUiAfter = Invoke-RestMethod -Method Post -Uri "$GatewayBaseUrl/api/chat" -Body $webUiAfterBody -ContentType "application/json" -TimeoutSec 180
-    Assert-True ($webUiAfter.message.role -eq "assistant") "Open WebUI /api/chat control failed after OpenCode tests."
+    $stream = $streamBody |
+        curl.exe -N -sS --max-time 300 -A "opencode/inferdeck-smoke" `
+            -H "Content-Type: application/json" --data-binary "@-" `
+            "$BaseUrl/v1/chat/completions"
+    Assert-True ($LASTEXITCODE -eq 0) "Streaming chat request failed."
+    Assert-True ($stream -match "chat.completion.chunk") `
+        "Streaming chat did not emit completion chunks."
+    Assert-True ($stream -match "data: \[DONE\]") `
+        "Streaming chat did not terminate with [DONE]."
 
     if ($RunDisconnectSmoke) {
         $disconnectBody = @{
-            model = "qwen3.6-35b-a3b"
-            messages = @(@{ role = "user"; content = "Write a long numbered checklist of 200 loading speed optimizations. Keep going until stopped." })
+            model = $Model
+            messages = @(@{
+                role = "user"
+                content = "Write a long numbered checklist and continue until stopped."
+            })
             max_tokens = 2048
             stream = $true
-        } | ConvertTo-Json -Depth 8 -Compress
-        $disconnectBody | curl.exe -N -sS --max-time 2 -A $openCodeUserAgent -H "Content-Type: application/json" --data-binary "@-" "$GatewayBaseUrl/v1/chat/completions" | Out-Null
-        Start-Sleep -Seconds 8
-        $status = Invoke-RestMethod -Method Get -Uri "$DashboardBaseUrl/api/status" -TimeoutSec 10
-        Assert-True ([int]$status.queue.running -eq 0) "Disconnect smoke left dashboard queue running=$($status.queue.running)."
-        Assert-True ($status.observability.lastOpenCodeRequest.client -eq "OpenCode") "Disconnect smoke did not record OpenCode as last client."
-        Assert-True ($status.observability.lastOpenCodeRequest.phase -eq "failed") "Disconnect smoke phase was $($status.observability.lastOpenCodeRequest.phase), expected failed."
+        } | ConvertTo-Json -Depth 12 -Compress
+        $disconnectBody |
+            curl.exe -N -sS --max-time 2 -A "opencode/inferdeck-smoke" `
+                -H "Content-Type: application/json" --data-binary "@-" `
+                "$BaseUrl/v1/chat/completions" | Out-Null
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            Start-Sleep -Milliseconds 250
+            $swap = Invoke-Json -Method Get -Uri "$BaseUrl/v1/swap/status"
+        } while ([int]$swap.active_requests -gt 0 -and [DateTime]::UtcNow -lt $deadline)
+        Assert-True ([int]$swap.active_requests -eq 0) `
+            "Disconnected stream retained an active request."
     }
-
-    Start-Sleep -Seconds 2
-    $runtimeProcessesAfterSwitch = Get-CimInstance Win32_Process |
-        Where-Object {
-            $_.Name -eq "llama-server.exe" -and
-            $_.ExecutablePath -and
-            ([System.IO.Path]::GetFullPath($_.ExecutablePath) -ieq $resolvedRuntime)
-        }
-    Assert-True (($runtimeProcessesAfterSwitch | Measure-Object).Count -eq 1) "Expected one InferDeck llama-server process after rapid switching, found $(($runtimeProcessesAfterSwitch | Measure-Object).Count)."
 }
 
-Write-Host "InferDeck OpenCode/Open WebUI smoke checks passed."
+$status = Invoke-Json -Method Get -Uri "$BaseUrl/api/status"
+Assert-True ($null -ne $status.queue) "/api/status did not return queue state."
+
+$ownerAfter = Get-NetTCPConnection -LocalPort $uri.Port -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty OwningProcess
+Assert-True ($ownerAfter -eq $listener.OwningProcess) `
+    "InferDeck listener ownership changed during the smoke test."
+
+Write-Host "InferDeck in-process OpenCode smoke checks passed."

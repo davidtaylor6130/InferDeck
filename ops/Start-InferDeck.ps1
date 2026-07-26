@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version 3.0
 
 $root = "C:\InferDeck"
 $exe = Join-Path $root "bin\gateway-service.exe"
@@ -6,45 +7,88 @@ $config = Join-Path $root "config\gateway.yml"
 $logs = Join-Path $root "logs"
 $lock = Join-Path $root "run\inferdeck-startup.lock"
 $meta = Join-Path $logs "startup-task-meta.json"
+$common = Join-Path $root "InferDeck-Lifecycle.Common.ps1"
+
+if (!(Test-Path -LiteralPath $common -PathType Leaf)) {
+    throw "Missing lifecycle helper: $common"
+}
+. $common
+
+if (!(Test-Path -LiteralPath $exe -PathType Leaf)) {
+    throw "Missing InferDeck executable: $exe"
+}
+if (!(Test-Path -LiteralPath $config -PathType Leaf)) {
+    throw "Missing InferDeck configuration: $config"
+}
 
 New-Item -ItemType Directory -Force -Path $logs, (Split-Path $lock) | Out-Null
+
 try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/health" -TimeoutSec 2
-    if ($health.status -eq "healthy") {
-        exit 0
-    }
+    Wait-InferDeckHealth -ExpectedExecutable $exe -Attempts 1 | Out-Null
+    exit 0
 } catch {
-}
-if (Test-Path $lock) {
-    $existing = Get-Content $lock -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($existing -and (Get-Process -Id ([int]$existing) -ErrorAction SilentlyContinue)) {
-        exit 0
+    $listener = Get-InferDeckListenerIdentity
+    if ($listener) {
+        Assert-InferDeckListenerOwner -Identity $listener -ExpectedExecutable $exe
     }
 }
 
-Get-Process -Name ollama,llama-server,inferdeck-gateway -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Set-Content -Path $lock -Value $PID -Encoding ASCII
+$existing = Remove-InferDeckStaleLock -LockPath $lock -ExpectedExecutable $exe
+if ($existing) {
+    Wait-InferDeckHealth -ExpectedExecutable $exe -Attempts 120 | Out-Null
+    exit 0
+}
+
+$listener = Get-InferDeckListenerIdentity
+if ($listener) {
+    Assert-InferDeckListenerOwner -Identity $listener -ExpectedExecutable $exe
+    throw "The expected InferDeck executable already owns port 11434 but did not pass /v1/health."
+}
+
 Set-Location $root
 $env:PATH = "$root\bin;$root;$env:PATH"
-[pscustomobject]@{
-    User = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    Pid = $PID
-    Root = $root
-    Exe = $exe
-    Config = $config
-    StartedAt = (Get-Date).ToString("o")
-    Path = $env:PATH
-} | ConvertTo-Json | Set-Content -Path $meta -Encoding UTF8
 $stdout = Join-Path $logs "startup-task.out.log"
 $stderr = Join-Path $logs "startup-task.err.log"
 $child = Start-Process -FilePath $exe -ArgumentList @("-c", $config) -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-Set-Content -Path $lock -Value $child.Id -Encoding ASCII
-for ($i = 0; $i -lt 20; $i++) {
-    try {
-        $health = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/health" -TimeoutSec 2
-        if ($health.status -eq "healthy") { exit 0 }
-    } catch {
-        Start-Sleep -Seconds 1
+$childIdentity = $null
+for ($attempt = 0; $attempt -lt 10 -and !$childIdentity; $attempt++) {
+    $childIdentity = Get-InferDeckProcessIdentity -ProcessId $child.Id
+    if (!$childIdentity -and !$child.HasExited) {
+        Start-Sleep -Milliseconds 100
     }
 }
-exit 1
+if (!$childIdentity -or !$childIdentity.ExecutablePath -or !$childIdentity.CreationTimeUtc) {
+    if (!$child.HasExited) {
+        $child.Kill()
+        $child.WaitForExit(5000) | Out-Null
+    }
+    throw "InferDeck started, but its process identity could not be verified."
+}
+
+Write-InferDeckLockIdentity -LockPath $lock -Identity $childIdentity
+[pscustomobject]@{
+    User = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    LauncherProcessId = $PID
+    Child = $childIdentity
+    Root = $root
+    Executable = $exe
+    Config = $config
+    StartedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $meta -Encoding UTF8
+
+try {
+    Wait-InferDeckHealth -ExpectedExecutable $exe -Attempts 120 | Out-Null
+    exit 0
+} catch {
+    if ((Test-InferDeckProcessIdentity -Identity $childIdentity -ExpectedExecutable $exe) -and !$child.HasExited) {
+        $child.Kill()
+        $child.WaitForExit(5000) | Out-Null
+    }
+    $locked = Read-InferDeckLockIdentity -LockPath $lock
+    if ($locked -and
+        [int]$locked.ProcessId -eq [int]$childIdentity.ProcessId -and
+        [string]$locked.CreationTimeUtc -eq [string]$childIdentity.CreationTimeUtc) {
+        Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
+    }
+    throw
+}

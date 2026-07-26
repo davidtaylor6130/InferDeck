@@ -1,3 +1,12 @@
+import assert from "node:assert/strict";
+
+import {
+  assertCompletionResponse,
+  createDeadline,
+  formatFailure,
+  readJsonResponse,
+} from "./harness-utils.mjs";
+
 const BASE = process.env.GATEWAY_URL ?? "http://127.0.0.1:11434";
 const MODEL = process.env.GATEWAY_MODEL ?? "qwen3.6-35b-a3b";
 
@@ -51,12 +60,31 @@ const shapes = {
   ],
 };
 
+let failures = 0;
 for (const [name, messages] of Object.entries(shapes)) {
-  const res = await fetch(`${BASE}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: MODEL, stream: false, max_tokens: 8, messages }),
-  }).catch(e => ({ status: "fetch-error", text: async () => String(e) }));
-  const text = (await res.text()).slice(0, 220);
-  console.log(`${name}: ${res.status}${res.status >= 400 ? " | " + text : ""}`);
+  const deadline = createDeadline(name);
+  try {
+    const response = await fetch(`${BASE}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: MODEL, stream: false, max_tokens: 16, messages }),
+      signal: deadline.signal,
+    });
+    const body = await readJsonResponse(response, name);
+    assert.equal(response.status, 200, `${name}: HTTP ${response.status} ${JSON.stringify(body).slice(0, 220)}`);
+    assertCompletionResponse(body, name);
+    console.log(`${name}: PASS`);
+  } catch (error) {
+    failures++;
+    console.error(`${name}: FAIL - ${formatFailure(error)}`);
+  } finally {
+    deadline.clear();
+  }
+}
+
+if (failures > 0) {
+  console.error(`SHAPE-SWEEP FAIL (${failures}/${Object.keys(shapes).length})`);
+  process.exitCode = 1;
+} else {
+  console.log(`SHAPE-SWEEP PASS (${Object.keys(shapes).length} shapes)`);
 }

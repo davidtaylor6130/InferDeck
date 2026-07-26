@@ -9,8 +9,8 @@
 
 namespace inferdeck::gateway {
 
-// Resolve an Anthropic-style model name (e.g. "claude-sonnet-4-6") to a
-// registry model: explicit alias > exact registry match > default model.
+// Resolve an Anthropic-style model name to an explicit alias or exact
+// registry model. Empty names retain the internal default-model fallback.
 std::string resolve_anthropic_model(const GatewayDeps& deps, const std::string& requested);
 
 // Translate an Anthropic Messages API request body into an OpenAI

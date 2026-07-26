@@ -131,7 +131,7 @@ TEST_CASE("anthropic_to_openai: stop_sequences and sampling passthrough", "[anth
     CHECK(out["stream"] == true);
 }
 
-TEST_CASE("anthropic_to_openai: thinking blocks dropped", "[anthropic]") {
+TEST_CASE("anthropic_to_openai: thinking blocks preserve reasoning", "[anthropic]") {
     json body = {
         {"max_tokens", 10},
         {"messages", json::array({
@@ -144,7 +144,49 @@ TEST_CASE("anthropic_to_openai: thinking blocks dropped", "[anthropic]") {
     auto out = anthropic_to_openai(body, "m");
     REQUIRE(out["messages"].size() == 1);
     CHECK(out["messages"][0]["content"] == "answer");
+    CHECK(out["messages"][0]["reasoning_content"] == "secret");
     CHECK_FALSE(out["messages"][0].contains("tool_calls"));
+}
+
+TEST_CASE("anthropic_to_openai: mixed user blocks preserve order", "[anthropic]") {
+    json body = {
+        {"max_tokens", 10},
+        {"messages", json::array({
+            {{"role", "user"}, {"content", json::array({
+                {{"type", "text"}, {"text", "before"}},
+                {{"type", "tool_result"}, {"tool_use_id", "t1"},
+                 {"content", "failed"}, {"is_error", true}},
+                {{"type", "text"}, {"text", "after"}},
+            })}},
+        })},
+    };
+    auto out = anthropic_to_openai(body, "m");
+    REQUIRE(out["messages"].size() == 3);
+    CHECK(out["messages"][0] ==
+          json({{"role", "user"}, {"content", "before"}}));
+    CHECK(out["messages"][1] ==
+          json({{"role", "tool"}, {"tool_call_id", "t1"},
+                {"content", "Error: failed"}}));
+    CHECK(out["messages"][2] ==
+          json({{"role", "user"}, {"content", "after"}}));
+}
+
+TEST_CASE("resolve_anthropic_model does not redirect unknown names", "[anthropic]") {
+    inferdeck::model::ModelRegistry registry;
+    inferdeck::model::BackendCoordinator coordinator(registry);
+    inferdeck::model::ModelInfo info;
+    info.name = "local-model";
+    registry.register_model(info);
+
+    GatewayDeps deps{coordinator, "10"};
+    deps.default_model = "local-model";
+    deps.anthropic_model_aliases.emplace("claude-local", "local-model");
+    deps.anthropic_model_aliases.emplace("claude-missing", "missing-model");
+
+    CHECK(resolve_anthropic_model(deps, "local-model") == "local-model");
+    CHECK(resolve_anthropic_model(deps, "claude-local") == "local-model");
+    CHECK(resolve_anthropic_model(deps, "claude-missing").empty());
+    CHECK(resolve_anthropic_model(deps, "claude-unknown").empty());
 }
 
 TEST_CASE("anthropic_to_openai: image block to data URI", "[anthropic]") {

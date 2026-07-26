@@ -71,6 +71,21 @@ TEST_CASE("GpuTelemetry: stop is idempotent and joinable", "[observability][gpu]
   REQUIRE_FALSE(t.running());
 }
 
+TEST_CASE("GpuTelemetry: stop interrupts a long poll wait", "[observability][gpu]") {
+  GpuTelemetry t;
+  t.set_poll_interval(5s);
+  t.start();
+  const auto sample = wait_for_sample(t, 2s);
+  REQUIRE(sample.timestamp_unix_ms > 0);
+
+  const auto started = std::chrono::steady_clock::now();
+  t.stop();
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+
+  REQUIRE_FALSE(t.running());
+  REQUIRE(elapsed < 500ms);
+}
+
 TEST_CASE("GpuTelemetry: record_external_sample sets latest", "[observability][gpu]") {
   GpuTelemetry t;
   GpuStats s;
@@ -99,4 +114,29 @@ TEST_CASE("GpuTelemetry: stale sample rejected", "[observability][gpu]") {
   t.record_external_sample(s);
   std::this_thread::sleep_for(50ms);
   REQUIRE_FALSE(t.try_fetch_blocking(50ms).has_value());
+}
+
+TEST_CASE("GpuTelemetry: blocking fetch wakes for a fresh external sample",
+          "[observability][gpu]") {
+  GpuTelemetry t;
+  GpuStats s;
+  s.available = true;
+  s.provider = "test";
+  s.timestamp_unix_ms = static_cast<std::int64_t>(
+    std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count());
+
+  std::thread publisher([&] {
+    std::this_thread::sleep_for(25ms);
+    t.record_external_sample(s);
+  });
+  const auto started = std::chrono::steady_clock::now();
+  const auto sample = t.try_fetch_blocking(500ms);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  publisher.join();
+
+  REQUIRE(sample.has_value());
+  REQUIRE(sample->provider == "test");
+  REQUIRE(elapsed >= 10ms);
+  REQUIRE(elapsed < 500ms);
 }

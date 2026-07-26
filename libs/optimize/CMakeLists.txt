@@ -9,6 +9,7 @@ find_package(yaml-cpp REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
 add_library(optimize STATIC
+    src/profile_optimizer.cpp
     src/search_space.cpp
     src/study.cpp
     src/yaml_loader.cpp

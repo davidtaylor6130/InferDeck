@@ -1,11 +1,9 @@
 #include "observability/gpu_telemetry.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
-#include <future>
-#include <algorithm>
-#include <sstream>
-#include <stdexcept>
+#include <cwchar>
 #include <thread>
 #include <vector>
 
@@ -32,10 +30,16 @@ std::int64_t now_ms() {
 #ifdef _WIN32
 std::string narrow(const wchar_t* value) {
   if (!value) return {};
-  int size = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0, nullptr, nullptr);
-  if (size <= 1) return {};
-  std::string out(static_cast<std::size_t>(size - 1), '\0');
-  WideCharToMultiByte(CP_UTF8, 0, value, -1, out.data(), size, nullptr, nullptr);
+  const auto length = static_cast<int>(std::wcslen(value));
+  if (length == 0) return {};
+  const int size = WideCharToMultiByte(
+      CP_UTF8, WC_ERR_INVALID_CHARS, value, length, nullptr, 0, nullptr, nullptr);
+  if (size <= 0) return {};
+  std::string out(static_cast<std::size_t>(size), '\0');
+  if (WideCharToMultiByte(
+          CP_UTF8, WC_ERR_INVALID_CHARS, value, length, out.data(), size, nullptr, nullptr) != size) {
+    return {};
+  }
   return out;
 }
 
@@ -137,8 +141,11 @@ std::optional<std::pair<std::string, std::uint64_t>> read_dxgi_adapter() {
     return std::nullopt;
   }
   std::optional<std::pair<std::string, std::uint64_t>> best;
-  IDXGIAdapter1* adapter = nullptr;
-  for (UINT index = 0; factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index) {
+  for (UINT index = 0;; ++index) {
+    IDXGIAdapter1* adapter = nullptr;
+    const auto status = factory->EnumAdapters1(index, &adapter);
+    if (status == DXGI_ERROR_NOT_FOUND) break;
+    if (FAILED(status) || !adapter) break;
     DXGI_ADAPTER_DESC1 desc{};
     if (SUCCEEDED(adapter->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
         desc.DedicatedVideoMemory > 0) {
@@ -162,18 +169,43 @@ GpuTelemetry::GpuTelemetry() {
 }
 GpuTelemetry::~GpuTelemetry() { stop(); }
 
-void GpuTelemetry::set_helper_path(std::string path) { helper_path_ = std::move(path); }
-void GpuTelemetry::set_poll_interval(std::chrono::milliseconds interval) { poll_interval_ = interval; }
-void GpuTelemetry::set_max_staleness(std::chrono::milliseconds max) { max_staleness_ = max; }
+void GpuTelemetry::set_helper_path(std::string path) {
+  std::lock_guard lk(mtx_);
+  helper_path_ = std::move(path);
+}
+
+void GpuTelemetry::set_poll_interval(std::chrono::milliseconds interval) {
+  {
+    std::lock_guard lk(mtx_);
+    poll_interval_ = std::max(interval, std::chrono::milliseconds{1});
+  }
+  poll_cv_.notify_all();
+}
+
+void GpuTelemetry::set_max_staleness(std::chrono::milliseconds max) {
+  {
+    std::lock_guard lk(mtx_);
+    max_staleness_ = std::max(max, std::chrono::milliseconds{0});
+  }
+  sample_cv_.notify_all();
+}
 
 void GpuTelemetry::start() {
-  bool expected = false;
-  if (!running_.compare_exchange_strong(expected, true)) return;
-  worker_ = std::thread([this] { run_loop(); });
+  std::lock_guard lifecycle_lk(lifecycle_mtx_);
+  if (running_.exchange(true)) return;
+  try {
+    worker_ = std::thread([this] { run_loop(); });
+  } catch (...) {
+    running_.store(false);
+    throw;
+  }
 }
 
 void GpuTelemetry::stop() {
-  if (!running_.exchange(false)) return;
+  std::lock_guard lifecycle_lk(lifecycle_mtx_);
+  running_.store(false);
+  poll_cv_.notify_all();
+  sample_cv_.notify_all();
   if (worker_.joinable()) worker_.join();
 }
 
@@ -183,33 +215,44 @@ GpuStats GpuTelemetry::latest() const {
 }
 
 std::optional<GpuStats> GpuTelemetry::try_fetch_blocking(std::chrono::milliseconds timeout) {
-  auto fut = std::async(std::launch::async, [this] {
-    std::lock_guard lk(mtx_);
-    return latest_;
-  });
-  if (fut.wait_for(timeout) != std::future_status::ready) return std::nullopt;
-  auto s = fut.get();
-  if (!s.available) return std::nullopt;
-  if (s.timestamp_unix_ms == 0) return std::nullopt;
-  const auto age = now_ms() - s.timestamp_unix_ms;
-  if (age > max_staleness_.count()) return std::nullopt;
-  return s;
+  const auto bounded_timeout = std::max(timeout, std::chrono::milliseconds{0});
+  std::unique_lock lk(mtx_);
+  const auto fresh_sample_available = [this] {
+    if (!latest_.available || latest_.timestamp_unix_ms == 0) return false;
+    const auto age = now_ms() - latest_.timestamp_unix_ms;
+    return age <= max_staleness_.count();
+  };
+  if (!fresh_sample_available() &&
+      !sample_cv_.wait_for(lk, bounded_timeout, fresh_sample_available)) {
+    return std::nullopt;
+  }
+  return latest_;
 }
 
 void GpuTelemetry::record_external_sample(const GpuStats& s) {
-  std::lock_guard lk(mtx_);
-  latest_ = s;
+  {
+    std::lock_guard lk(mtx_);
+    latest_ = s;
+  }
+  sample_cv_.notify_all();
 }
 
 void GpuTelemetry::run_loop() {
   using namespace std::chrono;
+#ifdef _WIN32
+  PdhDoubleSumCounter gpu_util(L"\\GPU Engine(*)\\Utilization Percentage");
+  PdhLargeSumCounter dedicated_usage(L"\\GPU Adapter Memory(*)\\Dedicated Usage");
+  std::optional<std::pair<std::string, std::uint64_t>> adapter;
+  auto next_adapter_refresh = steady_clock::time_point::min();
+#endif
   while (running_.load()) {
     GpuStats s;
-    s.timestamp_unix_ms = now_ms();
 #ifdef _WIN32
-    static PdhDoubleSumCounter gpu_util(L"\\GPU Engine(*)\\Utilization Percentage");
-    static PdhLargeSumCounter dedicated_usage(L"\\GPU Adapter Memory(*)\\Dedicated Usage");
-    auto adapter = read_dxgi_adapter();
+    const auto steady_now = steady_clock::now();
+    if (steady_now >= next_adapter_refresh) {
+      adapter = read_dxgi_adapter();
+      next_adapter_refresh = steady_now + (adapter ? seconds{30} : seconds{5});
+    }
     auto util = gpu_util.read();
     auto used_bytes = dedicated_usage.read();
     if (adapter || util || used_bytes) {
@@ -220,6 +263,7 @@ void GpuTelemetry::run_loop() {
       s.vram_mb = used_bytes ? static_cast<double>(*used_bytes) / (1024.0 * 1024.0) : 0.0;
       if (adapter && adapter->second > 0) {
         const double total_mb = static_cast<double>(adapter->second) / (1024.0 * 1024.0);
+        s.vram_total_mb = total_mb;
         if (s.vram_mb <= 0.0) s.vram_mb = 0.0;
         s.reason = "vram_total_mb=" + std::to_string(static_cast<int>(total_mb));
       }
@@ -233,11 +277,15 @@ void GpuTelemetry::run_loop() {
     s.provider = "none";
     s.reason = "gpu_telemetry_windows_only";
 #endif
+    s.timestamp_unix_ms = now_ms();
     {
       std::lock_guard lk(mtx_);
       latest_ = s;
     }
-    std::this_thread::sleep_for(poll_interval_);
+    sample_cv_.notify_all();
+    std::unique_lock lk(mtx_);
+    const auto interval = poll_interval_;
+    poll_cv_.wait_for(lk, interval);
   }
 }
 

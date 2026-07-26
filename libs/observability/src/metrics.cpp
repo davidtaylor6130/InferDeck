@@ -1,9 +1,23 @@
 #include "observability/metrics.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace inferdeck::observability {
+
+void Metrics::restore_lifetime(std::int64_t requests,
+                               std::int64_t swaps,
+                               std::int64_t prompt_tokens,
+                               std::int64_t completion_tokens,
+                               double duration_ms) {
+  total_requests_.store(std::max<std::int64_t>(0, requests));
+  total_swaps_.store(std::max<std::int64_t>(0, swaps));
+  total_prompt_tokens_.store(std::max<std::int64_t>(0, prompt_tokens));
+  total_completion_tokens_.store(std::max<std::int64_t>(0, completion_tokens));
+  total_duration_ms_.store(
+      std::isfinite(duration_ms) ? std::max(0.0, duration_ms) : 0.0);
+}
 
 void Metrics::record_request(const RequestRecord& rec) {
   total_requests_.fetch_add(1);

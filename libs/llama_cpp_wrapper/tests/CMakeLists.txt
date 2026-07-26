@@ -22,5 +22,5 @@ include(CTest)
 include(Catch)
 catch_discover_tests(llama_cpp_model_tests
     TEST_PREFIX "llama_"
-    LABELS "unit"
+    PROPERTIES LABELS "unit"
 )

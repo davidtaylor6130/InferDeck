@@ -1,0 +1,66 @@
+#pragma once
+
+#include <optional>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace inferdeck::model {
+
+struct SamplingConfig {
+    float temperature{0.8f};
+    float top_p{0.95f};
+    int top_k{40};
+    float min_p{0.05f};
+    float repeat_penalty{1.0f};
+    int repeat_last_n{64};
+    float dry_multiplier{0.0f};
+    float dry_base{1.75f};
+    int dry_allowed_length{2};
+    int dry_penalty_last_n{-1};
+    std::vector<std::string> dry_seq_breakers{"\n", ":", "\"", "*"};
+};
+
+struct ProfileOptimizationInfo {
+    std::string status{};
+    std::string measured_at{};
+    int quality_passes{0};
+    int quality_total{0};
+    double single_tokens_per_second{0.0};
+    double parallel_tokens_per_second{0.0};
+};
+
+struct ModelInfo {
+    std::string name{};
+    std::string family{};
+    std::string runtime{"llama_cpp"};
+    std::string modality{"text"};
+    std::vector<std::string> capabilities{"chat_completions", "responses"};
+    std::string gguf_path{};
+    std::string mmproj_path{};
+    int n_slots{2};
+    int min_slots{1};
+    int vram_required_mb{0};
+    int vram_fixed_mb{0};
+    int vram_per_slot_mb{0};
+    int context_size{65536};
+    std::optional<int> n_batch{};
+    std::optional<int> n_ubatch{};
+    std::string cache_type_k{};
+    std::string cache_type_v{};
+    std::optional<int> n_gpu_layers{};
+    bool mtp_enabled{false};
+    int mtp_draft_tokens{2};
+    float mtp_p_min{0.0f};
+    int mtp_max_active_requests{1};
+    bool has_vision{false};
+    std::string reasoning_format{};
+    std::string chat_template_path{};
+    std::map<std::string, std::string> artifacts{};
+    SamplingConfig sampling{};
+    ProfileOptimizationInfo optimization{};
+
+    [[nodiscard]] bool supports(const std::string& capability) const;
+};
+
+} // namespace inferdeck::model

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -48,7 +49,7 @@ public:
 
 private:
   LogLevel min_level_;
-  std::string sink_path_;
+  std::filesystem::path sink_path_;
   mutable std::mutex mtx_;
   std::size_t events_logged_{};
 };

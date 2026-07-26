@@ -8,6 +8,9 @@ export interface ModelCostConfig {
   source?: string;
   defaultsVersion?: number;
   userEdited?: boolean;
+  billingUnit?: 'tokens' | 'audio_minute' | 'million_characters';
+  pricePerUnit?: number;
+  sourceUrl?: string;
 }
 
 export interface ModelTokenUsage {
@@ -23,6 +26,10 @@ export interface TokenSeries {
   prompt: number[];
   output: number[];
   cost: number[];
+  requests: number[];
+  successfulRequests: number[];
+  audioSeconds: number[];
+  characters: number[];
 }
 
 export type TokenRange = 'day' | 'week' | 'month' | 'year' | 'all';
@@ -30,7 +37,7 @@ export type TokenRange = 'day' | 'week' | 'month' | 'year' | 'all';
 export const ALL_MODELS = 'All tracked models';
 export const COST_STORAGE_KEY = 'inferdeck:model-token-costs';
 export const DEFAULT_BREAK_EVEN_TARGET = 1739;
-export const MODEL_COST_DEFAULTS_VERSION = 4;
+export const MODEL_COST_DEFAULTS_VERSION = 5;
 
 export const TOKEN_RANGE_LABELS: Record<TokenRange, string> = {
   day: '24h',
@@ -47,6 +54,8 @@ export const DEFAULT_COST_CONFIG: ModelCostConfig = {
   breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
   source: 'OpenRouter median chat model pricing',
   defaultsVersion: MODEL_COST_DEFAULTS_VERSION,
+  billingUnit: 'tokens',
+  pricePerUnit: 0,
 };
 
 const LEGACY_DEFAULT_PRICES: Record<string, Array<[number, number]>> = {
@@ -72,6 +81,9 @@ export function buildCostDefaults(pricing: PricingEntry[]): { defaults: CostDefa
       breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
       source: 'data/pricing.json',
       defaultsVersion: MODEL_COST_DEFAULTS_VERSION,
+      billingUnit: entry.billing_unit || 'tokens',
+      pricePerUnit: sanitizeMoney(entry.price_per_unit, 0),
+      sourceUrl: entry.source_url,
     };
     if (entry.model_name === 'default') {
       fallback = config;
@@ -112,8 +124,8 @@ export function normalizeCostConfig(
     isLegacyDefaultConfig(model, config);
   const source = shouldRefreshDefaults ? defaultConfig : config;
   const savedBreakEven = Number(config?.breakEvenTarget);
-  const breakEvenTarget = !Number.isFinite(savedBreakEven) || savedBreakEven === 0
-    ? DEFAULT_BREAK_EVEN_TARGET
+  const breakEvenTarget = config?.breakEvenTarget === undefined || !Number.isFinite(savedBreakEven)
+    ? defaultConfig.breakEvenTarget
     : sanitizeMoney(config?.breakEvenTarget, defaultConfig.breakEvenTarget);
   return {
     equivalentModel: typeof source?.equivalentModel === 'string' && source.equivalentModel.trim()
@@ -125,6 +137,11 @@ export function normalizeCostConfig(
     source: typeof source?.source === 'string' && source.source.trim() ? source.source : defaultConfig.source,
     defaultsVersion: Number(source?.defaultsVersion ?? defaultConfig.defaultsVersion ?? MODEL_COST_DEFAULTS_VERSION),
     userEdited: Boolean(config?.userEdited),
+    billingUnit: source?.billingUnit || defaultConfig.billingUnit || 'tokens',
+    pricePerUnit: sanitizeMoney(source?.pricePerUnit, defaultConfig.pricePerUnit || 0),
+    sourceUrl: typeof source?.sourceUrl === 'string' && source.sourceUrl.trim()
+      ? source.sourceUrl
+      : defaultConfig.sourceUrl,
   };
 }
 
@@ -134,8 +151,38 @@ export function getCostConfigForModel(
   defaults: CostDefaults,
   fallback: ModelCostConfig = DEFAULT_COST_CONFIG,
 ): ModelCostConfig {
-  const defaultConfig = defaults[model] || fallback;
+  const defaultConfig = defaults[model] || inferredSpeechCostDefault(model) || fallback;
   return normalizeCostConfig(model, saved[model], defaultConfig);
+}
+
+export function inferredSpeechCostDefault(model: string): ModelCostConfig | undefined {
+  if (/(?:whisper|parakeet|transcri|(?:^|[-_.])(stt|asr)(?:$|[-_.]))/i.test(model)) {
+    return {
+      equivalentModel: 'OpenAI whisper-1',
+      promptPerMillion: 0,
+      outputPerMillion: 0,
+      breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
+      source: 'OpenAI model pricing',
+      sourceUrl: 'https://developers.openai.com/api/docs/models/whisper-1',
+      defaultsVersion: MODEL_COST_DEFAULTS_VERSION,
+      billingUnit: 'audio_minute',
+      pricePerUnit: 0.006,
+    };
+  }
+  if (/(?:supertonic|sapi|(?:^|[-_.])tts(?:$|[-_.])|text[-_. ]to[-_. ]speech)/i.test(model)) {
+    return {
+      equivalentModel: 'OpenAI tts-1',
+      promptPerMillion: 0,
+      outputPerMillion: 0,
+      breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
+      source: 'OpenAI model pricing',
+      sourceUrl: 'https://developers.openai.com/api/docs/models/tts-1',
+      defaultsVersion: MODEL_COST_DEFAULTS_VERSION,
+      billingUnit: 'million_characters',
+      pricePerUnit: 15,
+    };
+  }
+  return undefined;
 }
 
 function sanitizeMoney(value: unknown, fallback: number): number {
@@ -156,6 +203,24 @@ export function estimateCostAvoided(usage: ModelTokenUsage, cost: ModelCostConfi
   return (usage.prompt / 1_000_000) * cost.promptPerMillion + (usage.output / 1_000_000) * cost.outputPerMillion;
 }
 
+export function estimateUsageCost(
+  usage: Pick<UsageRow | MonthlyUsageRow, 'promptTokens' | 'completionTokens' | 'inputAudioSeconds' | 'inputCharacters'>,
+  cost: ModelCostConfig,
+): number {
+  if (cost.billingUnit === 'audio_minute') {
+    return (Number(usage.inputAudioSeconds ?? 0) / 60) * Number(cost.pricePerUnit ?? 0);
+  }
+  if (cost.billingUnit === 'million_characters') {
+    return (Number(usage.inputCharacters ?? 0) / 1_000_000) * Number(cost.pricePerUnit ?? 0);
+  }
+  const prompt = Number(usage.promptTokens ?? 0);
+  const output = Number(usage.completionTokens ?? 0);
+  return estimateCostAvoided(
+    { model: '', prompt, output, total: prompt + output },
+    cost,
+  );
+}
+
 export function estimatePortfolioCostAvoided(
   usage: UsageRow[],
   saved: Record<string, ModelCostConfig>,
@@ -163,10 +228,8 @@ export function estimatePortfolioCostAvoided(
   fallback: ModelCostConfig,
 ): number {
   return usage.reduce((sum, row) => {
-    const prompt = Number(row.promptTokens ?? 0);
-    const output = Number(row.completionTokens ?? 0);
-    return sum + estimateCostAvoided(
-      { model: row.model, prompt, output, total: prompt + output },
+    return sum + estimateUsageCost(
+      row,
       getCostConfigForModel(row.model, saved, defaults, fallback),
     );
   }, 0);
@@ -185,19 +248,26 @@ export function buildTokenSeries(
   range: TokenRange,
   daily: MonthlyUsageRow[] = [],
   hourly: MonthlyUsageRow[] = [],
+  dailyAllTime = false,
 ): TokenSeries {
-  const buckets = buildTokenBuckets(range, jobs, model, persisted);
-  const byBucket = new Map(buckets.map(bucket => [bucket.key, { prompt: 0, output: 0, total: 0, cost: 0 }]));
-  const persistedRows =
-    range === 'day' ? hourly :
-    range === 'week' || range === 'month' ? daily :
-    persisted;
-  const usePersisted = persistedRows.length > 0;
+  const persistedRows = selectPersistedRows(range, model, persisted, daily, hourly, dailyAllTime);
+  const buckets = buildTokenBuckets(range, jobs, model, persistedRows);
+  const byBucket = new Map(buckets.map(bucket => [bucket.key, {
+    prompt: 0,
+    output: 0,
+    total: 0,
+    cost: 0,
+    requests: 0,
+    successfulRequests: 0,
+    audioSeconds: 0,
+    characters: 0,
+  }]));
+  const relevantPersistedRows = persistedRows.filter(row => model === ALL_MODELS || row.model === model);
+  const usePersisted = relevantPersistedRows.length > 0;
   if (usePersisted) {
-    for (const row of persistedRows) {
-      if (model !== ALL_MODELS && row.model !== model) continue;
+    for (const row of relevantPersistedRows) {
       let bucket = byBucket.get(row.bucket);
-      if (!bucket && range !== 'all' && range !== 'year') {
+      if (!bucket) {
         const chartBucket = findTokenBucket(buckets, bucketStartDate(row.bucket));
         bucket = chartBucket ? byBucket.get(chartBucket.key) : undefined;
       }
@@ -207,8 +277,12 @@ export function buildTokenSeries(
       bucket.prompt += prompt;
       bucket.output += output;
       bucket.total += Number(row.totalTokens ?? prompt + output);
-      bucket.cost += estimateCostAvoided(
-        { model: row.model, prompt, output, total: prompt + output },
+      bucket.requests += Number(row.requests ?? 0);
+      bucket.successfulRequests += Number(row.successfulRequests ?? 0);
+      bucket.audioSeconds += Number(row.inputAudioSeconds ?? 0);
+      bucket.characters += Number(row.inputCharacters ?? 0);
+      bucket.cost += estimateUsageCost(
+        row,
         model === ALL_MODELS ? getCostConfigForModel(row.model, saved, defaults, fallback) : cost,
       );
     }
@@ -225,19 +299,41 @@ export function buildTokenSeries(
       bucket.prompt += prompt;
       bucket.output += output;
       bucket.total += Number(job.totalTokens ?? prompt + output);
-      bucket.cost += estimateCostAvoided(
-        { model: jobModel, prompt, output, total: prompt + output },
+      bucket.requests += 1;
+      bucket.successfulRequests += job.status === 'succeeded' ? 1 : 0;
+      bucket.audioSeconds += Number(job.inputAudioSeconds ?? 0);
+      bucket.characters += Number(job.inputCharacters ?? 0);
+      bucket.cost += estimateUsageCost(
+        {
+          promptTokens: prompt,
+          completionTokens: output,
+          inputAudioSeconds: job.inputAudioSeconds,
+          inputCharacters: job.inputCharacters,
+        },
         model === ALL_MODELS ? getCostConfigForModel(jobModel, saved, defaults, fallback) : cost,
       );
     }
   }
-  const values = buckets.map(bucket => byBucket.get(bucket.key) || { prompt: 0, output: 0, total: 0, cost: 0 });
+  const values = buckets.map(bucket => byBucket.get(bucket.key) || {
+    prompt: 0,
+    output: 0,
+    total: 0,
+    cost: 0,
+    requests: 0,
+    successfulRequests: 0,
+    audioSeconds: 0,
+    characters: 0,
+  });
   return {
     months: buckets.map(bucket => bucket.label),
     total: values.map(value => value.total),
     prompt: values.map(value => value.prompt),
     output: values.map(value => value.output),
     cost: values.map(value => value.cost),
+    requests: values.map(value => value.requests),
+    successfulRequests: values.map(value => value.successfulRequests),
+    audioSeconds: values.map(value => value.audioSeconds),
+    characters: values.map(value => value.characters),
   };
 }
 
@@ -254,7 +350,31 @@ function buildTokenBuckets(range: TokenRange, jobs: JobRecord[], model: string, 
   if (range === 'day') return fixedHourBuckets(24);
   if (range === 'week') return fixedDayBuckets(7);
   if (range === 'month') return fixedDayBuckets(30, 5);
-  return monthlyTokenBuckets(range, jobs, model, persisted);
+  if (range === 'year') return fixedMonthBuckets(12);
+  return allTimeTokenBuckets(jobs, model, persisted);
+}
+
+function selectPersistedRows(
+  range: TokenRange,
+  model: string,
+  monthly: MonthlyUsageRow[],
+  daily: MonthlyUsageRow[],
+  hourly: MonthlyUsageRow[],
+  dailyAllTime: boolean,
+): MonthlyUsageRow[] {
+  if (range === 'day') return hourly;
+  if (range === 'week' || range === 'month') return daily;
+  if (range === 'year') return monthly;
+  const relevant = (rows: MonthlyUsageRow[]) =>
+    rows.filter(row => model === ALL_MODELS || row.model === model);
+  const bucketCount = (rows: MonthlyUsageRow[]) =>
+    new Set(relevant(rows).map(row => row.bucket)).size;
+  if (new Set(monthly.map(row => row.bucket)).size >= 12) return monthly;
+  if (dailyAllTime && bucketCount(daily) >= 12) return daily;
+  if (bucketCount(hourly) >= 12) return hourly;
+  if (relevant(monthly).length) return monthly;
+  if (relevant(daily).length) return daily;
+  return hourly;
 }
 
 function fixedHourBuckets(hours: number): TokenBucket[] {
@@ -294,32 +414,65 @@ function fixedDayBuckets(days: number, spanDays = 1): TokenBucket[] {
   });
 }
 
-function monthlyTokenBuckets(range: TokenRange, jobs: JobRecord[], model: string, persisted: MonthlyUsageRow[]): TokenBucket[] {
-  const monthKeys = new Set<string>();
+function fixedMonthBuckets(months: number): TokenBucket[] {
   const now = new Date();
-  const earliestYearMonth = range === 'year'
-    ? monthKey(addMonths(new Date(now.getFullYear(), now.getMonth(), 1), -11))
-    : '';
+  const current = new Date(now.getFullYear(), now.getMonth(), 1);
+  return Array.from({ length: months }, (_, index) => {
+    const start = addMonths(current, -(months - 1 - index));
+    return {
+      key: monthKey(start),
+      label: monthLabel(monthKey(start)),
+      start,
+      end: addMonths(start, 1),
+    };
+  });
+}
+
+function allTimeTokenBuckets(
+  jobs: JobRecord[],
+  model: string,
+  persisted: MonthlyUsageRow[],
+): TokenBucket[] {
+  const points = new Map<number, Date>();
   for (const row of persisted) {
     if (model !== ALL_MODELS && row.model !== model) continue;
-    if (!/^\d{4}-\d{2}$/.test(row.bucket)) continue;
-    if (range === 'year' && row.bucket < earliestYearMonth) continue;
-    monthKeys.add(row.bucket);
+    const date = bucketStartDate(row.bucket);
+    if (!Number.isNaN(date.getTime())) points.set(date.getTime(), date);
   }
-  if (!monthKeys.size) {
+  if (!points.size) {
     for (const job of jobs) {
       if (model !== ALL_MODELS && (job.model || 'Unknown model') !== model) continue;
       const date = new Date(job.timestampUnixMs || job.createdAt);
-      const key = monthKey(Number.isNaN(date.getTime()) ? now : date);
-      if (range === 'year' && key < earliestYearMonth) continue;
-      monthKeys.add(key);
+      if (!Number.isNaN(date.getTime())) points.set(date.getTime(), date);
     }
   }
-  if (!monthKeys.size) monthKeys.add(monthKey(now));
-  return Array.from(monthKeys).sort().map(key => {
-    const start = monthStart(key);
-    return { key, label: monthLabel(key), start, end: addMonths(start, 1) };
-  });
+  if (!points.size) {
+    const now = startOfDay(new Date());
+    return [{ key: 'all:0', label: compactDateLabel(now), start: now, end: addDays(now, 1) }];
+  }
+  const dates = Array.from(points.values()).sort((left, right) => left.getTime() - right.getTime());
+  const chunk = Math.max(1, Math.ceil(dates.length / 24));
+  const buckets: TokenBucket[] = [];
+  for (let offset = 0; offset < dates.length; offset += chunk) {
+    const group = dates.slice(offset, offset + chunk);
+    const start = group[0];
+    const last = group[group.length - 1];
+    const next = dates[offset + chunk];
+    const fallbackEnd = persisted[0]?.bucket.includes('T')
+      ? new Date(last.getTime() + 3_600_000)
+      : /^\d{4}-\d{2}$/.test(persisted[0]?.bucket ?? '')
+        ? addMonths(last, 1)
+        : addDays(last, 1);
+    const firstLabel = compactDateLabel(start, persisted[0]?.bucket);
+    const lastLabel = compactDateLabel(last, persisted[0]?.bucket);
+    buckets.push({
+      key: `all:${buckets.length}`,
+      label: firstLabel === lastLabel ? firstLabel : `${firstLabel}–${lastLabel}`,
+      start,
+      end: next ?? fallbackEnd,
+    });
+  }
+  return buckets;
 }
 
 function findTokenBucket(buckets: TokenBucket[], date: Date): TokenBucket | undefined {
@@ -344,6 +497,14 @@ function dateKey(date: Date): string {
 function monthStart(key: string): Date {
   const [year, month] = key.split('-').map(Number);
   return new Date(year, (month || 1) - 1, 1);
+}
+
+function compactDateLabel(date: Date, sourceBucket = ''): string {
+  if (sourceBucket.includes('T')) {
+    return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit' });
+  }
+  if (/^\d{4}-\d{2}$/.test(sourceBucket)) return monthLabel(monthKey(date));
+  return date.toLocaleString([], { month: 'short', day: 'numeric' });
 }
 
 function startOfDay(date: Date): Date {

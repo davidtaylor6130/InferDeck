@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -77,8 +78,30 @@ public:
     }
 
     bool is_loaded() const override { return loaded.load(); }
-    int vram_usage_mb() const override { return vram_mb.load(); }
+    int vram_usage_mb() const override { return estimate_vram_mb(max_slots.load()); }
     int n_slots() const override { return max_slots.load(); }
+    int min_slots() const override { return model_info.min_slots; }
+    bool can_resize_slots() const override {
+        return model_info.vram_fixed_mb > 0 && model_info.vram_per_slot_mb > 0 &&
+               max_slots.load() > model_info.min_slots;
+    }
+    int estimate_vram_mb(int slots) const override {
+        if (model_info.vram_fixed_mb > 0 && model_info.vram_per_slot_mb > 0) {
+            return model_info.vram_fixed_mb + model_info.vram_per_slot_mb * slots;
+        }
+        return vram_mb.load();
+    }
+    Result<void> resize_slots(int slots) override {
+        if (slots < model_info.min_slots || slots > model_info.n_slots) {
+            return Err<void>(ErrorCode::InvalidArgument, "invalid capacity");
+        }
+        if (n_free_slots() != max_slots.load()) {
+            return Err<void>(ErrorCode::Unavailable, "active slots");
+        }
+        max_slots.store(slots);
+        busy_slots.assign(slots, 0);
+        return Ok();
+    }
 
     int n_free_slots() const override {
         int busy = 0;
@@ -122,6 +145,52 @@ public:
         r.duration_ms = 100.0f;
         r.tokens_per_second = 50.0f;
         return Ok(r);
+    }
+};
+
+class IBackendMock : public IBackend {
+public:
+    explicit IBackendMock(ModelInfo info) : info_(std::move(info)) {}
+
+    const ModelInfo& info() const override { return info_; }
+    Result<void> load() override { loaded_ = true; return Ok(); }
+    Result<void> unload() override { loaded_ = false; busy_ = false; return Ok(); }
+    bool is_loaded() const override { return loaded_; }
+    int vram_usage_mb() const override { return loaded_ ? info_.vram_required_mb : 0; }
+    int n_slots() const override { return 1; }
+    int n_free_slots() const override { return busy_ ? 0 : 1; }
+    Result<int> acquire_slot() override {
+        if (busy_) return Err<int>(ErrorCode::Unavailable, "busy");
+        busy_ = true;
+        return Ok(0);
+    }
+    Result<void> release_slot(int slot_id) override {
+        if (slot_id != 0) return Err<void>(ErrorCode::InvalidArgument, "invalid slot");
+        busy_ = false;
+        return Ok();
+    }
+    bool slot_busy(int slot_id) const override { return slot_id == 0 && busy_; }
+
+private:
+    ModelInfo info_;
+    bool loaded_{false};
+    bool busy_{false};
+};
+
+class EmbeddingBackendMock : public IBackendMock, public IEmbeddingBackend {
+public:
+    explicit EmbeddingBackendMock(ModelInfo info) : IBackendMock(std::move(info)) {}
+
+    Result<EmbeddingResult> embed(
+        int, const EmbeddingRequest& request,
+        const std::function<bool()>& cancelled = {}) override {
+        if (cancelled && cancelled()) {
+            return Err<EmbeddingResult>(ErrorCode::Cancelled, "cancelled");
+        }
+        EmbeddingResult result;
+        result.embeddings.resize(request.inputs.size(), std::vector<float>{1.0f, 2.0f});
+        result.prompt_tokens = static_cast<int>(request.inputs.size());
+        return Ok(std::move(result));
     }
 };
 
@@ -191,6 +260,40 @@ TEST_CASE("ModelRegistry: create uses factory", "[model][registry]") {
     REQUIRE(none == nullptr);
 }
 
+TEST_CASE("ModelRegistry: selects runtime factory", "[model][registry]") {
+    ModelRegistry reg;
+    reg.register_factory("llama_cpp", [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->text_to_return = "llama";
+        return backend;
+    });
+    reg.register_factory("image_cpp", [](const ModelInfo& info) {
+        return std::make_unique<IBackendMock>(info);
+    });
+    auto text = make_info("text");
+    auto image = make_info("image");
+    image.runtime = "image_cpp";
+    image.modality = "image";
+    image.capabilities = {"image_generation"};
+    reg.register_model(text);
+    reg.register_model(image);
+
+    REQUIRE(reg.has_factory("llama_cpp"));
+    REQUIRE(reg.has_factory("image_cpp"));
+    REQUIRE(dynamic_cast<IModel*>(reg.create("text").get()) != nullptr);
+    REQUIRE(dynamic_cast<IModel*>(reg.create("image").get()) == nullptr);
+}
+
+TEST_CASE("ModelRegistry: reports missing runtime", "[model][registry]") {
+    ModelRegistry reg;
+    auto info = make_info("missing-runtime");
+    info.runtime = "unknown";
+    reg.register_model(info);
+    auto result = reg.create_result(info.name);
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::Unavailable);
+}
+
 TEST_CASE("ModelRegistry: register rejects empty name", "[model][registry]") {
     ModelRegistry reg;
     REQUIRE_THROWS_AS(reg.register_model(ModelInfo{}), std::invalid_argument);
@@ -208,6 +311,49 @@ TEST_CASE("BackendCoordinator: load marks current_loaded_", "[model][coordinator
     REQUIRE(c.get_loaded_model().has_value());
     REQUIRE(c.get_loaded_model().value() == "a");
     REQUIRE(c.get_vram_usage() == 4096);
+}
+
+TEST_CASE("BackendCoordinator: rejects text execution on non-text backend", "[model][coordinator]") {
+    ModelRegistry reg;
+    reg.register_factory("image_cpp", [](const ModelInfo& info) {
+        return std::make_unique<IBackendMock>(info);
+    });
+    auto info = make_info("image");
+    info.runtime = "image_cpp";
+    info.modality = "image";
+    info.capabilities = {"image_generation"};
+    reg.register_model(info);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load(info.name).has_value());
+    auto slot = coordinator.acquire_slot(info.name);
+    REQUIRE(slot.has_value());
+    auto result = coordinator.predict(info.name, slot.value(), InferenceRequest{});
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::InvalidArgument);
+    REQUIRE(coordinator.release_slot(info.name, slot.value()).has_value());
+}
+
+TEST_CASE("BackendCoordinator: routes embeddings by capability", "[model][coordinator]") {
+    ModelRegistry reg;
+    reg.register_factory("embedding_cpp", [](const ModelInfo& info) {
+        return std::make_unique<EmbeddingBackendMock>(info);
+    });
+    auto info = make_info("embedding");
+    info.runtime = "embedding_cpp";
+    info.modality = "embedding";
+    info.capabilities = {"embeddings"};
+    reg.register_model(info);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load(info.name).has_value());
+    auto slot = coordinator.acquire_slot(info.name);
+    REQUIRE(slot.has_value());
+    EmbeddingRequest request;
+    request.inputs = {"one", "two"};
+    auto result = coordinator.embed(info.name, *slot, request);
+    REQUIRE(result.has_value());
+    REQUIRE(result->embeddings.size() == 2);
+    REQUIRE(result->prompt_tokens == 2);
+    REQUIRE(coordinator.release_slot(info.name, *slot).has_value());
 }
 
 TEST_CASE("BackendCoordinator: load of unregistered model fails", "[model][coordinator]") {
@@ -468,6 +614,292 @@ TEST_CASE("BackendCoordinator: acquire_slot succeeds after release", "[model][co
     REQUIRE(c.release_slot("a", s2.value()).has_value());
 }
 
+TEST_CASE("BackendCoordinator: duplicate release cannot affect a newer lease",
+          "[model][coordinator][lease]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        auto model = std::make_unique<IModelMock>(i);
+        model->max_slots.store(1);
+        model->busy_slots.assign(1, 0);
+        return model;
+    });
+    reg.register_model(make_info("a"));
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("a").has_value());
+
+    auto first = coordinator.acquire_slot("a");
+    REQUIRE(first.has_value());
+    REQUIRE(coordinator.release_slot("a", *first).has_value());
+
+    auto second = coordinator.acquire_slot("a");
+    REQUIRE(second.has_value());
+    REQUIRE(*second != *first);
+    REQUIRE(coordinator.release_slot("a", *first).has_value());
+    REQUIRE(coordinator.active_request_count("a") == 1);
+
+    auto stale = coordinator.predict("a", *first, InferenceRequest{});
+    REQUIRE_FALSE(stale.has_value());
+    REQUIRE(stale.error().code == ErrorCode::InvalidArgument);
+    REQUIRE(coordinator.predict("a", *second, InferenceRequest{}).has_value());
+
+    AcquireSlotOptions non_blocking;
+    non_blocking.block = false;
+    auto third = coordinator.acquire_slot("a", non_blocking);
+    REQUIRE_FALSE(third.has_value());
+    REQUIRE(third.error().code == ErrorCode::Unavailable);
+    REQUIRE(coordinator.release_slot("a", *second).has_value());
+    REQUIRE(coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("BackendCoordinator: unload blocks admission without holding coordinator mutex",
+          "[model][coordinator][drain]") {
+    std::atomic<bool> unload_started{false};
+    std::atomic<bool> allow_unload{false};
+
+    class BlockingUnloadMock : public IModelMock {
+    public:
+        BlockingUnloadMock(ModelInfo info, std::atomic<bool>& started,
+                           std::atomic<bool>& allow)
+            : IModelMock(std::move(info)), started_(started), allow_(allow) {
+            max_slots.store(2);
+            busy_slots.assign(2, 0);
+        }
+
+        Result<void> unload() override {
+            started_.store(true);
+            while (!allow_.load()) std::this_thread::yield();
+            return IModelMock::unload();
+        }
+
+    private:
+        std::atomic<bool>& started_;
+        std::atomic<bool>& allow_;
+    };
+
+    ModelRegistry reg;
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        return std::make_unique<BlockingUnloadMock>(i, unload_started, allow_unload);
+    });
+    reg.register_model(make_info("a"));
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("a").has_value());
+    auto held = coordinator.acquire_slot("a");
+    REQUIRE(held.has_value());
+
+    auto unloading = std::async(std::launch::async, [&] {
+        return coordinator.unload("a");
+    });
+
+    bool drain_observed = false;
+    bool probe_release_failed = false;
+    const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    while (std::chrono::steady_clock::now() < drain_deadline) {
+        AcquireSlotOptions options;
+        options.block = false;
+        auto probe = coordinator.acquire_slot("a", options);
+        if (!probe && probe.error().message == "model is draining: a") {
+            drain_observed = true;
+            break;
+        }
+        if (probe && !coordinator.release_slot("a", *probe)) {
+            probe_release_failed = true;
+            break;
+        }
+        std::this_thread::yield();
+    }
+
+    REQUIRE(coordinator.release_slot("a", *held).has_value());
+    const auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    while (!unload_started.load() && std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::yield();
+    }
+
+    auto query = std::async(std::launch::async, [&] {
+        return coordinator.active_request_count();
+    });
+    const bool query_completed =
+        query.wait_for(std::chrono::milliseconds{100}) == std::future_status::ready;
+    AcquireSlotOptions options;
+    options.block = false;
+    auto during_unload = coordinator.acquire_slot("a", options);
+
+    allow_unload.store(true);
+    const auto unloaded = unloading.get();
+    const auto active = query.get();
+
+    REQUIRE(drain_observed);
+    REQUIRE_FALSE(probe_release_failed);
+    REQUIRE(unload_started.load());
+    REQUIRE(query_completed);
+    REQUIRE(active == 0);
+    REQUIRE_FALSE(during_unload.has_value());
+    REQUIRE(during_unload.error().code == ErrorCode::Unavailable);
+    REQUIRE(unloaded.has_value());
+    REQUIRE_FALSE(coordinator.is_loaded("a"));
+}
+
+TEST_CASE("BackendCoordinator: request queue is FIFO at equal priority", "[model][coordinator][queue]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        auto model = std::make_unique<IModelMock>(i);
+        model->max_slots.store(1);
+        model->busy_slots.assign(1, 0);
+        return model;
+    });
+    reg.register_model(make_info("a"));
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("a").has_value());
+    auto held = coordinator.acquire_slot("a");
+    REQUIRE(held.has_value());
+
+    std::vector<int> order;
+    std::mutex order_mutex;
+    auto run = [&](int id) {
+        auto slot = coordinator.acquire_slot("a");
+        if (!slot) return;
+        {
+            std::lock_guard lock(order_mutex);
+            order.push_back(id);
+        }
+        (void)coordinator.release_slot("a", *slot);
+    };
+    std::thread first(run, 1);
+    while (coordinator.queued_request_count() != 1) std::this_thread::yield();
+    std::thread second(run, 2);
+    while (coordinator.queued_request_count() != 2) std::this_thread::yield();
+    REQUIRE(coordinator.release_slot("a", *held).has_value());
+    first.join();
+    second.join();
+    REQUIRE(order == std::vector<int>{1, 2});
+}
+
+TEST_CASE("BackendCoordinator: higher priority request advances first", "[model][coordinator][queue]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        auto model = std::make_unique<IModelMock>(i);
+        model->max_slots.store(1);
+        model->busy_slots.assign(1, 0);
+        return model;
+    });
+    reg.register_model(make_info("a"));
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("a").has_value());
+    auto held = coordinator.acquire_slot("a");
+    REQUIRE(held.has_value());
+
+    std::vector<int> order;
+    std::mutex order_mutex;
+    auto run = [&](int id, int priority) {
+        AcquireSlotOptions options;
+        options.priority = priority;
+        auto slot = coordinator.acquire_slot("a", options);
+        if (!slot) return;
+        {
+            std::lock_guard lock(order_mutex);
+            order.push_back(id);
+        }
+        (void)coordinator.release_slot("a", *slot);
+    };
+    std::thread low(run, 1, 0);
+    while (coordinator.queued_request_count() != 1) std::this_thread::yield();
+    std::thread high(run, 2, 10);
+    while (coordinator.queued_request_count() != 2) std::this_thread::yield();
+    REQUIRE(coordinator.release_slot("a", *held).has_value());
+    low.join();
+    high.join();
+    REQUIRE(order == std::vector<int>{2, 1});
+}
+
+TEST_CASE("BackendCoordinator: queued request can be cancelled", "[model][coordinator][queue]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        auto model = std::make_unique<IModelMock>(i);
+        model->max_slots.store(1);
+        model->busy_slots.assign(1, 0);
+        return model;
+    });
+    reg.register_model(make_info("a"));
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("a").has_value());
+    auto held = coordinator.acquire_slot("a");
+    REQUIRE(held.has_value());
+
+    std::atomic<bool> cancel{false};
+    Result<int> result = Err<int>(ErrorCode::Internal, "not run");
+    std::thread waiter([&] {
+        AcquireSlotOptions options;
+        options.cancelled = [&] { return cancel.load(); };
+        result = coordinator.acquire_slot("a", options);
+    });
+    while (coordinator.queued_request_count() != 1) std::this_thread::yield();
+    cancel.store(true);
+    waiter.join();
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::Cancelled);
+    REQUIRE(coordinator.queued_request_count() == 0);
+    REQUIRE(coordinator.release_slot("a", *held).has_value());
+}
+
+TEST_CASE("BackendCoordinator: bounded queue rejects overflow", "[model][coordinator][queue]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        auto model = std::make_unique<IModelMock>(i);
+        model->max_slots.store(1);
+        model->busy_slots.assign(1, 0);
+        return model;
+    });
+    reg.register_model(make_info("a"));
+    BackendCoordinator coordinator(reg);
+    coordinator.set_max_queue_size(1);
+    REQUIRE(coordinator.load("a").has_value());
+    auto held = coordinator.acquire_slot("a");
+    REQUIRE(held.has_value());
+
+    std::atomic<bool> cancel{false};
+    std::thread waiter([&] {
+        AcquireSlotOptions options;
+        options.cancelled = [&] { return cancel.load(); };
+        (void)coordinator.acquire_slot("a", options);
+    });
+    while (coordinator.queued_request_count() != 1) std::this_thread::yield();
+    auto overflow = coordinator.acquire_slot("a");
+    REQUIRE_FALSE(overflow.has_value());
+    REQUIRE(overflow.error().code == ErrorCode::Unavailable);
+    cancel.store(true);
+    waiter.join();
+    REQUIRE(coordinator.release_slot("a", *held).has_value());
+}
+
+TEST_CASE("BackendCoordinator: queued request remains admitted across model swap", "[model][coordinator][queue]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        auto model = std::make_unique<IModelMock>(i);
+        model->max_slots.store(1);
+        model->busy_slots.assign(1, 0);
+        return model;
+    });
+    reg.register_model(make_info("a"));
+    reg.register_model(make_info("b"));
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("a").has_value());
+    auto held = coordinator.acquire_slot("a");
+    REQUIRE(held.has_value());
+
+    Result<int> result = Err<int>(ErrorCode::Internal, "not run");
+    std::thread waiter([&] {
+        AcquireSlotOptions options;
+        options.prepare = [&] { return coordinator.swap_to("b"); };
+        result = coordinator.acquire_slot("b", options);
+    });
+    while (coordinator.queued_request_count() != 1) std::this_thread::yield();
+    REQUIRE(coordinator.queue().front().model == "b");
+    REQUIRE(coordinator.release_slot("a", *held).has_value());
+    waiter.join();
+    REQUIRE(result.has_value());
+    REQUIRE(coordinator.is_loaded("b"));
+    REQUIRE(coordinator.release_slot("b", *result).has_value());
+}
+
 TEST_CASE("BackendCoordinator: predict routes to model", "[model][coordinator]") {
     ModelRegistry reg;
     reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
@@ -502,6 +934,133 @@ TEST_CASE("BackendCoordinator: vram_usage sums loaded models", "[model][coordina
     REQUIRE(c.get_vram_usage() == 8000);
     REQUIRE(c.swap_to("b").has_value());
     REQUIRE(c.get_vram_usage() == 8000);
+}
+
+TEST_CASE("BackendCoordinator: keeps two models resident when budget fits", "[model][coordinator][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        return backend;
+    });
+    auto a = make_info("a");
+    auto b = make_info("b");
+    a.vram_required_mb = 4000;
+    b.vram_required_mb = 4000;
+    reg.register_model(a);
+    reg.register_model(b);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 1000);
+
+    REQUIRE(coordinator.swap_to("a").has_value());
+    REQUIRE(coordinator.swap_to("b").has_value());
+    REQUIRE(coordinator.is_loaded("a"));
+    REQUIRE(coordinator.is_loaded("b"));
+    REQUIRE(coordinator.get_loaded_model() == "b");
+    REQUIRE(coordinator.get_loaded_models() == std::vector<std::string>{"a", "b"});
+    REQUIRE(coordinator.vram_available_mb() == 0);
+}
+
+TEST_CASE("BackendCoordinator: shrinks idle capacity before loading", "[model][coordinator][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        return backend;
+    });
+    auto a = make_info("a");
+    a.vram_fixed_mb = 3000;
+    a.vram_per_slot_mb = 1000;
+    a.vram_required_mb = 5000;
+    auto b = make_info("b");
+    b.vram_required_mb = 5000;
+    reg.register_model(a);
+    reg.register_model(b);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+
+    REQUIRE(coordinator.swap_to("a").has_value());
+    REQUIRE(coordinator.swap_to("b").has_value());
+    REQUIRE(coordinator.is_loaded("a"));
+    REQUIRE(coordinator.is_loaded("b"));
+    REQUIRE(coordinator.get_backend("a")->n_slots() == 1);
+    REQUIRE(coordinator.get_vram_usage() == 9000);
+}
+
+TEST_CASE("BackendCoordinator: active model cannot be shrunk or evicted", "[model][coordinator][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        return backend;
+    });
+    auto a = make_info("a");
+    a.vram_fixed_mb = 3000;
+    a.vram_per_slot_mb = 1000;
+    a.vram_required_mb = 5000;
+    auto b = make_info("b");
+    b.vram_required_mb = 5000;
+    reg.register_model(a);
+    reg.register_model(b);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+
+    REQUIRE(coordinator.swap_to("a").has_value());
+    auto slot = coordinator.acquire_slot("a");
+    REQUIRE(slot.has_value());
+    auto result = coordinator.swap_to("b");
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::OutOfMemory);
+    REQUIRE(coordinator.is_loaded("a"));
+    REQUIRE_FALSE(coordinator.is_loaded("b"));
+    REQUIRE(coordinator.release_slot("a", *slot).has_value());
+}
+
+TEST_CASE("BackendCoordinator: evicts idle model only after resize options", "[model][coordinator][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        return backend;
+    });
+    auto a = make_info("a");
+    auto b = make_info("b");
+    a.vram_required_mb = 5000;
+    b.vram_required_mb = 5000;
+    reg.register_model(a);
+    reg.register_model(b);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+
+    REQUIRE(coordinator.swap_to("a").has_value());
+    REQUIRE(coordinator.swap_to("b").has_value());
+    REQUIRE_FALSE(coordinator.is_loaded("a"));
+    REQUIRE(coordinator.is_loaded("b"));
+}
+
+TEST_CASE("BackendCoordinator: restores residency after target load failure", "[model][coordinator][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->load_should_fail.store(i.name == "b");
+        return backend;
+    });
+    auto a = make_info("a");
+    auto b = make_info("b");
+    a.vram_required_mb = 5000;
+    b.vram_required_mb = 5000;
+    reg.register_model(a);
+    reg.register_model(b);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+
+    REQUIRE(coordinator.swap_to("a").has_value());
+    auto result = coordinator.swap_to("b");
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(coordinator.is_loaded("a"));
+    REQUIRE_FALSE(coordinator.is_loaded("b"));
+    REQUIRE(coordinator.get_loaded_model() == "a");
 }
 
 TEST_CASE("BackendCoordinator: unregister refuses loaded model", "[model][coordinator]") {

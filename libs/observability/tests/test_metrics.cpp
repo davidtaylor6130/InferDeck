@@ -1,8 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "observability/metrics.hpp"
 
 using namespace inferdeck::observability;
+using Catch::Approx;
 
 TEST_CASE("Metrics starts at zero", "[observability][metrics]") {
   Metrics m;
@@ -15,6 +17,26 @@ TEST_CASE("Metrics starts at zero", "[observability][metrics]") {
   REQUIRE(m.last_gpu_util_pct() == 0.0);
   auto s = m.snapshot_for("nope");
   REQUIRE(s.requests == 0);
+}
+
+TEST_CASE("Metrics restores persisted lifetime totals and keeps accumulating",
+          "[observability][metrics][restart]") {
+  Metrics m;
+  m.restore_lifetime(10, 3, 1000, 250, 5000.0);
+  REQUIRE(m.total_requests() == 10);
+  REQUIRE(m.total_swaps() == 3);
+  REQUIRE(m.lifetime_tokens_in() == 1000);
+  REQUIRE(m.lifetime_tokens_out() == 250);
+  REQUIRE(m.total_duration_ms() == Approx(5000.0));
+  REQUIRE(m.avg_tokens_per_second() == Approx(50.0));
+
+  m.record_request({2000, "qwen3.6-27b", 20, 50, 1000.0, 50.0, 200, 0});
+  m.record_swap({2000, "a", "b", 100.0, true, ""});
+  REQUIRE(m.total_requests() == 11);
+  REQUIRE(m.total_swaps() == 4);
+  REQUIRE(m.lifetime_tokens_in() == 1020);
+  REQUIRE(m.lifetime_tokens_out() == 300);
+  REQUIRE(m.avg_tokens_per_second() == Approx(50.0));
 }
 
 TEST_CASE("Metrics record_request accumulates", "[observability][metrics]") {
@@ -35,8 +57,8 @@ TEST_CASE("Metrics record_request accumulates", "[observability][metrics]") {
   REQUIRE(s27.requests == 2);
   REQUIRE(s27.prompt_tokens == 40);
   REQUIRE(s27.completion_tokens == 60);
-  REQUIRE(s27.peak_tokens_per_second() == 50.0);
-  REQUIRE(s27.last_tokens_per_second() == 50.0);
+  REQUIRE(s27.peak_tokens_per_second == 50.0);
+  REQUIRE(s27.last_tokens_per_second == 50.0);
   REQUIRE(s27.last_timestamp_unix_ms == 1500);
 
   auto scn = m.snapshot_for("qwen3-coder-next");

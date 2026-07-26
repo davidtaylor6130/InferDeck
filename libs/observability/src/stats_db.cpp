@@ -3,10 +3,13 @@
 #include <sqlite3.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
 #include <utility>
+
+#include "foundation/path_utils.hpp"
 
 namespace inferdeck::observability {
 
@@ -19,22 +22,6 @@ void throw_on_error(int rc, sqlite3* db, const char* what) {
   }
 }
 
-std::string expand_path(std::string path) {
-  if (path.empty()) return path;
-  if (path == ":memory:") return path;
-  if (path[0] == '~') {
-    const char* home = std::getenv("USERPROFILE");
-    if (!home) home = std::getenv("HOME");
-    if (home) {
-      if (path.size() == 1) return home;
-      if (path[1] == '/' || path[1] == '\\') {
-        return std::string(home) + path.substr(1);
-      }
-    }
-  }
-  return path;
-}
-
 std::int64_t now_ms() {
   using namespace std::chrono;
   return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
@@ -42,7 +29,12 @@ std::int64_t now_ms() {
 
 }
 
-StatsDb::StatsDb(const std::string& path) : path_(expand_path(path)) { open(); }
+StatsDb::StatsDb(const std::string& path)
+    : path_(path == ":memory:"
+        ? path
+        : foundation::expand_user_path(std::filesystem::path(path)).string()) {
+  open();
+}
 StatsDb::~StatsDb() { close(); }
 
 void StatsDb::open() {
@@ -64,7 +56,7 @@ void StatsDb::open() {
   char* pragma_err = nullptr;
   if (sqlite3_exec(reinterpret_cast<sqlite3*>(db_),
                    "PRAGMA journal_mode=WAL;"
-                   "PRAGMA synchronous=FULL;"
+                   "PRAGMA synchronous=NORMAL;"
                    "PRAGMA temp_store=MEMORY;",
                    nullptr, nullptr, &pragma_err) != SQLITE_OK) {
     if (pragma_err) sqlite3_free(pragma_err);
@@ -81,7 +73,9 @@ void StatsDb::open() {
     "  duration_ms REAL NOT NULL,"
     "  tps REAL NOT NULL,"
     "  status_code INTEGER NOT NULL,"
-    "  slot_id INTEGER NOT NULL"
+    "  slot_id INTEGER NOT NULL,"
+    "  input_audio_seconds REAL NOT NULL DEFAULT 0,"
+    "  input_characters INTEGER NOT NULL DEFAULT 0"
     ");"
     "CREATE TABLE IF NOT EXISTS swaps ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -100,6 +94,24 @@ void StatsDb::open() {
     if (err) sqlite3_free(err);
     healthy_ = false;
     return;
+  }
+  // Existing databases predate billable speech units. SQLite has no
+  // `ADD COLUMN IF NOT EXISTS`, so duplicate-column errors are intentionally
+  // ignored while all other migration failures mark the database unhealthy.
+  for (const char* migration : {
+         "ALTER TABLE requests ADD COLUMN input_audio_seconds REAL NOT NULL DEFAULT 0;",
+         "ALTER TABLE requests ADD COLUMN input_characters INTEGER NOT NULL DEFAULT 0;",
+       }) {
+    char* migration_error = nullptr;
+    if (sqlite3_exec(reinterpret_cast<sqlite3*>(db_), migration, nullptr, nullptr,
+                     &migration_error) != SQLITE_OK) {
+      const std::string message = migration_error ? migration_error : "";
+      if (migration_error) sqlite3_free(migration_error);
+      if (message.find("duplicate column name") == std::string::npos) {
+        healthy_ = false;
+        return;
+      }
+    }
   }
   healthy_ = true;
 }
@@ -121,11 +133,15 @@ void StatsDb::record_request(const RequestRow& row) {
   const auto ts = row.timestamp_unix_ms > 0 ? row.timestamp_unix_ms : now_ms();
   const int prompt_tokens = std::max(0, row.prompt_tokens);
   const int completion_tokens = std::max(0, row.completion_tokens);
-  const double duration_ms = std::max(0.0, row.duration_ms);
-  const double tps = std::max(0.0, row.tokens_per_second);
+  const double duration_ms = std::isfinite(row.duration_ms) ? std::max(0.0, row.duration_ms) : 0.0;
+  const double tps = std::isfinite(row.tokens_per_second) ? std::max(0.0, row.tokens_per_second) : 0.0;
+  const double input_audio_seconds = std::isfinite(row.input_audio_seconds)
+      ? std::max(0.0, row.input_audio_seconds) : 0.0;
+  const auto input_characters = std::max<std::int64_t>(0, row.input_characters);
   const char* sql =
     "INSERT INTO requests (ts, model, prompt_tokens, completion_tokens, "
-    "  duration_ms, tps, status_code, slot_id) VALUES (?,?,?,?,?,?,?,?);";
+    "  duration_ms, tps, status_code, slot_id, input_audio_seconds, input_characters) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?);";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return;
   sqlite3_bind_int64(stmt, 1, ts);
   sqlite3_bind_text(stmt, 2, model.c_str(), -1, SQLITE_TRANSIENT);
@@ -135,7 +151,9 @@ void StatsDb::record_request(const RequestRow& row) {
   sqlite3_bind_double(stmt, 6, tps);
   sqlite3_bind_int(stmt, 7, row.status_code);
   sqlite3_bind_int(stmt, 8, row.slot_id);
-  sqlite3_step(stmt);
+  sqlite3_bind_double(stmt, 9, input_audio_seconds);
+  sqlite3_bind_int64(stmt, 10, input_characters);
+  if (sqlite3_step(stmt) != SQLITE_DONE) healthy_ = false;
   sqlite3_finalize(stmt);
 }
 
@@ -151,10 +169,10 @@ void StatsDb::record_swap(const SwapRow& row) {
   sqlite3_bind_int64(stmt, 1, ts);
   sqlite3_bind_text(stmt, 2, row.from_model.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 3, row.to_model.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_double(stmt, 4, std::max(0.0, row.duration_ms));
+  sqlite3_bind_double(stmt, 4, std::isfinite(row.duration_ms) ? std::max(0.0, row.duration_ms) : 0.0);
   sqlite3_bind_int(stmt, 5, row.success ? 1 : 0);
   sqlite3_bind_text(stmt, 6, row.error.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_step(stmt);
+  if (sqlite3_step(stmt) != SQLITE_DONE) healthy_ = false;
   sqlite3_finalize(stmt);
 }
 
@@ -164,10 +182,11 @@ std::vector<RequestRow> StatsDb::recent_requests(int limit) const {
   std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
   const char* sql =
-    "SELECT ts, model, prompt_tokens, completion_tokens, duration_ms, tps, status_code, slot_id "
+    "SELECT ts, model, prompt_tokens, completion_tokens, duration_ms, tps, status_code, slot_id, "
+    "input_audio_seconds, input_characters "
     "FROM requests ORDER BY id DESC LIMIT ?;";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
-  sqlite3_bind_int(stmt, 1, limit);
+  sqlite3_bind_int(stmt, 1, std::clamp(limit, 1, 10'000));
   while (sqlite3_step(stmt) == SQLITE_ROW) {
     RequestRow r;
     r.timestamp_unix_ms    = sqlite3_column_int64(stmt, 0);
@@ -178,6 +197,8 @@ std::vector<RequestRow> StatsDb::recent_requests(int limit) const {
     r.tokens_per_second    = sqlite3_column_double(stmt, 5);
     r.status_code          = sqlite3_column_int(stmt, 6);
     r.slot_id              = sqlite3_column_int(stmt, 7);
+    r.input_audio_seconds  = sqlite3_column_double(stmt, 8);
+    r.input_characters     = sqlite3_column_int64(stmt, 9);
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);
@@ -193,7 +214,7 @@ std::vector<SwapRow> StatsDb::recent_swaps(int limit) const {
     "SELECT ts, from_model, to_model, duration_ms, success, error FROM swaps "
     "ORDER BY id DESC LIMIT ?;";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
-  sqlite3_bind_int(stmt, 1, limit);
+  sqlite3_bind_int(stmt, 1, std::clamp(limit, 1, 10'000));
   while (sqlite3_step(stmt) == SQLITE_ROW) {
     SwapRow r;
     r.timestamp_unix_ms = sqlite3_column_int64(stmt, 0);
@@ -218,7 +239,8 @@ std::vector<ModelUsageRow> StatsDb::model_usage() const {
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
     "COALESCE(SUM(prompt_tokens),0), "
     "COALESCE(SUM(completion_tokens),0), COALESCE(SUM(duration_ms),0), "
-    "COALESCE(MAX(tps),0), COALESCE(MAX(ts),0) "
+    "COALESCE(MAX(tps),0), COALESCE(MAX(ts),0), "
+    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
     "FROM requests GROUP BY model ORDER BY MAX(ts) DESC;";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
   while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -231,10 +253,43 @@ std::vector<ModelUsageRow> StatsDb::model_usage() const {
     r.total_duration_ms = sqlite3_column_double(stmt, 5);
     r.peak_tokens_per_second = sqlite3_column_double(stmt, 6);
     r.last_timestamp_unix_ms = sqlite3_column_int64(stmt, 7);
+    r.input_audio_seconds = sqlite3_column_double(stmt, 8);
+    r.input_characters = sqlite3_column_int64(stmt, 9);
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);
   return out;
+}
+
+LifetimeTotals StatsDb::lifetime_totals() const {
+  LifetimeTotals totals;
+  if (!healthy_) return totals;
+  std::lock_guard lk(mtx_);
+
+  sqlite3_stmt* stmt = nullptr;
+  const char* request_sql =
+    "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), "
+    "COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(duration_ms), 0.0) "
+    "FROM requests;";
+  if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), request_sql, -1,
+                         &stmt, nullptr) == SQLITE_OK &&
+      sqlite3_step(stmt) == SQLITE_ROW) {
+    totals.requests = sqlite3_column_int64(stmt, 0);
+    totals.prompt_tokens = sqlite3_column_int64(stmt, 1);
+    totals.completion_tokens = sqlite3_column_int64(stmt, 2);
+    totals.total_duration_ms = sqlite3_column_double(stmt, 3);
+  }
+  sqlite3_finalize(stmt);
+
+  stmt = nullptr;
+  if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_),
+                         "SELECT COUNT(*) FROM swaps;", -1,
+                         &stmt, nullptr) == SQLITE_OK &&
+      sqlite3_step(stmt) == SQLITE_ROW) {
+    totals.swaps = sqlite3_column_int64(stmt, 0);
+  }
+  sqlite3_finalize(stmt);
+  return totals;
 }
 
 std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
@@ -246,14 +301,16 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
     "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch') AS bucket, model, "
     "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
     "COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
-    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0) "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
+    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
     "FROM requests "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
   const char* limited_sql =
     "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch') AS bucket, model, "
     "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
     "COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
-    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0) "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
+    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
     "FROM requests "
     "WHERE ts >= ((strftime('%s','now','start of month', ?) * 1000)) "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
@@ -273,6 +330,8 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
     r.total_tokens = sqlite3_column_int64(stmt, 4);
     r.requests = sqlite3_column_int64(stmt, 5);
     r.successful_requests = sqlite3_column_int64(stmt, 6);
+    r.input_audio_seconds = sqlite3_column_double(stmt, 7);
+    r.input_characters = sqlite3_column_int64(stmt, 8);
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);
@@ -280,7 +339,9 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
 }
 
 std::vector<UsageBucketRow> StatsDb::daily_usage(int days) const {
-  return bucketed_usage("%Y-%m-%d", now_ms() - static_cast<std::int64_t>(days) * 86'400'000);
+  return bucketed_usage(
+      "%Y-%m-%d",
+      days <= 0 ? 0 : now_ms() - static_cast<std::int64_t>(days) * 86'400'000);
 }
 
 std::vector<UsageBucketRow> StatsDb::hourly_usage(int hours) const {
@@ -296,7 +357,8 @@ std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_
     "SELECT strftime(?, ts / 1000, 'unixepoch', 'localtime') AS bucket, model, "
     "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
     "COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
-    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0) "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
+    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
     "FROM requests WHERE ts >= ? "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
@@ -311,6 +373,8 @@ std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_
     r.total_tokens = sqlite3_column_int64(stmt, 4);
     r.requests = sqlite3_column_int64(stmt, 5);
     r.successful_requests = sqlite3_column_int64(stmt, 6);
+    r.input_audio_seconds = sqlite3_column_double(stmt, 7);
+    r.input_characters = sqlite3_column_int64(stmt, 8);
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);

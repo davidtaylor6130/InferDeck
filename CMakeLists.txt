@@ -16,8 +16,6 @@ if(INFERDECK_BUILD_TESTS)
     enable_testing()
 endif()
 
-add_subdirectory(apps/inferdeck-gateway)
-
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 
 # --- Dependencies via vcpkg ---
@@ -98,6 +96,7 @@ add_subdirectory(${llama_cpp_SOURCE_DIR}/tools/mtmd EXCLUDE_FROM_ALL)
 # --- Our libraries and app ---
 add_subdirectory(libs/foundation)
 add_subdirectory(libs/model)
+add_subdirectory(libs/native_runtimes)
 add_subdirectory(libs/gateway)
 add_subdirectory(libs/observability)
 add_subdirectory(libs/optimize)
@@ -108,6 +107,7 @@ if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests/parity)
 endif()
 add_subdirectory(libs/llama_cpp_wrapper)
+add_subdirectory(apps/inferdeck-gateway)
 add_subdirectory(apps/model-tester)
 
 install(TARGETS inferdeck-gateway
@@ -115,4 +115,8 @@ install(TARGETS inferdeck-gateway
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib/static)
 
-install(DIRECTORY config/ DESTINATION config)
+install(FILES config/gateway.yml DESTINATION config)
+install(DIRECTORY config/templates/ DESTINATION config/templates)
+install(DIRECTORY apps/inferdeck-gateway/static/ DESTINATION static)
+install(FILES data/pricing.json DESTINATION data)
+install(DIRECTORY ops/ DESTINATION ops FILES_MATCHING PATTERN "*.ps1")

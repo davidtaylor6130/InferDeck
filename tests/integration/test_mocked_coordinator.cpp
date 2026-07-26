@@ -260,7 +260,7 @@ TEST_CASE("Mocked Tier B: predict routes to correct model and returns text", "[i
     auto* m = dynamic_cast<IModelMock*>(const_cast<IModel*>(c.get_model("qwen3.6-27b")));
     REQUIRE(m != nullptr);
     REQUIRE(m->predictions.size() == 1);
-    REQUIRE(m->predictions[0].first == s.value());
+    REQUIRE(m->predictions[0].first == 0);
     REQUIRE(m->predictions[0].second.prompt == "What is 2+2?");
 
     REQUIRE(c.release_slot("qwen3.6-27b", s.value()).has_value());

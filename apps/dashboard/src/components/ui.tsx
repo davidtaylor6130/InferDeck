@@ -3,7 +3,7 @@ import type { Tone } from '../types';
 import { clamp, toneBg, toneHex, toneLabel, toneText } from '../utils';
 
 export const Panel: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className = '' }) => (
-  <div className={`rounded-lg border border-white/10 bg-[#0b1626]/88 p-4 shadow-deck ${className}`}>{children}</div>
+  <section className={`border-t border-border-slate pt-4 ${className}`}>{children}</section>
 );
 
 export const SectionTitle: React.FC<{ title: string; aside?: string; action?: React.ReactNode }> = ({ title, aside, action }) => (
@@ -16,8 +16,7 @@ export const SectionTitle: React.FC<{ title: string; aside?: string; action?: Re
 );
 
 export const Badge: React.FC<{ label: string; tone: Tone }> = ({ label, tone }) => (
-  <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-semibold ${toneBg(tone)} ${toneText(tone)}`}>
-    <span className="h-1.5 w-1.5 rounded-full" style={{ background: toneHex(tone) }} />
+  <span className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ${toneBg(tone)} ${toneText(tone)}`}>
     {label}
   </span>
 );
@@ -37,7 +36,7 @@ export const Stat: React.FC<{
         <p className={`truncate text-text-muted ${size === 'hero' ? 'text-sm' : 'text-xs'}`}>{label}</p>
         {badgeLabel && <Badge label={badgeLabel} tone={tone} />}
       </div>
-      <p className={`mt-0.5 truncate font-semibold ${size === 'hero' ? 'text-4xl' : 'text-lg'} ${tone === 'idle' ? 'text-text-primary' : toneText(tone)}`}>{value}</p>
+      <p className={`mt-0.5 truncate font-semibold ${size === 'hero' ? 'text-2xl' : 'text-lg'} ${tone === 'idle' ? 'text-text-primary' : toneText(tone)}`}>{value}</p>
       {sub && <p className="truncate text-xs text-text-muted">{sub}</p>}
     </div>
   );
@@ -46,12 +45,14 @@ export const Stat: React.FC<{
 export const Button: React.FC<{
   children: React.ReactNode;
   onClick?: () => void;
-  tone?: 'blue' | 'neutral' | 'danger';
+  tone?: 'blue' | 'green' | 'neutral' | 'danger';
   disabled?: boolean;
   className?: string;
 }> = ({ children, onClick, tone = 'neutral', disabled, className = '' }) => {
   const palette = tone === 'blue'
     ? 'border-queue-blue/40 bg-queue-blue/15 text-queue-blue hover:bg-queue-blue/25'
+    : tone === 'green'
+      ? 'border-success-green/40 bg-success-green/15 text-success-green hover:bg-success-green/25'
     : tone === 'danger'
       ? 'border-danger-rose/40 bg-danger-rose/15 text-danger-rose hover:bg-danger-rose/25'
       : 'border-white/15 bg-white/[0.06] text-text-primary hover:bg-white/[0.12]';
@@ -60,7 +61,7 @@ export const Button: React.FC<{
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className={`inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${palette} ${className}`}
+      className={`inline-flex min-h-9 items-center justify-center rounded border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue disabled:cursor-not-allowed disabled:opacity-40 ${palette} ${className}`}
     >
       {children}
     </button>
@@ -68,11 +69,11 @@ export const Button: React.FC<{
 };
 
 export const ProgressBar: React.FC<{ percent: number; tone?: Tone; indeterminate?: boolean }> = ({ percent, tone = 'good', indeterminate }) => (
-  <div className="h-2 overflow-hidden rounded-full bg-white/10">
+  <div className="h-1.5 overflow-hidden bg-white/10">
     {indeterminate ? (
-      <div className="h-full w-1/3 animate-pulse rounded-full" style={{ background: toneHex(tone) }} />
+      <div className="h-full w-1/3 animate-pulse" style={{ background: toneHex(tone) }} />
     ) : (
-      <div className="h-full rounded-full transition-all" style={{ width: `${clamp(percent, 0, 100)}%`, background: toneHex(tone) }} />
+      <div className="h-full transition-[width]" style={{ width: `${clamp(percent, 0, 100)}%`, background: toneHex(tone) }} />
     )}
   </div>
 );
@@ -116,14 +117,14 @@ export const Sparkline: React.FC<{
   const area = `${path} L ${width} ${height} L 0 ${height} Z`;
   const badgeLabel = statusLabel ? toneLabel(tone) : '';
   return (
-    <div className="rounded-lg border border-white/10 bg-[#07101d] p-3">
+    <div className="border-l border-border-slate pl-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-xs font-medium text-text-secondary">{label}</p>
           <p className="mt-0.5 truncate text-lg font-semibold text-text-primary">{display}</p>
           {sub && <p className="truncate text-xs text-text-muted">{sub}</p>}
         </div>
-        {badgeLabel ? <Badge label={badgeLabel} tone={tone} /> : <span className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ background: toneHex(tone) }} />}
+        {badgeLabel ? <Badge label={badgeLabel} tone={tone} /> : null}
       </div>
       <svg viewBox={`0 0 ${width} ${height}`} className="mt-2 h-16 w-full" role="img" aria-label={`${label} sparkline`}>
         <path d={area} fill={toneHex(tone)} opacity="0.1" />
@@ -134,7 +135,7 @@ export const Sparkline: React.FC<{
 };
 
 export const EmptyState: React.FC<{ title: string; detail?: string }> = ({ title, detail }) => (
-  <div className="rounded-lg border border-dashed border-white/15 p-8 text-center">
+  <div className="border-y border-dashed border-white/15 py-8 text-center">
     <p className="text-sm font-medium text-text-secondary">{title}</p>
     {detail && <p className="mt-1 text-xs text-text-muted">{detail}</p>}
   </div>

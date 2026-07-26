@@ -4,9 +4,13 @@ project(gateway LANGUAGES CXX)
 set(GATEWAY_SOURCES
     src/streaming_sanitizer.cpp
     src/routes.cpp
+    src/openai_routes.cpp
     src/anthropic_routes.cpp
     src/dashboard_routes.cpp
     src/metrics_builder.cpp
+    src/model_store.cpp
+    src/media_routes.cpp
+    src/profile_benchmark.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})
@@ -21,9 +25,14 @@ target_link_libraries(gateway
         foundation
         model
         observability
+        optimize
         nlohmann_json::nlohmann_json
         httplib::httplib
 )
+
+if(WIN32)
+    target_link_libraries(gateway PRIVATE winhttp bcrypt)
+endif()
 
 set_target_properties(gateway PROPERTIES
     CXX_STANDARD 23

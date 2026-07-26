@@ -20,6 +20,10 @@ target_include_directories(llama_cpp_wrapper PUBLIC
     ${CMAKE_SOURCE_DIR}/libs/foundation/include
 )
 
+target_include_directories(llama_cpp_wrapper PRIVATE
+    ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/src
+)
+
 target_link_libraries(llama_cpp_wrapper
     PUBLIC
         model

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getJobs, getPricing } from '../api';
-import { Panel, ProgressBar, SectionTitle, Stat, linePath, pickTickIndices } from '../components/ui';
+import { UsageRangeTabs } from '../components/UsageCharts';
+import { Panel, SectionTitle, Stat, linePath, pickTickIndices } from '../components/ui';
 import {
   ALL_MODELS,
   DEFAULT_COST_CONFIG,
@@ -8,18 +9,29 @@ import {
   TOKEN_RANGE_LABELS,
   buildCostDefaults,
   buildTokenSeries,
-  estimatePortfolioCostAvoided,
   getCostConfigForModel,
   loadCostConfig,
   saveCostConfig,
   tokenUsageFromSeries,
 } from '../cost';
 import type { CostDefaults, ModelCostConfig, TokenRange, TokenSeries } from '../cost';
+import {
+  bucketUsageForSection,
+  isDictationModel,
+  modelsForSection,
+  usageForSection,
+  type DashboardSection,
+} from '../dashboardSections';
 import { useGateway } from '../gateway';
 import type { JobRecord } from '../types';
 import { clamp, compactModel, formatCurrency, formatTokenCount } from '../utils';
+import { DictationUsagePage } from './DictationUsagePage';
 
-export const UsagePage: React.FC = () => {
+export const UsagePage: React.FC<{ section?: DashboardSection }> = ({ section = 'llm' }) => (
+  section === 'dictation' ? <DictationUsagePage /> : <LlmUsagePage />
+);
+
+const LlmUsagePage: React.FC = () => {
   const { status, models } = useGateway();
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [defaults, setDefaults] = useState<{ defaults: CostDefaults; fallback: ModelCostConfig }>({ defaults: {}, fallback: DEFAULT_COST_CONFIG });
@@ -41,39 +53,47 @@ export const UsagePage: React.FC = () => {
     return () => { active = false; };
   }, []);
 
-  const usage = status?.tokenUsage ?? [];
-  const monthly = status?.monthlyTokenUsage ?? [];
-  const daily = status?.dailyTokenUsage ?? [];
-  const hourly = status?.hourlyTokenUsage ?? [];
+  const usage = useMemo(
+    () => usageForSection(status?.tokenUsage ?? [], models, 'llm'),
+    [status?.tokenUsage, models],
+  );
+  const monthly = useMemo(
+    () => bucketUsageForSection(status?.monthlyTokenUsage ?? [], models, 'llm'),
+    [status?.monthlyTokenUsage, models],
+  );
+  const daily = useMemo(
+    () => bucketUsageForSection(status?.dailyTokenUsage ?? [], models, 'llm'),
+    [status?.dailyTokenUsage, models],
+  );
+  const hourly = useMemo(
+    () => bucketUsageForSection(status?.hourlyTokenUsage ?? [], models, 'llm'),
+    [status?.hourlyTokenUsage, models],
+  );
+  const llmModels = useMemo(() => modelsForSection(models, 'llm'), [models]);
+  const dictationIds = useMemo(
+    () => new Set(models.filter(isDictationModel).map(model => model.id)),
+    [models],
+  );
+  const llmJobs = useMemo(() => jobs.filter(job => !dictationIds.has(job.model)), [jobs, dictationIds]);
 
   const modelNames = useMemo(() => {
     const names = new Set<string>([ALL_MODELS]);
     for (const row of usage) names.add(row.model);
-    for (const model of models) names.add(model.id);
+    for (const model of llmModels) names.add(model.id);
     return Array.from(names);
-  }, [usage, models]);
+  }, [usage, llmModels]);
 
   useEffect(() => {
     if (!modelNames.includes(selectedModel)) setSelectedModel(ALL_MODELS);
   }, [modelNames, selectedModel]);
 
   const selectedCost = getCostConfigForModel(selectedModel, saved, defaults.defaults, defaults.fallback);
-  const portfolioCost = getCostConfigForModel(ALL_MODELS, saved, defaults.defaults, defaults.fallback);
-
   const series = useMemo(
-    () => buildTokenSeries(jobs, selectedModel, selectedCost, monthly, saved, defaults.defaults, defaults.fallback, range, daily, hourly),
-    [jobs, selectedModel, selectedCost, monthly, saved, defaults, range, daily, hourly],
+    () => buildTokenSeries(llmJobs, selectedModel, selectedCost, monthly, saved, defaults.defaults, defaults.fallback, range, daily, hourly, Boolean(status?.dailyTokenUsageAllTime)),
+    [llmJobs, selectedModel, selectedCost, monthly, saved, defaults, range, daily, hourly, status?.dailyTokenUsageAllTime],
   );
   const seriesUsage = useMemo(() => tokenUsageFromSeries(selectedModel, series), [selectedModel, series]);
-
-  const portfolioCostAvoided = useMemo(
-    () => estimatePortfolioCostAvoided(usage, saved, defaults.defaults, defaults.fallback),
-    [usage, saved, defaults],
-  );
-  const roiRemaining = Math.max(0, portfolioCost.breakEvenTarget - portfolioCostAvoided);
-  const roiProgress = portfolioCost.breakEvenTarget > 0
-    ? Math.min(100, (portfolioCostAvoided / portfolioCost.breakEvenTarget) * 100)
-    : 0;
+  const rangeCost = series.cost.reduce((sum, value) => sum + value, 0);
 
   const persistConfig = (model: string, next: ModelCostConfig) => {
     const merged = {
@@ -87,55 +107,33 @@ export const UsagePage: React.FC = () => {
   return (
     <div className="space-y-4">
       <Panel>
-        <SectionTitle title="Token usage & cost" aside={TOKEN_RANGE_LABELS[range]} />
-        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-5">
+        <SectionTitle title="LLM usage" aside={TOKEN_RANGE_LABELS[range]} />
+        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Stat label="Total tokens" value={formatTokenCount(seriesUsage.total)} />
           <Stat label="Prompt" value={formatTokenCount(seriesUsage.prompt)} />
           <Stat label="Output" value={formatTokenCount(seriesUsage.output)} />
-          <Stat label="Portfolio cost avoided" value={formatCurrency(portfolioCostAvoided)} tone="good" />
-          <Stat
-            label="ROI remaining"
-            value={portfolioCost.breakEvenTarget > 0 ? formatCurrency(roiRemaining) : 'Set target'}
-            tone={roiRemaining === 0 && portfolioCost.breakEvenTarget > 0 ? 'good' : 'warn'}
-          />
+          <Stat label="Estimated API cost" value={formatCurrency(rangeCost)} tone="good" />
         </div>
 
-        <div className="mt-3 flex flex-wrap gap-1 rounded-lg border border-white/10 bg-[#07101d] p-1 text-xs">
-          {(Object.keys(TOKEN_RANGE_LABELS) as TokenRange[]).map(value => (
-            <button
-              key={value}
-              type="button"
-              className={`rounded-md px-3 py-1.5 font-medium transition ${range === value ? 'bg-queue-blue text-white' : 'text-text-muted hover:bg-white/5 hover:text-text-primary'}`}
-              onClick={() => setRange(value)}
-            >
-              {TOKEN_RANGE_LABELS[value]}
-            </button>
-          ))}
-        </div>
+        <label className="mt-4 block max-w-sm text-xs text-text-secondary">
+          <span className="mb-1 block text-text-muted">Usage model</span>
+          <select
+            className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
+            value={selectedModel}
+            onChange={event => setSelectedModel(event.target.value)}
+          >
+            {modelNames.map(model => <option key={model} value={model}>{model}</option>)}
+          </select>
+        </label>
+        <div className="mt-3"><UsageRangeTabs value={range} onChange={setRange} /></div>
 
-        {portfolioCost.breakEvenTarget > 0 && (
-          <div className="mt-3">
-            <div className="mb-1 flex justify-between text-xs text-text-muted">
-              <span>Portfolio break-even progress</span>
-              <span>{Math.round(roiProgress)}%</span>
-            </div>
-            <ProgressBar percent={roiProgress} tone="good" />
-          </div>
-        )}
+        {series.total.some(value => value > 0)
+          ? <TokenUsageGraph series={series} />
+          : <p className="border-y border-dashed border-border-slate py-8 text-center text-sm text-text-muted">No usage recorded for this range.</p>}
 
-        <TokenUsageGraph series={series} />
-
-        <div className="mt-4 grid gap-3 rounded-lg border border-white/10 bg-[#07101d] p-3 lg:grid-cols-[1.15fr_1fr_1fr_1fr]">
-          <label className="min-w-0 text-xs text-text-secondary">
-            <span className="mb-1 block text-text-muted">Model</span>
-            <select
-              className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
-              value={selectedModel}
-              onChange={event => setSelectedModel(event.target.value)}
-            >
-              {modelNames.map(model => <option key={model} value={model}>{model}</option>)}
-            </select>
-          </label>
+        <details className="mt-4 border-t border-border-slate pt-3">
+          <summary className="cursor-pointer text-sm font-medium text-text-secondary hover:text-text-primary">Cost assumptions</summary>
+          <div className="mt-3 grid gap-3 lg:grid-cols-2">
           <label className={`min-w-0 text-xs text-text-secondary ${selectedModel === ALL_MODELS ? 'opacity-50' : ''}`}>
             <span className="mb-1 block text-text-muted">Prompt $/1M</span>
             <input
@@ -156,22 +154,14 @@ export const UsagePage: React.FC = () => {
               onChange={event => persistConfig(selectedModel, { ...selectedCost, outputPerMillion: Number(event.target.value) || 0 })}
             />
           </label>
-          <label className="min-w-0 text-xs text-text-secondary">
-            <span className="mb-1 block text-text-muted">Portfolio break-even $</span>
-            <input
-              className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
-              type="number" min="0" step="1"
-              value={portfolioCost.breakEvenTarget}
-              onChange={event => persistConfig(ALL_MODELS, { ...portfolioCost, breakEvenTarget: Number(event.target.value) || 0 })}
-            />
-          </label>
-          <p className="text-xs text-text-muted lg:col-span-4">
+          <p className="text-xs text-text-muted lg:col-span-2">
             {selectedModel === ALL_MODELS
-              ? 'Portfolio cost avoided uses each model\'s persisted tokens and saved per-model API prices; the break-even target applies to the whole tracked portfolio.'
-              : `The token graph and price fields are for ${compactModel(selectedModel)}. Headline ROI always uses all tracked models and the portfolio break-even target.`}
+              ? 'Estimated API cost applies saved per-model comparison prices to persisted local token usage for the selected range. It is an estimate, not a measured charge.'
+              : `The headline, graph, and price fields are for ${compactModel(selectedModel)} in the selected range.`}
             {selectedModel !== ALL_MODELS && selectedCost.source ? ` Default source: ${selectedCost.source}.` : ''}
           </p>
-        </div>
+          </div>
+        </details>
       </Panel>
 
       <Panel>
@@ -189,7 +179,7 @@ export const UsagePage: React.FC = () => {
                   <th className="py-2 pr-4 font-medium">Output</th>
                   <th className="py-2 pr-4 font-medium">Avg t/s</th>
                   <th className="py-2 pr-4 font-medium">Peak t/s</th>
-                  <th className="py-2 font-medium">Cost avoided</th>
+                  <th className="py-2 font-medium">Est. API cost</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
@@ -250,7 +240,7 @@ const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
               preserveAspectRatio="none"
               className="h-[150px] w-full overflow-visible"
               role="img"
-              aria-label="token usage graph"
+              aria-label="Token usage over time. A data table follows the chart."
               onMouseMove={handlePointerMove}
               onMouseLeave={handlePointerLeave}
             >
@@ -308,15 +298,30 @@ const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
         <Legend color="#60A5FA" label="Total Tokens" />
         <Legend color="#34D399" label="Prompt Tokens" />
         <Legend color="#A78BFA" label="Output Tokens" />
-        <Legend color="#22C55E" label="Est. Cost Avoided (USD)" dashed />
+        <Legend color="#22C55E" label="Estimated API cost (USD)" dashed />
       </div>
+      <table className="sr-only">
+        <caption>Token usage chart values</caption>
+        <thead><tr><th>Period</th><th>Total tokens</th><th>Prompt tokens</th><th>Output tokens</th><th>Estimated API cost</th></tr></thead>
+        <tbody>
+          {series.months.map((month, index) => (
+            <tr key={month}>
+              <th>{month}</th>
+              <td>{series.total[index]}</td>
+              <td>{series.prompt[index]}</td>
+              <td>{series.output[index]}</td>
+              <td>{series.cost[index]}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 };
 
 const Legend: React.FC<{ color: string; label: string; dashed?: boolean }> = ({ color, label, dashed }) => (
   <span className="inline-flex items-center gap-2">
-    <span className="h-0.5 w-6" style={{ background: dashed ? `repeating-linear-gradient(90deg, ${color} 0 8px, transparent 8px 13px)` : color }} />
+    <span className={`w-6 ${dashed ? 'border-t-2 border-dashed' : 'h-0.5'}`} style={dashed ? { borderColor: color } : { background: color }} />
     {label}
   </span>
 );
