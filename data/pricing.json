@@ -1,0 +1,43 @@
+[
+  {
+    "completion_price_per_million": 1.35,
+    "currency": "USD",
+    "equivalent_api_model": null,
+    "model_name": "default",
+    "prompt_price_per_million": 0.55
+  },
+  {
+    "completion_price_per_million": 0.6,
+    "currency": "USD",
+    "equivalent_api_model": "Nemotron-4-Mini-4B-Instruct",
+    "model_name": "nvidia-nemotron-3-nano-4b",
+    "prompt_price_per_million": 0.2
+  },
+  {
+    "completion_price_per_million": 0.9,
+    "currency": "USD",
+    "equivalent_api_model": "Equivalent API model",
+    "model_name": "qwen3.6-35b-a3b",
+    "prompt_price_per_million": 0.14
+  },
+  {
+    "billing_unit": "audio_minute",
+    "completion_price_per_million": 0,
+    "currency": "USD",
+    "equivalent_api_model": "OpenAI whisper-1",
+    "model_name": "parakeet-tdt-0.6b-v3",
+    "price_per_unit": 0.006,
+    "prompt_price_per_million": 0,
+    "source_url": "https://developers.openai.com/api/docs/models/whisper-1"
+  },
+  {
+    "billing_unit": "million_characters",
+    "completion_price_per_million": 0,
+    "currency": "USD",
+    "equivalent_api_model": "OpenAI tts-1",
+    "model_name": "supertonic-3",
+    "price_per_unit": 15,
+    "prompt_price_per_million": 0,
+    "source_url": "https://developers.openai.com/api/docs/models/tts-1"
+  }
+]

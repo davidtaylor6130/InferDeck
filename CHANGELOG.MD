@@ -6,6 +6,8 @@
 - **Windows release build setup** now takes the pnpm version exclusively from
   the root `packageManager` declaration, preventing the release workflow from
   aborting on conflicting pnpm 9 and pnpm 10 inputs.
+- **Release packaging** now tracks and includes the default API-equivalent
+  pricing table while runtime databases and usage logs remain ignored.
 
 ---
 

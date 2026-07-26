@@ -84,7 +84,8 @@ config/gateway.local.yaml
 *.rpm
 *.example
 /.UAM
-/data
+/data/*
+!/data/pricing.json
 
 # Legacy code archive
 .legacy/
