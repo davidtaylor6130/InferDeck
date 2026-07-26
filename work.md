@@ -669,3 +669,75 @@ existing SQL usage ledger retained.
 - A subsequent interactive elevation was accepted. The same guarded helper
   completed successfully, deployed the matching v0.5.3 gateway and dashboard,
   and passed the complete post-cutover verification recorded above.
+
+### 2026-07-26 Qwen3.6-27B MTP download and measured benchmark
+
+- Resolved the required speculative-decoding artifact to the public
+  `unsloth/Qwen3.6-27B-MTP-GGUF` repository rather than substituting another
+  model or quant.
+- The live C: volume had only 1.51 GB free, so the model was downloaded
+  resumably to the NVMe-backed E: model store. The existing non-MTP model in
+  `C:\InferDeck\models` was not modified.
+- Final artifact:
+  - path:
+    `E:\InferDeck\models\unsloth\Qwen3.6-27B-MTP-GGUF\Qwen3.6-27B-Q4_K_M.gguf`;
+  - exact size: 17,106,773,120 bytes;
+  - SHA-256:
+    `A7CBD3ECC0E3F9B333EDEE61AE66BC87ED713C5D49587A8355814722ED329E0F`;
+  - the completed file was promoted from its partial-download name only after
+    both size and SHA-256 matched the upstream Hugging Face metadata.
+- Benchmarked the downloaded model with the installed llama.cpp b9276 Vulkan
+  runtime on the AMD Radeon AI PRO R9700 through an isolated localhost sidecar
+  on port 11435. The live InferDeck gateway remained on port 11434, idle, and
+  its production SQL ledger remained unchanged at 6,949 requests and
+  262,846,499 tokens.
+- Corrected an exploratory benchmark before accepting its results:
+  `--kv-unified` changes the relationship between total and per-sequence
+  context. The authoritative matrix therefore used separated KV geometry with
+  400,000 total context tokens, four slots, and 100,000 context tokens per
+  slot.
+- All authoritative profiles used Q4/Q4 target KV, flash attention, all model
+  layers on the GPU, a 2,048-token batch, fixed seed 42, real model inference,
+  three exact-answer quality probes, two sustained single-request workloads,
+  and four concurrent prose generations.
+- Best safe MTP profile:
+  - speculative method: `draft-mtp`;
+  - draft depth: two tokens;
+  - draft probability floor: zero;
+  - micro-batch: 512;
+  - quality: three of three probes passed;
+  - repeated deterministic workload: 41.40 output tokens per second;
+  - technical-prose workload: 47.71 output tokens per second;
+  - sustained single-request average: 44.56 output tokens per second;
+  - four-request aggregate while MTP remained enabled: 46.69 output tokens
+    per second;
+  - draft acceptance: 41.15 percent on the repeat workload, 55.37 percent on
+    prose, and 51.99 percent across the parallel workload;
+  - model load time: 8,702.19 ms;
+  - actual peak VRAM: 27,354.36 MB;
+  - actual reserve: 4,667.34 MB, or 14.58 percent.
+- The 512-token micro-batch is material: the same depth-two MTP profile with a
+  2,048-token micro-batch peaked at 30,765.82 MB and left only 3.92 percent
+  reserve. It was rejected despite reaching a similar 43.97 single-request
+  average.
+- Draft depth one averaged 41.98 output tokens per second for a single request,
+  only 42.53 aggregate under four-way load, and left 5.80 percent reserve.
+  Draft depth three was slower than depth two and left still less headroom.
+- Matching non-speculative control with the same downloaded MTP GGUF and
+  512-token micro-batch:
+  - quality: three of three probes passed;
+  - sustained single-request average: 32.41 output tokens per second;
+  - four-request aggregate: 79.42 output tokens per second;
+  - model load time: 8,152.85 ms;
+  - actual peak VRAM: 25,046.34 MB;
+  - actual reserve: 6,975.36 MB, or 21.78 percent.
+- The measured result supports a concurrency-aware implementation:
+  depth-two MTP is beneficial for one active request, while ordinary
+  continuous batching is substantially faster once multiple requests are
+  active. InferDeck does not yet expose llama.cpp speculative decoding, and
+  the installed b9276 server compiles out per-request speculative-parameter
+  changes, so a dynamic in-process switch has not yet been implemented or
+  claimed as measured.
+- No live profile, service binary, YAML, model registry, or resident production
+  model was changed by this download and benchmark. All benchmark
+  `llama-server.exe` processes were stopped after their exact runs.
