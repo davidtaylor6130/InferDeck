@@ -978,3 +978,9 @@ existing SQL usage ledger retained.
   - `gemma-4-31b`: 65,536 context, 29,000 MB, one slot and only one historical
     production request; not recommended as a default without more quality and
     performance evidence.
+- Published the reviewed local history to `origin/alpha-v2` and opened draft
+  pull request
+  `https://github.com/davidtaylor6130/InferDeck/pull/63` against `main`.
+  GitHub reports the PR conflict-free and mergeable. The repository did not
+  attach a pull-request workflow run to the head commit, so the complete local
+  build/test gate above is the recorded verification evidence.
