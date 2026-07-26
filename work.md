@@ -928,7 +928,10 @@ existing SQL usage ledger retained.
   - corrected the project OpenCode catalog from 40,960 to 100,000 context
     tokens for `qwen3.6-27b`;
   - added the installed `qwen3-coder-next` 262,144-context model to the project
-    OpenCode catalog.
+    OpenCode catalog;
+  - normalized project OpenCode model keys and defaults to InferDeck's
+    canonical bare IDs, removing duplicate `:latest` entries from the merged
+    `opencode models inferdeck` catalog.
 - Public-tree secret-pattern review found only the deliberately fake
   `sk-inferdeck-local-dev-token-do-not-use-in-prod` fixture already used by
   authentication tests; no real private key or provider token was found in the
