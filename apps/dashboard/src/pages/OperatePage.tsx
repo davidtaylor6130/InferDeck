@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { parseDocument } from 'yaml';
 import {
   getConfig, optimizeProfile, saveActiveConfig, waitForActiveConfig,
-  type ConfigDocument, type ProfileOptimizationResult,
+  type ConfigDocument, type ProfileOptimizationCandidate, type ProfileOptimizationResult,
 } from '../api';
 import { Badge, Button, EmptyState, Panel, SectionTitle, Stat } from '../components/ui';
 import {
@@ -19,6 +19,30 @@ import { MediaJobsPanel } from './MediaJobsPanel';
 
 const inputClass = 'h-9 w-full rounded border border-white/10 bg-[#07101d] px-2 text-sm text-text-primary';
 type ConfigValue = string | number | boolean | null;
+type EditingModel = { model: ModelInfo; autoOptimize: boolean };
+
+export function stageProfileOptimization(
+  yaml: string,
+  modelId: string,
+  candidate: ProfileOptimizationCandidate,
+): string {
+  const document = parseDocument(yaml);
+  const registry = (document.toJS() as { model_registry?: unknown[] }).model_registry;
+  const index = Array.isArray(registry)
+    ? registry.findIndex(entry =>
+        entry && typeof entry === 'object' &&
+        (entry as { name?: string }).name === modelId)
+    : -1;
+  if (index < 0) throw new Error(`Model ${modelId} is not present in the active profile.`);
+  document.setIn(['model_registry', index, 'context_size'], candidate.contextPerSlot);
+  document.setIn(['model_registry', index, 'n_slots'], candidate.slots);
+  document.setIn(['gateway', 'cache_type_k'], candidate.cacheTypeK);
+  document.setIn(['gateway', 'cache_type_v'], candidate.cacheTypeV);
+  document.setIn(['gateway', 'n_batch'], candidate.nBatch);
+  document.setIn(['gateway', 'n_ubatch'], candidate.nUbatch);
+  document.setIn(['gateway', 'flash_attn'], candidate.flashAttention);
+  return document.toString();
+}
 
 export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }) => {
   const { models, status, stats, swap, swapTo, unload } = useGateway();
@@ -35,7 +59,7 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
   const lastUsed = Math.max(0, ...usage.map(row => row.lastTimestampUnixMs));
   const [pending, setPending] = useState('');
   const [error, setError] = useState('');
-  const [editing, setEditing] = useState<ModelInfo | null>(null);
+  const [editing, setEditing] = useState<EditingModel | null>(null);
 
   const load = async (model: string) => {
     setPending(`load:${model}`);
@@ -149,7 +173,12 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
                               {pending === `load:${model.id}` ? 'Starting...' : 'Load'}
                             </Button>
                           )}
-                          <Button onClick={() => setEditing(model)}>Model details</Button>
+                          {section === 'llm' && (
+                            <Button tone="blue" onClick={() => setEditing({ model, autoOptimize: true })}>
+                              Auto-optimize values
+                            </Button>
+                          )}
+                          <Button onClick={() => setEditing({ model, autoOptimize: false })}>Model details</Button>
                         </div>
                       </td>
                     </tr>
@@ -174,7 +203,14 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
       )}
 
       {section === 'dictation' && <MediaJobsPanel showEmpty />}
-      {editing && <ModelConfigDialog model={editing} section={section} onClose={() => setEditing(null)} />}
+      {editing && (
+        <ModelConfigDialog
+          model={editing.model}
+          section={section}
+          autoOptimize={editing.autoOptimize}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </div>
   );
 };
@@ -182,8 +218,9 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
 const ModelConfigDialog: React.FC<{
   model: ModelInfo;
   section: DashboardSection;
+  autoOptimize: boolean;
   onClose: () => void;
-}> = ({ model, section, onClose }) => {
+}> = ({ model, section, autoOptimize, onClose }) => {
   const { status } = useGateway();
   const [config, setConfig] = useState<ConfigDocument | null>(null);
   const [yaml, setYaml] = useState('');
@@ -192,6 +229,7 @@ const ModelConfigDialog: React.FC<{
   const [optimization, setOptimization] = useState<ProfileOptimizationResult | null>(null);
   const [dirty, setDirty] = useState(false);
   const [message, setMessage] = useState('');
+  const [autoStarted, setAutoStarted] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -294,7 +332,12 @@ const ModelConfigDialog: React.FC<{
     }
   };
 
-  const analyzeProfile = async () => {
+  const stageCandidate = (candidate: ProfileOptimizationCandidate) => {
+    setYaml(current => stageProfileOptimization(current, model.id, candidate));
+    setDirty(true);
+  };
+
+  const analyzeProfile = async (stageImmediately: boolean) => {
     setOptimizing(true);
     setOptimization(null);
     setMessage('');
@@ -310,7 +353,12 @@ const ModelConfigDialog: React.FC<{
         cacheTypeV: String(readRoot(['gateway', 'cache_type_v']) ?? 'q8_0'),
       });
       setOptimization(result);
-      setMessage('Profile analysis complete. Review the estimate before applying it to this draft.');
+      if (stageImmediately) {
+        stageCandidate(result.recommended);
+        setMessage('Auto-optimized values are staged in this draft. Review them, then save the active profile to hot apply.');
+      } else {
+        setMessage('Profile analysis complete. Review the estimate before applying it to this draft.');
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -319,24 +367,22 @@ const ModelConfigDialog: React.FC<{
   };
 
   const applyOptimization = () => {
-    if (!optimization || index < 0) return;
+    if (!optimization) return;
     try {
-      const candidate = optimization.recommended;
-      const document = parseDocument(yaml);
-      document.setIn(['model_registry', index, 'context_size'], candidate.contextPerSlot);
-      document.setIn(['model_registry', index, 'n_slots'], candidate.slots);
-      document.setIn(['gateway', 'cache_type_k'], candidate.cacheTypeK);
-      document.setIn(['gateway', 'cache_type_v'], candidate.cacheTypeV);
-      document.setIn(['gateway', 'n_batch'], candidate.nBatch);
-      document.setIn(['gateway', 'n_ubatch'], candidate.nUbatch);
-      document.setIn(['gateway', 'flash_attn'], candidate.flashAttention);
-      setYaml(document.toString());
-      setDirty(true);
+      stageCandidate(optimization.recommended);
       setMessage('Recommendation staged in this draft. Save active profile to validate and hot apply it.');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     }
   };
+
+  useEffect(() => {
+    if (!autoOptimize || autoStarted || !config || busy || index < 0) return;
+    setAutoStarted(true);
+    void analyzeProfile(true);
+  // The direct action is deliberately one-shot for each opened dialog.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOptimize, autoStarted, config, busy, index]);
 
   const save = async () => {
     if (!config) return;
@@ -464,9 +510,9 @@ const ModelConfigDialog: React.FC<{
                       <Button
                         tone="blue"
                         disabled={optimizing || busy || index < 0}
-                        onClick={() => { void analyzeProfile(); }}
+                        onClick={() => { void analyzeProfile(true); }}
                       >
-                        {optimizing ? 'Analysing...' : 'Analyse profile'}
+                        {optimizing ? 'Optimizing values...' : 'Auto-optimize values'}
                       </Button>
                     </div>
                     {(status?.queue.running ?? 0) > 0 || (status?.queue.queued ?? 0) > 0 ? (
@@ -495,8 +541,9 @@ const ModelConfigDialog: React.FC<{
                             : ' No persisted throughput baseline exists for this model yet.'}
                         </p>
                         <div className="mt-3 flex flex-wrap items-center gap-2">
-                          <Button onClick={applyOptimization}>Stage recommendation</Button>
+                          <Button onClick={applyOptimization}>Re-stage recommendation</Button>
                           <Badge label={`${optimization.candidates.length} safe candidates compared`} tone="info" />
+                          {dirty && <Badge label="Optimized values staged" tone="good" />}
                         </div>
                       </div>
                     )}

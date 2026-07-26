@@ -358,6 +358,26 @@ pass so this file remains a complete issue, PR, and release-note source.
 - Stage Recommendation updates only the open YAML draft. The user must still
   review and explicitly save the validated active profile before hot apply.
 
+### One-click usability follow-up
+
+- Added a visible `Auto-optimize values` action to every LLM row in Operate.
+- One click now:
+  - opens that model's Model Details dialog;
+  - calls the safety-gated profile analyser;
+  - compares the safe candidates;
+  - stages context per slot, slots, KV key/value precision, prompt batch,
+    physical batch, and flash attention in the active-profile draft.
+- The same action remains available inside Model Details for rerunning the
+  analysis after manual changes.
+- Saving remains a separate explicit action so optimization cannot silently
+  reload a headless production service.
+- Added a pure YAML-staging regression proving every recommended field is
+  written to the selected model and shared gateway settings.
+- Dashboard regression count after this follow-up: 31/31.
+- The production bundle contains the visible action. In-app browser automation
+  remains unavailable because its runtime rejects its own session metadata
+  before connecting; no standalone browser fallback was used.
+
 ### Optimization tests and proof
 
 - Added four optimizer regression tests covering:
@@ -395,7 +415,7 @@ pass so this file remains a complete issue, PR, and release-note source.
 - Release binary:
   `C:\Users\david\Documents\GitHub\InferDeck\build\bin\Release\inferdeck-gateway.exe`.
 - Release static bundle:
-  `index-HVe9AxzV.js` and `index-D68mq8yi.css`.
+  `index-DJvAaKNm.js` and `index-D68mq8yi.css`.
 - Guarded deployment helper:
   `C:\tmp\deploy-inferdeck-v053.ps1`.
 - Preflight before attempted cutover:
@@ -417,6 +437,12 @@ pass so this file remains a complete issue, PR, and release-note source.
     `C:/InferDeck/data/stats.db` with 6,925 requests.
 - No workaround was used to bypass Windows service permissions. Accepting the
   UAC prompt is the only remaining cutover action.
+- After the one-click follow-up, another guarded launch was attempted while
+  active/queued requests were zero, swap was idle, and GPU utilization was
+  approximately 1.7 percent. One idle model was resident.
+- The elevated helper again did not start or publish a result. The audit
+  confirmed no backup, no helper process, live v0.5.2 still running, a healthy
+  SQL database at `C:/InferDeck/data/stats.db`, and 6,926 persisted requests.
 
 ## GitHub issue candidates
 
@@ -489,3 +515,24 @@ recommendations without pretending estimates are measured benchmarks.
 
 Deployment and live verification are pending.
 The live v0.5.2 service remains healthy until the v0.5.3 UAC prompt is accepted.
+
+### 2026-07-26 direct v0.5.3 cutover audit
+
+- Executed `C:\tmp\deploy-inferdeck-v053.ps1` directly through the managed
+  elevated-command path after confirming zero active requests, zero queued
+  requests, no swap, and an idle resident model.
+- Windows Service Control Manager rejected both NSSM stop requests with
+  `OpenService(): Access is denied`; the command session has a medium-integrity
+  token and the LocalSystem service grants stop/start rights only to SYSTEM and
+  Administrators.
+- The guarded helper created
+  `C:\InferDeck\backups\v053-precutover-20260726-103300`, reported
+  `status=failed`, and completed its rollback path.
+- Post-attempt verification confirmed:
+  - the `InferDeck` NSSM service is still running;
+  - the live executable and dashboard hashes are unchanged from v0.5.2;
+  - `/v1/health` is healthy;
+  - the persistent database remains `C:/InferDeck/data/stats.db`;
+  - the lifetime request count remains available at 6,949.
+- No partial v0.5.3 installation was left live and no security boundary was
+  bypassed.

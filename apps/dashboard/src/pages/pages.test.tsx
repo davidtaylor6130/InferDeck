@@ -1,10 +1,12 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { parseDocument } from 'yaml';
 import { GatewayContext, type GatewayValue } from '../gateway';
 import { OverviewPage } from './OverviewPage';
 import { ModelsPage } from './ModelsPage';
-import { OperatePage } from './OperatePage';
+import { OperatePage, stageProfileOptimization } from './OperatePage';
+import type { ProfileOptimizationCandidate } from '../api';
 import { UsagePage } from './UsagePage';
 import { SystemPage } from './SystemPage';
 import type { StatsEvent, StatusPayload } from '../types';
@@ -104,8 +106,50 @@ describe('pages', () => {
     expect(dictation).toContain('Recording and playback stay in clients');
     expect(dictation).not.toContain('microphone');
     expect(llm).toContain('Model details');
+    expect(llm).toContain('Auto-optimize values');
     expect(llm).toContain('Saving applies the active profile automatically');
     expect(llm).not.toContain('next restart');
+  });
+
+  it('stages every optimized runtime value in the selected model profile', () => {
+    const candidate: ProfileOptimizationCandidate = {
+      contextPerSlot: 100_000,
+      slots: 4,
+      nBatch: 2048,
+      nUbatch: 1024,
+      cacheTypeK: 'q4_0',
+      cacheTypeV: 'q8_0',
+      flashAttention: 'auto',
+      estimatedVramMb: 24_000,
+      reserveVramMb: 8_000,
+      qualityScore: 0.98,
+      speedScore: 0.94,
+      parallelismScore: 1,
+      headroomScore: 0.95,
+      overallScore: 0.97,
+      fits: true,
+      reasons: [],
+    };
+    const updated = parseDocument(stageProfileOptimization(
+      'gateway:\n  n_batch: 512\n  n_ubatch: 512\n  cache_type_k: q8_0\n  cache_type_v: q8_0\n  flash_attn: off\nmodel_registry:\n  - name: qwen3.6-27b\n    context_size: 40960\n    n_slots: 1\n',
+      'qwen3.6-27b',
+      candidate,
+    )).toJS() as {
+      gateway: Record<string, unknown>;
+      model_registry: Array<Record<string, unknown>>;
+    };
+
+    expect(updated.model_registry[0]).toMatchObject({
+      context_size: 100_000,
+      n_slots: 4,
+    });
+    expect(updated.gateway).toMatchObject({
+      n_batch: 2048,
+      n_ubatch: 1024,
+      cache_type_k: 'q4_0',
+      cache_type_v: 'q8_0',
+      flash_attn: 'auto',
+    });
   });
 
   it('Models pages are section-specific catalogues rather than runtime controls', () => {
