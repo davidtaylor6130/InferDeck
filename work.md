@@ -587,6 +587,26 @@ existing SQL usage ledger retained.
   per second but peaked at 30,492.53 MB. Q8/Q8 peaked at 28,813.48 MB. Both
   were rejected because they left less than the required 12 percent VRAM
   reserve.
+- A follow-up stock `llama-bench` run isolated gateway/request overhead for the
+  same installed Qwen3.6-27B Q4_K_M GGUF:
+  - llama.cpp b9276, Vulkan, AMD Radeon AI PRO R9700;
+  - Q4/Q4 KV cache, flash attention on, all 27B layers on the GPU;
+  - 2,048/2,048 batch and micro-batch;
+  - five 256-token generation samples;
+  - sustained result: 32.62 +/- 0.04 tokens per second;
+  - 64-token prompt processing: 526.96 +/- 2.99 tokens per second.
+- The 32.62 tok/s stock result versus InferDeck's 30.42 tok/s end-to-end
+  result shows that ordinary one-token decoding has only about seven percent
+  headroom left. A 40-50 tok/s target therefore requires speculative/MTP
+  decoding or a materially smaller/lower-quality quant, not another batch-size
+  adjustment.
+- The installed standalone llama.cpp b9276 runtime advertises native
+  `draft-mtp` support. The currently installed non-MTP GGUF does not include
+  the required next-token prediction layer, and InferDeck's custom
+  continuous-batch scheduler does not yet expose llama.cpp speculative
+  decoding. The MTP-specific Q4_K_M replacement is approximately 17.5 GB and
+  must be benchmarked for real acceptance rate, long-session correctness, and
+  its additional draft-context VRAM before it can be recommended.
 - The first 27B pass revealed that short quality answers made first-token
   latency dominate the apparent speed. The speed path was corrected to use
   dedicated sustained generations, the candidate notes were switched from
