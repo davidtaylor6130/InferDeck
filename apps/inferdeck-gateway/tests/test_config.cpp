@@ -69,6 +69,34 @@ TEST_CASE("Repository gateway configuration keeps statistics in the installed ru
     CHECK(config.stats_db_path == "C:/InferDeck/data/stats.db");
 }
 
+TEST_CASE("Repository Qwen 27B profile enables the measured adaptive MTP settings",
+          "[config][mtp]") {
+    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "config" / "gateway.yml";
+    const auto config = load_config(path);
+    const auto qwen = std::find_if(
+        config.models.begin(), config.models.end(),
+        [](const auto& model) { return model.name == "qwen3.6-27b"; });
+    REQUIRE(qwen != config.models.end());
+    CHECK(qwen->gguf_path ==
+          "E:/InferDeck/models/unsloth/Qwen3.6-27B-MTP-GGUF/"
+          "Qwen3.6-27B-Q4_K_M.gguf");
+    CHECK(qwen->n_slots == 4);
+    CHECK(qwen->min_slots == 4);
+    CHECK(qwen->context_size == 100000);
+    CHECK(qwen->vram_required_mb == 29791);
+    REQUIRE(qwen->n_batch);
+    REQUIRE(qwen->n_ubatch);
+    CHECK(*qwen->n_batch == 2048);
+    CHECK(*qwen->n_ubatch == 2048);
+    CHECK(qwen->cache_type_k == "q4_0");
+    CHECK(qwen->cache_type_v == "q4_0");
+    CHECK(qwen->mtp_enabled);
+    CHECK(qwen->mtp_draft_tokens == 2);
+    CHECK(qwen->mtp_p_min == 0.0f);
+    CHECK(qwen->mtp_max_active_requests == 1);
+}
+
 TEST_CASE("Repository gateway configuration exposes bounded CPU speech models",
           "[config][speech-config]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
@@ -154,6 +182,30 @@ model_registry:
     gguf_path: model.gguf
     sampling:
       top_p: 1.5
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: bad-mtp-depth
+    gguf_path: model.gguf
+    speculative:
+      type: mtp
+      draft_tokens: 8
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: bad-mtp-window
+    gguf_path: model.gguf
+    n_slots: 2
+    speculative:
+      type: mtp
+      max_active_requests: 3
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: bad-model-batch
+    gguf_path: model.gguf
+    n_batch: 256
+    n_ubatch: 512
 )"));
 }
 

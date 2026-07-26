@@ -37,6 +37,7 @@
 #include "foundation/logging.hpp"
 #include "chat.h"
 #include "sampling.h"
+#include "speculative.h"
 #include <nlohmann/json.hpp>
 
 namespace inferdeck::llama_wrapper {
@@ -743,6 +744,14 @@ LlamaCppModel::~LlamaCppModel() {
   std::lock_guard lk(mtx_);
   for (auto& s : slots_) s.busy = false;
   slots_.clear();
+  if (speculative_) {
+    common_speculative_free(speculative_);
+    speculative_ = nullptr;
+  }
+  if (draft_ctx_) {
+    llama_free(draft_ctx_);
+    draft_ctx_ = nullptr;
+  }
   if (shared_ctx_) {
     llama_free(shared_ctx_);
     shared_ctx_ = nullptr;
@@ -783,7 +792,7 @@ Result<void> LlamaCppModel::load() {
     LOG_INFO("llama_system_info", "{}", sys_info);
   }
   LOG_INFO("llama_model_load_config",
-           "model={} path={} use_mmap={} use_mlock={} n_gpu_layers={} n_ctx={} n_slots={} n_batch={} n_ubatch={} flash_attn={} kv_offload={} op_offload={} cache_type_k={} cache_type_v={} swa_full={}",
+           "model={} path={} use_mmap={} use_mlock={} n_gpu_layers={} n_ctx={} n_slots={} n_batch={} n_ubatch={} flash_attn={} kv_offload={} op_offload={} cache_type_k={} cache_type_v={} mtp_enabled={} mtp_draft_tokens={} mtp_max_active_requests={} swa_full={}",
            info_.name,
            resolved_gguf_path_.string(),
            cfg_.use_mmap,
@@ -798,6 +807,9 @@ Result<void> LlamaCppModel::load() {
            cfg_.op_offload,
            cfg_.cache_type_k,
            cfg_.cache_type_v,
+           cfg_.mtp_enabled,
+           cfg_.mtp_draft_tokens,
+           cfg_.mtp_max_active_requests,
            cfg_.swa_full);
   log_memory_snapshot("llama_model_load_memory_before", info_.name);
 
@@ -832,6 +844,11 @@ Result<void> LlamaCppModel::load() {
   }
   auto ctx_res = init_shared_context_locked();
   if (!ctx_res.has_value()) {
+    if (speculative_) {
+      common_speculative_free(speculative_);
+      speculative_ = nullptr;
+    }
+    if (draft_ctx_) { llama_free(draft_ctx_); draft_ctx_ = nullptr; }
     if (shared_ctx_) { llama_free(shared_ctx_); shared_ctx_ = nullptr; }
     slots_.clear();
     llama_model_free(model_);
@@ -872,15 +889,20 @@ Result<void> LlamaCppModel::init_shared_context_locked() {
   cparams.embeddings  = info_.supports("embeddings");
   cparams.type_k      = cache_type_from_string(cfg_.cache_type_k);
   cparams.type_v      = cache_type_from_string(cfg_.cache_type_v);
+  cparams.n_rs_seq    = cfg_.mtp_enabled
+      ? static_cast<std::uint32_t>(std::max(1, cfg_.mtp_draft_tokens))
+      : 0;
 
   LOG_INFO("llama_shared_context_config",
            "model={} n_slots={} ctx_per_slot={} total_ctx={} n_seq_max={} "
            "n_batch={} n_ubatch={} flash_attn={} kv_offload={} op_offload={} "
-           "cache_type_k={} cache_type_v={} swa_full={}",
+           "cache_type_k={} cache_type_v={} mtp_enabled={} mtp_draft_tokens={} mtp_max_active_requests={} swa_full={}",
            info_.name, n_slots, ctx_per_slot, total_ctx, n_slots,
            cparams.n_batch, cparams.n_ubatch,
            cfg_.flash_attn, cfg_.kv_offload, cfg_.op_offload,
-           cfg_.cache_type_k, cfg_.cache_type_v, cfg_.swa_full);
+           cfg_.cache_type_k, cfg_.cache_type_v,
+           cfg_.mtp_enabled, cfg_.mtp_draft_tokens,
+           cfg_.mtp_max_active_requests, cfg_.swa_full);
 
   shared_ctx_ = llama_init_from_model(model_, cparams);
   if (shared_ctx_ == nullptr) {
@@ -890,13 +912,76 @@ Result<void> LlamaCppModel::init_shared_context_locked() {
                    std::to_string(total_ctx) + ")"));
   }
 
+  auto draft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
+  if (cfg_.mtp_enabled) {
+    auto draft_params = cparams;
+    draft_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+    draft_params.n_rs_seq = 0;
+    draft_params.n_ubatch = std::min<std::uint32_t>(
+        draft_params.n_ubatch, 512);
+    draft_ctx_ = llama_init_from_model(model_, draft_params);
+    if (draft_ctx_ == nullptr) {
+      return Result<void>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument,
+                     "MTP is enabled but the GGUF has no usable MTP head"));
+    }
+
+    (void)common_context_can_seq_rm(shared_ctx_);
+    draft_seq_rm_type = common_context_can_seq_rm(draft_ctx_);
+    if (draft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
+      return Result<void>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument,
+                     "MTP draft context does not support sequence removal"));
+    }
+
+    common_params_speculative params;
+    params.types = {COMMON_SPECULATIVE_TYPE_DRAFT_MTP};
+    params.draft.n_max = std::clamp(cfg_.mtp_draft_tokens, 1, 4);
+    params.draft.n_min = 0;
+    params.draft.p_min = std::clamp(cfg_.mtp_p_min, 0.0f, 1.0f);
+    params.draft.cache_type_k =
+        cache_type_from_string(cfg_.cache_type_k);
+    params.draft.cache_type_v =
+        cache_type_from_string(cfg_.cache_type_v);
+    params.draft.ctx_tgt = shared_ctx_;
+    params.draft.ctx_dft = draft_ctx_;
+    try {
+      speculative_ = common_speculative_init(
+          params, static_cast<std::uint32_t>(n_slots));
+    } catch (const std::exception& error) {
+      return Result<void>(std::unexpect,
+          make_error(ErrorCode::Internal,
+                     std::string("MTP initialization failed: ") +
+                     error.what()));
+    }
+    if (speculative_ == nullptr) {
+      return Result<void>(std::unexpect,
+          make_error(ErrorCode::Internal,
+                     "MTP initialization returned null"));
+    }
+    LOG_INFO("llama_mtp_initialized",
+             "model={} draft_tokens={} p_min={} max_active_requests={} draft_seq_rm_type={}",
+             info_.name,
+             params.draft.n_max,
+             params.draft.p_min,
+             cfg_.mtp_max_active_requests,
+             static_cast<int>(draft_seq_rm_type));
+  }
+
   slots_.clear();
   slots_.resize(n_slots);
 
   // Spawn the scheduler that owns the decode loop for this context.
   if (info_.supports("chat_completions")) {
     scheduler_ = std::make_unique<ContinuousBatchScheduler>(
-        shared_ctx_, model_, vocab_, cfg_.n_batch);
+        shared_ctx_,
+        draft_ctx_,
+        speculative_,
+        model_,
+        vocab_,
+        cfg_.n_batch,
+        cfg_.mtp_max_active_requests,
+        draft_seq_rm_type);
   }
 
   return Result<void>{};
@@ -913,6 +998,14 @@ Result<void> LlamaCppModel::unload() {
   log_memory_snapshot("llama_model_unload_memory_before", info_.name);
   for (auto& s : slots_) s.busy = false;
   slots_.clear();
+  if (speculative_) {
+    common_speculative_free(speculative_);
+    speculative_ = nullptr;
+  }
+  if (draft_ctx_) {
+    llama_free(draft_ctx_);
+    draft_ctx_ = nullptr;
+  }
   if (shared_ctx_) {
     llama_free(shared_ctx_);
     shared_ctx_ = nullptr;
@@ -1027,11 +1120,20 @@ Result<void> LlamaCppModel::reset_all_slots() noexcept {
       }
     }
   }
+  if (draft_ctx_) {
+    auto* mem = llama_get_memory(draft_ctx_);
+    if (mem) {
+      for (int i = 0; i < static_cast<int>(slots_.size()); ++i) {
+        llama_memory_seq_rm(mem, i, 0, -1);
+      }
+    }
+  }
   for (auto& s : slots_) {
     s.busy = false;
     s.last_prompt_tokens.clear();
     s.recurrent_checkpoint.reset();
     s.checkpoint_pos = 0;
+    s.mtp_cache_synced = true;
   }
   return Result<void>{};
 }
@@ -1453,6 +1555,7 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
     s.last_prompt_tokens   = slots_[slot_id].last_prompt_tokens;
     s.recurrent_checkpoint = slots_[slot_id].recurrent_checkpoint;
     s.checkpoint_pos       = slots_[slot_id].checkpoint_pos;
+    s.mtp_cache_synced     = slots_[slot_id].mtp_cache_synced;
   }
 
   common_sampler* smp = common_sampler_init(model_, s.sampling_params);
@@ -1515,6 +1618,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   task.recurrent_checkpoint = std::move(setup.recurrent_checkpoint);
   task.checkpoint_pos       = setup.checkpoint_pos;
   task.checkpoint_capture_pos = setup.checkpoint_capture_pos;
+  task.mtp_cache_synced    = setup.mtp_cache_synced;
   task.sampler             = setup.smp;   // scheduler takes ownership
   task.max_tokens          = setup.max_tokens;
   task.stop_tokens         = setup.stop_tokens;
@@ -1550,6 +1654,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
                                    decoded_ids.begin(), decoded_ids.end());
     slot.recurrent_checkpoint = std::move(task.out_recurrent_checkpoint);
     slot.checkpoint_pos       = task.out_checkpoint_pos;
+    slot.mtp_cache_synced     = task.out_mtp_cache_synced;
   }
 
   log_slot_release(info_.name,
@@ -1563,8 +1668,11 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   out.cached_prompt_tokens  = task.out_cached_prompt_tokens;
   out.completion_tokens     = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
-  if (out.completion_tokens > 0 && out.duration_ms > 0.0f)
-    out.tokens_per_second = (out.completion_tokens * 1000.0f) / out.duration_ms;
+  out.generation_duration_ms = task.out_generation_duration_ms > 0.0f
+      ? task.out_generation_duration_ms
+      : out.duration_ms;
+  out.tokens_per_second = detail::generation_tokens_per_second(
+      out.completion_tokens, out.generation_duration_ms);
   if (out.completion_tokens >= setup.max_tokens)
     out.finish_reason = "length";
 
@@ -1618,6 +1726,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   task.recurrent_checkpoint = std::move(setup.recurrent_checkpoint);
   task.checkpoint_pos      = setup.checkpoint_pos;
   task.checkpoint_capture_pos = setup.checkpoint_capture_pos;
+  task.mtp_cache_synced    = setup.mtp_cache_synced;
   task.sampler            = setup.smp;
   task.max_tokens         = setup.max_tokens;
   task.stop_tokens        = setup.stop_tokens;
@@ -1676,6 +1785,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
                                    decoded_ids.begin(), decoded_ids.end());
     slot.recurrent_checkpoint = std::move(task.out_recurrent_checkpoint);
     slot.checkpoint_pos       = task.out_checkpoint_pos;
+    slot.mtp_cache_synced     = task.out_mtp_cache_synced;
   }
 
   log_slot_release(info_.name,
@@ -1689,8 +1799,11 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   out.cached_prompt_tokens = task.out_cached_prompt_tokens;
   out.completion_tokens    = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
-  if (out.completion_tokens > 0 && out.duration_ms > 0.0f)
-    out.tokens_per_second = (out.completion_tokens * 1000.0f) / out.duration_ms;
+  out.generation_duration_ms = task.out_generation_duration_ms > 0.0f
+      ? task.out_generation_duration_ms
+      : out.duration_ms;
+  out.tokens_per_second = detail::generation_tokens_per_second(
+      out.completion_tokens, out.generation_duration_ms);
   if (out.completion_tokens >= setup.max_tokens)
     out.finish_reason = "length";
 

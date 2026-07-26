@@ -35,7 +35,15 @@ struct ModelInfo {
     int vram_fixed_mb{0};
     int vram_per_slot_mb{0};
     int context_size{65536};
+    std::optional<int> n_batch{};
+    std::optional<int> n_ubatch{};
+    std::string cache_type_k{};
+    std::string cache_type_v{};
     std::optional<int> n_gpu_layers{};
+    bool mtp_enabled{false};
+    int mtp_draft_tokens{2};
+    float mtp_p_min{0.0f};
+    int mtp_max_active_requests{1};
     bool has_vision{false};
     std::string reasoning_format{};
     std::string chat_template_path{};

@@ -60,7 +60,7 @@ void record_request(observability::Metrics* metrics,
     rec.slot_id = slot_id;
     if (metrics) metrics->record_request(rec);
     LOG_INFO("request_recorded",
-             "model={} status={} slot_id={} prompt_tokens={} cached_prompt_tokens={} completion_tokens={} duration_ms={} tps={}",
+             "model={} status={} slot_id={} prompt_tokens={} cached_prompt_tokens={} completion_tokens={} duration_ms={} generation_duration_ms={} tps={}",
              model_name,
              status_code,
              slot_id,
@@ -68,6 +68,7 @@ void record_request(observability::Metrics* metrics,
              result.cached_prompt_tokens,
              result.completion_tokens,
              result.duration_ms,
+             result.generation_duration_ms,
              result.tokens_per_second);
     if (stats_db) {
         stats_db->record_request({
@@ -90,6 +91,7 @@ void record_request(observability::Metrics* metrics,
             {"promptTokens", result.prompt_tokens},
             {"completionTokens", result.completion_tokens},
             {"durationMs", result.duration_ms},
+            {"generationDurationMs", result.generation_duration_ms},
             {"tokensPerSecond", result.tokens_per_second},
             {"status", status_code},
             {"inputAudioSeconds", input_audio_seconds},

@@ -18,6 +18,7 @@ struct llama_model;
 struct llama_context;
 struct llama_vocab;
 struct llama_sampler;
+struct common_speculative;
 struct common_chat_templates;
 using llama_token = int32_t;
 
@@ -45,6 +46,10 @@ struct LlamaCppConfig {
   bool op_offload{true};
   std::string cache_type_k{"q8_0"};
   std::string cache_type_v{"q8_0"};
+  bool mtp_enabled{false};
+  int mtp_draft_tokens{2};
+  float mtp_p_min{0.0f};
+  int mtp_max_active_requests{1};
   bool swa_full{false};
   bool truncate_prompt{true};
   std::string chat_template{};
@@ -103,6 +108,7 @@ private:
     std::vector<int> last_prompt_tokens;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
     int checkpoint_pos{0};
+    bool mtp_cache_synced{true};
   };
 
   inferdeck::foundation::Result<void> init_shared_context_locked();
@@ -126,6 +132,7 @@ private:
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
     int checkpoint_pos{0};
     int checkpoint_capture_pos{0};
+    bool mtp_cache_synced{true};
   };
   inferdeck::foundation::Result<PredictSetup> prepare_inference(
       int slot_id, const inferdeck::model::InferenceRequest& req);
@@ -143,6 +150,8 @@ private:
   const llama_vocab* vocab_{nullptr};
   // Shared context: n_ctx = context_size * n_slots, n_seq_max = n_slots
   llama_context* shared_ctx_{nullptr};
+  llama_context* draft_ctx_{nullptr};
+  common_speculative* speculative_{nullptr};
   std::unique_ptr<ContinuousBatchScheduler> scheduler_;
   std::vector<SlotState> slots_;
   std::filesystem::path resolved_gguf_path_;

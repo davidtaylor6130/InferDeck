@@ -9,6 +9,8 @@ namespace inferdeck::gateway {
 
 namespace {
 
+constexpr double minimum_vram_reserve_mb = 2048.0;
+
 std::int64_t unix_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -265,7 +267,8 @@ void ProfileBenchmarkManager::run(
                 trial.candidate.reserve_vram_mb =
                     input.total_vram_mb - trial.metrics.peak_vram_mb;
                 trial.candidate.fits =
-                    trial.metrics.peak_vram_mb <= input.total_vram_mb * 0.88;
+                    trial.candidate.reserve_vram_mb >=
+                        minimum_vram_reserve_mb;
                 trial.candidate.quality_score =
                     trial.metrics.quality_score;
                 trial.candidate.reasons = {
@@ -364,7 +367,7 @@ void ProfileBenchmarkManager::run(
         }
         if (!snapshot().has_recommendation) {
             finish("failed",
-                   "Measured trials produced no candidate with 12 percent VRAM reserve",
+                   "Measured trials produced no candidate with 2048 MB VRAM reserve",
                    restored);
             return;
         }

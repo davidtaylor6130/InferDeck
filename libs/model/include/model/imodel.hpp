@@ -77,6 +77,7 @@ struct InferenceResult {
     int cached_prompt_tokens{0};
     int completion_tokens{0};
     float duration_ms{0.0f};
+    float generation_duration_ms{0.0f};
     float tokens_per_second{0.0f};
     std::vector<std::string> tool_calls_json{};
     std::vector<ToolCall> tool_calls{};

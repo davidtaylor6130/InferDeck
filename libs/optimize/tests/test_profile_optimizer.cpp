@@ -33,7 +33,7 @@ TEST_CASE("Profile optimizer produces a fitting quality-first recommendation",
     REQUIRE_FALSE(result.measured);
     REQUIRE(result.recommended.fits);
     CHECK(result.quality_weight == 0.60);
-    CHECK(result.recommended.estimated_vram_mb <= 32768.0 * 0.88);
+    CHECK(result.recommended.estimated_vram_mb <= 32768.0 - 2048.0);
     CHECK(result.recommended.context_per_slot == 100000);
     CHECK(result.recommended.slots == 4);
     REQUIRE_FALSE(result.candidates.empty());
@@ -78,7 +78,7 @@ TEST_CASE("Profile optimizer demotes candidates that exceed the safety reserve",
     const auto result = recommend_profile(input);
 
     REQUIRE(result.recommended.fits);
-    CHECK(result.recommended.reserve_vram_mb >= input.total_vram_mb * 0.12);
+    CHECK(result.recommended.reserve_vram_mb >= 2048.0);
     for (std::size_t index = 1; index < result.candidates.size(); ++index) {
         CHECK(result.candidates[index - 1].overall_score >=
               result.candidates[index].overall_score);

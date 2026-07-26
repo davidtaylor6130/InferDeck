@@ -121,12 +121,21 @@ model_registry:
 
   - name: "qwen3.6-27b"
     family: "qwen3.6"
-    gguf_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
+    gguf_path: "E:/InferDeck/models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
     mmproj_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/mmproj-BF16.gguf"
-    n_slots: 1
-    min_slots: 1
-    vram_required_mb: 24000
-    context_size: 40960
+    n_slots: 4
+    min_slots: 4
+    vram_required_mb: 29791
+    context_size: 100000
+    n_batch: 2048
+    n_ubatch: 2048
+    cache_type_k: "q4_0"
+    cache_type_v: "q4_0"
+    speculative:
+      type: "mtp"
+      draft_tokens: 2
+      p_min: 0.0
+      max_active_requests: 1
     has_vision: false
     # Corrected Qwen3.6 chat template: avoids the "No user query found in messages."
     # crash during multi-step tool calling (e.g. OpenCode). See config/templates/.

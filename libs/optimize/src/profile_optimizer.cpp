@@ -10,6 +10,8 @@ namespace inferdeck::optimize {
 
 namespace {
 
+constexpr double minimum_vram_reserve_mb = 2048.0;
+
 double cache_memory_factor(const std::string& type) {
     if (type == "q4_0") return 0.5;
     if (type == "q8_0") return 1.0;
@@ -121,7 +123,8 @@ ProfileRecommendation recommend_profile(const ProfileInput& input) {
                     candidate.reserve_vram_mb =
                         input.total_vram_mb - candidate.estimated_vram_mb;
                     candidate.fits =
-                        candidate.estimated_vram_mb <= input.total_vram_mb * 0.88;
+                        candidate.reserve_vram_mb >=
+                            minimum_vram_reserve_mb;
 
                     const double kv_quality =
                         (cache_quality(cache_k) + cache_quality(cache_v)) / 2.0;
@@ -192,7 +195,7 @@ ProfileRecommendation recommend_profile(const ProfileInput& input) {
               });
     if (result.candidates.empty() || !result.candidates.front().fits) {
         throw std::runtime_error(
-            "no candidate preserves the required 12 percent VRAM reserve");
+            "no candidate preserves the required 2048 MB VRAM reserve");
     }
     if (result.candidates.size() > 8) result.candidates.resize(8);
     result.recommended = result.candidates.front();

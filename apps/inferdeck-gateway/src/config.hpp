@@ -242,6 +242,31 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "model context_size must be positive: " + name);
                 }
+                const int model_batch = entry["n_batch"]
+                    ? entry["n_batch"].as<int>()
+                    : (root["gateway"] && root["gateway"]["n_batch"]
+                        ? root["gateway"]["n_batch"].as<int>() : 512);
+                const int model_ubatch = entry["n_ubatch"]
+                    ? entry["n_ubatch"].as<int>()
+                    : (root["gateway"] && root["gateway"]["n_ubatch"]
+                        ? root["gateway"]["n_ubatch"].as<int>() : 512);
+                if (model_batch < 1 || model_ubatch < 1 ||
+                    model_ubatch > model_batch) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "invalid model batch settings: " + name);
+                }
+                const std::unordered_set<std::string> model_cache_types{
+                    "f32", "f16", "bf16", "q8_0", "q4_0", "q4_1",
+                    "q5_0", "q5_1", "iq4_nl"};
+                for (const char* key : {"cache_type_k", "cache_type_v"}) {
+                    if (entry[key] &&
+                        !model_cache_types.contains(entry[key].as<std::string>())) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "model " + std::string(key) +
+                            " is unsupported: " + name);
+                    }
+                }
                 for (const char* key : {"vram_required_mb", "vram_fixed_mb",
                                         "vram_per_slot_mb"}) {
                     if (entry[key] && entry[key].as<int>() < 0) {
@@ -277,6 +302,48 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 if (entry["has_vision"] && entry["has_vision"].as<bool>()) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "vision input is not implemented for: " + name);
+                }
+                if (entry["speculative"]) {
+                    const auto speculative = entry["speculative"];
+                    if (!speculative.IsMap()) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "model speculative settings must be a map: " + name);
+                    }
+                    const std::string type = speculative["type"]
+                        ? speculative["type"].as<std::string>() : "none";
+                    if (type != "none" && type != "mtp") {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "unsupported speculative type for model: " + name);
+                    }
+                    if (type == "mtp" &&
+                        (runtime != "llama_cpp" || modality != "text")) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "MTP requires a llama_cpp text model: " + name);
+                    }
+                    const int draft_tokens = speculative["draft_tokens"]
+                        ? speculative["draft_tokens"].as<int>() : 2;
+                    if (draft_tokens < 1 || draft_tokens > 4) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "MTP draft_tokens must be between 1 and 4: " + name);
+                    }
+                    const float p_min = speculative["p_min"]
+                        ? speculative["p_min"].as<float>() : 0.0f;
+                    if (!std::isfinite(p_min) || p_min < 0.0f || p_min > 1.0f) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "MTP p_min must be between 0 and 1: " + name);
+                    }
+                    const int max_active = speculative["max_active_requests"]
+                        ? speculative["max_active_requests"].as<int>() : 1;
+                    if (max_active < 1 || max_active > slots) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "MTP max_active_requests exceeds slot bounds: " + name);
+                    }
                 }
                 auto sampling = validate_sampling_node(
                     entry["sampling"], "model_registry." + name + ".sampling");
@@ -413,8 +480,27 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             info.vram_per_slot_mb = m["vram_per_slot_mb"] ? m["vram_per_slot_mb"].as<int>() : 0;
             info.context_size =
                 m["context_size"] ? m["context_size"].as<int>() : 65536;
+            if (m["n_batch"]) info.n_batch = m["n_batch"].as<int>();
+            if (m["n_ubatch"]) info.n_ubatch = m["n_ubatch"].as<int>();
+            info.cache_type_k =
+                m["cache_type_k"] ? m["cache_type_k"].as<std::string>() : "";
+            info.cache_type_v =
+                m["cache_type_v"] ? m["cache_type_v"].as<std::string>() : "";
             if (m["n_gpu_layers"] && !m["n_gpu_layers"].IsNull()) {
                 info.n_gpu_layers = m["n_gpu_layers"].as<int>();
+            }
+            if (m["speculative"] && m["speculative"].IsMap()) {
+                const auto speculative = m["speculative"];
+                info.mtp_enabled =
+                    speculative["type"] &&
+                    speculative["type"].as<std::string>() == "mtp";
+                info.mtp_draft_tokens = speculative["draft_tokens"]
+                    ? speculative["draft_tokens"].as<int>() : 2;
+                info.mtp_p_min = speculative["p_min"]
+                    ? speculative["p_min"].as<float>() : 0.0f;
+                info.mtp_max_active_requests =
+                    speculative["max_active_requests"]
+                        ? speculative["max_active_requests"].as<int>() : 1;
             }
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
             info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";

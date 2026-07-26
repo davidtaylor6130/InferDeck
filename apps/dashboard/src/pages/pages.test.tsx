@@ -142,12 +142,12 @@ describe('pages', () => {
     expect(updated.model_registry[0]).toMatchObject({
       context_size: 100_000,
       n_slots: 4,
-    });
-    expect(updated.gateway).toMatchObject({
       n_batch: 2048,
       n_ubatch: 1024,
       cache_type_k: 'q4_0',
       cache_type_v: 'q8_0',
+    });
+    expect(updated.gateway).toMatchObject({
       flash_attn: 'auto',
     });
   });

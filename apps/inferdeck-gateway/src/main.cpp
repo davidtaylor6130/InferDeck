@@ -267,8 +267,12 @@ inferdeck::llama_wrapper::LlamaCppConfig make_llama_config(
     const model::ModelInfo& info,
     const inferdeck::optimize::ProfileCandidate* candidate = nullptr) {
     inferdeck::llama_wrapper::LlamaCppConfig result;
-    result.n_batch = candidate ? candidate->n_batch : cfg.n_batch;
-    result.n_ubatch = candidate ? candidate->n_ubatch : cfg.n_ubatch;
+    result.n_batch = candidate
+        ? candidate->n_batch
+        : info.n_batch.value_or(cfg.n_batch);
+    result.n_ubatch = candidate
+        ? candidate->n_ubatch
+        : info.n_ubatch.value_or(cfg.n_ubatch);
     result.use_mmap = cfg.use_mmap;
     result.use_mlock = cfg.use_mlock;
     result.n_gpu_layers =
@@ -278,9 +282,17 @@ inferdeck::llama_wrapper::LlamaCppConfig make_llama_config(
     result.kv_offload = cfg.kv_offload;
     result.op_offload = cfg.op_offload;
     result.cache_type_k =
-        candidate ? candidate->cache_type_k : cfg.cache_type_k;
+        candidate
+            ? candidate->cache_type_k
+            : (info.cache_type_k.empty() ? cfg.cache_type_k : info.cache_type_k);
     result.cache_type_v =
-        candidate ? candidate->cache_type_v : cfg.cache_type_v;
+        candidate
+            ? candidate->cache_type_v
+            : (info.cache_type_v.empty() ? cfg.cache_type_v : info.cache_type_v);
+    result.mtp_enabled = info.mtp_enabled;
+    result.mtp_draft_tokens = info.mtp_draft_tokens;
+    result.mtp_p_min = info.mtp_p_min;
+    result.mtp_max_active_requests = info.mtp_max_active_requests;
     result.swa_full = cfg.swa_full;
     result.truncate_prompt = cfg.truncate_prompt;
     result.reasoning_format =
@@ -477,10 +489,7 @@ run_profile_benchmark_trial(
     measured.prompt_tokens += speed_result->prompt_tokens;
     measured.completion_tokens += speed_result->completion_tokens;
     measured.average_tokens_per_second =
-        speed_result->duration_ms > 0.0
-            ? static_cast<double>(speed_result->completion_tokens) /
-                (speed_result->duration_ms / 1000.0)
-            : 0.0;
+        speed_result->tokens_per_second;
 
     progress("parallelism", "Measuring concurrent-slot aggregate throughput");
     const int parallel_slots = std::clamp(candidate.slots, 1, 4);
@@ -524,6 +533,7 @@ run_profile_benchmark_trial(
             }));
     }
     int parallel_tokens = 0;
+    double longest_generation_ms = 0.0;
     for (auto& future : futures) {
         auto result = future.get();
         if (!result) {
@@ -534,10 +544,16 @@ run_profile_benchmark_trial(
         measured.prompt_tokens += result->prompt_tokens;
         measured.completion_tokens += result->completion_tokens;
         parallel_tokens += result->completion_tokens;
+        longest_generation_ms = std::max(
+            longest_generation_ms,
+            static_cast<double>(result->generation_duration_ms));
     }
     const auto parallel_finished = std::chrono::steady_clock::now();
-    const double parallel_seconds = std::chrono::duration<double>(
+    const double parallel_wall_seconds = std::chrono::duration<double>(
         parallel_finished - parallel_started).count();
+    const double parallel_seconds = longest_generation_ms > 0.0
+        ? longest_generation_ms / 1000.0
+        : parallel_wall_seconds;
     measured.parallel_tokens_per_second =
         parallel_seconds > 0.0
             ? static_cast<double>(parallel_tokens) / parallel_seconds

@@ -37,10 +37,10 @@ export function stageProfileOptimization(
   if (index < 0) throw new Error(`Model ${modelId} is not present in the active profile.`);
   document.setIn(['model_registry', index, 'context_size'], candidate.contextPerSlot);
   document.setIn(['model_registry', index, 'n_slots'], candidate.slots);
-  document.setIn(['gateway', 'cache_type_k'], candidate.cacheTypeK);
-  document.setIn(['gateway', 'cache_type_v'], candidate.cacheTypeV);
-  document.setIn(['gateway', 'n_batch'], candidate.nBatch);
-  document.setIn(['gateway', 'n_ubatch'], candidate.nUbatch);
+  document.setIn(['model_registry', index, 'cache_type_k'], candidate.cacheTypeK);
+  document.setIn(['model_registry', index, 'cache_type_v'], candidate.cacheTypeV);
+  document.setIn(['model_registry', index, 'n_batch'], candidate.nBatch);
+  document.setIn(['model_registry', index, 'n_ubatch'], candidate.nUbatch);
   document.setIn(['gateway', 'flash_attn'], candidate.flashAttention);
   return document.toString();
 }
@@ -360,10 +360,10 @@ const ModelConfigDialog: React.FC<{
         contextPerSlot: Number(read(['context_size']) ?? model.context_size),
         slots: Number(read(['n_slots']) ?? model.n_slots),
         minSlots: Number(read(['min_slots']) ?? 1),
-        nBatch: Number(readRoot(['gateway', 'n_batch']) ?? 512),
-        nUbatch: Number(readRoot(['gateway', 'n_ubatch']) ?? 512),
-        cacheTypeK: String(readRoot(['gateway', 'cache_type_k']) ?? 'q8_0'),
-        cacheTypeV: String(readRoot(['gateway', 'cache_type_v']) ?? 'q8_0'),
+        nBatch: Number(read(['n_batch']) ?? readRoot(['gateway', 'n_batch']) ?? 512),
+        nUbatch: Number(read(['n_ubatch']) ?? readRoot(['gateway', 'n_ubatch']) ?? 512),
+        cacheTypeK: String(read(['cache_type_k']) ?? readRoot(['gateway', 'cache_type_k']) ?? 'q8_0'),
+        cacheTypeV: String(read(['cache_type_v']) ?? readRoot(['gateway', 'cache_type_v']) ?? 'q8_0'),
         candidateLimit: 3,
       });
       setBenchmark(result);
@@ -507,16 +507,16 @@ const ModelConfigDialog: React.FC<{
 
               {section === 'llm' && (
                 <div className="mt-4 border-t border-border-slate pt-3">
-                  <h3 className="text-sm font-medium text-text-secondary">Shared runtime memory controls</h3>
+                  <h3 className="text-sm font-medium text-text-secondary">Model runtime and adaptive MTP</h3>
                   <p className="mt-1 text-xs text-text-muted">
-                    KV-cache precision controls context memory, not the model file quantization. Q8 is the quality-first default; Q4 saves VRAM for longer context or more parallel slots.
+                    These values apply to this model. Adaptive MTP accelerates a single request and automatically returns to ordinary continuous batching when concurrency exceeds its configured window.
                   </p>
                   <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     <ConfigField label="KV cache keys">
                       <select
                         className={inputClass}
-                        value={String(readRoot(['gateway', 'cache_type_k']) ?? 'q8_0')}
-                        onChange={event => updateRoot(['gateway', 'cache_type_k'], event.target.value)}
+                        value={String(read(['cache_type_k']) ?? readRoot(['gateway', 'cache_type_k']) ?? 'q8_0')}
+                        onChange={event => update(['cache_type_k'], event.target.value)}
                       >
                         <option value="q4_0">Q4 · maximum headroom</option>
                         <option value="q8_0">Q8 · quality-first</option>
@@ -526,8 +526,8 @@ const ModelConfigDialog: React.FC<{
                     <ConfigField label="KV cache values">
                       <select
                         className={inputClass}
-                        value={String(readRoot(['gateway', 'cache_type_v']) ?? 'q8_0')}
-                        onChange={event => updateRoot(['gateway', 'cache_type_v'], event.target.value)}
+                        value={String(read(['cache_type_v']) ?? readRoot(['gateway', 'cache_type_v']) ?? 'q8_0')}
+                        onChange={event => update(['cache_type_v'], event.target.value)}
                       >
                         <option value="q4_0">Q4 · maximum headroom</option>
                         <option value="q8_0">Q8 · quality-first</option>
@@ -535,10 +535,10 @@ const ModelConfigDialog: React.FC<{
                       </select>
                     </ConfigField>
                     <ConfigField label="Prompt batch">
-                      <input className={inputClass} type="number" min="1" value={Number(readRoot(['gateway', 'n_batch']) ?? 512)} onChange={event => updateRoot(['gateway', 'n_batch'], Number(event.target.value))} />
+                      <input className={inputClass} type="number" min="1" value={Number(read(['n_batch']) ?? readRoot(['gateway', 'n_batch']) ?? 512)} onChange={event => update(['n_batch'], Number(event.target.value))} />
                     </ConfigField>
                     <ConfigField label="Physical batch">
-                      <input className={inputClass} type="number" min="1" value={Number(readRoot(['gateway', 'n_ubatch']) ?? 512)} onChange={event => updateRoot(['gateway', 'n_ubatch'], Number(event.target.value))} />
+                      <input className={inputClass} type="number" min="1" value={Number(read(['n_ubatch']) ?? readRoot(['gateway', 'n_ubatch']) ?? 512)} onChange={event => update(['n_ubatch'], Number(event.target.value))} />
                     </ConfigField>
                     <ConfigField label="Flash attention">
                       <select
@@ -550,6 +550,25 @@ const ModelConfigDialog: React.FC<{
                         <option value="on">On</option>
                         <option value="off">Off</option>
                       </select>
+                    </ConfigField>
+                    <ConfigField label="Speculative mode">
+                      <select
+                        className={inputClass}
+                        value={String(read(['speculative', 'type']) ?? 'none')}
+                        onChange={event => update(['speculative', 'type'], event.target.value)}
+                      >
+                        <option value="none">Disabled</option>
+                        <option value="mtp">Adaptive MTP</option>
+                      </select>
+                    </ConfigField>
+                    <ConfigField label="MTP draft tokens">
+                      <input className={inputClass} type="number" min="1" max="4" value={Number(read(['speculative', 'draft_tokens']) ?? 2)} onChange={event => update(['speculative', 'draft_tokens'], Number(event.target.value))} />
+                    </ConfigField>
+                    <ConfigField label="MTP probability floor">
+                      <input className={inputClass} type="number" min="0" max="1" step="0.05" value={Number(read(['speculative', 'p_min']) ?? 0)} onChange={event => update(['speculative', 'p_min'], Number(event.target.value))} />
+                    </ConfigField>
+                    <ConfigField label="MTP active-request limit">
+                      <input className={inputClass} type="number" min="1" max={Number(read(['n_slots']) ?? model.n_slots)} value={Number(read(['speculative', 'max_active_requests']) ?? 1)} onChange={event => update(['speculative', 'max_active_requests'], Number(event.target.value))} />
                     </ConfigField>
                   </div>
                   <p className="mt-2 text-xs text-text-muted">
@@ -605,8 +624,8 @@ const ModelConfigDialog: React.FC<{
                       <div className="mt-3 border-t border-white/10 pt-3">
                         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                           <Stat label="Measured quality" value={`${Math.round(benchmark.recommended.qualityScore * 100)}%`} tone="good" />
-                          <Stat label="Output speed" value={`${winnerTrial?.averageTokensPerSecond.toFixed(1) ?? '0.0'} t/s`} />
-                          <Stat label="Parallel throughput" value={`${winnerTrial?.parallelTokensPerSecond.toFixed(1) ?? '0.0'} t/s`} />
+                          <Stat label="Single generation speed" value={`${winnerTrial?.averageTokensPerSecond.toFixed(1) ?? '0.0'} t/s`} />
+                          <Stat label="Parallel generation throughput" value={`${winnerTrial?.parallelTokensPerSecond.toFixed(1) ?? '0.0'} t/s`} />
                           <Stat label="Peak VRAM" value={formatMb(winnerTrial?.peakVramMb ?? benchmark.recommended.estimatedVramMb)} tone={benchmark.recommended.fits ? 'good' : 'critical'} />
                         </div>
                         <p className="mt-3 text-sm text-text-secondary">
@@ -626,8 +645,8 @@ const ModelConfigDialog: React.FC<{
                             <div key={`${candidate.contextPerSlot}-${candidate.slots}-${candidate.cacheTypeK}-${candidateIndex}`} className="grid gap-1 border border-white/10 px-3 py-2 text-xs text-text-secondary sm:grid-cols-5">
                               <span>{formatTokenCount(candidate.contextPerSlot)} × {candidate.slots} slots</span>
                               <span>{candidate.cacheTypeK}/{candidate.cacheTypeV} KV</span>
-                              <span>{candidate.averageTokensPerSecond.toFixed(1)} output t/s</span>
-                              <span>{candidate.parallelTokensPerSecond.toFixed(1)} parallel t/s</span>
+                              <span>{candidate.averageTokensPerSecond.toFixed(1)} generation t/s</span>
+                              <span>{candidate.parallelTokensPerSecond.toFixed(1)} parallel generation t/s</span>
                               <span>{Math.round(candidate.qualityScore * 100)}% quality</span>
                             </div>
                           ))}

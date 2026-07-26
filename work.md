@@ -741,3 +741,91 @@ existing SQL usage ledger retained.
 - No live profile, service binary, YAML, model registry, or resident production
   model was changed by this download and benchmark. All benchmark
   `llama-server.exe` processes were stopped after their exact runs.
+
+### 2026-07-26 native adaptive MTP inside InferDeck
+
+- Added MTP directly to InferDeck's in-process llama.cpp wrapper. The gateway
+  does not start, proxy, or depend on `llama-server.exe`.
+- Extended per-model configuration and validation with:
+  - `n_batch` and `n_ubatch`;
+  - target KV cache types;
+  - speculative type `mtp`;
+  - draft depth;
+  - draft probability floor;
+  - maximum active requests allowed to use MTP.
+- Registered the verified Qwen3.6-27B MTP artifact under the existing
+  `qwen3.6-27b` API model ID so clients do not need to change model names.
+- Implemented the measured concurrency policy:
+  - one active request uses depth-two MTP;
+  - two or more active requests use ordinary continuous batching;
+  - target hidden-state extraction and all draft-context decoding are disabled
+    in the multi-request path;
+  - a request that enters the multi-request path stays non-speculative until it
+    finishes;
+  - the next single request clears and rebuilds the paired target/draft cache
+    before MTP resumes.
+- Added target/draft micro-batch separation. The selected target context uses a
+  2,048-token micro-batch for four-slot throughput while the MTP draft context
+  is capped at 512 to avoid allocating a second oversized compute graph.
+- Corrected InferDeck TPS accounting:
+  - total request duration remains the latency figure;
+  - tokens per second now uses measured output-generation duration and excludes
+    prompt-prefill time;
+  - the automatic benchmark uses the same generation-only definition for
+    single and aggregate parallel throughput;
+  - request events and gateway logs expose generation duration separately.
+- Updated the dashboard model-details editor with per-model KV, batch, and
+  adaptive-MTP controls. Benchmark results now explicitly label single and
+  parallel generation throughput.
+- Updated the automatic optimiser's measured VRAM gate from a percentage to a
+  2,048 MB minimum reserve. This permits the measured 27B four-slot
+  performance profile while retaining approximately 2.23 GB of usable VRAM
+  headroom on the R9700.
+- Selected repository profile:
+  - four slots, 100,000 context tokens per slot;
+  - Q4/Q4 KV cache;
+  - target batch/micro-batch 2,048/2,048;
+  - MTP draft context micro-batch capped internally at 512;
+  - draft depth two, probability floor zero;
+  - MTP active-request limit one;
+  - measured VRAM requirement 29,791 MB.
+- Authoritative isolated InferDeck benchmark on port 11435:
+  - real in-process gateway runtime and HTTP API;
+  - quality: three of three exact-answer probes passed;
+  - sustained single generation probes: 39.36 and 42.06 tokens per second,
+    averaging 40.71 tokens per second;
+  - four-slot aggregate generation throughput: approximately 51.45 tokens per
+    second;
+  - four-slot aggregate end-to-end throughput including prefill and HTTP:
+    47.55 tokens per second;
+  - peak VRAM: 29,790.39 MB;
+  - model load time: 8,603.27 ms.
+- The four-slot-to-single transition was tested in the same process:
+  - InferDeck logged `scheduler_mtp_resync`;
+  - the following 128-token single request reached 62.71 generation tokens per
+    second and 55.53 end-to-end tokens per second;
+  - 86 of 86 drafted tokens were accepted;
+  - no stale-cache or quality failure occurred.
+- Rejected measured alternatives:
+  - target micro-batch 1,024 used 28,571.86 MB but reached only 35.87
+    end-to-end aggregate tokens per second;
+  - target micro-batch 1,536 used 29,067.62 MB but reached only 29.23
+    end-to-end aggregate tokens per second;
+  - giving both target and draft contexts a 2,048 micro-batch used
+    30,754 MB, so the split context configuration is materially safer.
+- Added permanent regression coverage for:
+  - repository MTP profile parsing;
+  - invalid MTP depth and concurrency windows;
+  - invalid per-model batch geometry;
+  - persistent low-concurrency MTP eligibility;
+  - generation-only TPS calculation.
+- Validation:
+  - complete Release build succeeded;
+  - all 115 C++ unit and integration tests passed;
+  - all 32 dashboard tests passed;
+  - TypeScript checking and the production dashboard build passed;
+  - isolated benchmark requests used only the temporary benchmark database and
+    did not alter the production token ledger.
+- This section records checkout and isolated-runtime completion. Live
+  `C:\InferDeck` deployment is recorded separately after guarded service
+  cutover and live health/performance verification.

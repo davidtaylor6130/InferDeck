@@ -59,6 +59,7 @@ export interface RequestEvent {
   promptTokens: number;
   completionTokens: number;
   durationMs: number;
+  generationDurationMs?: number;
   tokensPerSecond: number;
   status: number;
   inputAudioSeconds?: number;

@@ -224,12 +224,36 @@ TEST_CASE("ContinuousBatchScheduler rejects work after stopping", "[llama][sched
   REQUIRE(event.error_msg == "scheduler stopped");
 }
 
+TEST_CASE("Adaptive MTP is limited to the configured low-concurrency window",
+          "[llama][scheduler][mtp]") {
+  using inferdeck::llama_wrapper::detail::adaptive_mtp_enabled;
+  using inferdeck::llama_wrapper::detail::adaptive_mtp_request_eligible;
+
+  CHECK_FALSE(adaptive_mtp_enabled(false, 1, 1));
+  CHECK_FALSE(adaptive_mtp_enabled(true, 0, 1));
+  CHECK(adaptive_mtp_enabled(true, 1, 1));
+  CHECK_FALSE(adaptive_mtp_enabled(true, 2, 1));
+  CHECK(adaptive_mtp_enabled(true, 2, 2));
+  CHECK(adaptive_mtp_request_eligible(true, true, 1, 1));
+  CHECK_FALSE(adaptive_mtp_request_eligible(true, true, 2, 1));
+  CHECK_FALSE(adaptive_mtp_request_eligible(false, true, 1, 1));
+}
+
 TEST_CASE("ContinuousBatchScheduler generation limit includes the current token",
           "[llama][scheduler]") {
   REQUIRE(detail::generation_limit_reached(0, 1));
   REQUIRE_FALSE(detail::generation_limit_reached(0, 2));
   REQUIRE(detail::generation_limit_reached(1, 2));
   REQUIRE(detail::generation_limit_reached(0, 0));
+}
+
+TEST_CASE("Generation TPS excludes prompt prefill duration",
+          "[llama][scheduler][metrics]") {
+  using inferdeck::llama_wrapper::detail::generation_tokens_per_second;
+
+  CHECK(generation_tokens_per_second(200, 4000.0f) == 50.0f);
+  CHECK(generation_tokens_per_second(0, 4000.0f) == 0.0f);
+  CHECK(generation_tokens_per_second(200, 0.0f) == 0.0f);
 }
 
 TEST_CASE("Recurrent checkpoint eligibility requires a reusable prefix",
