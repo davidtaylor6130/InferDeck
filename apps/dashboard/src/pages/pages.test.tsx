@@ -106,7 +106,7 @@ describe('pages', () => {
     expect(dictation).toContain('Recording and playback stay in clients');
     expect(dictation).not.toContain('microphone');
     expect(llm).toContain('Model details');
-    expect(llm).toContain('Auto-optimize values');
+    expect(llm).toContain('Auto-optimize with benchmark');
     expect(llm).toContain('Saving applies the active profile automatically');
     expect(llm).not.toContain('next restart');
   });

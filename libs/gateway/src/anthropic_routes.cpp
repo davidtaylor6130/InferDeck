@@ -912,6 +912,11 @@ void handle_anthropic_count_tokens(const httplib::Request& req, httplib::Respons
 
 void handle_anthropic_messages(const httplib::Request& req, httplib::Response& resp,
                                const GatewayDeps& deps) {
+    if (maintenance_mode_active(deps)) {
+        write_anthropic_error(resp, 503, "overloaded_error",
+                              "measured model optimization is running");
+        return;
+    }
     nlohmann::json body;
     try {
         body = nlohmann::json::parse(req.body);

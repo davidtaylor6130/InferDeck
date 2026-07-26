@@ -1112,6 +1112,11 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
 
 void handle_responses(const httplib::Request& req, httplib::Response& resp,
                       const GatewayDeps& deps) {
+    if (maintenance_mode_active(deps)) {
+        write_error(resp, 503, "maintenance_mode",
+                    "measured model optimization is running");
+        return;
+    }
     nlohmann::json request;
     try {
         request = nlohmann::json::parse(req.body);

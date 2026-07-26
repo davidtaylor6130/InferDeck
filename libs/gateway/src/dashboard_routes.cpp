@@ -352,6 +352,56 @@ nlohmann::json profile_candidate_json(
     };
 }
 
+nlohmann::json profile_benchmark_snapshot_json(
+    const ProfileBenchmarkSnapshot& snapshot) {
+    nlohmann::json trials = nlohmann::json::array();
+    for (const auto& trial : snapshot.trials) {
+        auto value = profile_candidate_json(trial.candidate);
+        value["completed"] = trial.completed;
+        value["error"] = trial.error;
+        value["loadMs"] = trial.metrics.load_ms;
+        value["averageTokensPerSecond"] =
+            trial.metrics.average_tokens_per_second;
+        value["parallelTokensPerSecond"] =
+            trial.metrics.parallel_tokens_per_second;
+        value["averageTimeToFirstTokenMs"] =
+            trial.metrics.average_time_to_first_token_ms;
+        value["peakVramMb"] = trial.metrics.peak_vram_mb;
+        value["qualityPasses"] = trial.metrics.quality_passes;
+        value["qualityTotal"] = trial.metrics.quality_total;
+        value["promptTokens"] = trial.metrics.prompt_tokens;
+        value["completionTokens"] = trial.metrics.completion_tokens;
+        value["outputSamples"] = trial.metrics.output_samples;
+        trials.push_back(std::move(value));
+    }
+    nlohmann::json result = {
+        {"id", snapshot.id},
+        {"state", snapshot.state},
+        {"stage", snapshot.stage},
+        {"message", snapshot.message},
+        {"model", snapshot.model},
+        {"completedCandidates", snapshot.completed_candidates},
+        {"totalCandidates", snapshot.total_candidates},
+        {"progressPct", snapshot.progress_pct},
+        {"startedUnixMs", snapshot.started_unix_ms},
+        {"finishedUnixMs", snapshot.finished_unix_ms},
+        {"measured", snapshot.measured},
+        {"cancelRequested", snapshot.cancel_requested},
+        {"restored", snapshot.restored},
+        {"weights", {
+            {"quality", 0.60},
+            {"speed", 0.15},
+            {"parallelism", 0.15},
+            {"headroom", 0.10},
+        }},
+        {"candidates", std::move(trials)},
+    };
+    result["recommended"] = snapshot.has_recommendation
+        ? profile_candidate_json(snapshot.recommended)
+        : nlohmann::json(nullptr);
+    return result;
+}
+
 double artifact_size_mb(const std::string& path) {
     if (path.empty()) return 0.0;
     std::error_code error;
@@ -607,6 +657,107 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
     }));
 
+    server.Post(R"(^/api/optimize/benchmark$)",
+                wrap([deps](const httplib::Request& req,
+                            httplib::Response& resp) {
+        if (!deps.profile_benchmark) {
+            write_error(resp, 503, "benchmark_unavailable",
+                        "measured profile benchmark is unavailable");
+            return;
+        }
+        const auto gpu = deps.gpu.latest();
+        if (!gpu.available || gpu.vram_total_mb <= 0.0) {
+            write_error(resp, 503, "optimization_hardware_unavailable",
+                        "GPU VRAM telemetry is required for measured benchmarking");
+            return;
+        }
+        if (gpu.utilization_pct > 20.0) {
+            write_error(resp, 409, "optimization_busy",
+                        "GPU utilization is above the 20 percent safety threshold");
+            return;
+        }
+        try {
+            const auto body = nlohmann::json::parse(req.body);
+            const std::string model_name = body.value("model", "");
+            auto registered =
+                deps.gw.coordinator.registry().get_info_result(model_name);
+            if (!registered) {
+                write_error(resp, 404, "optimization_model_not_found",
+                            registered.error().message);
+                return;
+            }
+            const auto& info = *registered;
+            if (info.runtime != "llama_cpp") {
+                write_error(resp, 400, "optimization_runtime_unsupported",
+                            "measured benchmarking currently supports llama.cpp LLM models");
+                return;
+            }
+            optimize::ProfileInput input;
+            input.model = model_name;
+            input.total_vram_mb = gpu.vram_total_mb;
+            input.model_file_mb =
+                artifact_size_mb(info.gguf_path) +
+                (info.has_vision ? artifact_size_mb(info.mmproj_path) : 0.0);
+            input.configured_vram_mb = info.vram_required_mb;
+            input.context_per_slot =
+                body.value("contextPerSlot", info.context_size);
+            input.slots = body.value("slots", info.n_slots);
+            input.min_slots = body.value("minSlots", info.min_slots);
+            input.n_batch = body.value("nBatch", 512);
+            input.n_ubatch = body.value("nUbatch", input.n_batch);
+            input.cache_type_k =
+                body.value("cacheTypeK", std::string{"q8_0"});
+            input.cache_type_v =
+                body.value("cacheTypeV", std::string{"q8_0"});
+            const auto started = deps.profile_benchmark->start(
+                info, input, body.value("candidateLimit", 3));
+            if (!started) {
+                const int status =
+                    started.error().code == foundation::ErrorCode::InvalidArgument
+                        ? 400 : 409;
+                write_error(resp, status, "benchmark_not_started",
+                            started.error().message);
+                return;
+            }
+            write_json(resp, 202,
+                       profile_benchmark_snapshot_json(*started));
+        } catch (const nlohmann::json::exception& error) {
+            write_error(resp, 400, "invalid_benchmark_request", error.what());
+        } catch (const std::exception& error) {
+            write_error(resp, 422, "benchmark_not_started", error.what());
+        }
+    }));
+
+    server.Get(R"(^/api/optimize/benchmark$)",
+               wrap([deps](const httplib::Request&,
+                           httplib::Response& resp) {
+        if (!deps.profile_benchmark) {
+            write_error(resp, 503, "benchmark_unavailable",
+                        "measured profile benchmark is unavailable");
+            return;
+        }
+        write_json(resp, 200, profile_benchmark_snapshot_json(
+            deps.profile_benchmark->snapshot()));
+    }));
+
+    server.Post(R"(^/api/optimize/benchmark/cancel$)",
+                wrap([deps](const httplib::Request&,
+                            httplib::Response& resp) {
+        if (!deps.profile_benchmark) {
+            write_error(resp, 503, "benchmark_unavailable",
+                        "measured profile benchmark is unavailable");
+            return;
+        }
+        const auto cancelled = deps.profile_benchmark->cancel();
+        if (!cancelled) {
+            write_error(resp, 409, "benchmark_not_running",
+                        cancelled.error().message);
+            return;
+        }
+        write_json(resp, 202, profile_benchmark_snapshot_json(
+            deps.profile_benchmark->snapshot()));
+    }));
+
     server.Get(R"(^/api/model-store/search$)", wrap([deps](const httplib::Request& req,
                                                             httplib::Response& resp) {
         if (!deps.model_store) {
@@ -756,6 +907,11 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
 
     server.Put(R"(^/api/config$)", wrap([deps](const httplib::Request& req,
                                                httplib::Response& resp) {
+        if (maintenance_mode_active(deps.gw)) {
+            write_error(resp, 503, "maintenance_mode",
+                        "configuration cannot change during a measured benchmark");
+            return;
+        }
         static std::mutex write_mutex;
         std::lock_guard lock(write_mutex);
         nlohmann::json body;
@@ -812,6 +968,11 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
 
     server.Put(R"(^/api/config/active$)", wrap([deps](const httplib::Request& req,
                                                       httplib::Response& resp) {
+        if (maintenance_mode_active(deps.gw)) {
+            write_error(resp, 503, "maintenance_mode",
+                        "configuration cannot change during a measured benchmark");
+            return;
+        }
         static std::mutex active_write_mutex;
         std::lock_guard lock(active_write_mutex);
         if (deps.base_config_file.empty() || deps.active_config_file.empty()) {
@@ -877,6 +1038,11 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
 
     server.Delete(R"(^/api/config/active$)", wrap([deps](const httplib::Request&,
                                                          httplib::Response& resp) {
+        if (maintenance_mode_active(deps.gw)) {
+            write_error(resp, 503, "maintenance_mode",
+                        "configuration cannot change during a measured benchmark");
+            return;
+        }
         if (deps.active_config_file.empty()) {
             write_error(resp, 503, "config_unavailable", "active configuration path is unavailable");
             return;
@@ -936,6 +1102,11 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
 
     server.Post(R"(^/api/models/unload$)", wrap([deps](const httplib::Request& req,
                                                        httplib::Response& resp) {
+        if (maintenance_mode_active(deps.gw)) {
+            write_error(resp, 503, "maintenance_mode",
+                        "measured model optimization is running");
+            return;
+        }
         const auto body = req.body.empty() ? nlohmann::json::object() : nlohmann::json::parse(req.body);
         const auto current = deps.gw.coordinator.get_loaded_model();
         const std::string model_name = body.value("model", current.value_or(""));

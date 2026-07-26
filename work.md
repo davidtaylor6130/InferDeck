@@ -528,8 +528,49 @@ recommendations without pretending estimates are measured benchmarks.
 - Kept measured quality benchmarking separate and truthfully labelled as a
   future maintenance-mode feature.
 
-Deployed and verified live on loopback, LAN, and Tailscale with the existing SQL
-usage ledger retained.
+v0.5.3 was deployed and verified live on loopback, LAN, and Tailscale with the
+existing SQL usage ledger retained.
+
+### v0.6.0
+
+- Replaced the estimate-only Auto-optimize action with an asynchronous,
+  maintenance-mode mini benchmark that actually loads and runs the selected
+  llama.cpp model.
+- Added fixed-seed arithmetic, ordering-logic, and long-record retrieval
+  quality probes, followed by a concurrent-slot throughput probe.
+- Measures each candidate's model load time, average output tokens per second,
+  aggregate parallel tokens per second, average time to first token, actual
+  peak VRAM, and quality result.
+- Scores measured candidates with a quality-first balance:
+  60 percent measured quality, 15 percent sequential speed, 15 percent
+  concurrent throughput, and 10 percent VRAM headroom.
+- Requires a measured 12 percent VRAM reserve before a candidate can win.
+- Blocks new LLM requests, swaps, manual model changes, and profile changes
+  during the benchmark so the results are isolated.
+- Added live progress, cancellation, per-candidate measured results, and
+  explicit review-and-save controls to Model Details.
+- Restores the exact previously resident model set after success, cancellation,
+  or failure. Benchmark probes bypass usage accounting and therefore do not
+  contaminate normal request, token, cost, or ROI statistics.
+- Preserves the original estimator only as the bounded candidate generator;
+  the final recommendation is selected exclusively from real model runs.
+- A real isolated smoke benchmark against the installed
+  Qwen2.5-Coder-3B Q4_K_M GGUF completed successfully:
+  - quality: two of three probes, 66.7 percent;
+  - average output speed: 61.03 tokens per second;
+  - parallel throughput: 56.95 tokens per second;
+  - average first-token latency: 60.74 ms;
+  - load time: 2,117.34 ms;
+  - actual peak VRAM: 3,651.15 MB;
+  - arithmetic returned 704 instead of 714 while the logic and retrieval
+    probes returned Cara and saffron correctly, proving the measured quality
+    gate can expose a failure that configuration heuristics cannot.
+- Validation completed before live cutover:
+  - four focused optimizer/benchmark route cases passed with 40 assertions;
+  - all 32 dashboard tests passed;
+  - the production dashboard bundle built successfully;
+  - all 113 C++ unit and integration tests passed under normal Windows
+    filesystem permissions.
 
 ### 2026-07-26 direct v0.5.3 cutover audit
 

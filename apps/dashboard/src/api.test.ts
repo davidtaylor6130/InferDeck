@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getModels, optimizeProfile, waitForActiveConfig, waitForStableConfig } from './api';
+import {
+  cancelProfileBenchmark, getModels, getProfileBenchmark, optimizeProfile,
+  startProfileBenchmark, waitForActiveConfig, waitForStableConfig,
+} from './api';
 import type { ModelInfo } from './types';
 
 function respondWith(body: unknown) {
@@ -231,6 +234,62 @@ describe('profile optimization', () => {
         method: 'POST',
         body: expect.stringContaining('"contextPerSlot":100000'),
       }),
+    );
+  });
+
+  it('starts, polls, and cancels the measured benchmark API', async () => {
+    respondWith({
+      id: 7,
+      state: 'running',
+      stage: 'quality',
+      message: 'Running measured probes',
+      model: 'qwen3.6-27b',
+      completedCandidates: 0,
+      totalCandidates: 3,
+      progressPct: 10,
+      startedUnixMs: 1,
+      finishedUnixMs: 0,
+      measured: true,
+      cancelRequested: false,
+      restored: false,
+      weights: { quality: 0.6, speed: 0.15, parallelism: 0.15, headroom: 0.1 },
+      recommended: null,
+      candidates: [],
+    });
+
+    const started = await startProfileBenchmark({
+      model: 'qwen3.6-27b',
+      contextPerSlot: 100_000,
+      slots: 4,
+      minSlots: 1,
+      nBatch: 2048,
+      nUbatch: 2048,
+      cacheTypeK: 'q4_0',
+      cacheTypeV: 'q8_0',
+      candidateLimit: 3,
+    });
+    await getProfileBenchmark();
+    await cancelProfileBenchmark();
+
+    expect(started.measured).toBe(true);
+    const fetchMock = vi.mocked(fetch);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/optimize/benchmark',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"candidateLimit":3'),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/optimize/benchmark',
+      expect.objectContaining({ headers: { Accept: 'application/json' } }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/optimize/benchmark/cancel',
+      expect.objectContaining({ method: 'POST' }),
     );
   });
 });

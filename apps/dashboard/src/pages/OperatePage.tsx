@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { parseDocument } from 'yaml';
 import {
-  getConfig, optimizeProfile, saveActiveConfig, waitForActiveConfig,
-  type ConfigDocument, type ProfileOptimizationCandidate, type ProfileOptimizationResult,
+  cancelProfileBenchmark, getConfig, getProfileBenchmark, saveActiveConfig,
+  startProfileBenchmark, waitForActiveConfig,
+  type ConfigDocument, type ProfileBenchmarkSnapshot, type ProfileOptimizationCandidate,
 } from '../api';
 import { Badge, Button, EmptyState, Panel, SectionTitle, Stat } from '../components/ui';
 import {
@@ -175,7 +176,7 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
                           )}
                           {section === 'llm' && (
                             <Button tone="blue" onClick={() => setEditing({ model, autoOptimize: true })}>
-                              Auto-optimize values
+                              Auto-optimize with benchmark
                             </Button>
                           )}
                           <Button onClick={() => setEditing({ model, autoOptimize: false })}>Model details</Button>
@@ -226,7 +227,8 @@ const ModelConfigDialog: React.FC<{
   const [yaml, setYaml] = useState('');
   const [busy, setBusy] = useState(true);
   const [optimizing, setOptimizing] = useState(false);
-  const [optimization, setOptimization] = useState<ProfileOptimizationResult | null>(null);
+  const [benchmark, setBenchmark] = useState<ProfileBenchmarkSnapshot | null>(null);
+  const [stagedBenchmarkId, setStagedBenchmarkId] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [message, setMessage] = useState('');
   const [autoStarted, setAutoStarted] = useState(false);
@@ -251,6 +253,16 @@ const ModelConfigDialog: React.FC<{
     window.addEventListener('keydown', close);
     return () => window.removeEventListener('keydown', close);
   }, [onClose]);
+
+  useEffect(() => {
+    let active = true;
+    getProfileBenchmark().then(current => {
+      if (active && current.model === model.id && current.state !== 'idle') {
+        setBenchmark(current);
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [model.id]);
 
   const modelIndex = (text: string) => {
     try {
@@ -337,12 +349,13 @@ const ModelConfigDialog: React.FC<{
     setDirty(true);
   };
 
-  const analyzeProfile = async (stageImmediately: boolean) => {
+  const analyzeProfile = async () => {
     setOptimizing(true);
-    setOptimization(null);
+    setBenchmark(null);
+    setStagedBenchmarkId(0);
     setMessage('');
     try {
-      const result = await optimizeProfile({
+      const result = await startProfileBenchmark({
         model: model.id,
         contextPerSlot: Number(read(['context_size']) ?? model.context_size),
         slots: Number(read(['n_slots']) ?? model.n_slots),
@@ -351,14 +364,10 @@ const ModelConfigDialog: React.FC<{
         nUbatch: Number(readRoot(['gateway', 'n_ubatch']) ?? 512),
         cacheTypeK: String(readRoot(['gateway', 'cache_type_k']) ?? 'q8_0'),
         cacheTypeV: String(readRoot(['gateway', 'cache_type_v']) ?? 'q8_0'),
+        candidateLimit: 3,
       });
-      setOptimization(result);
-      if (stageImmediately) {
-        stageCandidate(result.recommended);
-        setMessage('Auto-optimized values are staged in this draft. Review them, then save the active profile to hot apply.');
-      } else {
-        setMessage('Profile analysis complete. Review the estimate before applying it to this draft.');
-      }
+      setBenchmark(result);
+      setMessage('Measured benchmark started. Normal LLM requests are paused until the previous model residency is restored.');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -367,19 +376,56 @@ const ModelConfigDialog: React.FC<{
   };
 
   const applyOptimization = () => {
-    if (!optimization) return;
+    if (!benchmark?.recommended) return;
     try {
-      stageCandidate(optimization.recommended);
+      stageCandidate(benchmark.recommended);
       setMessage('Recommendation staged in this draft. Save active profile to validate and hot apply it.');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     }
   };
 
+  const cancelBenchmark = async () => {
+    try {
+      setBenchmark(await cancelProfileBenchmark());
+      setMessage('Cancellation requested. InferDeck will restore the previous model residency.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  useEffect(() => {
+    if (!benchmark || (benchmark.state !== 'running' && benchmark.state !== 'cancelling')) return;
+    let active = true;
+    const timer = globalThis.setTimeout(() => {
+      getProfileBenchmark().then(current => {
+        if (active) setBenchmark(current);
+      }).catch(error => {
+        if (active) setMessage(error instanceof Error ? error.message : String(error));
+      });
+    }, 750);
+    return () => {
+      active = false;
+      globalThis.clearTimeout(timer);
+    };
+  }, [benchmark]);
+
+  useEffect(() => {
+    if (benchmark?.state !== 'completed' || !benchmark.recommended ||
+        benchmark.id === stagedBenchmarkId) return;
+    try {
+      stageCandidate(benchmark.recommended);
+      setStagedBenchmarkId(benchmark.id);
+      setMessage('Measured winner staged in this draft. Review it, then save the active profile to hot apply.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [benchmark?.state, benchmark?.id, benchmark?.recommended, stagedBenchmarkId]);
+
   useEffect(() => {
     if (!autoOptimize || autoStarted || !config || busy || index < 0) return;
     setAutoStarted(true);
-    void analyzeProfile(true);
+    void analyzeProfile();
   // The direct action is deliberately one-shot for each opened dialog.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoOptimize, autoStarted, config, busy, index]);
@@ -401,6 +447,17 @@ const ModelConfigDialog: React.FC<{
       setBusy(false);
     }
   };
+
+  const benchmarkRunning =
+    benchmark?.state === 'running' || benchmark?.state === 'cancelling';
+  const winnerTrial = benchmark?.recommended
+    ? benchmark.candidates.find(candidate =>
+        candidate.contextPerSlot === benchmark.recommended?.contextPerSlot &&
+        candidate.slots === benchmark.recommended?.slots &&
+        candidate.nBatch === benchmark.recommended?.nBatch &&
+        candidate.cacheTypeK === benchmark.recommended?.cacheTypeK &&
+        candidate.cacheTypeV === benchmark.recommended?.cacheTypeV)
+    : undefined;
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/75 p-4 sm:p-8" role="dialog" aria-modal="true" aria-label={`${model.id} model details`}>
@@ -496,53 +553,88 @@ const ModelConfigDialog: React.FC<{
                     </ConfigField>
                   </div>
                   <p className="mt-2 text-xs text-text-muted">
-                    Seed stays a per-request control and defaults to random. A future measured quality benchmark will use a fixed seed internally without making normal responses deterministic.
+                    Normal request seeds stay random. The benchmark uses fixed seeds internally so every candidate receives the same quality probes.
                   </p>
 
                   <div className="mt-4 border border-white/10 bg-[#07101d] p-3">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="max-w-2xl">
-                        <h3 className="text-sm font-medium text-text-primary">Quality-first profile analysis</h3>
+                        <h3 className="text-sm font-medium text-text-primary">Measured mini-benchmark</h3>
                         <p className="mt-1 text-xs text-text-muted">
-                          Scores safe candidate profiles from this model's real artifact size, per-slot context, slots, GPU capacity, and persisted throughput. It does not run inference, reload the model, change the GGUF quantization, or save anything automatically.
+                          Loads up to three safe profiles in-process, runs identical fixed-seed quality prompts, measures output speed, first-token latency, concurrent-slot throughput, load time, and actual peak VRAM, then restores the previous model.
                         </p>
                       </div>
-                      <Button
-                        tone="blue"
-                        disabled={optimizing || busy || index < 0}
-                        onClick={() => { void analyzeProfile(true); }}
-                      >
-                        {optimizing ? 'Optimizing values...' : 'Auto-optimize values'}
-                      </Button>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          tone="blue"
+                          disabled={optimizing || benchmarkRunning || busy || index < 0}
+                          onClick={() => { void analyzeProfile(); }}
+                        >
+                          {benchmarkRunning ? 'Benchmarking model...' : 'Auto-optimize with benchmark'}
+                        </Button>
+                        {benchmarkRunning && (
+                          <Button onClick={() => { void cancelBenchmark(); }}>
+                            Cancel benchmark
+                          </Button>
+                        )}
+                      </div>
                     </div>
                     {(status?.queue.running ?? 0) > 0 || (status?.queue.queued ?? 0) > 0 ? (
                       <p className="mt-2 text-xs text-warning-amber">
-                        Safety gate: analysis will wait until active and queued requests are zero.
+                        Safety gate: the benchmark can only start when active and queued requests are zero.
                       </p>
                     ) : null}
-                    {optimization && (
+                    {benchmarkRunning && benchmark && (
+                      <div className="mt-3">
+                        <div className="h-2 overflow-hidden bg-white/5">
+                          <div className="h-full bg-accent-blue transition-all" style={{ width: `${Math.max(2, benchmark.progressPct)}%` }} />
+                        </div>
+                        <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-text-muted">
+                          <span>{benchmark.message}</span>
+                          <span>{benchmark.completedCandidates}/{benchmark.totalCandidates || 3} profiles</span>
+                        </div>
+                      </div>
+                    )}
+                    {benchmark?.state === 'failed' && (
+                      <p className="mt-3 text-xs text-danger-rose">{benchmark.message}</p>
+                    )}
+                    {benchmark?.state === 'cancelled' && (
+                      <p className="mt-3 text-xs text-warning-amber">{benchmark.message}</p>
+                    )}
+                    {benchmark?.recommended && (
                       <div className="mt-3 border-t border-white/10 pt-3">
                         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                          <Stat label="Quality score" value={`${Math.round(optimization.recommended.qualityScore * 100)}%`} tone="good" />
-                          <Stat label="Overall score" value={`${Math.round(optimization.recommended.overallScore * 100)}%`} />
-                          <Stat label="Estimated VRAM" value={formatMb(optimization.recommended.estimatedVramMb)} />
-                          <Stat label="Estimated reserve" value={formatMb(optimization.recommended.reserveVramMb)} tone={optimization.recommended.fits ? 'good' : 'critical'} />
+                          <Stat label="Measured quality" value={`${Math.round(benchmark.recommended.qualityScore * 100)}%`} tone="good" />
+                          <Stat label="Output speed" value={`${winnerTrial?.averageTokensPerSecond.toFixed(1) ?? '0.0'} t/s`} />
+                          <Stat label="Parallel throughput" value={`${winnerTrial?.parallelTokensPerSecond.toFixed(1) ?? '0.0'} t/s`} />
+                          <Stat label="Peak VRAM" value={formatMb(winnerTrial?.peakVramMb ?? benchmark.recommended.estimatedVramMb)} tone={benchmark.recommended.fits ? 'good' : 'critical'} />
                         </div>
                         <p className="mt-3 text-sm text-text-secondary">
-                          Recommend {formatTokenCount(optimization.recommended.contextPerSlot)} context per slot,
-                          {' '}{optimization.recommended.slots} slot(s),
-                          {' '}{optimization.recommended.cacheTypeK}/{optimization.recommended.cacheTypeV} KV,
-                          {' '}batch {optimization.recommended.nBatch}/{optimization.recommended.nUbatch}.
+                          Recommend {formatTokenCount(benchmark.recommended.contextPerSlot)} context per slot,
+                          {' '}{benchmark.recommended.slots} slot(s),
+                          {' '}{benchmark.recommended.cacheTypeK}/{benchmark.recommended.cacheTypeV} KV,
+                          {' '}batch {benchmark.recommended.nBatch}/{benchmark.recommended.nUbatch}.
                         </p>
                         <p className="mt-1 text-xs text-text-muted">
-                          Estimate only, not a measured quality benchmark. Quality carries {Math.round(optimization.weights.quality * 100)}% of the score.
-                          {optimization.observedTokensPerSecond > 0
-                            ? ` Persisted baseline: ${optimization.observedTokensPerSecond.toFixed(1)} output t/s.`
-                            : ' No persisted throughput baseline exists for this model yet.'}
+                          Quality carries {Math.round(benchmark.weights.quality * 100)}% of the measured score.
+                          {' '}Winner load time: {winnerTrial ? formatDuration(winnerTrial.loadMs) : 'n/a'}.
+                          {' '}Average first token: {winnerTrial ? formatDuration(winnerTrial.averageTimeToFirstTokenMs) : 'n/a'}.
+                          {' '}Previous residency restored: {benchmark.restored ? 'yes' : 'no'}.
                         </p>
+                        <div className="mt-3 grid gap-2">
+                          {benchmark.candidates.map((candidate, candidateIndex) => (
+                            <div key={`${candidate.contextPerSlot}-${candidate.slots}-${candidate.cacheTypeK}-${candidateIndex}`} className="grid gap-1 border border-white/10 px-3 py-2 text-xs text-text-secondary sm:grid-cols-5">
+                              <span>{formatTokenCount(candidate.contextPerSlot)} × {candidate.slots} slots</span>
+                              <span>{candidate.cacheTypeK}/{candidate.cacheTypeV} KV</span>
+                              <span>{candidate.averageTokensPerSecond.toFixed(1)} output t/s</span>
+                              <span>{candidate.parallelTokensPerSecond.toFixed(1)} parallel t/s</span>
+                              <span>{Math.round(candidate.qualityScore * 100)}% quality</span>
+                            </div>
+                          ))}
+                        </div>
                         <div className="mt-3 flex flex-wrap items-center gap-2">
                           <Button onClick={applyOptimization}>Re-stage recommendation</Button>
-                          <Badge label={`${optimization.candidates.length} safe candidates compared`} tone="info" />
+                          <Badge label={`${benchmark.candidates.length} profiles measured`} tone="info" />
                           {dirty && <Badge label="Optimized values staged" tone="good" />}
                         </div>
                       </div>
@@ -566,8 +658,8 @@ const ModelConfigDialog: React.FC<{
           )}
 
           <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border-slate pt-4">
-            <Button tone="blue" disabled={busy || !dirty || index < 0} onClick={() => { void save(); }}>Save active profile</Button>
-            <Button disabled={busy || index < 0} onClick={resetModel}>Restore model baseline</Button>
+            <Button tone="blue" disabled={busy || benchmarkRunning || !dirty || index < 0} onClick={() => { void save(); }}>Save active profile</Button>
+            <Button disabled={busy || benchmarkRunning || index < 0} onClick={resetModel}>Restore model baseline</Button>
             {config?.hasActiveProfile && <Badge label={config.usingActiveProfile ? 'Active profile running' : 'Active profile saved'} tone={config.usingActiveProfile ? 'good' : 'warn'} />}
             {message && <span className="text-xs text-text-secondary" role="status">{message}</span>}
           </div>

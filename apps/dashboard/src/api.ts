@@ -122,6 +122,45 @@ export interface ProfileOptimizationResult {
   notes: string[];
 }
 
+export interface ProfileBenchmarkCandidate extends ProfileOptimizationCandidate {
+  completed: boolean;
+  error: string;
+  loadMs: number;
+  averageTokensPerSecond: number;
+  parallelTokensPerSecond: number;
+  averageTimeToFirstTokenMs: number;
+  peakVramMb: number;
+  qualityPasses: number;
+  qualityTotal: number;
+  promptTokens: number;
+  completionTokens: number;
+  outputSamples: string[];
+}
+
+export interface ProfileBenchmarkSnapshot {
+  id: number;
+  state: 'idle' | 'running' | 'cancelling' | 'completed' | 'cancelled' | 'failed';
+  stage: string;
+  message: string;
+  model: string;
+  completedCandidates: number;
+  totalCandidates: number;
+  progressPct: number;
+  startedUnixMs: number;
+  finishedUnixMs: number;
+  measured: true;
+  cancelRequested: boolean;
+  restored: boolean;
+  weights: {
+    quality: number;
+    speed: number;
+    parallelism: number;
+    headroom: number;
+  };
+  recommended: ProfileOptimizationCandidate | null;
+  candidates: ProfileBenchmarkCandidate[];
+}
+
 export interface StoreModel {
   id: string;
   pipeline: string;
@@ -298,6 +337,20 @@ export function saveActiveConfig(yaml: string, revision: string): Promise<Config
 
 export function optimizeProfile(input: ProfileOptimizationInput): Promise<ProfileOptimizationResult> {
   return postJson<ProfileOptimizationResult>('/api/optimize/profile', input);
+}
+
+export function startProfileBenchmark(
+  input: ProfileOptimizationInput & { candidateLimit?: number },
+): Promise<ProfileBenchmarkSnapshot> {
+  return postJson<ProfileBenchmarkSnapshot>('/api/optimize/benchmark', input);
+}
+
+export function getProfileBenchmark(): Promise<ProfileBenchmarkSnapshot> {
+  return getJson<ProfileBenchmarkSnapshot>('/api/optimize/benchmark');
+}
+
+export function cancelProfileBenchmark(): Promise<ProfileBenchmarkSnapshot> {
+  return postJson<ProfileBenchmarkSnapshot>('/api/optimize/benchmark/cancel', {});
 }
 
 export function resetActiveConfig(): Promise<{ ok: boolean; removed: boolean; restartRequired: boolean; applyScheduled: boolean }> {

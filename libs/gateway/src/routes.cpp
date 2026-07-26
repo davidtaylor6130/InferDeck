@@ -458,7 +458,16 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
     write_json(resp, 200, body);
 }
 
+bool maintenance_mode_active(const GatewayDeps& deps) noexcept {
+    return deps.maintenance_mode && deps.maintenance_mode->load();
+}
+
 SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name) {
+    if (maintenance_mode_active(deps)) {
+        return {503, make_error_json(
+            503, "maintenance_mode",
+            "measured model optimization is running; retry after it restores the active profile")};
+    }
     if (!deps.coordinator.registry().has(model_name)) {
         return {404, make_error_json(404, "model_not_found",
                                      "model not registered: " + model_name)};
@@ -510,6 +519,10 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
 
 EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
                                        const std::string& model_name) {
+    if (maintenance_mode_active(deps)) {
+        return {false, 503, "maintenance_mode",
+                "measured model optimization is running; retry after it restores the active profile"};
+    }
     if (deps.coordinator.is_loaded(model_name)) {
         return {true, 200, "", ""};
     }
@@ -620,6 +633,11 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
 
 void handle_chat_completions(const httplib::Request& req, httplib::Response& resp,
                              const GatewayDeps& deps) {
+    if (maintenance_mode_active(deps)) {
+        write_error(resp, 503, "maintenance_mode",
+                    "measured model optimization is running");
+        return;
+    }
     nlohmann::json body;
     try {
         body = nlohmann::json::parse(req.body);

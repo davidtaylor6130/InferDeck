@@ -1,6 +1,7 @@
 ﻿#include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -8,6 +9,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -63,7 +65,7 @@ std::atomic<bool> g_reload{false};
 httplib::Server* g_server = nullptr;
 std::once_flag g_llama_init_once;
 constexpr int runtime_reload_result = 75;
-constexpr std::string_view gateway_version = "0.5.3";
+constexpr std::string_view gateway_version = "0.6.0";
 
 std::string config_revision(const std::string& text) {
     std::uint64_t hash = 1469598103934665603ULL;
@@ -260,6 +262,248 @@ LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ex) {
 }
 #endif
 
+inferdeck::llama_wrapper::LlamaCppConfig make_llama_config(
+    const inferdeck::gateway::GatewayConfig& cfg,
+    const model::ModelInfo& info,
+    const inferdeck::optimize::ProfileCandidate* candidate = nullptr) {
+    inferdeck::llama_wrapper::LlamaCppConfig result;
+    result.n_batch = candidate ? candidate->n_batch : cfg.n_batch;
+    result.n_ubatch = candidate ? candidate->n_ubatch : cfg.n_ubatch;
+    result.use_mmap = cfg.use_mmap;
+    result.use_mlock = cfg.use_mlock;
+    result.n_gpu_layers =
+        info.n_gpu_layers.has_value() ? info.n_gpu_layers : cfg.n_gpu_layers;
+    result.flash_attn =
+        candidate ? candidate->flash_attention : cfg.flash_attn;
+    result.kv_offload = cfg.kv_offload;
+    result.op_offload = cfg.op_offload;
+    result.cache_type_k =
+        candidate ? candidate->cache_type_k : cfg.cache_type_k;
+    result.cache_type_v =
+        candidate ? candidate->cache_type_v : cfg.cache_type_v;
+    result.swa_full = cfg.swa_full;
+    result.truncate_prompt = cfg.truncate_prompt;
+    result.reasoning_format =
+        info.reasoning_format.empty() ? "auto" : info.reasoning_format;
+    result.sampling = info.sampling;
+    if (!info.chat_template_path.empty()) {
+        result.chat_template =
+            inferdeck::gateway::read_text_file(info.chat_template_path);
+    }
+    return result;
+}
+
+std::string normalized_answer(std::string text) {
+    std::string normalized;
+    normalized.reserve(text.size());
+    for (const unsigned char character : text) {
+        if (std::isalnum(character)) {
+            normalized.push_back(
+                static_cast<char>(std::tolower(character)));
+        }
+    }
+    return normalized;
+}
+
+foundation::Result<inferdeck::gateway::ProfileBenchmarkTrialMetrics>
+run_profile_benchmark_trial(
+    const inferdeck::gateway::GatewayConfig& cfg,
+    observability::GpuTelemetry& gpu,
+    const model::ModelInfo& registered,
+    const inferdeck::optimize::ProfileCandidate& candidate,
+    const std::vector<inferdeck::gateway::ProfileBenchmarkPrompt>& prompts,
+    const std::atomic<bool>& cancel,
+    const inferdeck::gateway::ProfileBenchmarkProgress& progress) {
+    using Metrics = inferdeck::gateway::ProfileBenchmarkTrialMetrics;
+    model::ModelInfo info = registered;
+    info.context_size = candidate.context_per_slot;
+    info.n_slots = candidate.slots;
+    auto runtime = std::make_unique<inferdeck::llama_wrapper::LlamaCppModel>(
+        info, make_llama_config(cfg, info, &candidate));
+    const double baseline_vram = gpu.latest().vram_mb;
+    std::atomic<double> peak_vram{baseline_vram};
+    const auto sample_vram = [&] {
+        const double sample = gpu.latest().vram_mb;
+        double current = peak_vram.load();
+        while (sample > current &&
+               !peak_vram.compare_exchange_weak(current, sample)) {}
+    };
+    progress("loading", "Loading candidate profile into the selected model");
+    const auto load_started = std::chrono::steady_clock::now();
+    auto loaded = runtime->load();
+    const auto load_finished = std::chrono::steady_clock::now();
+    if (!loaded) {
+        return foundation::Err<Metrics>(
+            loaded.error().code, loaded.error().message);
+    }
+    const auto unload = [&] {
+        (void)runtime->unload();
+        for (int sample = 0; sample < 20; ++sample) {
+            if (gpu.latest().vram_mb <= baseline_vram + 512.0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+    };
+    for (int sample = 0; sample < 10 && !cancel.load(); ++sample) {
+        sample_vram();
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    }
+    if (cancel.load()) {
+        unload();
+        return foundation::Err<Metrics>(
+            foundation::ErrorCode::Cancelled,
+            "benchmark cancelled after loading the candidate");
+    }
+
+    Metrics measured;
+    measured.load_ms =
+        std::chrono::duration<double, std::milli>(
+            load_finished - load_started).count();
+    double total_duration_ms = 0.0;
+    double total_ttft_ms = 0.0;
+    progress("quality", "Running fixed-seed quality and latency probes");
+    for (std::size_t index = 0; index < prompts.size(); ++index) {
+        if (cancel.load()) {
+            unload();
+            return foundation::Err<Metrics>(
+                foundation::ErrorCode::Cancelled,
+                "benchmark cancelled during quality probes");
+        }
+        auto slot = runtime->acquire_slot();
+        if (!slot) {
+            unload();
+            return foundation::Err<Metrics>(
+                slot.error().code, slot.error().message);
+        }
+        model::InferenceRequest request;
+        request.messages = {{"user", prompts[index].prompt}};
+        request.max_tokens = prompts[index].max_tokens;
+        request.temperature = 0.0f;
+        request.top_p = 1.0f;
+        request.top_k = 0;
+        request.repeat_penalty = 1.0f;
+        request.seed = 4242 + static_cast<int>(index);
+        const auto started = std::chrono::steady_clock::now();
+        std::atomic<bool> first_token{false};
+        std::chrono::steady_clock::time_point first_token_at{};
+        auto result = runtime->predict_stream(
+            *slot, request,
+            [&](const model::InferenceDelta& delta) {
+                sample_vram();
+                if ((!delta.content.empty() ||
+                     !delta.reasoning_text.empty()) &&
+                    !first_token.exchange(true)) {
+                    first_token_at = std::chrono::steady_clock::now();
+                }
+                return !cancel.load();
+            },
+            &cancel);
+        (void)runtime->release_slot(*slot);
+        if (!result) {
+            unload();
+            return foundation::Err<Metrics>(
+                result.error().code, result.error().message);
+        }
+        const auto finished = std::chrono::steady_clock::now();
+        const double ttft = first_token.load()
+            ? std::chrono::duration<double, std::milli>(
+                  first_token_at - started).count()
+            : std::chrono::duration<double, std::milli>(
+                  finished - started).count();
+        total_ttft_ms += ttft;
+        total_duration_ms += result->duration_ms;
+        measured.prompt_tokens += result->prompt_tokens;
+        measured.completion_tokens += result->completion_tokens;
+        ++measured.quality_total;
+        const auto output = normalized_answer(result->text);
+        const auto reference = normalized_answer(prompts[index].reference);
+        double score = 0.0;
+        if (output == reference) {
+            score = 1.0;
+            ++measured.quality_passes;
+        } else if (!reference.empty() &&
+                   output.find(reference) != std::string::npos) {
+            score = 0.75;
+            ++measured.quality_passes;
+        }
+        measured.quality_score += score;
+        measured.output_samples.push_back(
+            prompts[index].id + ": " +
+            result->text.substr(0, std::min<std::size_t>(
+                result->text.size(), 160)));
+    }
+    if (measured.quality_total > 0) {
+        measured.quality_score /=
+            static_cast<double>(measured.quality_total);
+        measured.average_time_to_first_token_ms =
+            total_ttft_ms / static_cast<double>(measured.quality_total);
+    }
+    measured.average_tokens_per_second =
+        total_duration_ms > 0.0
+            ? static_cast<double>(measured.completion_tokens) /
+                (total_duration_ms / 1000.0)
+            : 0.0;
+
+    progress("parallelism", "Measuring concurrent-slot aggregate throughput");
+    const int parallel_slots = std::clamp(candidate.slots, 1, 4);
+    const auto parallel_started = std::chrono::steady_clock::now();
+    std::vector<std::future<foundation::Result<model::InferenceResult>>> futures;
+    futures.reserve(static_cast<std::size_t>(parallel_slots));
+    for (int index = 0; index < parallel_slots; ++index) {
+        futures.push_back(std::async(
+            std::launch::async,
+            [&, index] {
+                auto slot = runtime->acquire_slot();
+                if (!slot) {
+                    return foundation::Err<model::InferenceResult>(
+                        slot.error().code, slot.error().message);
+                }
+                model::InferenceRequest request;
+                request.messages = {{
+                    "user",
+                    "Return only the integer result of " +
+                    std::to_string(120 + index) + " + " +
+                    std::to_string(30 + index) + ".",
+                }};
+                request.max_tokens = 24;
+                request.temperature = 0.0f;
+                request.top_p = 1.0f;
+                request.top_k = 0;
+                request.repeat_penalty = 1.0f;
+                request.seed = 9000 + index;
+                auto result = runtime->predict_stream(
+                    *slot, request,
+                    [&](const model::InferenceDelta&) {
+                        sample_vram();
+                        return !cancel.load();
+                    },
+                    &cancel);
+                (void)runtime->release_slot(*slot);
+                return result;
+            }));
+    }
+    int parallel_tokens = 0;
+    for (auto& future : futures) {
+        auto result = future.get();
+        if (!result) {
+            unload();
+            return foundation::Err<Metrics>(
+                result.error().code, result.error().message);
+        }
+        parallel_tokens += result->completion_tokens;
+    }
+    const auto parallel_finished = std::chrono::steady_clock::now();
+    const double parallel_seconds = std::chrono::duration<double>(
+        parallel_finished - parallel_started).count();
+    measured.parallel_tokens_per_second =
+        parallel_seconds > 0.0
+            ? static_cast<double>(parallel_tokens) / parallel_seconds
+            : 0.0;
+    sample_vram();
+    measured.peak_vram_mb = peak_vram.load();
+    unload();
+    return foundation::Ok(std::move(measured));
+}
+
 } // namespace
 
 int run_gateway(const fs::path& config_path) {
@@ -301,37 +545,8 @@ int run_gateway(const fs::path& config_path) {
 
     model::ModelRegistry registry;
     registry.register_factory("llama_cpp", [cfg](const model::ModelInfo& info) -> std::unique_ptr<model::IBackend> {
-        llama_wrapper::LlamaCppConfig lc;
-        lc.n_batch = cfg.n_batch;
-        lc.n_ubatch = cfg.n_ubatch;
-        lc.use_mmap = cfg.use_mmap;
-        lc.use_mlock = cfg.use_mlock;
-        lc.n_gpu_layers = info.n_gpu_layers.has_value() ? info.n_gpu_layers : cfg.n_gpu_layers;
-        lc.flash_attn = cfg.flash_attn;
-        lc.kv_offload = cfg.kv_offload;
-        lc.op_offload = cfg.op_offload;
-        lc.cache_type_k = cfg.cache_type_k;
-        lc.cache_type_v = cfg.cache_type_v;
-        lc.swa_full = cfg.swa_full;
-        lc.truncate_prompt = cfg.truncate_prompt;
-        lc.reasoning_format = info.reasoning_format.empty() ? "auto" : info.reasoning_format;
-        lc.sampling = info.sampling;  // per-model merged over global (issue #42)
-        // Optional per-model chat-template override (.jinja). Empty path keeps the
-        // template embedded in the GGUF. Used to fix the Qwen3.6 multi-step tool
-        // calling crash ("No user query found in messages.").
-        if (!info.chat_template_path.empty()) {
-            lc.chat_template = read_text_file(info.chat_template_path);
-            if (lc.chat_template.empty()) {
-                LOG_ERROR("chat_template_missing",
-                          "chat_template_path set but file empty/unreadable for {}: {} -- falling back to embedded template",
-                          info.name, info.chat_template_path);
-            } else {
-                LOG_INFO("chat_template_override",
-                         "loaded chat template for {} from {} ({} bytes)",
-                         info.name, info.chat_template_path, lc.chat_template.size());
-            }
-        }
-        return std::make_unique<llama_wrapper::LlamaCppModel>(info, lc);
+        return std::make_unique<llama_wrapper::LlamaCppModel>(
+            info, make_llama_config(cfg, info));
     });
     native_runtimes::register_factories(registry);
     for (const auto& m : cfg.models) {
@@ -372,9 +587,24 @@ int run_gateway(const fs::path& config_path) {
 
     foundation::EventBus events;
     SwapTracker swap_tracker;
+    std::atomic<bool> maintenance_mode{false};
     GatewayDeps deps{coordinator, "15", cfg.auto_swap,
                      cfg.default_model, cfg.anthropic_model_aliases,
-                     &metrics, &stats_db, &events, &swap_tracker};
+                     &metrics, &stats_db, &events, &swap_tracker,
+                     &maintenance_mode};
+    ProfileBenchmarkManager profile_benchmark{
+        coordinator,
+        &swap_tracker,
+        maintenance_mode,
+        [cfg, &gpu](
+            const model::ModelInfo& info,
+            const optimize::ProfileCandidate& candidate,
+            const std::vector<ProfileBenchmarkPrompt>& prompts,
+            const std::atomic<bool>& cancel,
+            const ProfileBenchmarkProgress& progress) {
+            return run_profile_benchmark_trial(
+                cfg, gpu, info, candidate, prompts, cancel, progress);
+        }};
 
     auto uptime_seconds = [&] {
         const auto now = std::chrono::steady_clock::now();
@@ -567,7 +797,8 @@ int run_gateway(const fs::path& config_path) {
             return foundation::Ok();
         },
         &model_store,
-        uptime_seconds};
+        uptime_seconds,
+        &profile_benchmark};
     register_dashboard_routes(server, dash_deps, wrap);
     if (cors.handles_options()) {
         server.Options(".*", [&](const httplib::Request& req,

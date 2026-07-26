@@ -11,6 +11,7 @@
 #include "observability/stats_db.hpp"
 
 #include <chrono>
+#include <atomic>
 #include <map>
 #include <string>
 
@@ -26,7 +27,10 @@ struct GatewayDeps {
     observability::StatsDb* stats_db{nullptr};
     foundation::EventBus* events{nullptr};
     SwapTracker* swap_tracker{nullptr};
+    std::atomic<bool>* maintenance_mode{nullptr};
 };
+
+bool maintenance_mode_active(const GatewayDeps& deps) noexcept;
 
 void record_request(observability::Metrics* metrics,
                     observability::StatsDb* stats_db,
