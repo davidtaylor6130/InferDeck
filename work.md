@@ -601,6 +601,30 @@ existing SQL usage ledger retained.
   - the production dashboard bundle built successfully;
   - all 113 C++ unit and integration tests passed under normal Windows
     filesystem permissions.
+- The required in-app browser validation was attempted with the bundled
+  browser client. Its Node runtime rejected initialization before a browser
+  session could be created with:
+  `codex/sandbox-state-meta: missing field sandboxPolicy`.
+  No visual-browser pass is claimed; the dashboard result is supported by the
+  32 automated tests and successful production bundle instead.
+- A guarded v0.6.0 live deployment helper was prepared at
+  `C:\tmp\deploy-inferdeck-v060.ps1`, with automatic binary/static backup,
+  hash verification, health probing, and rollback.
+- Live cutover preflight was clean: zero active requests, zero queued requests,
+  no swap, no resident model, approximately 1.77 percent GPU utilization,
+  874 MB used of 32,022 MB VRAM, and the production SQL ledger intact.
+- The managed command session cannot stop the LocalSystem NSSM service:
+  Windows returned `OpenService(): Access is denied`. Direct and Explorer-shell
+  elevation launchers did not produce an elevated helper result in this
+  session. No UAC boundary was bypassed.
+- The failed non-elevated attempt stopped before replacing any live artifact.
+  It left a recoverable snapshot at
+  `C:\InferDeck\backups\v060-precutover-20260726-112743`.
+- Post-attempt verification confirmed that production remains deliberately
+  unchanged on v0.5.3: the service is running and healthy, the database remains
+  `C:/InferDeck/data/stats.db`, lifetime usage remains 6,949 requests and
+  262,846,499 tokens, the GPU returned to approximately 874 MB idle use, and no
+  model is resident.
 
 ### 2026-07-26 direct v0.5.3 cutover audit
 
