@@ -362,6 +362,12 @@ TEST_CASE("Measured profile benchmark runs candidates and returns real metrics",
     CHECK(body["candidates"].size() == 2);
     CHECK(body["candidates"][0]["averageTokensPerSecond"].get<double>() > 0.0);
     CHECK(body["candidates"][0]["qualityTotal"] == 3);
+    CHECK(body["candidates"][0]["reserveVramMb"] == 8768.0);
+    CHECK(body["candidates"][0]["speedScore"].get<double>() <= 1.0);
+    CHECK(body["candidates"][1]["speedScore"].get<double>() <= 1.0);
+    CHECK(body["candidates"][0]["reasons"][2]
+              .get<std::string>()
+              .find("Actual peak VRAM") != std::string::npos);
 }
 
 TEST_CASE("Measured benchmark blocks model changes and can be cancelled",

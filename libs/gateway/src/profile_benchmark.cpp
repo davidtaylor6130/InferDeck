@@ -243,6 +243,7 @@ void ProfileBenchmarkManager::run(
                     const double stage_fraction =
                         stage == "loading" ? 0.10 :
                         stage == "quality" ? 0.45 :
+                        stage == "speed" ? 0.65 :
                         stage == "parallelism" ? 0.80 : 0.0;
                     std::lock_guard<std::mutex> lock(mutex_);
                     state_.stage = stage;
@@ -267,6 +268,24 @@ void ProfileBenchmarkManager::run(
                     trial.metrics.peak_vram_mb <= input.total_vram_mb * 0.88;
                 trial.candidate.quality_score =
                     trial.metrics.quality_score;
+                trial.candidate.reasons = {
+                    "Measured with " +
+                        std::to_string(trial.candidate.context_per_slot) +
+                        " context tokens per slot across " +
+                        std::to_string(trial.candidate.slots) + " slot(s)",
+                    "Measured " + trial.candidate.cache_type_k + "/" +
+                        trial.candidate.cache_type_v +
+                        " KV cache precision",
+                    "Actual peak VRAM leaves about " +
+                        std::to_string(static_cast<int>(std::round(
+                            trial.candidate.reserve_vram_mb))) +
+                        " MB reserve",
+                    "Passed " +
+                        std::to_string(trial.metrics.quality_passes) +
+                        " of " +
+                        std::to_string(trial.metrics.quality_total) +
+                        " fixed quality probes",
+                };
             } else {
                 trial.error = measured.error().message;
             }
@@ -293,7 +312,7 @@ void ProfileBenchmarkManager::run(
             double max_speed = 0.0;
             double max_parallel = 0.0;
             for (const auto& trial : state_.trials) {
-                if (!trial.completed || !trial.candidate.fits) continue;
+                if (!trial.completed) continue;
                 max_speed = std::max(
                     max_speed, trial.metrics.average_tokens_per_second);
                 max_parallel = std::max(

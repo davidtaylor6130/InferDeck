@@ -358,7 +358,6 @@ run_profile_benchmark_trial(
     measured.load_ms =
         std::chrono::duration<double, std::milli>(
             load_finished - load_started).count();
-    double total_duration_ms = 0.0;
     double total_ttft_ms = 0.0;
     progress("quality", "Running fixed-seed quality and latency probes");
     for (std::size_t index = 0; index < prompts.size(); ++index) {
@@ -375,7 +374,11 @@ run_profile_benchmark_trial(
                 slot.error().code, slot.error().message);
         }
         model::InferenceRequest request;
-        request.messages = {{"user", prompts[index].prompt}};
+        request.messages = {
+            {"system",
+             "Answer directly and concisely. <|think_off|>"},
+            {"user", prompts[index].prompt},
+        };
         request.max_tokens = prompts[index].max_tokens;
         request.temperature = 0.0f;
         request.top_p = 1.0f;
@@ -410,7 +413,6 @@ run_profile_benchmark_trial(
             : std::chrono::duration<double, std::milli>(
                   finished - started).count();
         total_ttft_ms += ttft;
-        total_duration_ms += result->duration_ms;
         measured.prompt_tokens += result->prompt_tokens;
         measured.completion_tokens += result->completion_tokens;
         ++measured.quality_total;
@@ -437,10 +439,47 @@ run_profile_benchmark_trial(
         measured.average_time_to_first_token_ms =
             total_ttft_ms / static_cast<double>(measured.quality_total);
     }
+
+    progress("speed", "Measuring sustained single-slot output throughput");
+    auto speed_slot = runtime->acquire_slot();
+    if (!speed_slot) {
+        unload();
+        return foundation::Err<Metrics>(
+            speed_slot.error().code, speed_slot.error().message);
+    }
+    model::InferenceRequest speed_request;
+    speed_request.messages = {
+        {"system", "Answer directly and concisely. <|think_off|>"},
+        {"user",
+         "Output the lowercase word benchmark exactly 128 times, "
+         "separated by single spaces. Do not add punctuation or any "
+         "other text."},
+    };
+    speed_request.max_tokens = 192;
+    speed_request.temperature = 0.0f;
+    speed_request.top_p = 1.0f;
+    speed_request.top_k = 0;
+    speed_request.repeat_penalty = 1.0f;
+    speed_request.seed = 7001;
+    auto speed_result = runtime->predict_stream(
+        *speed_slot, speed_request,
+        [&](const model::InferenceDelta&) {
+            sample_vram();
+            return !cancel.load();
+        },
+        &cancel);
+    (void)runtime->release_slot(*speed_slot);
+    if (!speed_result) {
+        unload();
+        return foundation::Err<Metrics>(
+            speed_result.error().code, speed_result.error().message);
+    }
+    measured.prompt_tokens += speed_result->prompt_tokens;
+    measured.completion_tokens += speed_result->completion_tokens;
     measured.average_tokens_per_second =
-        total_duration_ms > 0.0
-            ? static_cast<double>(measured.completion_tokens) /
-                (total_duration_ms / 1000.0)
+        speed_result->duration_ms > 0.0
+            ? static_cast<double>(speed_result->completion_tokens) /
+                (speed_result->duration_ms / 1000.0)
             : 0.0;
 
     progress("parallelism", "Measuring concurrent-slot aggregate throughput");
@@ -458,13 +497,16 @@ run_profile_benchmark_trial(
                         slot.error().code, slot.error().message);
                 }
                 model::InferenceRequest request;
-                request.messages = {{
-                    "user",
-                    "Return only the integer result of " +
-                    std::to_string(120 + index) + " + " +
-                    std::to_string(30 + index) + ".",
-                }};
-                request.max_tokens = 24;
+                request.messages = {
+                    {"system",
+                     "Answer directly and concisely. <|think_off|>"},
+                    {"user",
+                     "Output the lowercase word benchmark exactly 96 times, "
+                     "separated by single spaces. Do not add punctuation or "
+                     "any other text. Request " +
+                         std::to_string(index + 1) + "."},
+                };
+                request.max_tokens = 144;
                 request.temperature = 0.0f;
                 request.top_p = 1.0f;
                 request.top_k = 0;
@@ -489,6 +531,8 @@ run_profile_benchmark_trial(
             return foundation::Err<Metrics>(
                 result.error().code, result.error().message);
         }
+        measured.prompt_tokens += result->prompt_tokens;
+        measured.completion_tokens += result->completion_tokens;
         parallel_tokens += result->completion_tokens;
     }
     const auto parallel_finished = std::chrono::steady_clock::now();

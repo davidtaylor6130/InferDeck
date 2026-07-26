@@ -537,7 +537,8 @@ existing SQL usage ledger retained.
   maintenance-mode mini benchmark that actually loads and runs the selected
   llama.cpp model.
 - Added fixed-seed arithmetic, ordering-logic, and long-record retrieval
-  quality probes, followed by a concurrent-slot throughput probe.
+  quality probes, a dedicated 128-word sustained single-slot generation, and
+  four concurrent 96-word throughput generations.
 - Measures each candidate's model load time, average output tokens per second,
   aggregate parallel tokens per second, average time to first token, actual
   peak VRAM, and quality result.
@@ -554,19 +555,48 @@ existing SQL usage ledger retained.
   contaminate normal request, token, cost, or ROI statistics.
 - Preserves the original estimator only as the bounded candidate generator;
   the final recommendation is selected exclusively from real model runs.
-- A real isolated smoke benchmark against the installed
-  Qwen2.5-Coder-3B Q4_K_M GGUF completed successfully:
+- An early real isolated functional smoke against the installed
+  Qwen2.5-Coder-3B Q4_K_M GGUF completed before the dedicated sustained-speed
+  probe was added:
   - quality: two of three probes, 66.7 percent;
-  - average output speed: 61.03 tokens per second;
-  - parallel throughput: 56.95 tokens per second;
+  - short-answer end-to-end output rate: 61.03 tokens per second;
+  - short-answer parallel rate: 56.95 tokens per second;
   - average first-token latency: 60.74 ms;
   - load time: 2,117.34 ms;
   - actual peak VRAM: 3,651.15 MB;
   - arithmetic returned 704 instead of 714 while the logic and retrieval
     probes returned Cara and saffron correctly, proving the measured quality
-    gate can expose a failure that configuration heuristics cannot.
+    gate can expose a failure that configuration heuristics cannot;
+  - these two early speed figures are retained as execution evidence only and
+    are not comparable to the corrected sustained-throughput measurement.
+- A complete three-candidate run against the installed 16.82 GB
+  Qwen3.6-27B Q4_K_M GGUF and the AMD Radeon AI PRO R9700 selected:
+  - 100,000 context tokens per slot;
+  - four slots;
+  - Q4/Q4 KV cache;
+  - 2,048/2,048 batch and micro-batch sizes;
+  - three of three fixed quality probes passed;
+  - sustained single-slot output: 30.42 tokens per second;
+  - four-slot aggregate throughput: 48.70 tokens per second;
+  - average time to first token: 355.59 ms;
+  - model load time: 7,660.70 ms;
+  - actual peak VRAM: 27,357.95 MB;
+  - actual reserve: 4,663.71 MB;
+  - measured overall score: 95.78 percent.
+- The competing Q4/Q8 profile was marginally faster at 30.52 output tokens
+  per second but peaked at 30,492.53 MB. Q8/Q8 peaked at 28,813.48 MB. Both
+  were rejected because they left less than the required 12 percent VRAM
+  reserve.
+- The first 27B pass revealed that short quality answers made first-token
+  latency dominate the apparent speed. The speed path was corrected to use
+  dedicated sustained generations, the candidate notes were switched from
+  estimated to actual VRAM reserve, and the complete 27B benchmark was rerun.
+- The measured runner used a temporary database and a localhost-only sidecar
+  on port 11435. It restored an empty prior residency, was stopped after the
+  result was collected, and left the live v0.5.3 service idle and healthy with
+  its production ledger unchanged at 6,949 requests and 262,846,499 tokens.
 - Validation completed before live cutover:
-  - four focused optimizer/benchmark route cases passed with 40 assertions;
+  - four focused optimizer/benchmark route cases passed with 44 assertions;
   - all 32 dashboard tests passed;
   - the production dashboard bundle built successfully;
   - all 113 C++ unit and integration tests passed under normal Windows
