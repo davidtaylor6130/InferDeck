@@ -11,6 +11,7 @@
 namespace inferdeck::llama_wrapper {
 
 using inferdeck::foundation::LOG_ERROR;
+using inferdeck::foundation::LOG_DEBUG;
 using inferdeck::foundation::LOG_INFO;
 using inferdeck::foundation::LOG_WARN;
 
@@ -31,9 +32,28 @@ void ContinuousBatchScheduler::stop() {
 }
 
 void ContinuousBatchScheduler::submit(SlotTask* task) {
+    std::string error;
     {
         std::lock_guard lk(sub_mtx_);
-        active_.push_back(task);
+        if (!terminal_error_.empty()) {
+            error = terminal_error_;
+        } else if (stop_.load()) {
+            error = "scheduler stopped";
+        } else {
+            active_.push_back(task);
+        }
+    }
+    if (!error.empty()) {
+        if (task->sampler) {
+            common_sampler_free(task->sampler);
+            task->sampler = nullptr;
+        }
+        TokenEvent ev;
+        ev.is_done = true;
+        ev.is_error = true;
+        ev.error_msg = std::move(error);
+        push_event(task, std::move(ev));
+        return;
     }
     sub_cv_.notify_one();
 }
@@ -50,6 +70,26 @@ void ContinuousBatchScheduler::push_event(SlotTask* task, TokenEvent ev) {
         task->out_queue.push(std::move(ev));
     }
     task->out_cv.notify_one();
+}
+
+void ContinuousBatchScheduler::fail_all(std::string error) {
+    std::vector<SlotTask*> tasks;
+    {
+        std::lock_guard lk(sub_mtx_);
+        if (terminal_error_.empty()) terminal_error_ = std::move(error);
+        tasks.swap(active_);
+    }
+    for (auto* task : tasks) {
+        if (task->sampler) {
+            common_sampler_free(task->sampler);
+            task->sampler = nullptr;
+        }
+        TokenEvent ev;
+        ev.is_done = true;
+        ev.is_error = true;
+        ev.error_msg = terminal_error_;
+        push_event(task, std::move(ev));
+    }
 }
 
 // Called on scheduler thread the first time a task is seen.
@@ -92,7 +132,26 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
     // would decode the tail against an empty KV and silently drop the earlier
     // context (system prompt, tool definitions, history) — see issue #43.
     const int pos_max = static_cast<int>(llama_memory_seq_pos_max(mem, seq_id));
-    n_past = std::min(n_past, pos_max + 1);
+    const int physical_tokens = std::max(0, pos_max + 1);
+    LOG_DEBUG("scheduler_cache_probe",
+              "slot={} common_tokens={} physical_tokens={} checkpoint_bytes={} checkpoint_pos={} checkpoint_capture_pos={} prompt_tokens={}",
+              seq_id,
+              n_past,
+              physical_tokens,
+              task->recurrent_checkpoint ? task->recurrent_checkpoint->size() : 0,
+              task->checkpoint_pos,
+              task->checkpoint_capture_pos,
+              static_cast<int>(task->prompt_tokens.size()));
+    if (task->checkpoint_pos == task->checkpoint_capture_pos &&
+        detail::recurrent_checkpoint_usable(
+            task->recurrent_checkpoint ? task->recurrent_checkpoint->size() : 0,
+            task->checkpoint_pos,
+            n_past,
+            static_cast<int>(task->prompt_tokens.size()))) {
+        task->out_recurrent_checkpoint = task->recurrent_checkpoint;
+        task->out_checkpoint_pos = task->checkpoint_pos;
+    }
+    n_past = std::min(n_past, physical_tokens);
     if (n_past <= 0) {
         llama_memory_seq_rm(mem, seq_id, 0, -1);
         task->prompt_pos = 0;
@@ -101,9 +160,46 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
         return;
     }
 
-    // Trim any cached tokens beyond the reused prefix, then decode the rest.
+    if (n_past >= physical_tokens) {
+        task->prompt_pos = n_past;
+        task->n_pos = n_past;
+        task->out_cached_prompt_tokens = n_past;
+        LOG_INFO("scheduler_kv_extend",
+                 "slot={} cached_tokens={} prompt_tokens={}",
+                 seq_id, n_past, (int)task->prompt_tokens.size());
+        return;
+    }
+
     if (!llama_memory_seq_rm(mem, seq_id, n_past, -1)) {
-        // seq_rm failed (e.g. SWA cache): clear this slot and start fresh.
+        if (detail::recurrent_checkpoint_usable(
+                task->recurrent_checkpoint ? task->recurrent_checkpoint->size() : 0,
+                task->checkpoint_pos,
+                n_past,
+                static_cast<int>(task->prompt_tokens.size()))) {
+            const size_t restored = llama_state_seq_set_data_ext(
+                ctx_,
+                task->recurrent_checkpoint->data(),
+                task->recurrent_checkpoint->size(),
+                seq_id,
+                LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            if (restored == task->recurrent_checkpoint->size()) {
+                const bool trimmed =
+                    llama_memory_seq_rm(mem, seq_id, task->checkpoint_pos, -1);
+                if (trimmed) {
+                    task->prompt_pos = task->checkpoint_pos;
+                    task->n_pos = task->checkpoint_pos;
+                    task->out_cached_prompt_tokens = task->checkpoint_pos;
+                    LOG_INFO("scheduler_checkpoint_restore",
+                             "slot={} checkpoint_tokens={} common_tokens={} prompt_tokens={}",
+                             seq_id,
+                             task->checkpoint_pos,
+                             n_past,
+                             (int)task->prompt_tokens.size());
+                    return;
+                }
+            }
+            llama_memory_seq_rm(mem, seq_id, 0, -1);
+        }
         LOG_WARN("scheduler_kv_clear",
                  "slot={} seq_rm_failed clearing slot sequence", seq_id);
         llama_memory_seq_rm(mem, seq_id, 0, -1);
@@ -125,7 +221,8 @@ void ContinuousBatchScheduler::run_loop() {
     // in one iteration; typical n_batch=512 is ample for a handful of slots).
     llama_batch batch = llama_batch_init(n_batch_, 0, 1);
 
-    while (!stop_.load()) {
+    try {
+      while (!stop_.load()) {
         // ---- Wait for work ----
         std::vector<SlotTask*> tasks;
         {
@@ -151,10 +248,16 @@ void ContinuousBatchScheduler::run_loop() {
         // ---- Build batch ----
         batch.n_tokens = 0;
         std::vector<SlotTask*> cancelled;
+        std::vector<SlotTask*> stopped;
+        std::vector<SlotTask*> checkpoint_ready;
 
         for (auto* t : tasks) {
             if (should_cancel(t)) {
                 cancelled.push_back(t);
+                continue;
+            }
+            if (t->caller_stop.load()) {
+                stopped.push_back(t);
                 continue;
             }
 
@@ -168,7 +271,11 @@ void ContinuousBatchScheduler::run_loop() {
                 const int space = n_batch_ - batch.n_tokens;
                 if (space <= 0) continue; // batch full this iteration; retry next
 
-                const int chunk = std::min(remaining, space);
+                int chunk = std::min(remaining, space);
+                if (t->checkpoint_capture_pos > t->prompt_pos) {
+                    chunk = std::min(
+                        chunk, t->checkpoint_capture_pos - t->prompt_pos);
+                }
                 const bool is_last = (t->prompt_pos + chunk >= static_cast<int>(t->prompt_tokens.size()));
 
                 for (int i = 0; i < chunk; ++i) {
@@ -182,6 +289,9 @@ void ContinuousBatchScheduler::run_loop() {
                     if (is_last && i == chunk - 1) t->i_batch = bi;
                 }
                 t->prompt_pos += chunk;
+                if (t->prompt_pos == t->checkpoint_capture_pos) {
+                    checkpoint_ready.push_back(t);
+                }
                 if (is_last) {
                     t->n_pos = static_cast<int>(t->prompt_tokens.size());
                 }
@@ -199,19 +309,26 @@ void ContinuousBatchScheduler::run_loop() {
             }
         }
 
-        // Signal and remove cancelled tasks
-        for (auto* t : cancelled) {
-            if (t->sampler) { common_sampler_free(t->sampler); t->sampler = nullptr; }
-            TokenEvent ev; ev.is_done = true;
-            push_event(t, ev);
-        }
-        if (!cancelled.empty()) {
+        if (!cancelled.empty() || !stopped.empty()) {
             auto* mem = llama_get_memory(ctx_);
             std::lock_guard lk(sub_mtx_);
             for (auto* t : cancelled) {
                 if (mem) llama_memory_seq_rm(mem, t->slot_id, 0, -1);
                 active_.erase(std::remove(active_.begin(), active_.end(), t), active_.end());
             }
+            for (auto* t : stopped) {
+                active_.erase(std::remove(active_.begin(), active_.end(), t), active_.end());
+            }
+        }
+        for (auto* t : cancelled) {
+            if (t->sampler) { common_sampler_free(t->sampler); t->sampler = nullptr; }
+            TokenEvent ev; ev.is_done = true;
+            push_event(t, ev);
+        }
+        for (auto* t : stopped) {
+            if (t->sampler) { common_sampler_free(t->sampler); t->sampler = nullptr; }
+            TokenEvent ev; ev.is_done = true;
+            push_event(t, ev);
         }
 
         if (batch.n_tokens == 0) {
@@ -223,17 +340,24 @@ void ContinuousBatchScheduler::run_loop() {
         const int rc = llama_decode(ctx_, batch);
         if (rc != 0) {
             LOG_ERROR("scheduler_decode_failed", "llama_decode rc={} batch_tokens={}", rc, batch.n_tokens);
-            TokenEvent ev;
-            ev.is_done = true;
-            ev.is_error = true;
-            ev.error_msg = "llama_decode failed (rc=" + std::to_string(rc) + ")";
-            std::lock_guard lk(sub_mtx_);
-            for (auto* t : active_) {
-                if (t->sampler) { common_sampler_free(t->sampler); t->sampler = nullptr; }
-                push_event(t, ev);
-            }
-            active_.clear();
+            fail_all("llama_decode failed (rc=" + std::to_string(rc) + ")");
             break;
+        }
+
+        for (auto* t : checkpoint_ready) {
+            const size_t sz = llama_state_seq_get_size_ext(
+                ctx_, t->slot_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            if (sz == 0) {
+                continue;
+            }
+            auto checkpoint = std::make_shared<std::vector<uint8_t>>(sz);
+            const size_t written = llama_state_seq_get_data_ext(
+                ctx_, checkpoint->data(), sz,
+                t->slot_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            if (written == sz) {
+                t->out_recurrent_checkpoint = std::move(checkpoint);
+                t->out_checkpoint_pos = t->checkpoint_capture_pos;
+            }
         }
 
         // ---- Sample and push tokens ----
@@ -242,6 +366,7 @@ void ContinuousBatchScheduler::run_loop() {
         for (auto* t : tasks) {
             // Skip cancelled (already handled) or tasks not in this batch
             if (std::find(cancelled.begin(), cancelled.end(), t) != cancelled.end()) continue;
+            if (std::find(stopped.begin(), stopped.end(), t) != stopped.end()) continue;
             if (t->i_batch < 0) continue;
 
             const bool just_finished_prompt =
@@ -256,22 +381,6 @@ void ContinuousBatchScheduler::run_loop() {
             if (just_finished_prompt) {
                 // Transition to generation
                 t->prompt_done = true;
-                // Take a recurrent-model checkpoint (no-op for transformer models)
-                {
-                    const size_t sz = llama_state_seq_get_size_ext(
-                        ctx_, t->slot_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                    if (sz > 0) {
-                        t->out_recurrent_checkpoint.resize(sz);
-                        const size_t written = llama_state_seq_get_data_ext(
-                            ctx_, t->out_recurrent_checkpoint.data(), sz,
-                            t->slot_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                        if (written == sz) {
-                            t->out_checkpoint_pos = t->n_pos;
-                        } else {
-                            t->out_recurrent_checkpoint.clear();
-                        }
-                    }
-                }
             }
 
             // Check stop conditions
@@ -282,7 +391,8 @@ void ContinuousBatchScheduler::run_loop() {
                 }
             }
 
-            const bool at_max = (t->n_generated >= t->max_tokens);
+            const bool at_max =
+                detail::generation_limit_reached(t->n_generated, t->max_tokens);
 
             if (stop || at_max) {
                 if (!stop) {
@@ -291,8 +401,6 @@ void ContinuousBatchScheduler::run_loop() {
                     push_event(t, ev);
                 }
                 if (t->sampler) { common_sampler_free(t->sampler); t->sampler = nullptr; }
-                TokenEvent done; done.is_done = true;
-                push_event(t, done);
                 completed.push_back(t);
             } else {
                 TokenEvent ev; ev.id = id;
@@ -308,24 +416,27 @@ void ContinuousBatchScheduler::run_loop() {
         // re-decode every turn and, with init_task's prefix assumptions, drops
         // conversation context — the root cause of issue #43.
         if (!completed.empty()) {
-            std::lock_guard lk(sub_mtx_);
+            {
+                std::lock_guard lk(sub_mtx_);
+                for (auto* t : completed) {
+                    active_.erase(std::remove(active_.begin(), active_.end(), t), active_.end());
+                }
+            }
             for (auto* t : completed) {
-                active_.erase(std::remove(active_.begin(), active_.end(), t), active_.end());
+                TokenEvent done; done.is_done = true;
+                push_event(t, done);
             }
         }
+      }
+    } catch (const std::exception& e) {
+        LOG_ERROR("scheduler_exception", "error={}", e.what());
+        fail_all(std::string("scheduler exception: ") + e.what());
+    } catch (...) {
+        LOG_ERROR("scheduler_exception", "error=unknown");
+        fail_all("scheduler exception: unknown error");
     }
 
-    // Drain: any tasks still active when stop_ fires get an error event
-    {
-        std::lock_guard lk(sub_mtx_);
-        for (auto* t : active_) {
-            if (t->sampler) { common_sampler_free(t->sampler); t->sampler = nullptr; }
-            TokenEvent ev; ev.is_done = true; ev.is_error = true;
-            ev.error_msg = "scheduler stopped";
-            push_event(t, ev);
-        }
-        active_.clear();
-    }
+    fail_all(stop_.load() ? "scheduler stopped" : "scheduler terminated");
 
     llama_batch_free(batch);
 }

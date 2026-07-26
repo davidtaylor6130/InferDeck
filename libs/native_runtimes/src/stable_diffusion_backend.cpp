@@ -4,8 +4,9 @@
 
 #include <stable-diffusion.h>
 
-#include <chrono>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -37,15 +38,23 @@ std::mutex generation_mutex;
 struct ProgressState {
     sd_ctx_t* context{};
     const std::function<bool(int)>* callback{};
-    bool cancelled{false};
+    std::atomic<bool> cancelled{false};
 };
 
 void progress_callback(int step, int steps, float, void* data) {
     auto* state = static_cast<ProgressState*>(data);
-    const int percent = steps > 0 ? std::clamp(step * 100 / steps, 0, 100) : 0;
-    if (state->callback && *state->callback && !(*state->callback)(percent)) {
-        state->cancelled = true;
-        sd_cancel_generation(state->context, SD_CANCEL_ALL);
+    try {
+        if (!state) return;
+        const int percent = steps > 0 ? std::clamp(step * 100 / steps, 0, 100) : 0;
+        if (state->callback && *state->callback && !(*state->callback)(percent)) {
+            state->cancelled.store(true);
+            sd_cancel_generation(state->context, SD_CANCEL_ALL);
+        }
+    } catch (...) {
+        if (state) {
+            state->cancelled.store(true);
+            sd_cancel_generation(state->context, SD_CANCEL_ALL);
+        }
     }
 }
 
@@ -58,9 +67,11 @@ public:
           clip_g_path_(artifact(info_, "clip_g")), t5xxl_path_(artifact(info_, "t5xxl")),
           backend_(artifact(info_, "backend", "vulkan")), max_vram_(artifact(info_, "max_vram")) {}
 
-    ~StableDiffusionBackend() override { if (context_) free_sd_ctx(context_); }
+    ~StableDiffusionBackend() override { release_context(); }
 
     foundation::Result<void> load() override {
+        set_loaded(false);
+        release_context();
         if (model_path_.empty()) return foundation::Err<void>(foundation::ErrorCode::InvalidArgument, "stable-diffusion.cpp model artifact is missing");
         sd_ctx_params_t params;
         sd_ctx_params_init(&params);
@@ -86,8 +97,7 @@ public:
 
     foundation::Result<void> unload() override {
         set_loaded(false);
-        if (context_) free_sd_ctx(context_);
-        context_ = nullptr;
+        release_context();
         return foundation::Ok();
     }
 
@@ -113,11 +123,11 @@ public:
         const auto started = std::chrono::steady_clock::now();
         const bool generated = generate_image(context_, &params, &images, &count);
         sd_set_progress_callback(nullptr, nullptr);
-        if (!generated || !images || count < 1) {
+        if (state.cancelled.load() || !generated || !images || count < 1) {
             if (images) free_sd_images(images, count);
             return foundation::Err<model::ImageGenerationResult>(
-                state.cancelled ? foundation::ErrorCode::Cancelled : foundation::ErrorCode::Internal,
-                state.cancelled ? "image generation cancelled" : "stable-diffusion.cpp image generation failed");
+                state.cancelled.load() ? foundation::ErrorCode::Cancelled : foundation::ErrorCode::Internal,
+                state.cancelled.load() ? "image generation cancelled" : "stable-diffusion.cpp image generation failed");
         }
         model::ImageGenerationResult result;
         for (int index = 0; index < count; ++index) {
@@ -136,6 +146,11 @@ public:
     }
 
 private:
+    void release_context() noexcept {
+        if (context_) free_sd_ctx(context_);
+        context_ = nullptr;
+    }
+
     sd_ctx_t* context_{nullptr};
     std::string model_path_;
     std::string vae_path_;

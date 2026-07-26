@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <cmath>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -92,6 +93,46 @@ inline std::filesystem::path default_config_path() {
     return candidates[0];
 }
 
+inline foundation::Result<void> validate_sampling_node(
+    const YAML::Node& sampling, const std::string& location) {
+    if (!sampling) return foundation::Ok();
+    if (!sampling.IsMap()) {
+        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                     location + " must be a mapping");
+    }
+    const auto finite_between = [&](const char* key, float minimum, float maximum) {
+        if (!sampling[key]) return true;
+        const float value = sampling[key].as<float>();
+        return std::isfinite(value) && value >= minimum && value <= maximum;
+    };
+    if (!finite_between("temperature", 0.0f, 2.0f) ||
+        !finite_between("top_p", 0.0f, 1.0f) ||
+        !finite_between("min_p", 0.0f, 1.0f) ||
+        !finite_between("repeat_penalty", 0.01f, 100.0f) ||
+        !finite_between("dry_multiplier", 0.0f, 100.0f) ||
+        !finite_between("dry_base", 0.01f, 100.0f)) {
+        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                     location + " values are outside supported ranges");
+    }
+    for (const char* key : {"top_k", "dry_allowed_length"}) {
+        if (sampling[key] && sampling[key].as<int>() < 0) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         location + "." + key + " cannot be negative");
+        }
+    }
+    for (const char* key : {"repeat_last_n", "dry_penalty_last_n"}) {
+        if (sampling[key] && sampling[key].as<int>() < -1) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         location + "." + key + " cannot be less than -1");
+        }
+    }
+    if (sampling["dry_seq_breakers"] && !sampling["dry_seq_breakers"].IsSequence()) {
+        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                     location + ".dry_seq_breakers must be a sequence");
+    }
+    return foundation::Ok();
+}
+
 inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
     try {
         if (!root || !root.IsMap()) {
@@ -124,12 +165,34 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                                                  std::string("gateway.") + key + " must be positive");
                 }
             }
+            if (gateway["n_batch"] && gateway["n_ubatch"] &&
+                gateway["n_ubatch"].as<int>() > gateway["n_batch"].as<int>()) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.n_ubatch cannot exceed gateway.n_batch");
+            }
             for (const char* key : {"vram_budget_mb", "vram_safety_margin_mb"}) {
                 if (gateway[key] && gateway[key].as<int>() < 0) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  std::string("gateway.") + key + " cannot be negative");
                 }
             }
+            const std::unordered_set<std::string> cache_types{
+                "f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl"};
+            for (const char* key : {"cache_type_k", "cache_type_v"}) {
+                if (gateway[key] && !cache_types.contains(gateway[key].as<std::string>())) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 std::string("gateway.") + key + " is unsupported");
+                }
+            }
+            if (gateway["flash_attn"]) {
+                const auto value = gateway["flash_attn"].as<std::string>();
+                if (value != "auto" && value != "on" && value != "off") {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "gateway.flash_attn must be auto, on, or off");
+                }
+            }
+            auto sampling = validate_sampling_node(gateway["sampling"], "gateway.sampling");
+            if (!sampling) return sampling;
         }
         if (root["model_store"] && root["model_store"]["root"] &&
             root["model_store"]["root"].as<std::string>().empty()) {
@@ -154,9 +217,20 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 }
                 const std::string runtime = entry["runtime"]
                     ? entry["runtime"].as<std::string>() : "llama_cpp";
-                if (runtime.empty()) {
+                const std::unordered_set<std::string> runtimes{
+                    "llama_cpp", "stable_diffusion_cpp", "whisper_cpp",
+                    "sherpa_onnx", "windows_sapi"};
+                if (!runtimes.contains(runtime)) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
-                                                 "model runtime cannot be empty: " + name);
+                                                 "unsupported model runtime for: " + name);
+                }
+                const std::string modality = entry["modality"]
+                    ? entry["modality"].as<std::string>() : "text";
+                const std::unordered_set<std::string> modalities{
+                    "text", "embedding", "image", "audio_speech", "audio_transcription"};
+                if (!modalities.contains(modality)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "unsupported model modality for: " + name);
                 }
                 const int slots = entry["n_slots"] ? entry["n_slots"].as<int>() : 2;
                 const int minimum = entry["min_slots"] ? entry["min_slots"].as<int>() : 1;
@@ -164,16 +238,49 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "invalid slot bounds for model: " + name);
                 }
+                if (entry["context_size"] && entry["context_size"].as<int>() < 1) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "model context_size must be positive: " + name);
+                }
+                for (const char* key : {"vram_required_mb", "vram_fixed_mb",
+                                        "vram_per_slot_mb"}) {
+                    if (entry[key] && entry[key].as<int>() < 0) {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                     "model " + std::string(key) +
+                                                     " cannot be negative: " + name);
+                    }
+                }
                 if (runtime == "llama_cpp" &&
                     (!entry["gguf_path"] || entry["gguf_path"].as<std::string>().empty())) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "llama_cpp model requires gguf_path: " + name);
                 }
-                if (runtime != "llama_cpp" && !entry["gguf_path"] &&
-                    (!entry["artifacts"] || !entry["artifacts"].IsMap())) {
+                if (runtime != "llama_cpp" && runtime != "windows_sapi" &&
+                    (!entry["artifacts"] || !entry["artifacts"].IsMap() ||
+                     entry["artifacts"].size() == 0)) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
-                                                 "native model requires gguf_path or artifacts: " + name);
+                                                 "native model requires artifacts: " + name);
                 }
+                const bool modality_matches =
+                    (runtime == "llama_cpp" &&
+                     (modality == "text" || modality == "embedding")) ||
+                    (runtime == "stable_diffusion_cpp" && modality == "image") ||
+                    (runtime == "whisper_cpp" && modality == "audio_transcription") ||
+                    (runtime == "sherpa_onnx" &&
+                     (modality == "audio_speech" ||
+                      modality == "audio_transcription")) ||
+                    (runtime == "windows_sapi" && modality == "audio_speech");
+                if (!modality_matches) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "runtime and modality do not match for: " + name);
+                }
+                if (entry["has_vision"] && entry["has_vision"].as<bool>()) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "vision input is not implemented for: " + name);
+                }
+                auto sampling = validate_sampling_node(
+                    entry["sampling"], "model_registry." + name + ".sampling");
+                if (!sampling) return sampling;
             }
         }
         if (root["default_model"] && !root["default_model"].as<std::string>().empty() &&
@@ -198,8 +305,7 @@ inline foundation::Result<void> validate_config_text(const std::string& text) {
 inline GatewayConfig load_config(const std::filesystem::path& path) {
     GatewayConfig cfg;
     if (!std::filesystem::exists(path)) {
-        std::cerr << "config not found: " << path << "\n";
-        return cfg;
+        throw std::runtime_error("configuration file not found: " + path.string());
     }
     YAML::Node root = YAML::LoadFile(path.string());
     auto valid = validate_config_node(root);
@@ -321,6 +427,40 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         }
     }
     return cfg;
+}
+
+inline std::filesystem::path active_config_path_for(
+    const std::filesystem::path& base_path) {
+    const auto extension = base_path.extension().string();
+    return base_path.parent_path() /
+        (base_path.stem().string() + ".active" + extension);
+}
+
+struct ConfigLoadSelection {
+    GatewayConfig config;
+    std::filesystem::path loaded_path;
+    std::filesystem::path active_path;
+    bool using_active{false};
+    std::string fallback_reason;
+};
+
+inline ConfigLoadSelection load_config_with_active(
+    const std::filesystem::path& base_path) {
+    ConfigLoadSelection selection;
+    selection.active_path = active_config_path_for(base_path);
+    if (std::filesystem::exists(selection.active_path)) {
+        try {
+            selection.config = load_config(selection.active_path);
+            selection.loaded_path = selection.active_path;
+            selection.using_active = true;
+            return selection;
+        } catch (const std::exception& error) {
+            selection.fallback_reason = error.what();
+        }
+    }
+    selection.config = load_config(base_path);
+    selection.loaded_path = base_path;
+    return selection;
 }
 
 } // namespace inferdeck::gateway

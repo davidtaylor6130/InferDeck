@@ -5,6 +5,100 @@
 
 namespace inferdeck::gateway {
 
+namespace {
+
+bool is_utf8_continuation(unsigned char byte) {
+    return (byte & 0xc0u) == 0x80u;
+}
+
+int utf8_sequence_length(unsigned char lead) {
+    if (lead >= 0xc2u && lead <= 0xdfu) return 2;
+    if (lead >= 0xe0u && lead <= 0xefu) return 3;
+    if (lead >= 0xf0u && lead <= 0xf4u) return 4;
+    return 0;
+}
+
+std::size_t incomplete_utf8_suffix(const std::string& value) {
+    if (value.empty()) return value.size();
+
+    std::size_t lead_pos = value.size();
+    std::size_t continuation_count = 0;
+    while (lead_pos > 0 && continuation_count < 3 &&
+           is_utf8_continuation(static_cast<unsigned char>(value[lead_pos - 1]))) {
+        --lead_pos;
+        ++continuation_count;
+    }
+    if (lead_pos == 0) return value.size();
+
+    --lead_pos;
+    const int expected = utf8_sequence_length(
+        static_cast<unsigned char>(value[lead_pos]));
+    const auto present = static_cast<int>(continuation_count + 1);
+    return expected > present ? lead_pos : value.size();
+}
+
+}
+
+std::string Utf8StreamBuffer::on_chunk(std::string_view chunk) {
+    pending_.append(chunk);
+    const std::size_t suffix = incomplete_utf8_suffix(pending_);
+    if (suffix == pending_.size()) {
+        std::string out;
+        out.swap(pending_);
+        return out;
+    }
+
+    std::string out = pending_.substr(0, suffix);
+    pending_.erase(0, suffix);
+    return out;
+}
+
+std::string Utf8StreamBuffer::finish() {
+    std::string out;
+    out.swap(pending_);
+    return out;
+}
+
+model::InferenceDelta InferenceDeltaUtf8Buffer::on_delta(
+    const model::InferenceDelta& input) {
+    model::InferenceDelta output;
+    output.content = content_.on_chunk(input.content);
+    output.reasoning_text = reasoning_.on_chunk(input.reasoning_text);
+    for (const auto& call : input.tool_calls) {
+        auto& buffers = tool_calls_[call.index];
+        model::ToolCallDelta clean;
+        clean.index = call.index;
+        clean.id = buffers.id.on_chunk(call.id);
+        clean.type = buffers.type.on_chunk(call.type);
+        clean.function_name = buffers.function_name.on_chunk(call.function_name);
+        clean.function_arguments = buffers.function_arguments.on_chunk(call.function_arguments);
+        if (!clean.id.empty() || !clean.type.empty() ||
+            !clean.function_name.empty() || !clean.function_arguments.empty()) {
+            output.tool_calls.push_back(std::move(clean));
+        }
+    }
+    return output;
+}
+
+model::InferenceDelta InferenceDeltaUtf8Buffer::finish() {
+    model::InferenceDelta output;
+    output.content = content_.finish();
+    output.reasoning_text = reasoning_.finish();
+    for (auto& [index, buffers] : tool_calls_) {
+        model::ToolCallDelta clean;
+        clean.index = index;
+        clean.id = buffers.id.finish();
+        clean.type = buffers.type.finish();
+        clean.function_name = buffers.function_name.finish();
+        clean.function_arguments = buffers.function_arguments.finish();
+        if (!clean.id.empty() || !clean.type.empty() ||
+            !clean.function_name.empty() || !clean.function_arguments.empty()) {
+            output.tool_calls.push_back(std::move(clean));
+        }
+    }
+    return output;
+}
+
 const std::vector<StreamingSanitizer::Tag>& StreamingSanitizer::tags() {
     static const std::vector<Tag> k_tags = {
         {"<think>", TagKind::OpenThink},

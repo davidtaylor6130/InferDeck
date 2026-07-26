@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { GatewayContext, type GatewayValue } from '../gateway';
 import { OverviewPage } from './OverviewPage';
 import { ModelsPage } from './ModelsPage';
+import { OperatePage } from './OperatePage';
 import { UsagePage } from './UsagePage';
 import { SystemPage } from './SystemPage';
 import type { StatsEvent, StatusPayload } from '../types';
@@ -15,7 +16,7 @@ const stats: StatsEvent = {
   activeRequests: 1,
   swapping: false,
   swapTarget: '',
-  totalRequests: 12,
+  totalRequests: 19,
   totalSwaps: 3,
   lifetimeTokensIn: 384_220,
   lifetimeTokensOut: 120_000,
@@ -31,14 +32,25 @@ const status: StatusPayload = {
     memory: { used: 27 * 1024 ** 3, total: 32 * 1024 ** 3, percentage: 84 },
     cpu: { name: 'Test CPU', logicalProcessors: 24 },
   },
-  summary: { totalRequests: 12, totalTokens: 504_220, promptTokens: 384_220, completionTokens: 120_000, avgLatencyMs: 900, p50LatencyMs: 750, p95LatencyMs: 2200 },
-  metrics: { total_requests: 12, total_swaps: 3, total_tokens: 504_220, avg_tokens_per_second: 41.5 },
-  tokenUsage: [{
-    model: 'qwen3.6-35b-a3b', requests: 12, successfulRequests: 11,
-    promptTokens: 384_220, completionTokens: 120_000, totalTokens: 504_220,
-    peakTokensPerSecond: 55, avgTokensPerSecond: 41.5, lastTimestampUnixMs: Date.now(),
-  }],
-  monthlyTokenUsage: [{ bucket: '2026-06', model: 'qwen3.6-35b-a3b', promptTokens: 384_220, completionTokens: 120_000, totalTokens: 504_220, requests: 12, successfulRequests: 11 }],
+  summary: { totalRequests: 19, totalTokens: 504_220, promptTokens: 384_220, completionTokens: 120_000, avgLatencyMs: 900, p50LatencyMs: 750, p95LatencyMs: 2200 },
+  metrics: { total_requests: 19, total_swaps: 3, total_tokens: 504_220, avg_tokens_per_second: 41.5 },
+  tokenUsage: [
+    {
+      model: 'qwen3.6-35b-a3b', requests: 12, successfulRequests: 11,
+      promptTokens: 384_220, completionTokens: 120_000, totalTokens: 504_220,
+      peakTokensPerSecond: 55, avgTokensPerSecond: 41.5, lastTimestampUnixMs: Date.now(),
+    },
+    {
+      model: 'parakeet-tdt-0.6b-v3', requests: 7, successfulRequests: 7,
+      promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      peakTokensPerSecond: 0, avgTokensPerSecond: 0, lastTimestampUnixMs: Date.now(),
+      inputAudioSeconds: 3_600, inputCharacters: 0,
+    },
+  ],
+  monthlyTokenUsage: [
+    { bucket: '2026-06', model: 'qwen3.6-35b-a3b', promptTokens: 384_220, completionTokens: 120_000, totalTokens: 504_220, requests: 12, successfulRequests: 11 },
+    { bucket: '2026-06', model: 'parakeet-tdt-0.6b-v3', promptTokens: 0, completionTokens: 0, totalTokens: 0, requests: 7, successfulRequests: 7, inputAudioSeconds: 3_600, inputCharacters: 0 },
+  ],
   models: [],
   current: 'qwen3.6-35b-a3b',
   uptime: 8421,
@@ -50,7 +62,11 @@ const value: GatewayValue = {
   stats,
   statsHistory: [stats],
   status,
-  models: [{ id: 'qwen3.6-35b-a3b', family: 'qwen3.6', context_size: 100_000, vram_required_mb: 22_000, n_slots: 2, has_vision: true, loaded: true }],
+  models: [
+    { id: 'qwen3.6-35b-a3b', family: 'qwen3.6', modality: 'text', context_size: 100_000, vram_required_mb: 22_000, n_slots: 2, has_vision: true, loaded: true },
+    { id: 'parakeet-tdt-0.6b-v3', family: 'parakeet', runtime: 'sherpa_onnx', runtime_available: true, modality: 'audio_transcription', context_size: 0, vram_required_mb: 0, n_slots: 1, has_vision: false, loaded: true },
+    { id: 'supertonic-3', family: 'supertonic', runtime: 'sherpa_onnx', runtime_available: true, modality: 'audio_speech', context_size: 0, vram_required_mb: 0, n_slots: 1, has_vision: false, loaded: false },
+  ],
   swap: status.swap,
   activity: [],
   refresh: async () => {},
@@ -63,38 +79,79 @@ const renderWith = (node: React.ReactElement) =>
   renderToStaticMarkup(<GatewayContext.Provider value={value}>{node}</GatewayContext.Provider>);
 
 describe('pages', () => {
-  it('Overview shows the loaded model, live stats, and lifetime counters', () => {
+  it('Home shows global LLM and dictation summaries with aggregate counters', () => {
     const html = renderWith(<OverviewPage />);
-    expect(html).toContain('qwen3.6-35b-a3b');
+    expect(html).toContain('Everything at a glance');
+    expect(html).toContain('LLM');
+    expect(html).toContain('Dictation');
+    expect(html).toContain('Open LLM');
+    expect(html).toContain('Open Dictation');
     expect(html).toContain('GPU utilization');
     expect(html).toContain('42%');
     expect(html).toContain('Tokens in');
     expect(html).toContain('p95 latency');
-    expect(html).toContain('Vision');
+    expect(html).toContain('Combined usage');
+    expect(html).toContain('API-equivalent value');
   });
 
-  it('Models lists registered models with load state', () => {
-    const html = renderWith(<ModelsPage />);
-    expect(html).toContain('Registered models');
-    expect(html).toContain('qwen3.6-35b-a3b');
-    expect(html).toContain('Loaded');
-    expect(html).toContain('Swap history');
-    expect(html).toContain('Model store');
+  it('LLM and dictation operate pages stay administration-only', () => {
+    const llm = renderWith(<OperatePage section="llm" />);
+    const dictation = renderWith(<OperatePage section="dictation" />);
+    expect(llm).toContain('LLM operation');
+    expect(llm).toContain('qwen3.6-35b-a3b');
+    expect(dictation).toContain('Dictation operation');
+    expect(dictation).toContain('parakeet-tdt-0.6b-v3');
+    expect(dictation).toContain('Recording and playback stay in clients');
+    expect(dictation).not.toContain('microphone');
+    expect(llm).toContain('Model details');
+    expect(llm).toContain('Saving applies the active profile automatically');
+    expect(llm).not.toContain('next restart');
   });
 
-  it('Usage renders the cost panel and per-model table', () => {
-    const html = renderWith(<UsagePage />);
-    expect(html).toContain('Token usage &amp; cost');
-    expect(html).toContain('Portfolio cost avoided');
-    expect(html).toContain('Prompt $/1M');
-    expect(html).toContain('Per-model usage');
+  it('Models pages are section-specific catalogues rather than runtime controls', () => {
+    const llm = renderWith(<ModelsPage section="llm" />);
+    const dictation = renderWith(<ModelsPage section="dictation" />);
+    expect(llm).toContain('LLM model catalogue');
+    expect(llm).toContain('Recommended 20–40B');
+    expect(llm).toContain('Recommended only');
+    expect(llm).toContain('Models on this server');
+    expect(dictation).toContain('Dictation model catalogue');
+    expect(dictation).toContain('Speech to text');
+    expect(dictation).toContain('Text to speech');
+    expect(dictation).toContain('complete runtime bundles');
+    expect(llm).not.toContain('Load history');
+    expect(dictation).not.toContain('Load history');
   });
 
-  it('System renders hardware meters and the log viewer', () => {
-    const html = renderWith(<SystemPage />);
-    expect(html).toContain('GPU');
-    expect(html).toContain('System RAM');
-    expect(html).toContain('Gateway configuration');
-    expect(html).toContain('Gateway log');
+  it('Usage pages expose correctly scoped LLM and dictation economics', () => {
+    const llm = renderWith(<UsagePage section="llm" />);
+    const dictation = renderWith(<UsagePage section="dictation" />);
+    expect(llm).toContain('LLM usage');
+    expect(llm).toContain('Estimated API cost');
+    expect(llm).toContain('Prompt $/1M');
+    expect(llm).toContain('Usage time range');
+    expect(llm).not.toContain('ROI remaining');
+    expect(llm).not.toContain('Portfolio break-even $');
+    expect(dictation).toContain('Dictation usage');
+    expect(dictation).toContain('persisted SQL ledger');
+    expect(dictation).toContain('Audio transcribed');
+    expect(dictation).toContain('Estimated API cost');
+    expect(dictation).toContain('OpenAI whisper-1');
+    expect(dictation).not.toContain('ROI remaining');
+    expect(dictation).not.toContain('Portfolio break-even USD');
+  });
+
+  it('Diagnostics pages expose section-specific runtime health', () => {
+    const llm = renderWith(<SystemPage section="llm" />);
+    const dictation = renderWith(<SystemPage section="dictation" />);
+    expect(llm).toContain('LLM accelerator');
+    expect(llm).toContain('GPU utilization');
+    expect(dictation).toContain('Dictation runtimes');
+    expect(dictation).toContain('parakeet-tdt-0.6b-v3');
+    expect(dictation).toContain('Dictation host resources');
+    expect(dictation).toContain('Configuration recovery');
+    expect(dictation).toContain('Complete stable YAML');
+    expect(dictation).toContain('Advanced dictation diagnostics');
+    expect(dictation).toContain('collapsed for safety');
   });
 });

@@ -79,5 +79,27 @@ TEST_CASE("Logger escapes control chars and quotes", "[observability][logger]") 
   REQUIRE(content.find("\\\\") != std::string::npos);
 }
 
-// sentinel
+TEST_CASE("Logger preserves UTF-8 file paths and content", "[observability][logger]") {
+  static std::atomic<int> counter{0};
+  const int id = counter.fetch_add(1);
+  const auto sink = std::filesystem::temp_directory_path() /
+                    std::filesystem::path(
+                        L"inferdeck_\u65e5\u5fd7_" + std::to_wstring(id) + L".log");
+  std::error_code ec;
+  std::filesystem::remove(sink, ec);
+  const auto utf8 = sink.u8string();
+  const std::string utf8_sink(utf8.begin(), utf8.end());
+  {
+    Logger log(LogLevel::Info, utf8_sink);
+    log.info("gpu_detected", "Radeon \u2014 \u6e29\u5ea6");
+  }
 
+  REQUIRE(std::filesystem::exists(sink));
+  std::ifstream in(sink);
+  const std::string content(
+      (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  REQUIRE(content.find("Radeon \u2014 \u6e29\u5ea6") != std::string::npos);
+  std::filesystem::remove(sink, ec);
+}
+
+// sentinel

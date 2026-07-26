@@ -31,15 +31,23 @@
         },
         "gemma-4-26b-a4b:latest": {
           "name": "gemma-4-26b-a4b",
-          "limit": { "context": 262144, "output": 16384 },
+          "limit": { "context": 100000, "output": 16384 },
           "modalities": {
-            "input": ["text", "image"],
+            "input": ["text"],
+            "output": ["text"]
+          }
+        },
+        "gemma-4-31b:latest": {
+          "name": "gemma-4-31b",
+          "limit": { "context": 65536, "output": 16384 },
+          "modalities": {
+            "input": ["text"],
             "output": ["text"]
           }
         },
         "gpt-oss-20b:latest": {
           "name": "gpt-oss-20b",
-          "limit": { "context": 131072, "output": 16384 },
+          "limit": { "context": 32768, "output": 8192 },
           "modalities": {
             "input": ["text"],
             "output": ["text"]
@@ -55,9 +63,9 @@
         },
         "qwen3.6-27b:latest": {
           "name": "qwen3.6-27b",
-          "limit": { "context": 65536, "output": 8192 },
+          "limit": { "context": 40960, "output": 8192 },
           "modalities": {
-            "input": ["text", "image"],
+            "input": ["text"],
             "output": ["text"]
           }
         }
@@ -65,7 +73,7 @@
     }
   },
   "model": "inferdeck/qwen3-coder-30b-a3b:latest",
-  "small_model": "inferdeck/qwen3-coder-30b-a3b:latest",
+  "small_model": "inferdeck/qwen2.5-coder-3b:latest",
   "plugin": [
     "@tarquinen/opencode-dcp",
     "@mohak34/opencode-notifier@latest",

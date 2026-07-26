@@ -50,16 +50,51 @@ jobs:
           path: ${{ github.workspace }}/build/vcpkg_installed
           key: vcpkg-x64-windows-${{ hashFiles('vcpkg.json') }}
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Build dashboard
+        shell: pwsh
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter dashboard test
+          pnpm --filter dashboard build
+
+      - name: Provision Whisper runtime source
+        shell: pwsh
+        run: .\scripts\setup-whisper-runtime.ps1 -RuntimeRoot runtime -SkipModel
+
+      - name: Select Visual Studio generator
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $version = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationVersion
+          if (!$version) { throw "Visual Studio with MSBuild is unavailable" }
+          $generator = if ($version.StartsWith("18.")) { "Visual Studio 18 2026" } else { "Visual Studio 17 2022" }
+          "CMAKE_VS_GENERATOR=$generator" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Configure
         run: |
           cmake -S . -B build `
-            -G "Visual Studio 18 2026" -A x64 `
+            -G "$env:CMAKE_VS_GENERATOR" -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DINFERDECK_BUILD_TESTS=OFF
+            -DINFERDECK_BUILD_TESTS=ON `
+            -DINFERDECK_REQUIRE_WHISPER_CPP=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure -L "unit|integration"
 
       - name: Collect artifacts
         shell: pwsh
@@ -71,6 +106,11 @@ jobs:
 
           # Dashboard static assets (copied post-build by CMake)
           Copy-Item -Recurse build\bin\Release\static dist\
+          New-Item -ItemType Directory -Path dist\config\templates, dist\data, dist\ops -Force | Out-Null
+          Copy-Item config\gateway.yml dist\config\
+          Copy-Item config\templates\* dist\config\templates\
+          Copy-Item data\pricing.json dist\data\
+          Copy-Item ops\*.ps1 dist\ops\
 
           # llama.cpp + ggml DLLs built from source (live alongside the exe)
           Copy-Item build\bin\Release\*.dll dist\

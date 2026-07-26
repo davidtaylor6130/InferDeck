@@ -74,6 +74,65 @@ function swapActivity(event: ModelEvent): ActivityItem {
   };
 }
 
+function parseEvent<T>(event: Event, validate: (value: unknown) => value is T): T | null {
+  try {
+    const value: unknown = JSON.parse((event as MessageEvent<string>).data);
+    return validate(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isStatsEvent(value: unknown): value is StatsEvent {
+  if (!isObject(value) || !isObject(value.gpu)) return false;
+  return isFiniteNumber(value.timestampUnixMs)
+    && typeof value.loadedModel === 'string'
+    && typeof value.swapping === 'boolean'
+    && typeof value.swapTarget === 'string'
+    && isFiniteNumber(value.activeRequests)
+    && isFiniteNumber(value.totalRequests)
+    && isFiniteNumber(value.totalSwaps)
+    && isFiniteNumber(value.lifetimeTokensIn)
+    && isFiniteNumber(value.lifetimeTokensOut)
+    && isFiniteNumber(value.avgTokensPerSecond)
+    && isFiniteNumber(value.uptimeSeconds)
+    && typeof value.gpu.available === 'boolean'
+    && typeof value.gpu.name === 'string'
+    && isFiniteNumber(value.gpu.utilizationPct)
+    && isFiniteNumber(value.gpu.vramUsedMb)
+    && isFiniteNumber(value.gpu.temperatureC)
+    && isFiniteNumber(value.gpu.powerW);
+}
+
+function isModelEvent(value: unknown): value is ModelEvent {
+  if (!isObject(value)) return false;
+  return ['swapping', 'ready', 'failed', 'cancelled', 'unloaded'].includes(String(value.state))
+    && typeof value.from === 'string'
+    && typeof value.to === 'string'
+    && typeof value.error === 'string'
+    && isFiniteNumber(value.durationMs)
+    && isFiniteNumber(value.timestampUnixMs);
+}
+
+function isRequestEvent(value: unknown): value is RequestEvent {
+  if (!isObject(value)) return false;
+  return typeof value.model === 'string'
+    && isFiniteNumber(value.timestampUnixMs)
+    && isFiniteNumber(value.promptTokens)
+    && isFiniteNumber(value.completionTokens)
+    && isFiniteNumber(value.durationMs)
+    && isFiniteNumber(value.tokensPerSecond)
+    && isFiniteNumber(value.status);
+}
+
 export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
@@ -85,17 +144,18 @@ export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const sourceRef = useRef<EventSource | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshRef = useRef(0);
 
   const refresh = useCallback(async () => {
-    try {
-      const [nextStatus, nextModels] = await Promise.all([api.getStatus(), api.getModels()]);
-      setStatus(nextStatus);
-      setModels(nextModels);
-      setSwap(nextStatus.swap ?? idleSwap);
+    const request = ++refreshRef.current;
+    const [statusResult, modelsResult] = await Promise.allSettled([api.getStatus(), api.getModels()]);
+    if (request !== refreshRef.current) return;
+    if (statusResult.status === 'fulfilled') {
+      setStatus(statusResult.value);
+      setSwap(statusResult.value.swap ?? idleSwap);
       setLastUpdatedAt(Date.now());
-    } catch {
-      // SSE connection state drives the offline banner; a failed refresh keeps stale data.
     }
+    if (modelsResult.status === 'fulfilled') setModels(modelsResult.value);
   }, []);
 
   useEffect(() => {
@@ -128,7 +188,8 @@ export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ child
       };
 
       source.addEventListener('stats', event => {
-        const next = JSON.parse((event as MessageEvent<string>).data) as StatsEvent;
+        const next = parseEvent(event, isStatsEvent);
+        if (!next) return;
         setConnection('connected');
         setStats(next);
         setStatsHistory(history => [...history, next].slice(-HISTORY_LIMIT));
@@ -136,7 +197,8 @@ export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ child
       });
 
       source.addEventListener('model', event => {
-        const next = JSON.parse((event as MessageEvent<string>).data) as ModelEvent;
+        const next = parseEvent(event, isModelEvent);
+        if (!next) return;
         if (next.state === 'swapping') {
           setSwap({ swapping: true, target: next.to, from: next.from, startedUnixMs: next.timestampUnixMs, lastError: '' });
         } else {
@@ -147,7 +209,8 @@ export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ child
       });
 
       source.addEventListener('request', event => {
-        const next = JSON.parse((event as MessageEvent<string>).data) as RequestEvent;
+        const next = parseEvent(event, isRequestEvent);
+        if (!next) return;
         setActivity(items => [requestActivity(next), ...items].slice(0, ACTIVITY_LIMIT));
       });
     };

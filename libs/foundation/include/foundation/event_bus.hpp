@@ -22,7 +22,7 @@ class EventBus {
 public:
     class Subscription {
     public:
-        explicit Subscription(std::size_t max_queue) : max_queue_(max_queue) {}
+        explicit Subscription(std::size_t max_queue) : max_queue_(std::max<std::size_t>(1, max_queue)) {}
 
         std::optional<BusEvent> wait_for(std::chrono::milliseconds timeout) {
             std::unique_lock<std::mutex> lk(mtx_);

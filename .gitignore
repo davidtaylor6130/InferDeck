@@ -26,6 +26,7 @@ runtime/llama-*/
 build-asan/
 *.gguf
 runtime/whisper.cpp-*-src/
+runtime/whisper.cpp-src/
 runtime/whisper.cpp-*-build/
 runtime/whisper.cpp-*-cpu-build/
 
@@ -101,3 +102,5 @@ session-*.md
 /rocblas/
 /hipblaslt/
 /.agents
+/.claude/
+/.codex-tmp/

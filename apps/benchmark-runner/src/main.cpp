@@ -108,6 +108,11 @@ int main(int argc, char** argv) {
   const Args args = parse_args(argc, argv);
   if (args.show_help) { print_help(); return 0; }
   if (args.show_version) { std::cout << "inferdeck-bench 0.4.0\n"; return 0; }
+  if (!args.dry_run) {
+    std::cerr << "real inference scoring is not implemented; no optimization was run. "
+              << "Use --dry-run only to validate the search machinery.\n";
+    return 2;
+  }
 
   std::cout << "inferdeck-bench 0.4.0\n"
             << "  model=" << args.model
@@ -140,7 +145,7 @@ int main(int argc, char** argv) {
   Study study(std::move(scfg));
   const auto t_start = std::chrono::steady_clock::now();
   auto result = study.run([&](const std::vector<ParamValue>& params) {
-    const double s = args.dry_run ? score_params(params) : 0.0;
+    const double s = score_params(params);
     if (args.verbose) {
       std::cout << "  trial: score=" << s << " params=";
       for (const auto& p : params) {

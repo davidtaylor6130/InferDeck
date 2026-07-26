@@ -7,8 +7,10 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <iomanip>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <limits>
@@ -18,7 +20,9 @@ namespace inferdeck::gateway {
 namespace {
 
 void record_media(const GatewayDeps& deps, const std::string& model_name,
-                  float duration_ms, int status, int slot);
+                  float duration_ms, int status, int slot,
+                  double input_audio_seconds = 0.0,
+                  std::int64_t input_characters = 0);
 
 struct MediaJob {
     std::uint64_t id{0};
@@ -65,14 +69,18 @@ struct SlotGuard {
     model::BackendCoordinator* coordinator{};
     std::string model;
     int slot{-1};
-    ~SlotGuard() { if (coordinator && slot >= 0) coordinator->release_slot(model, slot); }
+    ~SlotGuard() { if (coordinator && slot >= 0) (void)coordinator->release_slot(model, slot); }
     void disarm() { coordinator = nullptr; }
 };
 
 struct SpeechStreamState {
+    static constexpr std::size_t max_pending_chunks = 64;
+    static constexpr std::size_t max_pending_bytes = 2 * 1024 * 1024;
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<std::string> chunks;
+    std::size_t pending_bytes{0};
+    bool streamed_bytes{false};
     std::atomic<bool> aborted{false};
     std::atomic<bool> finished{false};
     std::atomic<bool> cleaned{false};
@@ -82,7 +90,8 @@ struct SpeechStreamState {
     std::string model;
     int slot{-1};
     float duration_ms{0};
-    bool failed{false};
+    std::int64_t input_characters{0};
+    std::atomic<bool> failed{false};
     std::shared_ptr<MediaJob> job;
 
     SpeechStreamState(const GatewayDeps& source) : deps(source) {}
@@ -93,9 +102,10 @@ struct SpeechStreamState {
         aborted.store(status == 499);
         cv.notify_all();
         if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) worker.join();
-        record_media(deps, model, duration_ms, status, slot);
+        record_media(deps, model, duration_ms, status, slot, 0.0,
+                     status == 200 ? input_characters : 0);
         finish_job(job, status == 200 ? "completed" : status == 499 ? "cancelled" : "failed");
-        if (coordinator) coordinator->release_slot(model, slot);
+        if (coordinator) (void)coordinator->release_slot(model, slot);
     }
 };
 
@@ -123,10 +133,20 @@ int status_for(foundation::ErrorCode code) {
 }
 
 void record_media(const GatewayDeps& deps, const std::string& model_name,
-                  float duration_ms, int status, int slot) {
+                  float duration_ms, int status, int slot,
+                  double input_audio_seconds,
+                  std::int64_t input_characters) {
     model::InferenceResult metrics;
     metrics.duration_ms = duration_ms;
-    record_request(deps, model_name, metrics, status, slot);
+    record_request(deps, model_name, metrics, status, slot,
+                   input_audio_seconds, input_characters);
+}
+
+std::int64_t utf8_character_count(const std::string& text) {
+    return static_cast<std::int64_t>(std::count_if(
+        text.begin(), text.end(), [](unsigned char byte) {
+            return (byte & 0xc0U) != 0x80U;
+        }));
 }
 
 std::string base64(const std::vector<std::byte>& bytes) {
@@ -181,6 +201,10 @@ foundation::Result<model::TranscriptionRequest> decode_wav(
             channels = u16(chunk + 10);
             sample_rate = u32(chunk + 12);
             bits = u16(chunk + 22);
+            if (format == 0xfffe && size >= 40) {
+                const std::uint16_t subformat = u16(chunk + 32);
+                if (subformat == 1 || subformat == 3) format = subformat;
+            }
         } else if (std::memcmp(chunk, "data", 4) == 0) {
             samples = chunk + 8;
             sample_bytes = size;
@@ -193,8 +217,12 @@ foundation::Result<model::TranscriptionRequest> decode_wav(
                                                              "WAVE must contain PCM16 or float32 audio");
     }
     const std::size_t frame_size = channels * (bits / 8);
+    if (sample_bytes % frame_size != 0) {
+        return foundation::Err<model::TranscriptionRequest>(foundation::ErrorCode::InvalidArgument,
+                                                             "WAVE data is not aligned to complete sample frames");
+    }
     const std::size_t frames = sample_bytes / frame_size;
-    if (frames == 0 || frames > 192000ULL * 60 * 30) {
+    if (frames == 0 || frames > static_cast<std::size_t>(sample_rate) * 60ULL * 30ULL) {
         return foundation::Err<model::TranscriptionRequest>(foundation::ErrorCode::InvalidArgument,
                                                              "audio duration is invalid or exceeds 30 minutes");
     }
@@ -210,7 +238,12 @@ foundation::Result<model::TranscriptionRequest> decode_wav(
             } else {
                 float decoded = 0.0f;
                 std::memcpy(&decoded, value, sizeof(decoded));
-                mixed += std::isfinite(decoded) ? std::clamp(decoded, -1.0f, 1.0f) : 0.0f;
+                if (!std::isfinite(decoded)) {
+                    return foundation::Err<model::TranscriptionRequest>(
+                        foundation::ErrorCode::InvalidArgument,
+                        "float32 WAVE samples must be finite");
+                }
+                mixed += std::clamp(decoded, -1.0f, 1.0f);
             }
         }
         request.pcm[frame] = mixed / channels;
@@ -218,14 +251,85 @@ foundation::Result<model::TranscriptionRequest> decode_wav(
     if (form.has_field("language")) request.language = form.get_field("language");
     if (form.has_field("prompt")) request.prompt = form.get_field("prompt");
     if (form.has_field("temperature")) {
-        try { request.temperature = std::stof(form.get_field("temperature")); }
+        try {
+            const auto value = form.get_field("temperature");
+            std::size_t parsed = 0;
+            request.temperature = std::stof(value, &parsed);
+            if (parsed != value.size()) {
+                return foundation::Err<model::TranscriptionRequest>(
+                    foundation::ErrorCode::InvalidArgument, "temperature must be numeric");
+            }
+        }
         catch (...) { return foundation::Err<model::TranscriptionRequest>(foundation::ErrorCode::InvalidArgument, "temperature must be numeric"); }
     }
-    if (request.temperature < 0.0f || request.temperature > 1.0f || request.prompt.size() > 4096 || request.language.size() > 32) {
+    if (!std::isfinite(request.temperature) || request.temperature < 0.0f ||
+        request.temperature > 1.0f || request.prompt.size() > 4096 ||
+        request.language.size() > 32) {
         return foundation::Err<model::TranscriptionRequest>(foundation::ErrorCode::InvalidArgument,
                                                              "invalid transcription parameters");
     }
     return foundation::Ok(std::move(request));
+}
+
+std::string timestamp(float seconds, char separator) {
+    const auto total_milliseconds = static_cast<std::uint64_t>(
+        std::llround(std::max(0.0f, seconds) * 1000.0f));
+    const auto milliseconds = total_milliseconds % 1000;
+    const auto total_seconds = total_milliseconds / 1000;
+    const auto second = total_seconds % 60;
+    const auto total_minutes = total_seconds / 60;
+    const auto minute = total_minutes % 60;
+    const auto hour = total_minutes / 60;
+    std::ostringstream output;
+    output << std::setfill('0') << std::setw(2) << hour << ':'
+           << std::setw(2) << minute << ':' << std::setw(2) << second
+           << separator << std::setw(3) << milliseconds;
+    return output.str();
+}
+
+std::string subtitle_text(const std::string& text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+std::string subtitles(const model::TranscriptionResult& result, bool vtt) {
+    std::ostringstream output;
+    if (vtt) output << "WEBVTT\n\n";
+    for (const auto& segment : result.segments) {
+        if (!vtt) output << segment.id + 1 << '\n';
+        output << timestamp(segment.start_seconds, vtt ? '.' : ',') << " --> "
+               << timestamp(segment.end_seconds, vtt ? '.' : ',') << '\n'
+               << subtitle_text(segment.text) << "\n\n";
+    }
+    return output.str();
+}
+
+nlohmann::json verbose_transcription(const model::TranscriptionResult& result,
+                                     float temperature) {
+    nlohmann::json segments = nlohmann::json::array();
+    for (const auto& segment : result.segments) {
+        segments.push_back({
+            {"id", segment.id},
+            {"seek", static_cast<int>(std::llround(segment.start_seconds * 100.0f))},
+            {"start", segment.start_seconds},
+            {"end", segment.end_seconds},
+            {"text", segment.text},
+            {"tokens", segment.tokens},
+            {"temperature", temperature},
+            {"avg_logprob", segment.avg_logprob},
+            {"compression_ratio", 0.0},
+            {"no_speech_prob", segment.no_speech_probability},
+        });
+    }
+    return {
+        {"task", "transcribe"},
+        {"language", result.language},
+        {"duration", result.duration_seconds},
+        {"text", result.text},
+        {"segments", std::move(segments)},
+    };
 }
 
 }
@@ -310,8 +414,15 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     model::SpeechRequest request;
     request.input = body.value("input", "");
     request.voice = body.value("voice", "");
-    request.format = body.value("response_format", "mp3");
     request.speed = body.value("speed", 1.0f);
+    const auto info = deps.coordinator.registry().get_info_result(model_name);
+    const bool wav_runtime =
+        info && (info->runtime == "sherpa_onnx" ||
+                 info->runtime == "windows_sapi");
+    const std::string default_format =
+        wav_runtime ? "wav" : "mp3";
+    request.format = body.value("response_format", default_format);
+    const auto input_characters = utf8_character_count(request.input);
     static const std::array formats{"mp3", "opus", "aac", "flac", "wav", "pcm"};
     if (model_name.empty() || request.input.empty() || request.input.size() > 65536 ||
         request.voice.empty() || request.voice.size() > 128 ||
@@ -320,9 +431,8 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
         write_error(resp, 400, "invalid_speech_request", "invalid model, input, voice, speed, or response format");
         return;
     }
-    const auto info = deps.coordinator.registry().get_info_result(model_name);
-    if (info && info->runtime == "sherpa_onnx" && request.format != "wav" && request.format != "pcm") {
-        write_error(resp, 400, "unsupported_response_format", "sherpa-onnx supports wav and pcm responses");
+    if (wav_runtime && request.format != "wav" && request.format != "pcm") {
+        write_error(resp, 400, "unsupported_response_format", "this speech runtime supports wav and pcm responses");
         return;
     }
     auto job = begin_job(model_name, "audio_speech");
@@ -330,36 +440,124 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     auto slot = acquire_media_slot(req, deps, model_name, job);
     if (!slot) { const int status = status_for(slot.error().code); write_error(resp, status, "speech_admission_failed", slot.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
     SlotGuard guard{&deps.coordinator, model_name, *slot};
+    if (request.format == "wav") {
+        try {
+            auto result = deps.coordinator.synthesize(
+                model_name, *slot, request,
+                [&req, job](const std::byte*, std::size_t) {
+                    return !req.is_connection_closed() &&
+                           !job->cancelled->load();
+                });
+            if (!result) {
+                const int status = job->cancelled->load()
+                    ? 499
+                    : status_for(result.error().code);
+                write_error(resp, status, "speech_generation_failed",
+                            result.error().message);
+                record_media(deps, model_name, 0, status, *slot);
+                finish_job(job, status == 499 ? "cancelled" : "failed");
+                return;
+            }
+            if (result->bytes.empty()) {
+                write_error(resp, 500, "speech_generation_failed",
+                            "speech runtime returned no audio");
+                record_media(deps, model_name, result->duration_ms, 500, *slot);
+                finish_job(job, "failed");
+                return;
+            }
+            resp.set_content(
+                std::string(
+                    reinterpret_cast<const char*>(result->bytes.data()),
+                    result->bytes.size()),
+                result->content_type.empty() ? "audio/wav"
+                                             : result->content_type);
+            record_media(deps, model_name, result->duration_ms, 200, *slot,
+                         0.0, input_characters);
+            finish_job(job, "completed");
+            return;
+        } catch (const std::exception& error) {
+            write_error(resp, 500, "speech_generation_failed", error.what());
+            record_media(deps, model_name, 0, 500, *slot);
+            finish_job(job, "failed");
+            return;
+        }
+    }
     auto state = std::make_shared<SpeechStreamState>(deps);
     state->coordinator = &deps.coordinator;
     state->model = model_name;
     state->slot = *slot;
     state->job = job;
-    state->worker = std::thread([state, request] {
-        auto result = state->coordinator->synthesize(
-            state->model, state->slot, request,
-            [state](const std::byte* data, std::size_t size) {
-                if (state->aborted.load() || state->job->cancelled->load()) return false;
-                if (size > 0) {
+    state->input_characters = input_characters;
+    try {
+        state->worker = std::thread([state, request] {
+            try {
+                auto result = state->coordinator->synthesize(
+                    state->model, state->slot, request,
+                    [state](const std::byte* data, std::size_t size) {
+                        try {
+                            if (state->aborted.load() || state->job->cancelled->load()) return false;
+                            if (size > 0) {
+                                if (!data) {
+                                    state->failed.store(true);
+                                    return false;
+                                }
+                                std::unique_lock lock(state->mutex);
+                                auto has_capacity = [state, size] {
+                                    const bool byte_capacity =
+                                        state->chunks.empty() ||
+                                        (size <= state->max_pending_bytes &&
+                                         state->pending_bytes <=
+                                             state->max_pending_bytes - size);
+                                    return state->chunks.size() <
+                                               state->max_pending_chunks &&
+                                           byte_capacity;
+                                };
+                                while (!state->aborted.load() &&
+                                       !state->job->cancelled->load() &&
+                                       !has_capacity()) {
+                                    state->cv.wait_for(
+                                        lock, std::chrono::milliseconds{100});
+                                }
+                                if (state->aborted.load() ||
+                                    state->job->cancelled->load()) {
+                                    return false;
+                                }
+                                state->chunks.emplace_back(reinterpret_cast<const char*>(data), size);
+                                state->pending_bytes += size;
+                                state->streamed_bytes = true;
+                                state->cv.notify_one();
+                            }
+                            return !state->aborted.load() && !state->job->cancelled->load();
+                        } catch (...) {
+                            state->failed.store(true);
+                            return false;
+                        }
+                    });
+                if (!result) {
+                    state->failed.store(!state->job->cancelled->load());
+                    if (state->job->cancelled->load()) state->aborted.store(true);
+                } else {
+                    state->duration_ms = result->duration_ms;
                     std::lock_guard lock(state->mutex);
-                    state->chunks.emplace_back(reinterpret_cast<const char*>(data), size);
-                    state->cv.notify_one();
+                    if (!state->streamed_bytes && !result->bytes.empty()) {
+                        state->chunks.emplace_back(
+                            reinterpret_cast<const char*>(result->bytes.data()),
+                            result->bytes.size());
+                        state->pending_bytes += result->bytes.size();
+                    }
                 }
-                return !state->aborted.load() && !state->job->cancelled->load();
-            });
-        if (!result) {
-            state->failed = !state->job->cancelled->load();
-            if (state->job->cancelled->load()) state->aborted.store(true);
-        } else {
-            state->duration_ms = result->duration_ms;
-            std::lock_guard lock(state->mutex);
-            if (state->chunks.empty() && !result->bytes.empty()) {
-                state->chunks.emplace_back(reinterpret_cast<const char*>(result->bytes.data()), result->bytes.size());
+            } catch (...) {
+                state->failed.store(true);
             }
-        }
-        state->finished.store(true);
-        state->cv.notify_all();
-    });
+            state->finished.store(true);
+            state->cv.notify_all();
+        });
+    } catch (const std::exception& error) {
+        write_error(resp, 500, "speech_generation_failed", error.what());
+        record_media(deps, model_name, 0, 500, *slot);
+        finish_job(job, "failed");
+        return;
+    }
     guard.disarm();
     const std::string content_type = request.format == "wav" ? "audio/wav" :
                                      request.format == "pcm" ? "audio/pcm" :
@@ -375,8 +573,10 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
             });
             if (!state->chunks.empty()) {
                 std::string chunk = std::move(state->chunks.front());
+                state->pending_bytes -= chunk.size();
                 state->chunks.pop_front();
                 lock.unlock();
+                state->cv.notify_all();
                 if (!sink.write(chunk.data(), chunk.size())) {
                     state->finish(499);
                     return false;
@@ -384,7 +584,7 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                 return true;
             }
             if (state->finished.load()) {
-                const bool failed = state->failed;
+                const bool failed = state->failed.load();
                 const bool aborted = state->aborted.load();
                 lock.unlock();
                 state->finish(aborted ? 499 : failed ? 500 : 200);
@@ -393,7 +593,11 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
             }
             return true;
         },
-        [state](bool success) { state->finish(!success || state->aborted.load() ? 499 : state->failed ? 500 : 200); });
+        [state](bool success) {
+            state->finish(!success || state->aborted.load()
+                              ? 499
+                              : state->failed.load() ? 500 : 200);
+        });
 }
 
 void handle_audio_transcriptions(const httplib::Request& req, httplib::Response& resp,
@@ -408,13 +612,22 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         return;
     }
     const std::string model_name = req.form.get_field("model");
+    if (model_name.empty()) {
+        write_error(resp, 400, "invalid_transcription_request", "model must not be empty");
+        return;
+    }
     const std::string format = req.form.has_field("response_format") ? req.form.get_field("response_format") : "json";
-    if (format != "json" && format != "text") {
-        write_error(resp, 400, "unsupported_response_format", "response_format must be json or text");
+    if (format != "json" && format != "text" && format != "verbose_json" &&
+        format != "srt" && format != "vtt") {
+        write_error(resp, 400, "unsupported_response_format",
+                    "response_format must be json, text, verbose_json, srt, or vtt");
         return;
     }
     auto decoded = decode_wav(file.content, req.form);
     if (!decoded) { write_error(resp, 400, "invalid_audio", decoded.error().message); return; }
+    const double input_audio_seconds =
+        static_cast<double>(decoded->pcm.size()) /
+        static_cast<double>(decoded->sample_rate);
     auto job = begin_job(model_name, "audio_transcription");
     resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
     auto slot = acquire_media_slot(req, deps, model_name, job);
@@ -430,10 +643,19 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
     if (format == "text") {
         resp.status = 200;
         resp.set_content(result->text, "text/plain; charset=utf-8");
+    } else if (format == "verbose_json") {
+        write_json(resp, 200, verbose_transcription(*result, decoded->temperature));
+    } else if (format == "srt") {
+        resp.status = 200;
+        resp.set_content(subtitles(*result, false), "application/x-subrip; charset=utf-8");
+    } else if (format == "vtt") {
+        resp.status = 200;
+        resp.set_content(subtitles(*result, true), "text/vtt; charset=utf-8");
     } else {
         write_json(resp, 200, {{"text", result->text}});
     }
-    record_media(deps, model_name, result->inference_ms, 200, *slot);
+    record_media(deps, model_name, result->inference_ms, 200, *slot,
+                 input_audio_seconds, 0);
     finish_job(job, "completed");
 }
 

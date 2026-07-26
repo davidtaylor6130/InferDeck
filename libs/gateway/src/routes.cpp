@@ -23,6 +23,9 @@ using namespace inferdeck::foundation;
 
 namespace {
 
+constexpr std::size_t max_pending_stream_deltas = 128;
+constexpr std::size_t max_pending_stream_bytes = 1024 * 1024;
+
 std::string make_id() {
     static std::mutex mtx;
     static std::mt19937_64 rng{std::random_device{}()};
@@ -43,7 +46,9 @@ void record_request(observability::Metrics* metrics,
                     const std::string& model_name,
                     const model::InferenceResult& result,
                     int status_code,
-                    int slot_id) {
+                    int slot_id,
+                    double input_audio_seconds,
+                    std::int64_t input_characters) {
     observability::RequestRecord rec;
     rec.timestamp_unix_ms = now_ms();
     rec.model = model_name;
@@ -73,7 +78,9 @@ void record_request(observability::Metrics* metrics,
             rec.duration_ms,
             rec.tokens_per_second,
             rec.status_code,
-            rec.slot_id
+            rec.slot_id,
+            input_audio_seconds,
+            input_characters
         });
     }
     if (events) {
@@ -85,6 +92,8 @@ void record_request(observability::Metrics* metrics,
             {"durationMs", result.duration_ms},
             {"tokensPerSecond", result.tokens_per_second},
             {"status", status_code},
+            {"inputAudioSeconds", input_audio_seconds},
+            {"inputCharacters", input_characters},
         }.dump());
     }
 }
@@ -93,9 +102,12 @@ void record_request(const GatewayDeps& deps,
                     const std::string& model_name,
                     const model::InferenceResult& result,
                     int status_code,
-                    int slot_id) {
+                    int slot_id,
+                    double input_audio_seconds,
+                    std::int64_t input_characters) {
     record_request(deps.metrics, deps.stats_db, deps.events,
-                   model_name, result, status_code, slot_id);
+                   model_name, result, status_code, slot_id,
+                   input_audio_seconds, input_characters);
 }
 
 namespace {
@@ -162,21 +174,28 @@ foundation::Result<void> perform_swap(const GatewayDeps& deps,
     record_swap(deps, from, target, elapsed, result.has_value(), error);
     publish_model_event(deps, result ? "ready" : (cancelled ? "cancelled" : "failed"),
                         from, target, elapsed, error);
-    if (deps.swap_tracker) deps.swap_tracker->end(result.has_value(), error);
+    if (deps.swap_tracker) {
+        deps.swap_tracker->end(result.has_value(), error, cancelled);
+    }
     return result;
 }
 
-bool begin_tracked_swap(const GatewayDeps& deps, const std::string& from,
-                        const std::string& target) {
-    if (deps.swap_tracker && !deps.swap_tracker->begin(from, target, now_ms())) {
-        return false;
-    }
-    publish_model_event(deps, "swapping", from, target, 0.0, "");
-    return true;
+EnsureLoadedResult swap_start_error(const SwapStartResult& started) {
+    const auto error = started.body.value("error", nlohmann::json::object());
+    return {
+        false,
+        started.status,
+        error.value("code", "swap_start_failed"),
+        error.value("message", "model swap could not be started"),
+    };
 }
 
-std::string sse_chunk(const std::string& id, const std::string& model,
-                      const std::string& delta_json) {
+std::string dump_json(const nlohmann::json& value) {
+    return value.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+}
+
+std::string sse_chunk_json(const std::string& id, const std::string& model,
+                           const nlohmann::json& delta) {
     nlohmann::json chunk = {
         {"id", id},
         {"object", "chat.completion.chunk"},
@@ -185,17 +204,12 @@ std::string sse_chunk(const std::string& id, const std::string& model,
         {"choices", nlohmann::json::array({
             {
                 {"index", 0},
-                {"delta", nlohmann::json::parse(delta_json)},
+                {"delta", delta},
                 {"finish_reason", nullptr},
             }
         })},
     };
-    return "data: " + chunk.dump() + "\n\n";
-}
-
-std::string sse_chunk_json(const std::string& id, const std::string& model,
-                           const nlohmann::json& delta) {
-    return sse_chunk(id, model, delta.dump());
+    return "data: " + dump_json(chunk) + "\n\n";
 }
 
 std::string sse_done(const std::string& id, const std::string& model,
@@ -222,7 +236,7 @@ std::string sse_done(const std::string& id, const std::string& model,
             {"total_tokens", result->prompt_tokens + result->completion_tokens},
         };
     }
-    return "data: " + chunk.dump() + "\n\ndata: [DONE]\n\n";
+    return "data: " + dump_json(chunk) + "\n\ndata: [DONE]\n\n";
 }
 
 nlohmann::json tool_call_json(const model::ToolCall& tc) {
@@ -252,24 +266,29 @@ nlohmann::json tool_call_delta_json(const model::ToolCallDelta& tc) {
     return out;
 }
 
-model::InferenceRequest make_inference_request(const nlohmann::json& body) {
-    model::InferenceRequest ir;
-    ir.openai_body_json = body.dump();
-    ir.max_tokens = body.value("max_tokens", body.value("max_completion_tokens", -1));
-    // Only carry sampler params the client explicitly set; unset ones fall back
-    // to the server-side SamplingConfig defaults downstream (issue #42).
-    if (body.contains("temperature") && !body["temperature"].is_null())
-        ir.temperature = body["temperature"].get<float>();
-    if (body.contains("top_p") && !body["top_p"].is_null())
-        ir.top_p = body["top_p"].get<float>();
-    if (body.contains("top_k") && !body["top_k"].is_null())
-        ir.top_k = body["top_k"].get<int>();
-    if (body.contains("repeat_penalty") && !body["repeat_penalty"].is_null())
-        ir.repeat_penalty = body["repeat_penalty"].get<float>();
-    if (body.contains("repeat_last_n") && !body["repeat_last_n"].is_null())
-        ir.repeat_last_n = body["repeat_last_n"].get<int>();
-    ir.seed = body.value("seed", -1);
-    return ir;
+foundation::Result<model::InferenceRequest> make_inference_request(
+    const nlohmann::json& body) {
+    try {
+        model::InferenceRequest ir;
+        ir.openai_body_json = body.dump();
+        ir.max_tokens = body.value("max_tokens", body.value(
+            "max_completion_tokens", model::k_max_tokens_use_context_budget));
+        if (body.contains("temperature") && !body["temperature"].is_null())
+            ir.temperature = body["temperature"].get<float>();
+        if (body.contains("top_p") && !body["top_p"].is_null())
+            ir.top_p = body["top_p"].get<float>();
+        if (body.contains("top_k") && !body["top_k"].is_null())
+            ir.top_k = body["top_k"].get<int>();
+        if (body.contains("repeat_penalty") && !body["repeat_penalty"].is_null())
+            ir.repeat_penalty = body["repeat_penalty"].get<float>();
+        if (body.contains("repeat_last_n") && !body["repeat_last_n"].is_null())
+            ir.repeat_last_n = body["repeat_last_n"].get<int>();
+        ir.seed = body.value("seed", -1);
+        return foundation::Ok(std::move(ir));
+    } catch (const nlohmann::json::exception& error) {
+        return foundation::Err<model::InferenceRequest>(
+            foundation::ErrorCode::InvalidArgument, error.what());
+    }
 }
 
 struct ErrorClass {
@@ -278,13 +297,13 @@ struct ErrorClass {
     std::string code;
 };
 
-ErrorClass classify_inference_error(foundation::ErrorCode code, const std::string& message) {
+ErrorClass classify_inference_error(foundation::ErrorCode code) {
+    if (code == foundation::ErrorCode::ContextLengthExceeded) {
+        return {400, "invalid_request_error", "context_length_exceeded"};
+    }
     const bool invalid = code == foundation::ErrorCode::InvalidArgument ||
                          code == foundation::ErrorCode::ParseError;
     if (!invalid) return {500, "server_error", "inference_error"};
-    if (message.find("maximum context length") != std::string::npos) {
-        return {400, "invalid_request_error", "context_length_exceeded"};
-    }
     return {400, "invalid_request_error", "invalid_request_error"};
 }
 
@@ -301,20 +320,65 @@ nlohmann::json delta_json(const model::InferenceDelta& delta) {
     return out;
 }
 
+std::size_t delta_size(const model::InferenceDelta& delta) {
+    std::size_t size = delta.content.size() + delta.reasoning_text.size();
+    for (const auto& call : delta.tool_calls) {
+        size += call.id.size() + call.type.size() + call.function_name.size() +
+                call.function_arguments.size();
+    }
+    return size;
+}
+
+bool content_uses_vision(const nlohmann::json& content) {
+    if (!content.is_array()) return false;
+    for (const auto& part : content) {
+        if (!part.is_object()) continue;
+        const auto type = part.value("type", "");
+        if (type == "image" || type == "image_url" || type == "input_image") return true;
+    }
+    return false;
+}
+
+bool chat_uses_vision(const nlohmann::json& body) {
+    if (!body.contains("messages") || !body["messages"].is_array()) return false;
+    for (const auto& message : body["messages"]) {
+        if (message.is_object() && message.contains("content") &&
+            content_uses_vision(message["content"])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 void write_json(httplib::Response& resp, int status,
                 const nlohmann::json& body) {
     resp.status = status;
-    resp.set_content(body.dump(), "application/json");
+    resp.set_content(dump_json(body), "application/json");
+}
+
+nlohmann::json make_error_json(int status, const std::string& code,
+                               const std::string& message,
+                               nlohmann::json param) {
+    std::string type = "invalid_request_error";
+    if (status == 401) type = "authentication_error";
+    else if (status == 403) type = "permission_error";
+    else if (status == 429) type = "rate_limit_error";
+    else if (status >= 500) type = "server_error";
+    return {
+        {"error", {
+            {"message", message},
+            {"type", type},
+            {"param", std::move(param)},
+            {"code", code},
+        }},
+    };
 }
 
 void write_error(httplib::Response& resp, int status, const std::string& code,
                  const std::string& message) {
-    nlohmann::json body = {
-        {"error", {{"code", code}, {"message", message}}},
-    };
-    write_json(resp, status, body);
+    write_json(resp, status, make_error_json(status, code, message));
 }
 
 std::string header_value(const httplib::Request& req, const std::string& name) {
@@ -396,13 +460,15 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
 
 SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name) {
     if (!deps.coordinator.registry().has(model_name)) {
-        return {404, {{"error", {{"code", "model_not_found"},
-                                 {"message", "model not registered: " + model_name}}}}};
+        return {404, make_error_json(404, "model_not_found",
+                                     "model not registered: " + model_name)};
     }
     const auto info = deps.coordinator.registry().get_info_result(model_name);
     if (!info || !deps.coordinator.registry().has_factory(info->runtime)) {
-        return {503, {{"error", {{"code", "runtime_unavailable"},
-                                  {"message", "runtime is not linked: " + (info ? info->runtime : std::string("unknown"))}}}}};
+        return {503, make_error_json(
+            503, "runtime_unavailable",
+            "runtime is not linked: " +
+                (info ? info->runtime : std::string("unknown")))};
     }
     auto current = deps.coordinator.get_loaded_model();
     if (current && *current == model_name) {
@@ -410,16 +476,33 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
                       {"model", model_name},
                       {"message", "model already loaded"}}};
     }
-    if (!begin_tracked_swap(deps, current.value_or(""), model_name)) {
-        const auto snap = deps.swap_tracker ? deps.swap_tracker->snapshot() : SwapSnapshot{};
-        return {409, {{"error", {{"code", "swap_in_progress"},
-                                 {"message", "a swap to " + snap.target + " is already in progress"}}}}};
+    if (!deps.swap_tracker) {
+        return {503, make_error_json(
+            503, "swap_executor_unavailable",
+            "model swap executor is unavailable")};
     }
+
     GatewayDeps deps_copy = deps;
     const std::string from = current.value_or("");
-    std::thread([deps_copy, from, model_name]() {
-        (void)perform_swap(deps_copy, from, model_name);
-    }).detach();
+    std::string launch_error;
+    const auto start_result = deps.swap_tracker->start(
+        from, model_name, now_ms(),
+        [deps_copy, from, model_name]() {
+            publish_model_event(deps_copy, "swapping", from, model_name, 0.0, "");
+            (void)perform_swap(deps_copy, from, model_name);
+        },
+        launch_error);
+    if (start_result == SwapTracker::StartResult::Busy) {
+        const auto snap = deps.swap_tracker ? deps.swap_tracker->snapshot() : SwapSnapshot{};
+        return {409, make_error_json(
+            409, "swap_in_progress",
+            "a swap to " + snap.target + " is already in progress")};
+    }
+    if (start_result == SwapTracker::StartResult::Failed) {
+        return {500, make_error_json(
+            500, "swap_start_failed",
+            "model swap worker could not be started: " + launch_error)};
+    }
     return {202, {{"status", "swapping"},
                   {"model", model_name},
                   {"from", from}}};
@@ -435,11 +518,12 @@ EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
                 "model not loaded; POST /v1/swap/to/" + model_name + " then retry"};
     }
 
+    if (!deps.swap_tracker) {
+        return {false, 503, "swap_executor_unavailable",
+                "model swap executor is unavailable"};
+    }
+
     LOG_INFO("auto_swap_begin", "requested={}", model_name);
-    // Wait out any in-progress swap rather than failing fast with 503. A cold-start
-    // race (e.g. a client firing a title + main request at the same time) resolves
-    // when the first swap finishes and the target becomes loaded -- no redundant
-    // swap, no 503.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes{5};
     while (std::chrono::steady_clock::now() < deadline) {
         if (deps.coordinator.is_loaded(model_name)) {
@@ -447,31 +531,34 @@ EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
         }
 
         auto started = start_swap_async(deps, model_name);
-        if (started.status == 404) {
-            return {false, 404, "model_not_found",
-                    "model not registered: " + model_name};
+        if (started.status != 200 && started.status != 202 &&
+            started.status != 409) {
+            return swap_start_error(started);
         }
-        // status 200 (already loaded), 202 (we started the swap), or 409 (another
-        // swap already in progress): in every case wait for the model to load.
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (deps.coordinator.is_loaded(model_name)) {
-                return {true, 200, "", ""};
+
+        if (deps.coordinator.is_loaded(model_name)) {
+            return {true, 200, "", ""};
+        }
+        if (!deps.swap_tracker->wait_until_idle(deadline)) {
+            break;
+        }
+
+        if (deps.coordinator.is_loaded(model_name)) {
+            return {true, 200, "", ""};
+        }
+        const auto snap = deps.swap_tracker->snapshot();
+        if (snap.target == model_name) {
+            if (snap.last_cancelled) {
+                return {false, 503, "swap_cancelled",
+                        "model load was cancelled: " + model_name};
             }
-            const auto snap =
-                deps.swap_tracker ? deps.swap_tracker->snapshot() : SwapSnapshot{};
-            if (!snap.swapping && !deps.coordinator.swap_in_progress()) {
-                // The in-progress swap settled. If it targeted our model and failed,
-                // surface that; otherwise re-evaluate and start our own swap.
-                if (snap.target == model_name && !snap.last_error.empty()) {
-                    return {false, 503, "swap_failed",
-                            "model load failed: " + snap.last_error};
-                }
-                break;
+            if (!snap.last_error.empty()) {
+                return {false, 503, "swap_failed",
+                        "model load failed: " + snap.last_error};
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }
     }
-    return {false, 503, "swap_in_progress", "model load timed out: " + model_name};
+    return {false, 503, "swap_timeout", "model load timed out: " + model_name};
 }
 
 void handle_swap_to(const httplib::Request& req, httplib::Response& resp,
@@ -513,6 +600,7 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
         {"from", snap.from},
         {"started_unix_ms", snap.started_unix_ms},
         {"last_error", snap.last_error},
+        {"last_cancelled", snap.last_cancelled},
     };
     for (const auto& resident : deps.coordinator.residency()) {
         body["residency"].push_back({
@@ -553,10 +641,33 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     "model not registered: " + model_name);
         return;
     }
-    bool stream = body.value("stream", false);
+    const auto model_info = deps.coordinator.registry().get_info_result(model_name);
+    if (model_info && !model_info->has_vision && chat_uses_vision(body)) {
+        write_error(resp, 400, "unsupported_capability",
+                    "model does not support image input: " + model_name);
+        return;
+    }
+    if (body.contains("stream") && !body["stream"].is_boolean()) {
+        write_error(resp, 400, "invalid_request_error", "stream must be a boolean");
+        return;
+    }
+    const bool stream = body.value("stream", false);
+    if (body.contains("stream_options") && body["stream_options"].is_object() &&
+        body["stream_options"].contains("include_usage") &&
+        !body["stream_options"]["include_usage"].is_boolean()) {
+        write_error(resp, 400, "invalid_request_error",
+                    "stream_options.include_usage must be a boolean");
+        return;
+    }
     const bool include_stream_usage = body.contains("stream_options") &&
         body["stream_options"].is_object() &&
         body["stream_options"].value("include_usage", false);
+    auto inference_request = make_inference_request(body);
+    if (!inference_request) {
+        write_error(resp, 400, "invalid_request_error",
+                    inference_request.error().message);
+        return;
+    }
 
     int slot_id = -1;
     {
@@ -617,13 +728,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     } guard{&release_slot};
 
     if (!stream) {
-        model::InferenceRequest ir = make_inference_request(body);
-
         model::InferenceResult pr;
         try {
-            auto pres = deps.coordinator.predict(model_name, slot_id, ir);
+            auto pres = deps.coordinator.predict(
+                model_name, slot_id, *inference_request);
             if (!pres) {
-                const auto ec = classify_inference_error(pres.error().code, pres.error().message);
+                const auto ec = classify_inference_error(pres.error().code);
                 LOG_ERROR("inference_failed",
                           "model={} slot_id={} status={} code={} error={}",
                           model_name, slot_id, ec.status, ec.code, pres.error().message);
@@ -691,12 +801,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     resp.set_header("Cache-Control", "no-cache");
     resp.set_header("Connection", "keep-alive");
 
-    model::InferenceRequest ir = make_inference_request(body);
-
     struct StreamState {
         std::mutex mtx;
         std::condition_variable cv;
         std::deque<model::InferenceDelta> delta_queue;
+        std::size_t pending_bytes{0};
         bool inference_done{false};
         bool inference_error{false};
         foundation::ErrorCode error_code{foundation::ErrorCode::Internal};
@@ -711,6 +820,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         observability::StatsDb* stats_db{nullptr};
         foundation::EventBus* events{nullptr};
         std::atomic<bool> cleanup_done{false};
+        InferenceDeltaUtf8Buffer utf8;
 
         void finish_once(bool aborted_stream, int fallback_status, const std::string& reason) {
             bool expected = false;
@@ -768,21 +878,34 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     state->stats_db = deps.stats_db;
     state->events = deps.events;
 
-    guard.disarm();
-
-    state->inference_thread = std::thread([state, ir]() {
+    state->inference_thread = std::thread(
+        [state, ir = std::move(*inference_request)]() {
         try {
             auto result = state->coordinator->predict_stream(
                 state->model_name, state->slot_id, ir,
                 [state](const model::InferenceDelta& delta) -> bool {
                     if (state->aborted.load()) return false;
                     {
-                        std::lock_guard<std::mutex> lk(state->mtx);
+                        const auto bytes = delta_size(delta);
+                        std::unique_lock<std::mutex> lk(state->mtx);
+                        state->cv.wait(lk, [state, bytes] {
+                            const bool byte_capacity =
+                                state->delta_queue.empty() ||
+                                (bytes <= max_pending_stream_bytes &&
+                                 state->pending_bytes <=
+                                     max_pending_stream_bytes - bytes);
+                            return state->aborted.load() ||
+                                   (state->delta_queue.size() <
+                                        max_pending_stream_deltas &&
+                                    byte_capacity);
+                        });
+                        if (state->aborted.load()) return false;
                         state->delta_queue.push_back(delta);
+                        state->pending_bytes += bytes;
                     }
                     state->cv.notify_one();
-                return !state->aborted.load();
-            },
+                    return !state->aborted.load();
+                },
             &state->aborted);
             {
                 std::lock_guard<std::mutex> lk(state->mtx);
@@ -814,6 +937,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             state->cv.notify_all();
         }
     });
+    guard.disarm();
 
     resp.set_chunked_content_provider(
         "text/event-stream",
@@ -846,10 +970,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             if (!state->delta_queue.empty()) {
                 std::deque<model::InferenceDelta> deltas;
                 while (!state->delta_queue.empty()) {
+                    state->pending_bytes -= delta_size(state->delta_queue.front());
                     deltas.push_back(std::move(state->delta_queue.front()));
                     state->delta_queue.pop_front();
                 }
                 lk.unlock();
+                state->cv.notify_all();
 
                 if (!sink.is_writable()) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=sink_not_writable",
@@ -859,7 +985,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 }
 
                 for (const auto& delta : deltas) {
-                    auto json_delta = delta_json(delta);
+                    auto json_delta = delta_json(state->utf8.on_delta(delta));
                     if (json_delta.empty()) continue;
                     std::string out = sse_chunk_json(id, stream_model, json_delta);
                     if (!sink.write(out.data(), out.size())) {
@@ -878,16 +1004,26 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             const auto final_result = state->final_result;
             lk.unlock();
 
+            auto trailing_delta = delta_json(state->utf8.finish());
+            if (!trailing_delta.empty()) {
+                std::string out = sse_chunk_json(id, stream_model, trailing_delta);
+                if (!sink.write(out.data(), out.size())) {
+                    LOG_WARN("stream_abort", "model={} slot_id={} reason=trailing_chunk_write_failed",
+                             state->model_name, state->slot_id);
+                    state->finish_once(true, 499, "trailing_chunk_write_failed");
+                    return false;
+                }
+            }
+
             if (inference_error) {
-                const auto ec = classify_inference_error(error_code, error_msg);
+                const auto ec = classify_inference_error(error_code);
                 LOG_ERROR("inference_failed",
                           "model={} slot_id={} status={} code={} error={}",
                           state->model_name, state->slot_id, ec.status, ec.code, error_msg);
-                std::string err = "data: " + nlohmann::json{{"error", {
-                    {"message", error_msg},
-                    {"type", ec.type},
-                    {"code", ec.code},
-                }}}.dump() + "\n\n";
+                auto error = make_error_json(ec.status, ec.code, error_msg);
+                error["error"]["type"] = ec.type;
+                std::string err = "data: " + dump_json(error) +
+                    "\n\ndata: [DONE]\n\n";
                 if (!sink.write(err.data(), err.size())) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=error_write_failed",
                              state->model_name, state->slot_id);

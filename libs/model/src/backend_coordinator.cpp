@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <thread>
 #include <utility>
 
@@ -82,31 +83,47 @@ foundation::Result<void> BackendCoordinator::unload_current() {
 foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
     std::lock_guard<std::recursive_mutex> swap_lock(swap_mutex_);
     auto drain_deadline = clock::now() + std::chrono::milliseconds{30000};
+    std::unique_ptr<IBackend> instance;
+    bool was_primary = false;
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        while (active_requests_by_model_[name] > 0 && clock::now() < drain_deadline) {
+        draining_models_.insert(name);
+        const auto has_active_requests = [&] {
+            const auto active = active_requests_by_model_.find(name);
+            return active != active_requests_by_model_.end() && active->second > 0;
+        };
+        while (has_active_requests() && clock::now() < drain_deadline) {
             cv_.wait_for(lock, std::chrono::milliseconds{100});
         }
-        if (active_requests_by_model_[name] > 0) {
+        if (has_active_requests()) {
+            draining_models_.erase(name);
+            lock.unlock();
+            cv_.notify_all();
             return foundation::Err<void>(foundation::ErrorCode::Timeout,
                                           "timeout draining active requests for: " + name);
         }
-    }
-    foundation::Result<void> r = foundation::Ok();
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
         auto it = instances_.find(name);
         if (it != instances_.end() && it->second) {
-            r = it->second->unload();
-            if (r) {
-                instances_.erase(it);
-            }
+            instance = std::move(it->second);
+            instances_.erase(it);
         }
-        if (current_loaded_.has_value() && *current_loaded_ == name) {
+        was_primary = current_loaded_.has_value() && *current_loaded_ == name;
+        if (was_primary) {
             current_loaded_.reset();
             select_primary_locked();
         }
-        active_requests_by_model_.erase(name);
+    }
+
+    auto r = instance ? instance->unload() : foundation::Ok();
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!r && instance) {
+            instances_[name] = std::move(instance);
+            if (was_primary) current_loaded_ = name;
+        }
+        if (r) active_requests_by_model_.erase(name);
+        draining_models_.erase(name);
     }
     cv_.notify_all();
     return r;
@@ -277,6 +294,10 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
     std::unique_lock<std::mutex> lock(mutex_);
     const auto deadline = clock::now() + opts.timeout;
     if (!opts.block) {
+        if (draining_models_.contains(name)) {
+            return foundation::Err<int>(foundation::ErrorCode::Unavailable,
+                                         "model is draining: " + name);
+        }
         auto it = instances_.find(name);
         if (it == instances_.end() || !it->second || !it->second->is_loaded()) {
             return foundation::Err<int>(foundation::ErrorCode::NotFound,
@@ -288,9 +309,9 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
         }
         auto slot = it->second->acquire_slot();
         if (!slot) return slot;
-        ++active_requests_;
-        ++active_requests_by_model_[name];
-        return slot;
+        auto lease = issue_lease_locked(name, *slot);
+        if (!lease) (void)it->second->release_slot(*slot);
+        return lease;
     }
     if (waiters_.size() >= max_queue_size_) {
         return foundation::Err<int>(foundation::ErrorCode::Unavailable,
@@ -312,6 +333,10 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             cv_.notify_all();
             return foundation::Err<int>(foundation::ErrorCode::Timeout,
                                          "timeout waiting in request queue: " + name);
+        }
+        if (draining_models_.contains(name)) {
+            cv_.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds{100}));
+            continue;
         }
         auto it = instances_.find(name);
         if (it == instances_.end() || !it->second || !it->second->is_loaded()) {
@@ -346,11 +371,16 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
         if (!resizing_models_.contains(name) && waiter_is_next_locked(waiter_id, now)) {
             auto slot = it->second->acquire_slot();
             if (slot) {
+                auto lease = issue_lease_locked(name, *slot);
+                if (!lease) {
+                    (void)it->second->release_slot(*slot);
+                    erase_waiter_locked(waiter_id);
+                    cv_.notify_all();
+                    return lease;
+                }
                 erase_waiter_locked(waiter_id);
-                ++active_requests_;
-                ++active_requests_by_model_[name];
                 cv_.notify_all();
-                return slot;
+                return lease;
             }
         }
         cv_.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds{100}));
@@ -358,16 +388,27 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
 }
 
 foundation::Result<void> BackendCoordinator::release_slot(
-    const std::string& name, int slot_id) {
+    const std::string& name, int lease_id) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto lease = active_leases_.find(lease_id);
+        if (lease == active_leases_.end()) {
+            if (lease_id > 0 && lease_id < next_lease_id_) return foundation::Ok();
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                          "invalid slot lease");
+        }
+        if (lease->second.model != name) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                          "slot lease belongs to another model");
+        }
         auto it = instances_.find(name);
         if (it == instances_.end() || !it->second) {
             return foundation::Err<void>(foundation::ErrorCode::NotFound,
                                           "model not loaded: " + name);
         }
-        auto r = it->second->release_slot(slot_id);
+        auto r = it->second->release_slot(lease->second.backend_slot);
         if (!r) return r;
+        active_leases_.erase(lease);
         if (active_requests_ > 0) --active_requests_;
         auto active = active_requests_by_model_.find(name);
         if (active != active_requests_by_model_.end() && active->second > 0) --active->second;
@@ -428,9 +469,33 @@ void BackendCoordinator::erase_waiter_locked(std::uint64_t id) {
     std::erase_if(waiters_, [id](const SlotWaiter& waiter) { return waiter.id == id; });
 }
 
+foundation::Result<int> BackendCoordinator::issue_lease_locked(
+    const std::string& name, int backend_slot) {
+    if (next_lease_id_ > std::numeric_limits<int>::max()) {
+        return foundation::Err<int>(foundation::ErrorCode::Internal,
+                                     "slot lease id space exhausted");
+    }
+    const auto lease_id = static_cast<int>(next_lease_id_++);
+    active_leases_.emplace(lease_id, ActiveLease{name, backend_slot});
+    ++active_requests_;
+    ++active_requests_by_model_[name];
+    return foundation::Ok(lease_id);
+}
+
+foundation::Result<int> BackendCoordinator::backend_slot_for_lease_locked(
+    const std::string& name, int lease_id) const {
+    const auto lease = active_leases_.find(lease_id);
+    if (lease == active_leases_.end() || lease->second.model != name) {
+        return foundation::Err<int>(foundation::ErrorCode::InvalidArgument,
+                                     "invalid slot lease");
+    }
+    return foundation::Ok(lease->second.backend_slot);
+}
+
 foundation::Result<InferenceResult> BackendCoordinator::predict(
-    const std::string& name, int slot_id, const InferenceRequest& req) {
+    const std::string& name, int lease_id, const InferenceRequest& req) {
     IModel* inst = nullptr;
+    int backend_slot = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = instances_.find(name);
@@ -443,16 +508,22 @@ foundation::Result<InferenceResult> BackendCoordinator::predict(
             return foundation::Err<InferenceResult>(foundation::ErrorCode::InvalidArgument,
                                                       "backend does not support text generation: " + name);
         }
+        auto slot = backend_slot_for_lease_locked(name, lease_id);
+        if (!slot) {
+            return foundation::Err<InferenceResult>(slot.error().code, slot.error().message);
+        }
+        backend_slot = *slot;
     }
     // Safe to call unlocked: the caller holds a slot, so unload() drains before
     // the instance can be destroyed.
-    return inst->predict(slot_id, req);
+    return inst->predict(backend_slot, req);
 }
 
 foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
-    const std::string& name, int slot_id, const InferenceRequest& req,
+    const std::string& name, int lease_id, const InferenceRequest& req,
     const IModel::TokenCallback& callback, const std::atomic<bool>* cancel) {
     IModel* inst = nullptr;
+    int backend_slot = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = instances_.find(name);
@@ -465,14 +536,20 @@ foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
             return foundation::Err<InferenceResult>(foundation::ErrorCode::InvalidArgument,
                                                       "backend does not support text generation: " + name);
         }
+        auto slot = backend_slot_for_lease_locked(name, lease_id);
+        if (!slot) {
+            return foundation::Err<InferenceResult>(slot.error().code, slot.error().message);
+        }
+        backend_slot = *slot;
     }
-    return inst->predict_stream(slot_id, req, callback, cancel);
+    return inst->predict_stream(backend_slot, req, callback, cancel);
 }
 
 foundation::Result<EmbeddingResult> BackendCoordinator::embed(
-    const std::string& name, int slot_id, const EmbeddingRequest& request,
+    const std::string& name, int lease_id, const EmbeddingRequest& request,
     const std::function<bool()>& cancelled) {
     IEmbeddingBackend* backend = nullptr;
+    int backend_slot = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = instances_.find(name);
@@ -485,14 +562,20 @@ foundation::Result<EmbeddingResult> BackendCoordinator::embed(
             return foundation::Err<EmbeddingResult>(foundation::ErrorCode::InvalidArgument,
                                                       "backend does not support embeddings: " + name);
         }
+        auto slot = backend_slot_for_lease_locked(name, lease_id);
+        if (!slot) {
+            return foundation::Err<EmbeddingResult>(slot.error().code, slot.error().message);
+        }
+        backend_slot = *slot;
     }
-    return backend->embed(slot_id, request, cancelled);
+    return backend->embed(backend_slot, request, cancelled);
 }
 
 foundation::Result<ImageGenerationResult> BackendCoordinator::generate_images(
-    const std::string& name, int slot_id, const ImageGenerationRequest& request,
+    const std::string& name, int lease_id, const ImageGenerationRequest& request,
     const std::function<bool(int)>& progress) {
     IImageBackend* backend = nullptr;
+    int backend_slot = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = instances_.find(name);
@@ -505,14 +588,20 @@ foundation::Result<ImageGenerationResult> BackendCoordinator::generate_images(
             return foundation::Err<ImageGenerationResult>(foundation::ErrorCode::InvalidArgument,
                                                            "backend does not support image generation: " + name);
         }
+        auto slot = backend_slot_for_lease_locked(name, lease_id);
+        if (!slot) {
+            return foundation::Err<ImageGenerationResult>(slot.error().code, slot.error().message);
+        }
+        backend_slot = *slot;
     }
-    return backend->generate_images(slot_id, request, progress);
+    return backend->generate_images(backend_slot, request, progress);
 }
 
 foundation::Result<AudioResult> BackendCoordinator::synthesize(
-    const std::string& name, int slot_id, const SpeechRequest& request,
+    const std::string& name, int lease_id, const SpeechRequest& request,
     const std::function<bool(const std::byte*, std::size_t)>& stream) {
     ISpeechBackend* backend = nullptr;
+    int backend_slot = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = instances_.find(name);
@@ -525,14 +614,20 @@ foundation::Result<AudioResult> BackendCoordinator::synthesize(
             return foundation::Err<AudioResult>(foundation::ErrorCode::InvalidArgument,
                                                  "backend does not support speech synthesis: " + name);
         }
+        auto slot = backend_slot_for_lease_locked(name, lease_id);
+        if (!slot) {
+            return foundation::Err<AudioResult>(slot.error().code, slot.error().message);
+        }
+        backend_slot = *slot;
     }
-    return backend->synthesize(slot_id, request, stream);
+    return backend->synthesize(backend_slot, request, stream);
 }
 
 foundation::Result<TranscriptionResult> BackendCoordinator::transcribe(
-    const std::string& name, int slot_id, const TranscriptionRequest& request,
+    const std::string& name, int lease_id, const TranscriptionRequest& request,
     const std::function<bool(int)>& progress) {
     ITranscriptionBackend* backend = nullptr;
+    int backend_slot = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = instances_.find(name);
@@ -545,8 +640,13 @@ foundation::Result<TranscriptionResult> BackendCoordinator::transcribe(
             return foundation::Err<TranscriptionResult>(foundation::ErrorCode::InvalidArgument,
                                                          "backend does not support transcription: " + name);
         }
+        auto slot = backend_slot_for_lease_locked(name, lease_id);
+        if (!slot) {
+            return foundation::Err<TranscriptionResult>(slot.error().code, slot.error().message);
+        }
+        backend_slot = *slot;
     }
-    return backend->transcribe(slot_id, request, progress);
+    return backend->transcribe(backend_slot, request, progress);
 }
 
 void BackendCoordinator::drain_active(std::chrono::milliseconds timeout) {

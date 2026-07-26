@@ -101,7 +101,7 @@ private:
   struct SlotState {
     bool busy{false};
     std::vector<int> last_prompt_tokens;
-    std::vector<uint8_t> recurrent_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
     int checkpoint_pos{0};
   };
 
@@ -123,14 +123,15 @@ private:
     int max_tokens{0};
     int n_ctx_seq{0};
     std::vector<int> last_prompt_tokens;
-    std::vector<uint8_t> recurrent_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
     int checkpoint_pos{0};
+    int checkpoint_capture_pos{0};
   };
   inferdeck::foundation::Result<PredictSetup> prepare_inference(
       int slot_id, const inferdeck::model::InferenceRequest& req);
 
   // Drain task.out_queue until done, calling on_token for each produced token.
-  // on_token returns false to request early stop (sets task.caller_cancel).
+  // on_token returns false to request early stop.
   using OnToken = std::function<bool(llama_token)>;
   inferdeck::foundation::Result<void> drain_task(SlotTask& task, const OnToken& on_token);
 

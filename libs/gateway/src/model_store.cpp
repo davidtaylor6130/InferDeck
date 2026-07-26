@@ -1,10 +1,13 @@
 #include "gateway/model_store.hpp"
 
+#include "foundation/path_utils.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <fstream>
 #include <iomanip>
+#include <stdexcept>
 #include <sstream>
 
 #ifdef _WIN32
@@ -63,7 +66,10 @@ bool compatible_extension(const std::string& filename, const std::string& runtim
     if (runtime == "stable_diffusion_cpp") return extension == ".safetensors" || extension == ".gguf" ||
                                                     extension == ".ckpt" || extension == ".pth" || extension == ".pt";
     if (runtime == "whisper_cpp") return extension == ".bin" || extension == ".gguf";
-    if (runtime == "sherpa_onnx") return extension == ".onnx" || extension == ".bin" || extension == ".txt";
+    if (runtime == "sherpa_onnx") {
+        return extension == ".onnx" || extension == ".bin" ||
+               extension == ".txt" || extension == ".json";
+    }
     return false;
 }
 
@@ -72,7 +78,9 @@ std::vector<std::string> capabilities_for(const std::string& runtime,
     if (modality == "embedding") return {"embeddings"};
     if (runtime == "stable_diffusion_cpp") return {"image_generation"};
     if (runtime == "whisper_cpp") return {"audio_transcription"};
-    if (runtime == "sherpa_onnx") return {"audio_speech"};
+    if (runtime == "sherpa_onnx") {
+        return {modality == "audio_transcription" ? "audio_transcription" : "audio_speech"};
+    }
     return {"chat_completions", "responses"};
 }
 
@@ -85,6 +93,7 @@ std::string lower(std::string value) {
 std::string infer_runtime(const std::string& filename, const std::string& pipeline) {
     const std::string name = lower(filename);
     const std::string tag = lower(pipeline);
+    if (name.ends_with(".onnx") || name.ends_with(".ort")) return "sherpa_onnx";
     if (tag.find("text-to-image") != std::string::npos || name.ends_with(".safetensors")) return "stable_diffusion_cpp";
     if (tag.find("automatic-speech-recognition") != std::string::npos) return "whisper_cpp";
     if (tag.find("text-to-speech") != std::string::npos) return "sherpa_onnx";
@@ -94,7 +103,11 @@ std::string infer_runtime(const std::string& filename, const std::string& pipeli
 std::string infer_modality(const std::string& runtime, const std::string& pipeline) {
     if (runtime == "stable_diffusion_cpp") return "image";
     if (runtime == "whisper_cpp") return "audio_transcription";
-    if (runtime == "sherpa_onnx") return "audio_speech";
+    if (runtime == "sherpa_onnx") {
+        return lower(pipeline).find("automatic-speech-recognition") != std::string::npos
+            ? "audio_transcription"
+            : "audio_speech";
+    }
     if (lower(pipeline).find("feature-extraction") != std::string::npos) return "embedding";
     return "text";
 }
@@ -153,7 +166,7 @@ Result<std::string> sha256_file(const std::filesystem::path& path) {
         return Err<std::string>(ErrorCode::Internal, "cannot initialize SHA-256 hash");
     }
     std::ifstream input(path, std::ios::binary);
-    std::array<char, 1024 * 1024> buffer{};
+    std::vector<char> buffer(1024 * 1024);
     while (input) {
         input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const auto count = input.gcount();
@@ -218,7 +231,8 @@ Result<nlohmann::json> ModelStore::search(const std::string& query,
     }
     auto response = transport_->get_json(
         "https://huggingface.co/api/models?search=" + encode(query) +
-        "&full=true&limit=" + std::to_string(limit), token_);
+        "&full=true&sort=downloads&direction=-1&limit=" +
+        std::to_string(limit), token_);
     if (!response) return Err<nlohmann::json>(response.error().code, response.error().message);
     nlohmann::json results = nlohmann::json::array();
     if (!response->is_array()) return Err<nlohmann::json>(ErrorCode::ParseError, "invalid model source response");
@@ -226,17 +240,40 @@ Result<nlohmann::json> ModelStore::search(const std::string& query,
         const std::string id = item.value("id", "");
         const std::string pipeline = item.value("pipeline_tag", "");
         if (id.empty()) continue;
-        const std::string inferred_runtime = infer_runtime("", pipeline);
+        const auto tags = item.value("tags", nlohmann::json::array());
+        const std::string searchable = lower(id + " " + tags.dump());
+        std::string inferred_runtime = infer_runtime("", pipeline);
+        if (lower(pipeline).find("automatic-speech-recognition") != std::string::npos &&
+            (searchable.find("onnx") != std::string::npos ||
+             searchable.find("sherpa") != std::string::npos)) {
+            inferred_runtime = "sherpa_onnx";
+        }
         const std::string inferred_modality = infer_modality(inferred_runtime, pipeline);
         if (!runtime.empty() && inferred_runtime != runtime) continue;
         if (!modality.empty() && inferred_modality != modality) continue;
+        const auto downloads = item.value("downloads", 0);
+        const auto likes = item.value("likes", 0);
+        const bool has_vision =
+            lower(pipeline).find("image-text") != std::string::npos ||
+            lower(pipeline).find("visual-question") != std::string::npos ||
+            searchable.find("vision") != std::string::npos ||
+            searchable.find("multimodal") != std::string::npos;
         results.push_back({
             {"id", id}, {"pipeline", pipeline}, {"runtime", inferred_runtime},
-            {"modality", inferred_modality}, {"downloads", item.value("downloads", 0)},
-            {"likes", item.value("likes", 0)}, {"private", item.value("private", false)},
-            {"gated", item.value("gated", nlohmann::json(false))}
+            {"modality", inferred_modality}, {"downloads", downloads},
+            {"likes", likes}, {"private", item.value("private", false)},
+            {"gated", item.value("gated", nlohmann::json(false))},
+            {"lastModified", item.value("lastModified", "")},
+            {"hasVision", has_vision},
+            {"recommended", downloads >= 1000 || likes >= 25}
         });
     }
+    std::sort(results.begin(), results.end(), [](const auto& left, const auto& right) {
+        const auto left_downloads = left.value("downloads", 0LL);
+        const auto right_downloads = right.value("downloads", 0LL);
+        if (left_downloads != right_downloads) return left_downloads > right_downloads;
+        return left.value("likes", 0LL) > right.value("likes", 0LL);
+    });
     return Ok(std::move(results));
 }
 
@@ -306,19 +343,39 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
     if (model_name.empty() || model_name.size() > 160 || safe_name(model_name) != model_name) {
         return Err<std::uint64_t>(ErrorCode::InvalidArgument, "invalid model name");
     }
-    if (coordinator_.registry().has(model_name)) {
-        return Err<std::uint64_t>(ErrorCode::AlreadyExists, "model name is already registered");
-    }
     auto file = resolve_file(repo, filename, runtime, modality);
     if (!file) return Err<std::uint64_t>(file.error().code, file.error().message);
     const auto space = std::filesystem::space(root_);
     if (space.available < file->size + 64 * 1024 * 1024) {
         return Err<std::uint64_t>(ErrorCode::Unavailable, "insufficient disk space for model artifact");
     }
-    std::uint64_t id;
+    reap_completed_workers();
+    std::uint64_t id = 0;
     {
         std::lock_guard lock(mutex_);
+        prune_completed_jobs_locked();
+        const auto active = std::count_if(
+            downloads_.begin(), downloads_.end(), [](const auto& entry) {
+                return entry.second.state == "queued" || entry.second.state == "downloading";
+            });
+        if (active >= kMaxActiveInstalls) {
+            return Err<std::uint64_t>(
+                ErrorCode::Unavailable,
+                "model store already has the maximum number of active installs");
+        }
+        if (downloads_.size() >= kMaxRetainedJobs) {
+            return Err<std::uint64_t>(
+                ErrorCode::Unavailable,
+                "model store job history is full; retry after active installs finish");
+        }
+        if (reserved_names_.contains(model_name) || installed_.contains(model_name) ||
+            coordinator_.registry().has(model_name)) {
+            return Err<std::uint64_t>(
+                ErrorCode::AlreadyExists,
+                "model name is already installed, registered, or being installed");
+        }
         id = next_id_++;
+        reserved_names_.emplace(model_name, id);
         StoreDownload job;
         job.id = id;
         job.file = std::move(*file);
@@ -328,31 +385,160 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
         cancellations_[id] = std::make_shared<std::atomic<bool>>(false);
     }
     auto started = start(id);
-    if (!started) return Err<std::uint64_t>(started.error().code, started.error().message);
+    if (!started) {
+        std::lock_guard lock(mutex_);
+        const auto reservation = reserved_names_.find(model_name);
+        if (reservation != reserved_names_.end() &&
+            reservation->second == id) {
+            reserved_names_.erase(reservation);
+        }
+        downloads_.erase(id);
+        cancellations_.erase(id);
+        return Err<std::uint64_t>(started.error().code, started.error().message);
+    }
     return Ok(id);
 }
 
 Result<void> ModelStore::start(std::uint64_t id) {
+    reap_completed_workers();
     std::thread previous;
+    std::shared_ptr<std::atomic<bool>> done;
     {
         std::lock_guard lock(mutex_);
         auto job = downloads_.find(id);
         if (job == downloads_.end()) return Err<void>(ErrorCode::NotFound, "download not found");
         if (job->second.state == "downloading") return Err<void>(ErrorCode::AlreadyExists, "download is already running");
+        const auto active = std::count_if(
+            downloads_.begin(), downloads_.end(), [id](const auto& entry) {
+                return entry.first != id &&
+                       (entry.second.state == "queued" || entry.second.state == "downloading");
+            });
+        if (active >= kMaxActiveInstalls) {
+            return Err<void>(
+                ErrorCode::Unavailable,
+                "model store already has the maximum number of active installs");
+        }
+        if (workers_.size() >= kMaxRetainedJobs) {
+            return Err<void>(
+                ErrorCode::Unavailable,
+                "model store worker history is full; retry after installs finish");
+        }
+        const auto reservation = reserved_names_.find(job->second.model_name);
+        if ((reservation != reserved_names_.end() &&
+             reservation->second != id) ||
+            (reservation == reserved_names_.end() &&
+             (installed_.contains(job->second.model_name) ||
+              coordinator_.registry().has(job->second.model_name)))) {
+            return Err<void>(
+                ErrorCode::AlreadyExists,
+                "model name is already installed, registered, or being installed");
+        }
         if (auto worker = workers_.find(id); worker != workers_.end()) {
             previous = std::move(worker->second);
             workers_.erase(worker);
+            worker_done_.erase(id);
         }
         cancellations_[id] = std::make_shared<std::atomic<bool>>(false);
         job->second.state = "queued";
         job->second.error.clear();
+        reserved_names_[job->second.model_name] = id;
     }
     if (previous.joinable()) previous.join();
+    done = std::make_shared<std::atomic<bool>>(false);
     {
         std::lock_guard lock(mutex_);
-        workers_.emplace(id, std::thread([this, id] { run(id); }));
+        try {
+            workers_.emplace(
+                id, std::thread([this, id, done] { worker_entry(id, done); }));
+            worker_done_[id] = done;
+        } catch (const std::exception& error) {
+            downloads_.at(id).state = "failed";
+            downloads_.at(id).error =
+                std::string("cannot start model install worker: ") + error.what();
+            const auto reservation =
+                reserved_names_.find(downloads_.at(id).model_name);
+            if (reservation != reserved_names_.end() &&
+                reservation->second == id) {
+                reserved_names_.erase(reservation);
+            }
+            return Err<void>(ErrorCode::Unavailable,
+                             "cannot start model install worker");
+        }
     }
     return Ok();
+}
+
+void ModelStore::worker_entry(
+    std::uint64_t id,
+    const std::shared_ptr<std::atomic<bool>>& done) noexcept {
+    try {
+        run(id);
+    } catch (const std::exception& error) {
+        fail_job(id, std::string("model install failed unexpectedly: ") + error.what());
+    } catch (...) {
+        fail_job(id, "model install failed unexpectedly");
+    }
+    done->store(true, std::memory_order_release);
+}
+
+void ModelStore::fail_job(std::uint64_t id, std::string error) noexcept {
+    try {
+        finish_job(id, "failed", std::move(error));
+    } catch (...) {
+    }
+}
+
+void ModelStore::finish_job(std::uint64_t id, std::string state,
+                            std::string error) {
+    std::lock_guard lock(mutex_);
+    const auto job = downloads_.find(id);
+    if (job == downloads_.end()) return;
+    job->second.state = std::move(state);
+    job->second.error = std::move(error);
+    const auto reservation = reserved_names_.find(job->second.model_name);
+    if (reservation != reserved_names_.end() &&
+        reservation->second == id) {
+        reserved_names_.erase(reservation);
+    }
+}
+
+void ModelStore::reap_completed_workers() {
+    std::vector<std::thread> completed;
+    {
+        std::lock_guard lock(mutex_);
+        for (auto worker = workers_.begin(); worker != workers_.end();) {
+            const auto done = worker_done_.find(worker->first);
+            if (done == worker_done_.end() ||
+                !done->second->load(std::memory_order_acquire)) {
+                ++worker;
+                continue;
+            }
+            completed.push_back(std::move(worker->second));
+            worker_done_.erase(worker->first);
+            worker = workers_.erase(worker);
+        }
+    }
+    for (auto& worker : completed) {
+        if (worker.joinable()) worker.join();
+    }
+}
+
+void ModelStore::prune_completed_jobs_locked() {
+    while (downloads_.size() >= kMaxRetainedJobs) {
+        auto oldest = downloads_.end();
+        for (auto job = downloads_.begin(); job != downloads_.end(); ++job) {
+            const bool terminal = job->second.state == "installed" ||
+                                  job->second.state == "failed" ||
+                                  job->second.state == "cancelled";
+            if (terminal && (oldest == downloads_.end() ||
+                             job->first < oldest->first)) {
+                oldest = job;
+            }
+        }
+        if (oldest == downloads_.end()) return;
+        cancellations_.erase(oldest->first);
+        downloads_.erase(oldest);
+    }
 }
 
 void ModelStore::run(std::uint64_t id) {
@@ -369,45 +555,63 @@ void ModelStore::run(std::uint64_t id) {
     std::filesystem::create_directories(directory);
     const std::filesystem::path final_path = directory / safe_name(std::filesystem::path(job.file.name).filename().string());
     const std::filesystem::path partial_path = final_path.string() + ".partial";
-    const std::uint64_t offset = std::min(local_file_size(partial_path), job.file.size);
+    const auto partial_size = local_file_size(partial_path);
+    if (partial_size > job.file.size) {
+        std::error_code ignored;
+        std::filesystem::remove(partial_path, ignored);
+        finish_job(id, "failed",
+                   "partial download exceeds the validated source size");
+        return;
+    }
+    const std::uint64_t offset = partial_size;
     const std::string url = "https://huggingface.co/" + job.file.repo + "/resolve/" +
                             encode(job.file.revision) + "/" + encode(job.file.name);
     Result<void> downloaded = Ok();
+    const auto exceeded_size = std::make_shared<std::atomic<bool>>(false);
     if (offset < job.file.size) {
         downloaded = transport_->download(
             url, token_, partial_path, offset,
-            [this, id, cancelled](std::uint64_t bytes) {
+            [this, id, cancelled, exceeded_size,
+             expected_size = job.file.size](std::uint64_t bytes) {
+                if (bytes > expected_size) {
+                    exceeded_size->store(true, std::memory_order_release);
+                    return false;
+                }
                 std::lock_guard lock(mutex_);
                 downloads_.at(id).bytes_downloaded = bytes;
                 return !cancelled->load();
             });
     }
     if (!downloaded) {
-        std::lock_guard lock(mutex_);
-        downloads_.at(id).state = cancelled->load() ? "cancelled" : "failed";
-        downloads_.at(id).error = cancelled->load() ? "cancelled" : downloaded.error().message;
+        if (exceeded_size->load(std::memory_order_acquire)) {
+            std::error_code ignored;
+            std::filesystem::remove(partial_path, ignored);
+            finish_job(id, "failed",
+                       "download exceeds the validated source size");
+        } else {
+            finish_job(id, cancelled->load() ? "cancelled" : "failed",
+                       cancelled->load() ? "cancelled" : downloaded.error().message);
+        }
         return;
     }
     if (local_file_size(partial_path) != job.file.size) {
-        std::lock_guard lock(mutex_);
-        downloads_.at(id).state = "failed";
-        downloads_.at(id).error = "downloaded size does not match source metadata";
+        finish_job(id, "failed",
+                   "downloaded size does not match source metadata");
         return;
     }
     auto checksum = sha256_file(partial_path);
     if (!checksum || lower(*checksum) != lower(job.file.sha256)) {
         std::error_code ignored;
         std::filesystem::remove(partial_path, ignored);
-        std::lock_guard lock(mutex_);
-        downloads_.at(id).state = "failed";
-        downloads_.at(id).error = checksum ? "downloaded checksum does not match source metadata" : checksum.error().message;
+        finish_job(
+            id, "failed",
+            checksum ? "downloaded checksum does not match source metadata"
+                     : checksum.error().message);
         return;
     }
     auto finalized = replace_file(partial_path, final_path);
     if (!finalized) {
-        std::lock_guard lock(mutex_);
-        downloads_.at(id).state = "failed";
-        downloads_.at(id).error = finalized.error().message;
+        finish_job(id, "failed", finalized.error().message);
         return;
     }
     model::ModelInfo info;
@@ -433,15 +637,15 @@ void ModelStore::run(std::uint64_t id) {
     if (!saved) {
         std::error_code ignored;
         std::filesystem::remove(final_path, ignored);
-        std::lock_guard lock(mutex_);
-        installed_.erase(job.model_name);
-        downloads_.at(id).state = "failed";
-        downloads_.at(id).error = saved.error().message;
+        {
+            std::lock_guard lock(mutex_);
+            installed_.erase(job.model_name);
+        }
+        finish_job(id, "failed", saved.error().message);
         return;
     }
     coordinator_.registry().register_model(info);
-    std::lock_guard lock(mutex_);
-    downloads_.at(id).state = "installed";
+    finish_job(id, "installed");
 }
 
 Result<void> ModelStore::cancel(std::uint64_t id) {
@@ -453,6 +657,7 @@ Result<void> ModelStore::cancel(std::uint64_t id) {
 }
 
 Result<void> ModelStore::resume(std::uint64_t id) {
+    reap_completed_workers();
     {
         std::lock_guard lock(mutex_);
         const auto job = downloads_.find(id);
@@ -479,7 +684,7 @@ Result<void> ModelStore::remove(const std::string& model_name) {
     std::error_code error;
     const auto root = std::filesystem::weakly_canonical(root_, error);
     const auto path = std::filesystem::weakly_canonical(entry.value("path", ""), error);
-    if (error || path.string().rfind(root.string() + std::filesystem::path::preferred_separator, 0) != 0) {
+    if (error || !foundation::is_path_within(root, path)) {
         return Err<void>(ErrorCode::InvalidArgument, "installed artifact is outside the model store");
     }
     if (!std::filesystem::remove(path, error) || error) {
@@ -507,6 +712,155 @@ nlohmann::json ModelStore::installed() const {
     return installed_;
 }
 
+nlohmann::json ModelStore::library() const {
+    nlohmann::json result = nlohmann::json::array();
+    const auto managed = installed();
+    std::unordered_map<std::string, std::string> configured_files;
+
+    auto normalized_path = [](const std::filesystem::path& path) {
+        std::error_code error;
+        auto normalized = std::filesystem::weakly_canonical(path, error).string();
+#ifdef _WIN32
+        normalized = lower(std::move(normalized));
+#endif
+        return error ? std::string{} : normalized;
+    };
+
+    for (const auto& name : coordinator_.registry().list()) {
+        auto info_result = coordinator_.registry().get_info_result(name);
+        if (!info_result) continue;
+        const auto& info = *info_result;
+        std::vector<std::filesystem::path> paths;
+        if (!info.gguf_path.empty()) paths.emplace_back(info.gguf_path);
+        if (!info.mmproj_path.empty()) paths.emplace_back(info.mmproj_path);
+        for (const auto& [_, value] : info.artifacts) {
+            std::error_code error;
+            if (!value.empty() && std::filesystem::is_regular_file(value, error)) {
+                paths.emplace_back(value);
+            }
+        }
+        std::uint64_t size = 0;
+        std::size_t artifact_count = 0;
+        std::string display_path;
+        std::string quantization{"unknown"};
+        for (const auto& path : paths) {
+            std::error_code error;
+            if (!std::filesystem::is_regular_file(path, error)) continue;
+            const auto key = normalized_path(path);
+            if (!key.empty()) configured_files[key] = name;
+            size += local_file_size(path);
+            ++artifact_count;
+            if (display_path.empty()) display_path = path.parent_path().string();
+            if (path.extension() == ".gguf" && path.filename().string().find("mmproj") == std::string::npos) {
+                quantization = infer_quantization(path.filename().string());
+            }
+        }
+        result.push_back({
+            {"id", "registered:" + name},
+            {"name", name},
+            {"family", info.family},
+            {"runtime", info.runtime},
+            {"modality", info.modality},
+            {"capabilities", info.capabilities},
+            {"path", display_path.empty() ? info.gguf_path : display_path},
+            {"size", size},
+            {"vramRequiredMb", info.vram_required_mb},
+            {"quantization", quantization},
+            {"artifactCount", artifact_count},
+            {"hasVision", info.has_vision || !info.mmproj_path.empty()},
+            {"configured", true},
+            {"managed", managed.contains(name)}
+        });
+    }
+
+    struct DiskGroup {
+        std::filesystem::path directory;
+        std::uint64_t size{0};
+        std::size_t count{0};
+        std::string runtime;
+        std::string modality;
+        std::string quantization{"unknown"};
+        bool has_vision{false};
+    };
+    std::map<std::string, DiskGroup> groups;
+    const auto library_root = lower(root_.filename().string()) == "store"
+        ? root_.parent_path()
+        : root_;
+    std::error_code scan_error;
+    std::size_t visited = 0;
+    if (std::filesystem::is_directory(library_root, scan_error)) {
+        std::filesystem::recursive_directory_iterator iterator(
+            library_root,
+            std::filesystem::directory_options::skip_permission_denied,
+            scan_error);
+        const std::filesystem::recursive_directory_iterator end;
+        for (; iterator != end && !scan_error && visited < 4096;
+             iterator.increment(scan_error), ++visited) {
+            if (!iterator->is_regular_file(scan_error)) continue;
+            const auto path = iterator->path();
+            const auto extension = lower(path.extension().string());
+            if (extension != ".gguf" && extension != ".onnx" &&
+                extension != ".ort" && extension != ".bin" &&
+                extension != ".safetensors") {
+                continue;
+            }
+            const auto normalized = normalized_path(path);
+            if (normalized.empty() || configured_files.contains(normalized)) continue;
+            const auto directory_key = normalized_path(path.parent_path());
+            if (directory_key.empty()) continue;
+            auto& group = groups[directory_key];
+            group.directory = path.parent_path();
+            group.size += local_file_size(path);
+            ++group.count;
+            const auto searchable = lower(path.string());
+            const auto file_runtime = infer_runtime(path.filename().string(), "");
+            if (group.runtime.empty() || file_runtime != "llama_cpp") {
+                group.runtime = file_runtime;
+            }
+            group.modality =
+                searchable.find("\\stt\\") != std::string::npos ||
+                searchable.find("/stt/") != std::string::npos
+                    ? "audio_transcription"
+                    : searchable.find("\\tts\\") != std::string::npos ||
+                      searchable.find("/tts/") != std::string::npos
+                        ? "audio_speech"
+                        : infer_modality(group.runtime, "");
+            const auto quantization = infer_quantization(path.filename().string());
+            if (quantization != "unknown") group.quantization = quantization;
+            if (searchable.find("mmproj") != std::string::npos) group.has_vision = true;
+        }
+    }
+    for (const auto& [key, group] : groups) {
+        std::error_code relative_error;
+        const auto relative = std::filesystem::relative(
+            group.directory, library_root, relative_error);
+        const auto label = relative_error ? group.directory.filename().string() : relative.string();
+        result.push_back({
+            {"id", "disk:" + key},
+            {"name", label},
+            {"family", "On-disk artifact"},
+            {"runtime", group.runtime},
+            {"modality", group.modality},
+            {"capabilities", capabilities_for(group.runtime, group.modality)},
+            {"path", group.directory.string()},
+            {"size", group.size},
+            {"vramRequiredMb", static_cast<std::uint64_t>((group.size + 1024 * 1024 - 1) / (1024 * 1024))},
+            {"quantization", group.quantization},
+            {"artifactCount", group.count},
+            {"hasVision", group.has_vision},
+            {"configured", false},
+            {"managed", false}
+        });
+    }
+    std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
+        const bool left_configured = left.value("configured", false);
+        const bool right_configured = right.value("configured", false);
+        if (left_configured != right_configured) return left_configured > right_configured;
+        return left.value("name", "") < right.value("name", "");
+    });
+    return result;
+}
+
 void ModelStore::load_manifest() {
     std::ifstream input(root_ / "installed.json", std::ios::binary);
     if (!input) return;
@@ -519,7 +873,7 @@ void ModelStore::load_manifest() {
         for (auto item = manifest.begin(); item != manifest.end(); ++item) {
             const auto path = std::filesystem::weakly_canonical(item.value().value("path", ""), error);
             if (error || !std::filesystem::is_regular_file(path, error) ||
-                path.string().rfind(root.string() + std::filesystem::path::preferred_separator, 0) != 0) continue;
+                !foundation::is_path_within(root, path)) continue;
             model::ModelInfo info;
             info.name = item.key();
             info.family = item.value().value("family", "");
@@ -537,6 +891,7 @@ void ModelStore::load_manifest() {
 }
 
 Result<void> ModelStore::save_manifest() {
+    std::lock_guard manifest_lock(manifest_mutex_);
     nlohmann::json snapshot;
     {
         std::lock_guard lock(mutex_);
@@ -602,6 +957,10 @@ Result<OpenRequest> open_request(const std::string& url, const std::string& toke
     handles.session.value = WinHttpOpen(L"InferDeck/2.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!handles.session.value) return Err<OpenRequest>(ErrorCode::Unavailable, "cannot initialize Windows HTTP");
+    if (!WinHttpSetTimeouts(handles.session.value, 10000, 10000, 30000, 30000)) {
+        return Err<OpenRequest>(ErrorCode::Unavailable,
+                                "cannot configure model source timeouts");
+    }
     std::wstring host(components.lpszHostName, components.dwHostNameLength);
     handles.connection.value = WinHttpConnect(handles.session.value, host.c_str(), components.nPort, 0);
     if (!handles.connection.value) return Err<OpenRequest>(ErrorCode::Unavailable, "cannot connect to model source");
@@ -673,7 +1032,7 @@ public:
         std::ofstream output(destination, std::ios::binary |
                             (offset > 0 ? std::ios::app : std::ios::trunc));
         if (!output) return Err<void>(ErrorCode::IoError, "cannot open partial model artifact");
-        std::array<char, 1024 * 1024> buffer{};
+        std::vector<char> buffer(1024 * 1024);
         std::uint64_t total = offset;
         while (true) {
             DWORD received = 0;

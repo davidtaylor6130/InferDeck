@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -611,6 +612,130 @@ TEST_CASE("BackendCoordinator: acquire_slot succeeds after release", "[model][co
     REQUIRE(s3.has_value());
     REQUIRE(c.release_slot("a", s3.value()).has_value());
     REQUIRE(c.release_slot("a", s2.value()).has_value());
+}
+
+TEST_CASE("BackendCoordinator: duplicate release cannot affect a newer lease",
+          "[model][coordinator][lease]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        auto model = std::make_unique<IModelMock>(i);
+        model->max_slots.store(1);
+        model->busy_slots.assign(1, 0);
+        return model;
+    });
+    reg.register_model(make_info("a"));
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("a").has_value());
+
+    auto first = coordinator.acquire_slot("a");
+    REQUIRE(first.has_value());
+    REQUIRE(coordinator.release_slot("a", *first).has_value());
+
+    auto second = coordinator.acquire_slot("a");
+    REQUIRE(second.has_value());
+    REQUIRE(*second != *first);
+    REQUIRE(coordinator.release_slot("a", *first).has_value());
+    REQUIRE(coordinator.active_request_count("a") == 1);
+
+    auto stale = coordinator.predict("a", *first, InferenceRequest{});
+    REQUIRE_FALSE(stale.has_value());
+    REQUIRE(stale.error().code == ErrorCode::InvalidArgument);
+    REQUIRE(coordinator.predict("a", *second, InferenceRequest{}).has_value());
+
+    AcquireSlotOptions non_blocking;
+    non_blocking.block = false;
+    auto third = coordinator.acquire_slot("a", non_blocking);
+    REQUIRE_FALSE(third.has_value());
+    REQUIRE(third.error().code == ErrorCode::Unavailable);
+    REQUIRE(coordinator.release_slot("a", *second).has_value());
+    REQUIRE(coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("BackendCoordinator: unload blocks admission without holding coordinator mutex",
+          "[model][coordinator][drain]") {
+    std::atomic<bool> unload_started{false};
+    std::atomic<bool> allow_unload{false};
+
+    class BlockingUnloadMock : public IModelMock {
+    public:
+        BlockingUnloadMock(ModelInfo info, std::atomic<bool>& started,
+                           std::atomic<bool>& allow)
+            : IModelMock(std::move(info)), started_(started), allow_(allow) {
+            max_slots.store(2);
+            busy_slots.assign(2, 0);
+        }
+
+        Result<void> unload() override {
+            started_.store(true);
+            while (!allow_.load()) std::this_thread::yield();
+            return IModelMock::unload();
+        }
+
+    private:
+        std::atomic<bool>& started_;
+        std::atomic<bool>& allow_;
+    };
+
+    ModelRegistry reg;
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        return std::make_unique<BlockingUnloadMock>(i, unload_started, allow_unload);
+    });
+    reg.register_model(make_info("a"));
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("a").has_value());
+    auto held = coordinator.acquire_slot("a");
+    REQUIRE(held.has_value());
+
+    auto unloading = std::async(std::launch::async, [&] {
+        return coordinator.unload("a");
+    });
+
+    bool drain_observed = false;
+    bool probe_release_failed = false;
+    const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    while (std::chrono::steady_clock::now() < drain_deadline) {
+        AcquireSlotOptions options;
+        options.block = false;
+        auto probe = coordinator.acquire_slot("a", options);
+        if (!probe && probe.error().message == "model is draining: a") {
+            drain_observed = true;
+            break;
+        }
+        if (probe && !coordinator.release_slot("a", *probe)) {
+            probe_release_failed = true;
+            break;
+        }
+        std::this_thread::yield();
+    }
+
+    REQUIRE(coordinator.release_slot("a", *held).has_value());
+    const auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    while (!unload_started.load() && std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::yield();
+    }
+
+    auto query = std::async(std::launch::async, [&] {
+        return coordinator.active_request_count();
+    });
+    const bool query_completed =
+        query.wait_for(std::chrono::milliseconds{100}) == std::future_status::ready;
+    AcquireSlotOptions options;
+    options.block = false;
+    auto during_unload = coordinator.acquire_slot("a", options);
+
+    allow_unload.store(true);
+    const auto unloaded = unloading.get();
+    const auto active = query.get();
+
+    REQUIRE(drain_observed);
+    REQUIRE_FALSE(probe_release_failed);
+    REQUIRE(unload_started.load());
+    REQUIRE(query_completed);
+    REQUIRE(active == 0);
+    REQUIRE_FALSE(during_unload.has_value());
+    REQUIRE(during_unload.error().code == ErrorCode::Unavailable);
+    REQUIRE(unloaded.has_value());
+    REQUIRE_FALSE(coordinator.is_loaded("a"));
 }
 
 TEST_CASE("BackendCoordinator: request queue is FIFO at equal priority", "[model][coordinator][queue]") {

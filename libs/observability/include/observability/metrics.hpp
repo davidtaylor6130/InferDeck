@@ -41,6 +41,11 @@ struct ModelStats {
 
 class Metrics {
 public:
+  void restore_lifetime(std::int64_t requests,
+                        std::int64_t swaps,
+                        std::int64_t prompt_tokens,
+                        std::int64_t completion_tokens,
+                        double duration_ms);
   void record_request(const RequestRecord& rec);
   void record_swap(const SwapRecord& rec);
   void record_gpu_sample(std::int64_t ts, double util_pct, double vram_mb, double temp_c, double power_w);

@@ -78,15 +78,18 @@ and the same dashboard. See the [roadmap](#roadmap).
 ## Features
 
 ### Inference engine
-- **In-process llama.cpp (Vulkan).** Direct C-API integration; the only helper
-  subprocess is an optional ADLX GPU-telemetry probe.
-- **Multi-model with async hot swap.** Models register in
-  `config/gateway.yml`; one is resident at a time (single-GPU VRAM budget).
+- **In-process llama.cpp (Vulkan).** Direct C-API integration with no backend
+  subprocess, proxy, or orphan process.
+- **Multi-model residency with async hot swap.** Models register in
+  `config/gateway.yml`; the coordinator admits resident models within the
+  configured single-GPU VRAM budget.
   `POST /v1/swap/to/:name` drains active requests, unloads, loads the new
   GGUF, and streams progress to the dashboard over SSE — with cancellation.
 - **KV-cache reuse.** Longest-common-prefix prompt matching, so multi-turn
-  agent sessions don't re-prefill the whole conversation each turn.
-- **Vision-capable.** mmproj projectors stay resident for multimodal models.
+  agent sessions reuse full-attention KV state and hybrid recurrent
+  checkpoints instead of re-prefilling the whole conversation each turn.
+- **Honest modality discovery.** Text models advertise text input only until
+  the in-process multimodal projector path is implemented.
 
 ### API
 - **OpenAI-compatible** `POST /v1/chat/completions`: SSE streaming,
@@ -95,25 +98,29 @@ and the same dashboard. See the [roadmap](#roadmap).
 - **Anthropic Messages API** at `POST /v1/messages`.
 - **Anthropic model aliases.** Map requested Claude model names (`claude-*`) to
   local models via `anthropic.model_aliases` in `config/gateway.yml`, so
-  Anthropic-API clients (e.g. Claude Code) route to the right local model;
-  unmapped names fall back to the loaded model, then the configured default.
+  Anthropic-API clients (e.g. Claude Code) route to the intended local model.
+  Unknown non-empty model IDs are rejected instead of silently rerouted.
+- **Native audio APIs.** CPU-only Parakeet TDT 0.6B v3 transcription at
+  `POST /v1/audio/transcriptions` and in-process Supertonic 3 neural speech
+  synthesis at `POST /v1/audio/speech`, both behind the same model admission
+  path.
 - Discovery and ops endpoints: `/v1/models`, `/v1/health`, `/v1/metrics`.
 
 ### Live dashboard
-React 19 + Vite + Tailwind, driven by a single SSE stream — no polling:
-GPU utilisation/VRAM/temperature/power sparklines, per-request
-tokens-per-second, swap progress with cancel, token/cost tracking with
-per-model pricing, and a live log viewer.
+React 19 + Vite + Tailwind, driven by one SSE connection with a bounded
+30-second status fallback. The task views cover operation, model residency,
+usage assumptions, and diagnostics. Voice capture and playback belong to API
+clients such as Open WebUI, not the administration dashboard.
 
 ### Observability & quality
 - Every request and swap is recorded three ways: in-memory metrics, SQLite
   history (`stats.db`), and SSE events. p50/p95 latency, daily/hourly usage
   buckets, lifetime counters.
-- **Parity-tested:** a CI gate checks ≥ 0.95 LCS token similarity against raw
-  `llama-server` per registered model, plus Catch2 unit/integration suites and
-  a streaming tool-call harness.
-- **Sampler optimization harness** (`inferdeck-bench`) for per-model sampler
-  tuning against benchmark tasks.
+- Catch2 unit/integration suites and a streaming tool-call harness cover API
+  shape and runtime behavior. Real-model parity remains a manually provisioned
+  hardware test.
+- `inferdeck-bench --dry-run` validates search-space parsing and optimizer
+  mechanics; real inference scoring is not implemented yet.
 
 ## Architecture
 
@@ -125,7 +132,7 @@ per-model pricing, and a live log viewer.
               │                      drain-on-swap, 30s acquisition queue)          │
               │  libs/llama_cpp_wrapper  LlamaCppModel: template/tokenize/decode/   │
               │                      sample, LCP prompt-cache reuse                 │
-              │  libs/observability  GPU telemetry (PDH/DXGI/ADLX), Metrics,        │
+              │  libs/observability  GPU telemetry (PDH/DXGI), Metrics,             │
               │                      SQLite StatsDb                                 │
               │  libs/foundation     logging, Result/Error, EventBus                │
               └──────────────────────────────┬───────────────────────────────────────┘
@@ -147,7 +154,7 @@ responsive mid-generation.
 apps/inferdeck-gateway/    exe entry: config, dependency wiring, routes, static files
 apps/dashboard/            React dashboard (built output is committed and served by the exe)
 apps/benchmark-runner/     inferdeck-bench sampler-optimization harness
-apps/hardware-adlx-helper/ optional GPU telemetry helper
+apps/hardware-adlx-helper/ standalone ADLX probe experiment; not launched by the gateway
 libs/                      gateway, model, llama_cpp_wrapper, observability, optimize, foundation
 config/                    gateway.yml, per-model sampler profiles
 tests/                     Catch2 unit/integration, parity gate, fixtures, stress
@@ -171,6 +178,9 @@ llama.cpp is cloned into `libs/third_party/` (not a submodule).
 ```bash
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DINFERDECK_BUILD_TESTS=ON
 cmake --build build --target inferdeck-gateway --config Release -j
+
+# Install the pinned in-process Whisper source and default model
+./scripts/setup-whisper-runtime.ps1
 
 # Dashboard (output lands in apps/inferdeck-gateway/static/)
 pnpm install
@@ -218,6 +228,8 @@ bash tests/parity/run.sh
 | --- | --- |
 | `POST /v1/chat/completions` | OpenAI-compatible; SSE streaming, tool calls, reasoning content |
 | `POST /v1/messages` | Anthropic Messages API |
+| `POST /v1/audio/transcriptions` | Request-scoped PCM WAV to text via in-process Parakeet TDT |
+| `POST /v1/audio/speech` | Text to request-scoped audio via in-process Supertonic 3 |
 | `GET /v1/models` · `/v1/health` · `/v1/metrics` | discovery + ops |
 | `POST /v1/swap/to/:name` | async swap, `202` + SSE progress; `/v1/swap/cancel`, `/v1/swap/status` |
 | `GET /api/status` · `/api/jobs` · `/api/logs` · `/api/pricing` | dashboard data |
@@ -233,7 +245,7 @@ completions today.
 - [ ] **Durable request queue** across all workloads — overlapping calls wait
   their turn (with queue position surfaced in the dashboard) instead of being
   rejected, even across model swaps.
-- [ ] **Recurrent-state checkpoints** for hybrid linear-attention models
+- [x] **Recurrent-state checkpoints** for hybrid linear-attention models
   (e.g. Qwen3.6-A3B), so they get the same KV-cache reuse as full-attention
   models instead of re-prefilling every turn.
 - [ ] **Structured error codes** across the API surface and UTF-8 hold-back in
@@ -241,7 +253,7 @@ completions today.
 - [x] **GitHub Actions CI** running the unit/integration suites on every push.
 
 **Beyond text — the multi-modal gateway**
-- [ ] **Speech-to-text** (`/v1/audio/transcriptions`, whisper.cpp) and
+- [x] **Speech-to-text** (`/v1/audio/transcriptions`, whisper.cpp) and
   **text-to-speech** (`/v1/audio/speech`) behind the same slot scheduler.
 - [ ] **Image generation** (`/v1/images/generations`, stable-diffusion.cpp) —
   the swap machinery already handles "unload the LLM, load something else."

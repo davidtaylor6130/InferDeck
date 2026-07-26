@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "foundation/result.hpp"
+#include "gateway/anthropic_routes.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
 #include "gateway/openai_routes.hpp"
@@ -17,6 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
@@ -39,8 +42,17 @@ public:
     std::atomic<int> vram_mb{4096};
     std::atomic<int> max_slots{2};
     std::atomic<int> load_delay_ms{0};
+    std::atomic<bool> load_should_fail{false};
     std::atomic<bool> block_until_cancel{false};
     std::atomic<bool> block_media_until_cancel{false};
+    std::atomic<bool> split_utf8{false};
+    std::atomic<bool> context_error{false};
+    std::atomic<int> last_max_tokens{0};
+    std::atomic<int> stream_delta_count{0};
+    std::atomic<int> stream_deltas_emitted{0};
+    std::atomic<int> speech_chunk_count{0};
+    std::atomic<int> speech_chunks_emitted{0};
+    std::atomic<bool> speech_should_fail{false};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
     std::string last_request_json;
@@ -56,6 +68,10 @@ public:
     Result<void> load() override {
         const int delay = load_delay_ms.load();
         if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds{delay});
+        if (load_should_fail.load()) {
+            return inferdeck::foundation::Err<void>(
+                ErrorCode::Internal, "mock load failed");
+        }
         loaded.store(true);
         return Ok();
     }
@@ -103,9 +119,14 @@ public:
     }
 
     Result<InferenceResult> predict(int, const InferenceRequest& request) override {
+        last_max_tokens.store(request.max_tokens);
         {
             std::lock_guard<std::mutex> lock(mtx);
             last_request_json = request.openai_body_json;
+        }
+        if (context_error.load()) {
+            return inferdeck::foundation::Err<InferenceResult>(
+                ErrorCode::ContextLengthExceeded, "prompt is too long");
         }
         InferenceResult r;
         const auto body = request.openai_body_json.empty()
@@ -129,12 +150,64 @@ public:
     Result<InferenceResult> predict_stream(
         int, const InferenceRequest&, const TokenCallback& callback,
         const std::atomic<bool>* cancel = nullptr) override {
+        if (context_error.load()) {
+            return inferdeck::foundation::Err<InferenceResult>(
+                ErrorCode::ContextLengthExceeded, "prompt is too long");
+        }
+        const int deltas = stream_delta_count.load();
+        if (deltas > 0) {
+            InferenceDelta delta;
+            delta.content.assign(64 * 1024, 'x');
+            for (int index = 0; index < deltas; ++index) {
+                const bool accepted = callback(delta);
+                stream_deltas_emitted.fetch_add(1);
+                if (!accepted) return Ok(InferenceResult{});
+            }
+            return Ok(InferenceResult{});
+        }
         if (block_until_cancel.load()) {
             // Simulate a long generation that only ends when cancelled.
             while (!(cancel && cancel->load())) {
                 std::this_thread::sleep_for(std::chrono::milliseconds{5});
             }
             return Ok(InferenceResult{});
+        }
+        if (split_utf8.load()) {
+            InferenceDelta first;
+            first.content = std::string("cost \xe2\x82", 7);
+            first.reasoning_text = std::string("idea \xf0\x9f\x92", 8);
+            ToolCallDelta first_call;
+            first_call.index = 0;
+            first_call.id = "call_utf8";
+            first_call.type = "function";
+            first_call.function_name = "lookup";
+            first_call.function_arguments = std::string("{\"city\":\"M") +
+                std::string("\xc3", 1);
+            first.tool_calls.push_back(std::move(first_call));
+            if (!callback(first)) return Ok(InferenceResult{});
+
+            InferenceDelta second;
+            second.content = std::string("\xac", 1) + "5";
+            second.reasoning_text = std::string("\xa1", 1);
+            ToolCallDelta second_call;
+            second_call.index = 0;
+            second_call.function_arguments = std::string("\xbc", 1) + "nchen\"}";
+            second.tool_calls.push_back(std::move(second_call));
+            if (!callback(second)) return Ok(InferenceResult{});
+
+            InferenceDelta trailing;
+            trailing.content = std::string("\xe2", 1);
+            if (!callback(trailing)) return Ok(InferenceResult{});
+
+            InferenceResult result;
+            result.prompt_tokens = 5;
+            result.completion_tokens = 7;
+            ToolCall call;
+            call.id = "call_utf8";
+            call.function_name = "lookup";
+            call.function_arguments = std::string("{\"city\":\"M\xc3\xbcnchen\"}", 19);
+            result.tool_calls.push_back(std::move(call));
+            return Ok(std::move(result));
         }
         InferenceDelta reasoning;
         reasoning.reasoning_text = "need a tool";
@@ -204,10 +277,28 @@ public:
     Result<AudioResult> synthesize(
         int, const SpeechRequest& request,
         const std::function<bool(const std::byte*, std::size_t)>& stream = {}) override {
+        if (speech_should_fail.load()) {
+            return inferdeck::foundation::Err<AudioResult>(
+                ErrorCode::InvalidArgument, "mock speech failure");
+        }
         AudioResult result;
         result.bytes = {std::byte{0x52}, std::byte{0x49}, std::byte{0x46}, std::byte{0x46}};
         result.content_type = request.format == "wav" ? "audio/wav" : "audio/mpeg";
         result.duration_ms = 8;
+        const int chunks = speech_chunk_count.load();
+        if (stream && chunks > 0) {
+            std::vector<std::byte> chunk(128 * 1024, std::byte{0x41});
+            for (int index = 0; index < chunks; ++index) {
+                const bool accepted = stream(chunk.data(), chunk.size());
+                speech_chunks_emitted.fetch_add(1);
+                if (!accepted) {
+                    return inferdeck::foundation::Err<AudioResult>(
+                        ErrorCode::Cancelled, "cancelled");
+                }
+            }
+            result.bytes.clear();
+            return Ok(std::move(result));
+        }
         if (stream && !stream(result.bytes.data(), result.bytes.size())) {
             return inferdeck::foundation::Err<AudioResult>(ErrorCode::Cancelled, "cancelled");
         }
@@ -223,6 +314,15 @@ public:
         result.language = request.language.empty() ? "en" : request.language;
         result.duration_seconds = static_cast<float>(request.pcm.size()) / request.sample_rate;
         result.inference_ms = 7;
+        TranscriptionSegment segment;
+        segment.id = 0;
+        segment.start_seconds = 0.0f;
+        segment.end_seconds = 0.5f;
+        segment.text = " test transcript";
+        segment.tokens = {50364, 1234, 50389};
+        segment.avg_logprob = -0.25f;
+        segment.no_speech_probability = 0.01f;
+        result.segments.push_back(std::move(segment));
         return Ok(std::move(result));
     }
 };
@@ -262,12 +362,40 @@ std::string test_wav() {
     return wav;
 }
 
+std::string test_float_wav(float sample) {
+    std::string wav(48, '\0');
+    auto put16 = [&wav](std::size_t at, std::uint16_t value) {
+        wav[at] = static_cast<char>(value & 0xff);
+        wav[at + 1] = static_cast<char>((value >> 8) & 0xff);
+    };
+    auto put32 = [&wav](std::size_t at, std::uint32_t value) {
+        for (int byte = 0; byte < 4; ++byte) {
+            wav[at + byte] =
+                static_cast<char>((value >> (8 * byte)) & 0xff);
+        }
+    };
+    std::memcpy(wav.data(), "RIFF", 4);
+    put32(4, 40);
+    std::memcpy(wav.data() + 8, "WAVEfmt ", 8);
+    put32(16, 16);
+    put16(20, 3);
+    put16(22, 1);
+    put32(24, 16000);
+    put32(28, 64000);
+    put16(32, 4);
+    put16(34, 32);
+    std::memcpy(wav.data() + 36, "data", 4);
+    put32(40, 4);
+    std::memcpy(wav.data() + 44, &sample, sizeof(sample));
+    return wav;
+}
+
 struct TestServer {
     ModelRegistry registry;
     BackendCoordinator coordinator;
-    SwapTracker swap_tracker;
     observability::Metrics metrics;
     observability::StatsDb stats_db{":memory:"};
+    SwapTracker swap_tracker;
     httplib::Server server;
     std::thread th;
     int port{0};
@@ -303,6 +431,10 @@ struct TestServer {
         server.Post("/v1/responses",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_responses(req, resp, make_deps());
+                    });
+        server.Post("/v1/messages",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_anthropic_messages(req, resp, make_deps());
                     });
         server.Post("/v1/images/generations",
                     [this](const httplib::Request& req, httplib::Response& resp) {
@@ -341,6 +473,16 @@ struct TestServer {
         if (th.joinable()) th.join();
     }
 };
+
+bool wait_for_count(const std::atomic<int>& count, int minimum) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds{2};
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (count.load() >= minimum) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    return count.load() >= minimum;
+}
 
 } // namespace
 
@@ -396,6 +538,11 @@ TEST_CASE("Routes: POST /v1/swap/to/missing returns 404", "[routes][swap]") {
     auto res = cli.Post("/v1/swap/to/missing", "", "application/json");
     REQUIRE(res);
     REQUIRE(res->status == 404);
+    const auto error = nlohmann::json::parse(res->body)["error"];
+    REQUIRE(error["message"] == "model not registered: missing");
+    REQUIRE(error["type"] == "invalid_request_error");
+    REQUIRE(error["param"].is_null());
+    REQUIRE(error["code"] == "model_not_found");
     ts.stop();
 }
 
@@ -440,6 +587,51 @@ TEST_CASE("Routes: POST /v1/chat/completions missing model returns 400", "[route
                         "application/json");
     REQUIRE(res);
     REQUIRE(res->status == 400);
+    const auto error = nlohmann::json::parse(res->body)["error"];
+    REQUIRE(error["message"] == "request body must include 'model'");
+    REQUIRE(error["type"] == "invalid_request_error");
+    REQUIRE(error["param"].is_null());
+    REQUIRE(error["code"] == "missing_model");
+    ts.stop();
+}
+
+TEST_CASE("Routes: malformed chat parameters fail before slot admission",
+          "[routes][chat][validation]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("validation-model"));
+    REQUIRE(ts.coordinator.load("validation-model"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"validation-model","stream":"yes","messages":[]})",
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 400);
+    REQUIRE(nlohmann::json::parse(response->body)["error"]["code"] ==
+            "invalid_request_error");
+    REQUIRE(ts.coordinator.active_request_count() == 0);
+
+    response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"validation-model","temperature":"hot","messages":[]})",
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 400);
+    REQUIRE(nlohmann::json::parse(response->body)["error"]["code"] ==
+            "invalid_request_error");
+    REQUIRE(ts.coordinator.active_request_count() == 0);
+
+    response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"validation-model","stream":true,"stream_options":{"include_usage":"yes"},"messages":[]})",
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 400);
+    REQUIRE(nlohmann::json::parse(response->body)["error"]["code"] ==
+            "invalid_request_error");
+    REQUIRE(ts.coordinator.active_request_count() == 0);
     ts.stop();
 }
 
@@ -495,6 +687,50 @@ TEST_CASE("Routes: POST /v1/chat/completions loaded model returns 200 with conte
     REQUIRE(usage[0].model == "qwen3.6-27b");
     REQUIRE(usage[0].prompt_tokens == 3);
     REQUIRE(usage[0].completion_tokens == 4);
+    const auto* backend = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend("qwen3.6-27b"));
+    REQUIRE(backend);
+    REQUIRE(backend->last_max_tokens.load() == k_max_tokens_use_context_budget);
+    ts.stop();
+}
+
+TEST_CASE("Routes: typed context errors map without message matching",
+          "[routes][chat][stream][errors]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("context-model"));
+    REQUIRE(ts.coordinator.load("context-model"));
+    const auto* backend = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend("context-model"));
+    REQUIRE(backend);
+    const_cast<IModelMock*>(backend)->context_error.store(true);
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"context-model","stream":false,"messages":[{"role":"user","content":"test"}]})",
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 400);
+    REQUIRE(nlohmann::json::parse(response->body)["error"]["code"] ==
+            "context_length_exceeded");
+
+    response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"context-model","stream":true,"messages":[{"role":"user","content":"test"}]})",
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto error_line_start = response->body.find("data: ");
+    REQUIRE(error_line_start != std::string::npos);
+    const auto error_line_end = response->body.find('\n', error_line_start);
+    const auto error = nlohmann::json::parse(response->body.substr(
+        error_line_start + 6, error_line_end - error_line_start - 6))["error"];
+    REQUIRE(error["message"] == "prompt is too long");
+    REQUIRE(error["type"] == "invalid_request_error");
+    REQUIRE(error["param"].is_null());
+    REQUIRE(error["code"] == "context_length_exceeded");
+    REQUIRE(response->body.ends_with("data: [DONE]\n\n"));
     ts.stop();
 }
 
@@ -665,6 +901,64 @@ TEST_CASE("Routes: POST /v1/responses rejects stateful fields", "[routes][respon
     ts.stop();
 }
 
+TEST_CASE("Routes: POST /v1/responses validates contract before acquisition",
+          "[routes][responses][validation]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("chat-model"));
+
+    const std::vector<nlohmann::json> invalid = {
+        {{"model", "chat-model"}, {"input", "Hello"}, {"stream", "yes"}},
+        {{"model", "chat-model"}, {"input", "Hello"}, {"max_output_tokens", 0}},
+        {{"model", "chat-model"}, {"input", "Hello"}, {"temperature", 2.1}},
+        {{"model", "chat-model"}, {"input", "Hello"}, {"top_p", -0.1}},
+        {{"model", "chat-model"}, {"input", "Hello"}, {"priority", 101}},
+        {{"model", "chat-model"}, {"input", "Hello"},
+         {"parallel_tool_calls", "yes"}},
+        {{"model", "chat-model"}, {"input", "Hello"},
+         {"metadata", nlohmann::json::array()}},
+        {{"model", "chat-model"},
+         {"input", nlohmann::json::array({
+             {{"type", "message"}, {"role", "invalid"}, {"content", "Hello"}},
+         })}},
+        {{"model", "chat-model"},
+         {"input", nlohmann::json::array({
+             {{"type", "message"}, {"role", "user"},
+              {"content", nlohmann::json::array({
+                  {{"type", "input_text"}, {"text", 42}},
+              })}},
+         })}},
+        {{"model", "chat-model"},
+         {"input", nlohmann::json::array({
+             {{"type", "function_call"}, {"call_id", "c1"}, {"name", "run"},
+              {"arguments", nlohmann::json::object()}},
+         })}},
+        {{"model", "chat-model"},
+         {"input", nlohmann::json::array({
+             {{"type", "function_call_output"}, {"call_id", "c1"},
+              {"output", nlohmann::json::object()}},
+         })}},
+        {{"model", "chat-model"}, {"input", "Hello"},
+         {"tools", nlohmann::json::array({
+             {{"type", "function"}, {"name", "run"},
+              {"parameters", nlohmann::json::array()}},
+         })}},
+        {{"model", "chat-model"}, {"input", "Hello"},
+         {"tool_choice", "sometimes"}},
+        {{"model", "chat-model"}, {"input", "Hello"},
+         {"text", {{"format", {{"type", "json_schema"},
+                                {"schema", nlohmann::json::object()}}}}}},
+    };
+
+    for (const auto& body : invalid) {
+        httplib::Request request;
+        request.body = body.dump();
+        httplib::Response response;
+        handle_responses(request, response, ts.make_deps());
+        CHECK(response.status == 400);
+    }
+    CHECK(ts.metrics.total_requests() == 0);
+}
+
 TEST_CASE("Routes: POST /v1/responses streams typed reasoning and tool events", "[routes][responses]") {
     TestServer ts;
     ts.registry.register_model(make_info("chat-model"));
@@ -686,6 +980,135 @@ TEST_CASE("Routes: POST /v1/responses streams typed reasoning and tool events", 
     REQUIRE(response->body.find("event: response.function_call_arguments.done") != std::string::npos);
     REQUIRE(response->body.find("event: response.completed") != std::string::npos);
     REQUIRE(response->body.find("data: [DONE]") == std::string::npos);
+    ts.stop();
+}
+
+TEST_CASE("Routes: Anthropic rejects unknown model instead of default fallback",
+          "[routes][anthropic][validation]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("local-model"));
+    REQUIRE(ts.coordinator.load("local-model"));
+    auto deps = ts.make_deps();
+    deps.default_model = "local-model";
+
+    httplib::Request request;
+    request.body =
+        R"({"model":"claude-unknown","max_tokens":16,"messages":[{"role":"user","content":"test"}]})";
+    httplib::Response response;
+    handle_anthropic_messages(request, response, deps);
+    REQUIRE(response.status == 404);
+    CHECK(nlohmann::json::parse(response.body)["error"]["type"] ==
+          "not_found_error");
+    CHECK(ts.metrics.total_requests() == 0);
+}
+
+TEST_CASE("Routes: Anthropic explicit aliases remain compatible",
+          "[routes][anthropic][validation]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("local-model"));
+    REQUIRE(ts.coordinator.load("local-model"));
+    auto deps = ts.make_deps();
+    deps.anthropic_model_aliases.emplace("claude-local", "local-model");
+
+    httplib::Request request;
+    request.is_connection_closed = [] { return false; };
+    request.body =
+        R"({"model":"claude-local","max_tokens":16,"messages":[{"role":"user","content":"test"}]})";
+    httplib::Response response;
+    handle_anthropic_messages(request, response, deps);
+    REQUIRE(response.status == 200);
+    CHECK(nlohmann::json::parse(response.body)["model"] == "claude-local");
+}
+
+TEST_CASE("Routes: Anthropic validates contract before acquisition",
+          "[routes][anthropic][validation]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("local-model"));
+
+    const std::vector<nlohmann::json> invalid = {
+        {{"max_tokens", 16},
+         {"messages", nlohmann::json::array({
+             {{"role", "user"}, {"content", "test"}},
+         })}},
+        {{"model", "local-model"}, {"max_tokens", 0},
+         {"messages", nlohmann::json::array({
+             {{"role", "user"}, {"content", "test"}},
+         })}},
+        {{"model", "local-model"}, {"max_tokens", 16}, {"stream", "yes"},
+         {"messages", nlohmann::json::array({
+             {{"role", "user"}, {"content", "test"}},
+         })}},
+        {{"model", "local-model"}, {"max_tokens", 16},
+         {"temperature", 1.1},
+         {"messages", nlohmann::json::array({
+             {{"role", "user"}, {"content", "test"}},
+         })}},
+        {{"model", "local-model"}, {"max_tokens", 16},
+         {"messages", nlohmann::json::array({
+             {{"role", "system"}, {"content", "test"}},
+         })}},
+        {{"model", "local-model"}, {"max_tokens", 16},
+         {"messages", nlohmann::json::array({
+             {{"role", "user"},
+              {"content", nlohmann::json::array({
+                  {{"type", "tool_use"}, {"id", "t1"}, {"name", "run"},
+                   {"input", nlohmann::json::object()}},
+              })}},
+         })}},
+        {{"model", "local-model"}, {"max_tokens", 16},
+         {"thinking", {{"type", "enabled"}, {"budget_tokens", 1024}}},
+         {"messages", nlohmann::json::array({
+             {{"role", "user"}, {"content", "test"}},
+         })}},
+    };
+
+    for (const auto& body : invalid) {
+        httplib::Request request;
+        request.body = body.dump();
+        httplib::Response response;
+        handle_anthropic_messages(request, response, ts.make_deps());
+        CHECK(response.status == 400);
+    }
+    CHECK(ts.metrics.total_requests() == 0);
+}
+
+TEST_CASE("Routes: Anthropic streaming holds split UTF-8", "[routes][anthropic][stream][utf8]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("utf8-model"));
+    REQUIRE(ts.coordinator.load("utf8-model"));
+    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("utf8-model"));
+    REQUIRE(backend);
+    const_cast<IModelMock*>(backend)->split_utf8.store(true);
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/messages", nlohmann::json{
+        {"model", "utf8-model"}, {"max_tokens", 32}, {"stream", true},
+        {"messages", nlohmann::json::array({{{"role", "user"}, {"content", "test"}}})},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+
+    std::string content;
+    std::string arguments;
+    std::size_t position = 0;
+    while (position < response->body.size()) {
+        auto newline = response->body.find('\n', position);
+        if (newline == std::string::npos) newline = response->body.size();
+        const std::string line = response->body.substr(position, newline - position);
+        position = newline + 1;
+        if (line.rfind("data: ", 0) != 0) continue;
+        const auto event = nlohmann::json::parse(line.substr(6));
+        if (event.value("type", "") != "content_block_delta") continue;
+        const auto delta = event.value("delta", nlohmann::json::object());
+        if (delta.value("type", "") == "text_delta") content += delta.value("text", "");
+        if (delta.value("type", "") == "input_json_delta") {
+            arguments += delta.value("partial_json", "");
+        }
+    }
+
+    REQUIRE(content == std::string("cost \xe2\x82\xac", 8) + "5\xef\xbf\xbd");
+    REQUIRE(arguments == std::string("{\"city\":\"M\xc3\xbcnchen\"}", 19));
     ts.stop();
 }
 
@@ -757,12 +1180,43 @@ TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speec
     httplib::Client client("127.0.0.1", ts.port);
     auto response = client.Post("/v1/audio/speech",
         nlohmann::json{{"model", "speech-model"}, {"input", "hello"},
-                       {"voice", "default"}, {"response_format", "wav"},
-                       {"speed", 1.0}}.dump(), "application/json");
+                       {"voice", "default"}, {"speed", 1.0}}.dump(),
+        "application/json");
     REQUIRE(response);
     CHECK(response->status == 200);
     CHECK(response->get_header_value("Content-Type") == "audio/wav");
     CHECK(response->body == "RIFF");
+
+    auto* backend = const_cast<IModelMock*>(
+        dynamic_cast<const IModelMock*>(
+            ts.coordinator.get_backend("speech-model")));
+    REQUIRE(backend);
+    backend->speech_should_fail.store(true);
+    response = client.Post("/v1/audio/speech",
+        nlohmann::json{{"model", "speech-model"}, {"input", "hello"},
+                       {"voice", "default"}, {"speed", 1.0}}.dump(),
+        "application/json");
+    REQUIRE(response);
+    CHECK(response->status == 400);
+    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
+          "speech_generation_failed");
+    backend->speech_should_fail.store(false);
+
+    response = client.Post("/v1/audio/speech",
+        nlohmann::json{{"model", "speech-model"}, {"input", "hello"},
+                       {"voice", "default"}, {"response_format", "mp3"},
+                       {"speed", 1.0}}.dump(), "application/json");
+    REQUIRE(response);
+    CHECK(response->status == 400);
+    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
+          "unsupported_response_format");
+    const auto usage = ts.stats_db.model_usage();
+    REQUIRE(usage.size() == 1);
+    CHECK(usage[0].model == "speech-model");
+    CHECK(usage[0].requests == 2);
+    CHECK(usage[0].successful_requests == 1);
+    CHECK(usage[0].input_characters == 5);
+    CHECK(usage[0].input_audio_seconds == 0.0);
     ts.stop();
 }
 
@@ -776,16 +1230,52 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     REQUIRE(ts.coordinator.load("whisper-model"));
     REQUIRE(ts.start());
     httplib::Client client("127.0.0.1", ts.port);
-    httplib::UploadFormDataItems items{
-        {"file", test_wav(), "test.wav", "audio/wav"},
-        {"model", "whisper-model", "", ""},
-        {"language", "en", "", ""},
-        {"response_format", "json", "", ""},
+    const auto transcribe = [&client](const std::string& format) {
+        return client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+            {"file", test_wav(), "test.wav", "audio/wav"},
+            {"model", "whisper-model", "", ""},
+            {"language", "en", "", ""},
+            {"response_format", format, "", ""},
+        });
     };
-    auto response = client.Post("/v1/audio/transcriptions", items);
+    auto response = transcribe("json");
     REQUIRE(response);
     REQUIRE(response->status == 200);
     CHECK(nlohmann::json::parse(response->body)["text"] == "test transcript");
+
+    response = transcribe("text");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(response->body == "test transcript");
+    CHECK(response->get_header_value("Content-Type") == "text/plain; charset=utf-8");
+
+    response = transcribe("verbose_json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto verbose = nlohmann::json::parse(response->body);
+    CHECK(verbose["task"] == "transcribe");
+    CHECK(verbose["language"] == "en");
+    REQUIRE(verbose["segments"].size() == 1);
+    CHECK(verbose["segments"][0]["tokens"] == nlohmann::json::array({50364, 1234, 50389}));
+
+    response = transcribe("srt");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(response->body == "1\n00:00:00,000 --> 00:00:00,500\ntest transcript\n\n");
+    CHECK(response->get_header_value("Content-Type") == "application/x-subrip; charset=utf-8");
+
+    response = transcribe("vtt");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(response->body == "WEBVTT\n\n00:00:00.000 --> 00:00:00.500\ntest transcript\n\n");
+    CHECK(response->get_header_value("Content-Type") == "text/vtt; charset=utf-8");
+    const auto usage = ts.stats_db.model_usage();
+    REQUIRE(usage.size() == 1);
+    CHECK(usage[0].model == "whisper-model");
+    CHECK(usage[0].requests == 5);
+    CHECK(usage[0].successful_requests == 5);
+    CHECK(usage[0].input_audio_seconds == Catch::Approx(0.05));
+    CHECK(usage[0].input_characters == 0);
     ts.stop();
 }
 
@@ -803,6 +1293,37 @@ TEST_CASE("Media routes reject unsupported request shapes", "[routes][media]") {
         "application/json");
     REQUIRE(speech);
     CHECK(speech->status == 400);
+    auto transcription = client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+        {"file", test_wav(), "test.wav", "audio/wav"},
+        {"model", "", "", ""},
+    });
+    REQUIRE(transcription);
+    CHECK(transcription->status == 400);
+    transcription = client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+        {"file", test_wav(), "test.wav", "audio/wav"},
+        {"model", "x", "", ""},
+        {"response_format", "mp3", "", ""},
+    });
+    REQUIRE(transcription);
+    CHECK(transcription->status == 400);
+    transcription = client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+        {"file", test_wav(), "test.wav", "audio/wav"},
+        {"model", "x", "", ""},
+        {"temperature", "nan", "", ""},
+    });
+    REQUIRE(transcription);
+    CHECK(transcription->status == 400);
+    CHECK(nlohmann::json::parse(transcription->body)["error"]["code"] ==
+          "invalid_audio");
+    transcription = client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+        {"file", test_float_wav(std::numeric_limits<float>::quiet_NaN()),
+         "test.wav", "audio/wav"},
+        {"model", "x", "", ""},
+    });
+    REQUIRE(transcription);
+    CHECK(transcription->status == 400);
+    CHECK(nlohmann::json::parse(transcription->body)["error"]["message"] ==
+          "float32 WAVE samples must be finite");
     ts.stop();
 }
 
@@ -886,6 +1407,176 @@ TEST_CASE("Routes: streaming tool call emits llama-server shaped SSE",
     ts.stop();
 }
 
+TEST_CASE("Routes: streaming holds split UTF-8 and replaces malformed trailing bytes",
+          "[routes][chat][stream][utf8]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("utf8-model"));
+    REQUIRE(ts.coordinator.load("utf8-model"));
+    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("utf8-model"));
+    REQUIRE(backend);
+    const_cast<IModelMock*>(backend)->split_utf8.store(true);
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"utf8-model","stream":true,"messages":[{"role":"user","content":"test"}]})",
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+
+    std::string content;
+    std::string reasoning;
+    std::string arguments;
+    std::size_t position = 0;
+    while (position < response->body.size()) {
+        auto newline = response->body.find('\n', position);
+        if (newline == std::string::npos) newline = response->body.size();
+        const std::string line = response->body.substr(position, newline - position);
+        position = newline + 1;
+        if (line.rfind("data: ", 0) != 0 || line == "data: [DONE]") continue;
+        const auto chunk = nlohmann::json::parse(line.substr(6));
+        const auto& delta = chunk["choices"][0]["delta"];
+        content += delta.value("content", "");
+        reasoning += delta.value("reasoning_content", "");
+        if (delta.contains("tool_calls")) {
+            const auto& function = delta["tool_calls"][0].value("function", nlohmann::json::object());
+            arguments += function.value("arguments", "");
+        }
+    }
+
+    REQUIRE(content == std::string("cost \xe2\x82\xac", 8) + "5\xef\xbf\xbd");
+    REQUIRE(reasoning == std::string("idea \xf0\x9f\x92\xa1", 9));
+    REQUIRE(arguments == std::string("{\"city\":\"M\xc3\xbcnchen\"}", 19));
+    ts.stop();
+}
+
+TEST_CASE("Routes: text models reject image input before inference",
+          "[routes][vision]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("text-only"));
+    REQUIRE(ts.coordinator.load("text-only"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto chat = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"text-only","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]})",
+        "application/json");
+    REQUIRE(chat);
+    REQUIRE(chat->status == 400);
+    CHECK(nlohmann::json::parse(chat->body)["error"]["code"] ==
+          "unsupported_capability");
+
+    auto responses = client.Post(
+        "/v1/responses",
+        R"({"model":"text-only","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"describe"},{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]})",
+        "application/json");
+    REQUIRE(responses);
+    REQUIRE(responses->status == 400);
+    CHECK(nlohmann::json::parse(responses->body)["error"]["code"] ==
+          "unsupported_capability");
+
+    auto anthropic = client.Post(
+        "/v1/messages",
+        R"({"model":"text-only","max_tokens":16,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]})",
+        "application/json");
+    REQUIRE(anthropic);
+    REQUIRE(anthropic->status == 400);
+    CHECK(nlohmann::json::parse(anthropic->body)["error"]["type"] ==
+          "invalid_request_error");
+    CHECK(ts.metrics.total_requests() == 0);
+    ts.stop();
+}
+
+TEST_CASE("Routes: chat stream applies producer backpressure until disconnect",
+          "[routes][chat][stream][backpressure]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("chat-pressure"));
+    REQUIRE(ts.coordinator.load("chat-pressure"));
+    auto* backend = const_cast<IModelMock*>(
+        dynamic_cast<const IModelMock*>(
+            ts.coordinator.get_backend("chat-pressure")));
+    REQUIRE(backend);
+    backend->stream_delta_count.store(1000);
+
+    httplib::Request request;
+    request.is_connection_closed = [] { return false; };
+    request.body =
+        R"({"model":"chat-pressure","stream":true,"messages":[{"role":"user","content":"test"}]})";
+    httplib::Response response;
+    handle_chat_completions(request, response, ts.make_deps());
+    REQUIRE(response.content_provider_);
+    REQUIRE(wait_for_count(backend->stream_deltas_emitted, 8));
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    CHECK(backend->stream_deltas_emitted.load() < 1000);
+
+    REQUIRE(response.content_provider_resource_releaser_);
+    response.content_provider_resource_releaser_(false);
+    CHECK(backend->stream_deltas_emitted.load() < 1000);
+    CHECK(ts.coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("Routes: Anthropic stream applies producer backpressure until disconnect",
+          "[routes][anthropic][stream][backpressure]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("anthropic-pressure"));
+    REQUIRE(ts.coordinator.load("anthropic-pressure"));
+    auto* backend = const_cast<IModelMock*>(
+        dynamic_cast<const IModelMock*>(
+            ts.coordinator.get_backend("anthropic-pressure")));
+    REQUIRE(backend);
+    backend->stream_delta_count.store(1000);
+
+    httplib::Request request;
+    request.is_connection_closed = [] { return false; };
+    request.body =
+        R"({"model":"anthropic-pressure","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"test"}]})";
+    httplib::Response response;
+    handle_anthropic_messages(request, response, ts.make_deps());
+    REQUIRE(response.content_provider_);
+    REQUIRE(wait_for_count(backend->stream_deltas_emitted, 8));
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    CHECK(backend->stream_deltas_emitted.load() < 1000);
+
+    REQUIRE(response.content_provider_resource_releaser_);
+    response.content_provider_resource_releaser_(false);
+    CHECK(backend->stream_deltas_emitted.load() < 1000);
+    CHECK(ts.coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("Routes: speech stream applies byte backpressure until disconnect",
+          "[routes][speech][stream][backpressure]") {
+    TestServer ts;
+    auto info = make_info("speech-pressure");
+    info.runtime = "sherpa_onnx";
+    info.modality = "audio";
+    info.capabilities = {"audio_speech"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("speech-pressure"));
+    auto* backend = const_cast<IModelMock*>(
+        dynamic_cast<const IModelMock*>(
+            ts.coordinator.get_backend("speech-pressure")));
+    REQUIRE(backend);
+    backend->speech_chunk_count.store(1000);
+
+    httplib::Request request;
+    request.is_connection_closed = [] { return false; };
+    request.body =
+        R"({"model":"speech-pressure","input":"test","voice":"default","response_format":"pcm"})";
+    httplib::Response response;
+    handle_audio_speech(request, response, ts.make_deps());
+    REQUIRE(response.content_provider_);
+    REQUIRE(wait_for_count(backend->speech_chunks_emitted, 8));
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    CHECK(backend->speech_chunks_emitted.load() < 1000);
+
+    REQUIRE(response.content_provider_resource_releaser_);
+    response.content_provider_resource_releaser_(false);
+    CHECK(backend->speech_chunks_emitted.load() < 1000);
+    CHECK(ts.coordinator.active_request_count() == 0);
+}
+
 TEST_CASE("ensure_model_loaded: already-loaded model returns ok immediately", "[routes][swap]") {
     ModelRegistry registry;
     registry.set_factory([](const ModelInfo& info) {
@@ -920,6 +1611,142 @@ TEST_CASE("ensure_model_loaded: auto_swap disabled yields 503 for a cold model",
     REQUIRE_FALSE(r.ok);
     REQUIRE(r.status == 503);
     REQUIRE(r.code == "model_not_loaded");
+}
+
+TEST_CASE("ensure_model_loaded: missing swap executor fails before starting work",
+          "[routes][swap]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+
+    const auto result = ensure_model_loaded(deps, "a");
+
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.status == 503);
+    REQUIRE(result.code == "swap_executor_unavailable");
+    REQUIRE_FALSE(coordinator.swap_in_progress());
+}
+
+TEST_CASE("ensure_model_loaded: unavailable runtime is returned without waiting",
+          "[routes][swap]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto info = make_info("speech");
+    info.runtime = "missing_runtime";
+    registry.register_model(std::move(info));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+    const auto started = std::chrono::steady_clock::now();
+
+    const auto result = ensure_model_loaded(deps, "speech");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.status == 503);
+    REQUIRE(result.code == "runtime_unavailable");
+    REQUIRE(elapsed < std::chrono::milliseconds{250});
+}
+
+TEST_CASE("ensure_model_loaded: cancellation has a distinct outcome",
+          "[routes][swap]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+    coordinator.request_swap_cancel();
+
+    const auto result = ensure_model_loaded(deps, "a");
+
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.status == 503);
+    REQUIRE(result.code == "swap_cancelled");
+    REQUIRE_FALSE(coordinator.is_loaded("a"));
+    REQUIRE(tracker.snapshot().last_cancelled);
+}
+
+TEST_CASE("ensure_model_loaded: load failure is returned after completion",
+          "[routes][swap]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto model = std::make_unique<IModelMock>(info);
+        model->load_should_fail.store(true);
+        return model;
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+
+    const auto result = ensure_model_loaded(deps, "a");
+
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.status == 503);
+    REQUIRE(result.code == "swap_failed");
+    REQUIRE(result.message == "model load failed: mock load failed");
+}
+
+TEST_CASE("SwapTracker owns the worker and joins it at destruction",
+          "[routes][swap]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto model = std::make_unique<IModelMock>(info);
+        model->load_delay_ms.store(80);
+        return model;
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+
+    {
+        SwapTracker tracker;
+        GatewayDeps deps{coordinator, "10"};
+        deps.swap_tracker = &tracker;
+        const auto result = start_swap_async(deps, "a");
+        REQUIRE(result.status == 202);
+    }
+
+    REQUIRE(coordinator.is_loaded("a"));
+    REQUIRE_FALSE(coordinator.swap_in_progress());
+}
+
+TEST_CASE("SwapTracker completion wait is bounded", "[routes][swap]") {
+    SwapTracker tracker;
+    std::atomic<bool> release{false};
+    std::string error;
+    const auto started = tracker.start(
+        "", "a", 1,
+        [&] {
+            while (!release.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+            tracker.end(true, "");
+        },
+        error);
+    REQUIRE(started == SwapTracker::StartResult::Started);
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds{30};
+    REQUIRE_FALSE(tracker.wait_until_idle(deadline));
+    release.store(true);
+    tracker.join();
+    REQUIRE_FALSE(tracker.snapshot().swapping);
 }
 
 // Regression for issue #19: two requests racing on a cold model (e.g. OpenCode's

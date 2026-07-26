@@ -9,6 +9,7 @@
 namespace inferdeck::foundation {
 
 Logger& Logger::instance() {
+    (void)spdlog::default_logger();
     static Logger inst;
     return inst;
 }
@@ -18,12 +19,6 @@ Logger::~Logger() {
 }
 
 void Logger::initialize(const LogConfig& cfg) {
-    std::lock_guard<std::mutex> lock(init_mu_);
-    if (initialized_) {
-        shutdown();
-    }
-
-    level_ = cfg.level;
     std::vector<spdlog::sink_ptr> sinks;
 
     if (cfg.console_enabled) {
@@ -33,7 +28,7 @@ void Logger::initialize(const LogConfig& cfg) {
     }
 
     if (!cfg.log_file.empty()) {
-        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(cfg.log_file.string(), true);
+        auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(cfg.log_file.string(), false);
         file_sink->set_pattern(cfg.pattern);
         sinks.push_back(file_sink);
     }
@@ -44,51 +39,62 @@ void Logger::initialize(const LogConfig& cfg) {
         logger->flush_on(spdlog::level::info);
     }
 
+    std::lock_guard<std::mutex> lock(state_mu_);
+    if (logger_) {
+        initialized_.store(false, std::memory_order_release);
+        logger_->flush();
+        spdlog::drop(logger_->name());
+        logger_.reset();
+    } else {
+        previous_default_logger_ = spdlog::default_logger();
+    }
+
     spdlog::register_logger(logger);
     spdlog::set_default_logger(logger);
-    initialized_ = true;
-
-    log(LogLevel::Info, "logger_init", fmt::format("level={} console={} file={}",
-                                                  static_cast<int>(cfg.level),
-                                                  cfg.console_enabled,
-                                                  cfg.log_file.string()));
+    logger_ = logger;
+    level_.store(cfg.level, std::memory_order_release);
+    initialized_.store(true, std::memory_order_release);
+    logger_->info("event=logger_init level={} console={} file={}",
+                  static_cast<int>(cfg.level),
+                  cfg.console_enabled,
+                  cfg.log_file.string());
 }
 
 void Logger::shutdown() {
-    if (initialized_) {
-        if (auto logger = spdlog::get("inferdeck-foundation"); logger) {
-            logger->flush();
-            spdlog::drop("inferdeck-foundation");
+    std::lock_guard<std::mutex> lock(state_mu_);
+    initialized_.store(false, std::memory_order_release);
+    if (logger_) {
+        logger_->flush();
+        if (spdlog::default_logger() == logger_) {
+            spdlog::set_default_logger(previous_default_logger_);
         }
-        initialized_ = false;
+        spdlog::drop(logger_->name());
+        logger_.reset();
     }
+    previous_default_logger_.reset();
 }
 
 void Logger::set_level(LogLevel level) {
-    level_ = level;
-    if (initialized_) {
-        if (auto logger = spdlog::get("inferdeck-foundation"); logger) {
-            logger->set_level(detail::to_spdlog(level));
-        }
+    std::lock_guard<std::mutex> lock(state_mu_);
+    level_.store(level, std::memory_order_release);
+    if (logger_) {
+        logger_->set_level(detail::to_spdlog(level));
     }
 }
 
 void Logger::log(LogLevel lvl, std::string_view event, std::string_view message) {
-    if (!initialized_) {
-        return;
-    }
-    auto logger = spdlog::get("inferdeck-foundation");
-    if (!logger) {
+    std::lock_guard<std::mutex> lock(state_mu_);
+    if (!logger_) {
         return;
     }
     const std::string line = fmt::format("event={} {}", event, message);
     switch (lvl) {
-        case LogLevel::Trace: logger->trace("{}", line); break;
-        case LogLevel::Debug: logger->debug("{}", line); break;
-        case LogLevel::Info:  logger->info("{}", line); break;
-        case LogLevel::Warn:  logger->warn("{}", line); break;
-        case LogLevel::Error: logger->error("{}", line); break;
-        case LogLevel::Fatal: logger->critical("{}", line); break;
+        case LogLevel::Trace: logger_->trace("{}", line); break;
+        case LogLevel::Debug: logger_->debug("{}", line); break;
+        case LogLevel::Info:  logger_->info("{}", line); break;
+        case LogLevel::Warn:  logger_->warn("{}", line); break;
+        case LogLevel::Error: logger_->error("{}", line); break;
+        case LogLevel::Fatal: logger_->critical("{}", line); break;
         case LogLevel::Off: break;
     }
 }

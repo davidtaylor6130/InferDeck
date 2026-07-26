@@ -2,15 +2,19 @@
 #include <algorithm>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -23,7 +27,9 @@
 
 #include "config.hpp"
 #include "foundation/event_bus.hpp"
+#include "foundation/json_utils.hpp"
 #include "foundation/logging.hpp"
+#include "foundation/path_utils.hpp"
 #include "gateway/anthropic_routes.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
@@ -48,15 +54,41 @@ namespace fs = std::filesystem;
 
 namespace {
 
+namespace foundation = inferdeck::foundation;
 namespace model = inferdeck::model;
 namespace observability = inferdeck::observability;
 
 std::atomic<bool> g_stop{false};
+std::atomic<bool> g_reload{false};
 httplib::Server* g_server = nullptr;
+std::once_flag g_llama_init_once;
+constexpr int runtime_reload_result = 75;
+constexpr std::string_view gateway_version = "0.5.3";
+
+std::string config_revision(const std::string& text) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (unsigned char byte : text) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    std::ostringstream output;
+    output << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return output.str();
+}
+
+FILE* open_crash_log() noexcept {
+    FILE* file = nullptr;
+#ifdef _WIN32
+    (void)fopen_s(&file, "logs/crash.log", "a");
+#else
+    file = fopen("logs/crash.log", "a");
+#endif
+    return file;
+}
 
 void my_terminate_handler() {
     std::cerr << "=== std::terminate called ===" << std::endl;
-    FILE* f = fopen("logs/crash.log", "a");
+    FILE* f = open_crash_log();
     if (f) {
         fprintf(f, "=== std::terminate called ===\n");
     }
@@ -89,11 +121,22 @@ inferdeck::foundation::LogLevel parse_log_level(const std::string& s) {
     return LogLevel::Info;
 }
 
-void persist_state(const std::string& path, const std::string& model) {
-    if (path.empty()) return;
-    std::ofstream f(path, std::ios::trunc);
-    if (!f.is_open()) return;
-    f << "loaded_model: " << model << "\n";
+foundation::Result<void> persist_state(const std::string& path,
+                                       const std::string& model) {
+    if (path.empty()) return foundation::Ok();
+    const auto expanded = foundation::expand_user_path(fs::path(path));
+    const auto parent = expanded.parent_path();
+    if (!parent.empty()) {
+        std::error_code error;
+        fs::create_directories(parent, error);
+        if (error) {
+            return foundation::Err<void>(
+                foundation::ErrorCode::IoError,
+                "failed to create state directory: " + error.message());
+        }
+    }
+    return foundation::save_json_file(
+        expanded, nlohmann::json{{"loaded_model", model}}, true);
 }
 
 std::string mime_type(const fs::path& path) {
@@ -147,7 +190,8 @@ void write_dashboard_file(httplib::Response& resp, const fs::path& static_dir, c
     std::error_code ec;
     fs::path target = fs::weakly_canonical(static_dir / relative, ec);
     fs::path root = fs::weakly_canonical(static_dir, ec);
-    if (target.string().rfind(root.string(), 0) != 0 || !fs::exists(target, ec) || fs::is_directory(target, ec)) {
+    if (ec || !inferdeck::foundation::is_path_within(root, target) ||
+        !fs::exists(target, ec) || fs::is_directory(target, ec)) {
         target = static_dir / "index.html";
     }
     const auto body = read_file(target);
@@ -166,7 +210,7 @@ LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ex) {
     if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_SINGLE_STEP || code == 0x40010006 || code == 0xE06D7363) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    FILE* f = fopen("logs/crash.log", "a");
+    FILE* f = open_crash_log();
     if (f) {
         fprintf(f, "=== CRASH ===\n");
         fprintf(f, "code=0x%08lX addr=%p\n", code, ex->ExceptionRecord->ExceptionAddress);
@@ -218,52 +262,42 @@ LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ex) {
 
 } // namespace
 
-int main(int argc, char** argv) {
+int run_gateway(const fs::path& config_path) {
     using namespace inferdeck;
     using namespace inferdeck::foundation;
     using namespace inferdeck::gateway;
 
-    fs::path config_path = default_config_path();
-    for (int i = 1; i < argc; ++i) {
-        std::string a = argv[i];
-        if (a == "-c" || a == "--config") {
-            if (i + 1 < argc) {
-                config_path = argv[++i];
-            }
-        } else if (a == "-h" || a == "--help") {
-            std::cout << "Usage: " << argv[0] << " [-c config.yml]\n";
-            return 0;
-        } else if (a == "-v" || a == "--version") {
-            std::cout << "inferdeck-gateway 0.4.0\n";
-            return 0;
-        }
-    }
-
-    auto cfg = load_config(config_path);
+    g_stop.store(false);
+    g_reload.store(false);
+    const auto config_selection = load_config_with_active(config_path);
+    auto cfg = config_selection.config;
+    const auto running_config_revision =
+        config_revision(read_text_file(config_selection.loaded_path.string()));
     foundation::LogConfig lc;
     lc.level = parse_log_level(cfg.log_level);
     if (!cfg.log_file.empty()) lc.log_file = cfg.log_file;
     foundation::Logger::instance().initialize(lc);
 
-    std::set_terminate(my_terminate_handler);
-
-#ifdef _WIN32
-    SymInitialize(GetCurrentProcess(), NULL, TRUE);
-    AddVectoredExceptionHandler(0, CrashHandler);
-#endif
-
-    LOG_INFO("startup", "inferdeck-gateway 0.4.0 starting");
-    LOG_INFO("config", "loaded from {}", config_path.string());
-    LOG_INFO("vulkan_test", "About to initialize llama backend");
-    std::cerr << "DEBUG: About to call llama_backend_init()" << std::endl;
-
-    llama_backend_init();
-    const char* sys_info = llama_print_system_info();
-    std::cerr << "DEBUG: llama_print_system_info returned" << std::endl;
-    if (sys_info) {
-        LOG_INFO("llama_system_info", "{}", sys_info);
-        std::cerr << "DEBUG: sys_info = " << sys_info << std::endl;
+    LOG_INFO("startup", "inferdeck-gateway {} starting", gateway_version);
+    LOG_INFO("config", "loaded from {}", config_selection.loaded_path.string());
+    if (!config_selection.fallback_reason.empty()) {
+        LOG_ERROR("active_config_fallback",
+                  "active profile {} was rejected: {}; using stable base {}",
+                  config_selection.active_path.string(),
+                  config_selection.fallback_reason,
+                  config_path.string());
     }
+    std::call_once(g_llama_init_once, [] {
+        LOG_INFO("vulkan_test", "About to initialize llama backend");
+        std::cerr << "DEBUG: About to call llama_backend_init()" << std::endl;
+        llama_backend_init();
+        const char* sys_info = llama_print_system_info();
+        std::cerr << "DEBUG: llama_print_system_info returned" << std::endl;
+        if (sys_info) {
+            LOG_INFO("llama_system_info", "{}", sys_info);
+            std::cerr << "DEBUG: sys_info = " << sys_info << std::endl;
+        }
+    });
 
     model::ModelRegistry registry;
     registry.register_factory("llama_cpp", [cfg](const model::ModelInfo& info) -> std::unique_ptr<model::IBackend> {
@@ -317,6 +351,17 @@ int main(int argc, char** argv) {
     observability::Metrics metrics;
     observability::GpuTelemetry gpu;
     observability::StatsDb stats_db(cfg.stats_db_path);
+    if (stats_db.healthy()) {
+        const auto totals = stats_db.lifetime_totals();
+        metrics.restore_lifetime(totals.requests, totals.swaps,
+                                 totals.prompt_tokens, totals.completion_tokens,
+                                 totals.total_duration_ms);
+        LOG_INFO("stats_restored",
+                 "db={} requests={} swaps={} prompt_tokens={} completion_tokens={} duration_ms={}",
+                 stats_db.path(), totals.requests, totals.swaps,
+                 totals.prompt_tokens, totals.completion_tokens,
+                 totals.total_duration_ms);
+    }
     const auto started_at = std::chrono::steady_clock::now();
 
     gpu.set_helper_path(cfg.adlx_helper_path);
@@ -400,7 +445,7 @@ int main(int argc, char** argv) {
         return [&, handler](const httplib::Request& req,
                             httplib::Response& resp) {
             LOG_INFO("http_request_begin", "method={} path={}", req.method, req.path);
-            cors.apply(resp);
+            cors.apply(req, resp);
             std::string auth_header = header_value(req, "Authorization");
             if (auth_header.empty()) {
                 // Anthropic SDK clients (e.g. Claude Code) authenticate via x-api-key.
@@ -408,10 +453,8 @@ int main(int argc, char** argv) {
                 if (!api_key.empty()) auth_header = "Bearer " + api_key;
             }
             if (auth.required() && !auth.check(auth_header)) {
-                resp.status = 401;
                 resp.set_header("WWW-Authenticate", "Bearer");
-                write_json(resp, 401, {{"error", {{"code", "unauthorized"},
-                                                  {"message", "valid Bearer token required"}}}});
+                write_error(resp, 401, "unauthorized", "valid Bearer token required");
                 return;
             }
             try {
@@ -421,13 +464,13 @@ int main(int argc, char** argv) {
             } catch (const std::exception& e) {
                 LOG_ERROR("handler_exception", "what={}", e.what());
                 if (resp.status == 0) resp.status = 500;
-                write_json(resp, resp.status, nlohmann::json{{"error", {{"code", "internal_error"}, {"message", e.what()}}}});
+                write_error(resp, resp.status, "internal_error", "request could not be completed");
                 const int logged_status = resp.status > 0 ? resp.status : 500;
                 LOG_INFO("http_request_end", "method={} path={} status={}", req.method, req.path, logged_status);
             } catch (...) {
                 LOG_ERROR("handler_unknown_exception", "");
                 if (resp.status == 0) resp.status = 500;
-                write_json(resp, resp.status, nlohmann::json{{"error", {{"code", "internal_error"}, {"message", "unknown exception"}}}});
+                write_error(resp, resp.status, "internal_error", "unknown exception");
                 const int logged_status = resp.status > 0 ? resp.status : 500;
                 LOG_INFO("http_request_end", "method={} path={} status={}", req.method, req.path, logged_status);
             }
@@ -496,48 +539,73 @@ int main(int argc, char** argv) {
                                                       httplib::Response& resp) {
         handle_anthropic_count_tokens(req, resp, deps);
     }));
-    server.Get(R"(^/v1/metrics$)", wrap([&](const httplib::Request& req,
+    server.Get(R"(^/v1/metrics$)", wrap([&](const httplib::Request&,
                                        httplib::Response& resp) {
         resp.set_content(
             MetricsBuilder::build_live(metrics, gpu, uptime_seconds()).dump(),
             "application/json");
     }));
-    server.Get(R"(^/v1/stats/history$)", wrap([&](const httplib::Request& req,
+    server.Get(R"(^/v1/stats/history$)", wrap([&](const httplib::Request&,
                                              httplib::Response& resp) {
         resp.set_content(MetricsBuilder::build_history(stats_db, 100).dump(),
                          "application/json");
     }));
-    server.Get(R"(^/v1/health$)", wrap([&](const httplib::Request& req,
+    server.Get(R"(^/v1/health$)", wrap([&](const httplib::Request&,
                                       httplib::Response& resp) {
         resp.set_content(MetricsBuilder::build_health(metrics, gpu, stats_db).dump(),
                          "application/json");
     }));
     DashboardDeps dash_deps{
         deps, gpu, cfg.log_file, "data/pricing.json", config_path.string(),
-        [](const std::string& text) { return validate_config_text(text); }, &model_store,
+        config_selection.active_path.string(), running_config_revision,
+        config_selection.using_active,
+        config_selection.fallback_reason,
+        [](const std::string& text) { return validate_config_text(text); },
+        [] {
+            g_reload.store(true);
+            LOG_INFO("config_reload_requested", "validated active profile will be applied");
+            return foundation::Ok();
+        },
+        &model_store,
         uptime_seconds};
     register_dashboard_routes(server, dash_deps, wrap);
     if (cors.handles_options()) {
         server.Options(".*", [&](const httplib::Request& req,
                                   httplib::Response& resp) {
-            cors.apply(resp);
+            cors.apply(req, resp);
             resp.status = 204;
         });
     }
     server.Get(R"(^/$)", [&](const httplib::Request& req, httplib::Response& resp) {
-        cors.apply(resp);
+        cors.apply(req, resp);
         write_dashboard_file(resp, dashboard_static_dir, req.path);
     });
     server.Get(R"(^/(?!api(?:/|$)|v1(?:/|$)).*)", [&](const httplib::Request& req, httplib::Response& resp) {
-        cors.apply(resp);
+        cors.apply(req, resp);
         write_dashboard_file(resp, dashboard_static_dir, req.path);
     });
 
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
+    std::atomic<bool> reload_monitor_stop{false};
+    std::thread reload_monitor([&] {
+        while (!reload_monitor_stop.load()) {
+            if (g_reload.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{350});
+                if (!reload_monitor_stop.load()) server.stop();
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{25});
+        }
+    });
 
     LOG_INFO("server_listening", "host={} port={}", cfg.host, cfg.port);
     const bool listen_ok = server.listen(cfg.host.c_str(), cfg.port);
+    reload_monitor_stop.store(true);
+    if (reload_monitor.joinable()) reload_monitor.join();
+    g_server = nullptr;
+
+    if (g_reload.load()) {
+        coordinator.drain_active(std::chrono::seconds{120});
+    }
 
     stats_stop.store(true);
     events.close_all();
@@ -556,9 +624,46 @@ int main(int argc, char** argv) {
 
     if (!cfg.state_file.empty()) {
         if (auto m = coordinator.get_loaded_model()) {
-            persist_state(cfg.state_file, *m);
+            auto persisted = persist_state(cfg.state_file, *m);
+            if (!persisted) {
+                LOG_WARN("state_persist_failed", "error={}",
+                         persisted.error().message);
+            }
         }
+    }
+    if (g_reload.load()) {
+        LOG_INFO("server_reloading", "graceful runtime reload");
+        return runtime_reload_result;
     }
     LOG_INFO("server_stopped", "graceful shutdown");
     return 0;
+}
+
+int main(int argc, char** argv) {
+    fs::path config_path = inferdeck::gateway::default_config_path();
+    for (int i = 1; i < argc; ++i) {
+        std::string argument = argv[i];
+        if (argument == "-c" || argument == "--config") {
+            if (i + 1 < argc) config_path = argv[++i];
+        } else if (argument == "-h" || argument == "--help") {
+            std::cout << "Usage: " << argv[0] << " [-c config.yml]\n";
+            return 0;
+        } else if (argument == "-v" || argument == "--version") {
+            std::cout << "inferdeck-gateway " << gateway_version << "\n";
+            return 0;
+        }
+    }
+
+    std::set_terminate(my_terminate_handler);
+#ifdef _WIN32
+    SymInitialize(GetCurrentProcess(), NULL, TRUE);
+    AddVectoredExceptionHandler(0, CrashHandler);
+#endif
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+
+    while (true) {
+        const int result = run_gateway(config_path);
+        if (result != runtime_reload_result) return result;
+    }
 }

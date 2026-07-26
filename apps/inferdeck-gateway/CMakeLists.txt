@@ -21,6 +21,15 @@ target_link_libraries(inferdeck-gateway PRIVATE
 if(WIN32)
     target_link_libraries(inferdeck-gateway PRIVATE dbghelp)
     target_link_options(inferdeck-gateway PRIVATE /STACK:33554432)
+    if(INFERDECK_SHERPA_ONNX_INCLUDE AND INFERDECK_SHERPA_ONNX_LIBRARY)
+        add_custom_command(TARGET inferdeck-gateway POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${INFERDECK_SHERPA_ONNX_RUNTIME_DIR}/sherpa-onnx-c-api.dll"
+                    "${INFERDECK_SHERPA_ONNX_RUNTIME_DIR}/onnxruntime.dll"
+                    "${INFERDECK_SHERPA_ONNX_RUNTIME_DIR}/onnxruntime_providers_shared.dll"
+                    "$<TARGET_FILE_DIR:inferdeck-gateway>"
+            COMMENT "Copying sherpa-onnx runtime libraries")
+    endif()
 endif()
 
 set_target_properties(inferdeck-gateway PROPERTIES
@@ -40,6 +49,7 @@ set(INFERDECK_DASHBOARD_STATIC_DIR
     CACHE PATH "Built InferDeck dashboard static asset directory")
 
 add_custom_command(TARGET inferdeck-gateway POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_FILE_DIR:inferdeck-gateway>/static"
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:inferdeck-gateway>/static"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${INFERDECK_DASHBOARD_STATIC_DIR}"
@@ -50,8 +60,16 @@ add_custom_command(TARGET inferdeck-gateway POST_BUILD
 if(INFERDECK_BUILD_TESTS)
     add_executable(config_tests tests/test_config.cpp)
     target_include_directories(config_tests PRIVATE src)
+    target_compile_definitions(config_tests PRIVATE
+        INFERDECK_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     target_link_libraries(config_tests PRIVATE model foundation yaml-cpp::yaml-cpp Catch2::Catch2WithMain)
     set_target_properties(config_tests PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
     add_test(NAME config_tests COMMAND config_tests)
     set_tests_properties(config_tests PROPERTIES LABELS "unit")
+    add_test(NAME lan_config_tests COMMAND config_tests "[lan]")
+    set_tests_properties(lan_config_tests PROPERTIES LABELS "unit")
+    add_test(NAME stats_path_config_tests COMMAND config_tests "[stats-path]")
+    set_tests_properties(stats_path_config_tests PROPERTIES LABELS "unit")
+    add_test(NAME tts_config_tests COMMAND config_tests "[speech-config]")
+    set_tests_properties(tts_config_tests PROPERTIES LABELS "unit")
 endif()

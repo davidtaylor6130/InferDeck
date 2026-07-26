@@ -16,7 +16,11 @@ target_include_directories(observability PUBLIC include)
 
 find_package(Threads REQUIRED)
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
-target_link_libraries(observability PUBLIC Threads::Threads unofficial::sqlite3::sqlite3)
+target_link_libraries(observability PUBLIC
+    foundation
+    Threads::Threads
+    unofficial::sqlite3::sqlite3
+)
 
 if(MSVC)
     target_compile_options(observability PRIVATE /W4 /utf-8)

@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -25,6 +27,38 @@ struct TokenEvent {
     std::string error_msg;
 };
 
+namespace detail {
+
+constexpr bool generation_limit_reached(
+    int generated_before_sample, int max_tokens) noexcept {
+    return max_tokens <= 0 || generated_before_sample >= max_tokens - 1;
+}
+
+constexpr bool recurrent_checkpoint_usable(
+    std::size_t checkpoint_bytes,
+    int checkpoint_pos,
+    int common_prefix_tokens,
+    int prompt_tokens) noexcept {
+    return checkpoint_bytes > 0 &&
+           checkpoint_pos > 0 &&
+           checkpoint_pos <= common_prefix_tokens &&
+           checkpoint_pos <= prompt_tokens;
+}
+
+inline int recurrent_checkpoint_capture_pos(
+    const std::vector<llama_token>& prompt_tokens,
+    const std::vector<llama_token>& stable_prefix_tokens) noexcept {
+    const std::size_t common =
+        std::min(prompt_tokens.size(), stable_prefix_tokens.size());
+    std::size_t i = 0;
+    while (i < common && prompt_tokens[i] == stable_prefix_tokens[i]) {
+        ++i;
+    }
+    return static_cast<int>(i);
+}
+
+}
+
 // One in-flight inference request managed by the scheduler.
 // Caller creates this on their stack, fills the input fields, calls submit(),
 // then drains out_queue until a TokenEvent with is_done=true arrives.
@@ -34,11 +68,15 @@ struct SlotTask {
     int slot_id{-1};                          // also the llama sequence ID (0..n_slots-1)
     std::vector<llama_token> prompt_tokens;
     std::vector<int> last_prompt_tokens;      // previous call's tokens (KV reuse hint)
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
+    int checkpoint_pos{0};
+    int checkpoint_capture_pos{0};
     common_sampler* sampler{nullptr};         // scheduler takes ownership; freed on completion
     int max_tokens{512};
     std::vector<llama_token> stop_tokens;     // single-token early-stop IDs
     const std::atomic<bool>* ext_cancel{nullptr};  // external cancel (e.g. client disconnect)
     std::atomic<bool> caller_cancel{false};   // set by caller to abort generation early
+    std::atomic<bool> caller_stop{false};
 
     // ---- State (managed exclusively by scheduler thread) ----
     bool initialized{false};
@@ -51,7 +89,7 @@ struct SlotTask {
 
     // ---- Output (written by scheduler before done event, read by caller after) ----
     int out_cached_prompt_tokens{0};
-    std::vector<uint8_t> out_recurrent_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> out_recurrent_checkpoint;
     int out_checkpoint_pos{0};
 
     // ---- Async token channel ----
@@ -88,6 +126,7 @@ private:
     void init_task(SlotTask* task);
     void push_event(SlotTask* task, TokenEvent ev);
     bool should_cancel(const SlotTask* task) const noexcept;
+    void fail_all(std::string error);
 
     llama_context* ctx_;
     llama_model* model_;
@@ -97,6 +136,7 @@ private:
     std::mutex sub_mtx_;
     std::condition_variable sub_cv_;
     std::vector<SlotTask*> active_;
+    std::string terminal_error_;
     std::atomic<bool> stop_{false};
     std::thread thread_;
 };

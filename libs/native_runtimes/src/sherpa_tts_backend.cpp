@@ -4,7 +4,10 @@
 #include <sherpa-onnx/c-api/c-api.h>
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -29,6 +32,70 @@ model::ModelInfo speech_info(model::ModelInfo info) {
 std::string artifact(const model::ModelInfo& info, const std::string& key) {
     const auto found = info.artifacts.find(key);
     return found == info.artifacts.end() ? std::string{} : found->second;
+}
+
+std::string lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char character) {
+                       return static_cast<char>(std::tolower(character));
+                   });
+    return value;
+}
+
+foundation::Result<int> thread_count(const model::ModelInfo& info) {
+    const auto configured = artifact(info, "num_threads");
+    if (configured.empty()) {
+        const auto available = std::max(1U, std::thread::hardware_concurrency());
+        return foundation::Ok(static_cast<int>(std::min(4U, available)));
+    }
+    int value = 0;
+    const auto [end, error] = std::from_chars(
+        configured.data(), configured.data() + configured.size(), value);
+    if (error != std::errc{} || end != configured.data() + configured.size() ||
+        value < 1 || value > 64) {
+        return foundation::Err<int>(
+            foundation::ErrorCode::InvalidArgument,
+            "sherpa-onnx num_threads must be an integer between 1 and 64");
+    }
+    return foundation::Ok(value);
+}
+
+foundation::Result<int> speaker_id(std::string voice, int speakers) {
+    voice = lower(std::move(voice));
+    static constexpr std::array aliases{
+        std::pair{"default", 0}, std::pair{"alloy", 0},
+        std::pair{"ash", 2},     std::pair{"ballad", 1},
+        std::pair{"coral", 7},   std::pair{"echo", 3},
+        std::pair{"fable", 4},   std::pair{"nova", 5},
+        std::pair{"onyx", 0},    std::pair{"sage", 8},
+        std::pair{"shimmer", 6}, std::pair{"verse", 9},
+        std::pair{"m1", 0},      std::pair{"m2", 1},
+        std::pair{"m3", 2},      std::pair{"m4", 3},
+        std::pair{"m5", 4},      std::pair{"f1", 5},
+        std::pair{"f2", 6},      std::pair{"f3", 7},
+        std::pair{"f4", 8},      std::pair{"f5", 9},
+    };
+    int value = -1;
+    const auto alias = std::find_if(
+        aliases.begin(), aliases.end(),
+        [&voice](const auto& item) { return item.first == voice; });
+    if (alias != aliases.end()) {
+        value = alias->second;
+    } else {
+        const auto [end, error] =
+            std::from_chars(voice.data(), voice.data() + voice.size(), value);
+        if (error != std::errc{} || end != voice.data() + voice.size()) {
+            return foundation::Err<int>(
+                foundation::ErrorCode::InvalidArgument,
+                "voice must be an OpenAI voice alias, M1-M5, F1-F5, or a numeric speaker id");
+        }
+    }
+    if (speakers < 1 || value < 0 || value >= speakers) {
+        return foundation::Err<int>(
+            foundation::ErrorCode::InvalidArgument,
+            "voice speaker id is out of range for this speech model");
+    }
+    return foundation::Ok(value);
 }
 
 void append16(std::vector<std::byte>& output, std::uint16_t value) {
@@ -79,61 +146,117 @@ struct StreamState {
 
 int32_t audio_callback(const float* samples, int32_t count, float, void* data) {
     auto* state = static_cast<StreamState*>(data);
-    if (!state->stream || !*state->stream) return 1;
-    if (!state->raw_pcm) {
-        if (!(*state->stream)(nullptr, 0)) {
+    try {
+        if (!state || count < 0 || (count > 0 && !samples)) return 0;
+        if (!state->stream || !*state->stream) return 1;
+        if (!state->raw_pcm) {
+            if (!(*state->stream)(nullptr, 0)) {
+                state->cancelled = true;
+                return 0;
+            }
+            return 1;
+        }
+        auto bytes = pcm16(samples, static_cast<std::size_t>(count));
+        if (!(*state->stream)(bytes.data(), bytes.size())) {
             state->cancelled = true;
             return 0;
         }
         return 1;
-    }
-    auto bytes = pcm16(samples, static_cast<std::size_t>(count));
-    if (!(*state->stream)(bytes.data(), bytes.size())) {
-        state->cancelled = true;
+    } catch (...) {
+        if (state) state->cancelled = true;
         return 0;
     }
-    return 1;
 }
 
 class SherpaTtsBackend final : public model::FixedBackend, public model::ISpeechBackend {
 public:
     explicit SherpaTtsBackend(model::ModelInfo info)
-        : FixedBackend(speech_info(std::move(info))), model_path_(artifact(info_, "model")),
+        : FixedBackend(speech_info(std::move(info))),
+          engine_(lower(artifact(info_, "engine"))),
+          model_path_(artifact(info_, "model")),
           tokens_(artifact(info_, "tokens")), lexicon_(artifact(info_, "lexicon")),
           data_dir_(artifact(info_, "data_dir")), dict_dir_(artifact(info_, "dict_dir")),
+          duration_predictor_(artifact(info_, "duration_predictor")),
+          text_encoder_(artifact(info_, "text_encoder")),
+          vector_estimator_(artifact(info_, "vector_estimator")),
+          vocoder_(artifact(info_, "vocoder")),
+          tts_json_(artifact(info_, "tts_json")),
+          unicode_indexer_(artifact(info_, "unicode_indexer")),
+          voice_style_(artifact(info_, "voice_style")),
           provider_(artifact(info_, "provider")) {
         if (model_path_.empty()) model_path_ = info_.gguf_path;
+        if (engine_.empty()) {
+            engine_ = duration_predictor_.empty() ? "vits" : "supertonic";
+        }
         if (provider_.empty()) provider_ = "cpu";
     }
 
-    ~SherpaTtsBackend() override { if (tts_) SherpaOnnxDestroyOfflineTts(tts_); }
+    ~SherpaTtsBackend() override { release_tts(); }
 
     foundation::Result<void> load() override {
-        if (model_path_.empty() || tokens_.empty()) {
-            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument, "sherpa-onnx VITS model and tokens artifacts are required");
+        set_loaded(false);
+        release_tts();
+        auto threads = thread_count(info_);
+        if (!threads) {
+            return foundation::Err<void>(threads.error().code,
+                                         threads.error().message);
         }
         SherpaOnnxOfflineTtsConfig config{};
-        config.model.vits.model = model_path_.c_str();
-        config.model.vits.tokens = tokens_.c_str();
-        config.model.vits.lexicon = lexicon_.c_str();
-        config.model.vits.data_dir = data_dir_.c_str();
-        config.model.vits.dict_dir = dict_dir_.c_str();
-        config.model.vits.noise_scale = 0.667f;
-        config.model.vits.noise_scale_w = 0.8f;
-        config.model.vits.length_scale = 1.0f;
-        config.model.num_threads = static_cast<int>(std::max(1U, std::thread::hardware_concurrency()));
+        if (engine_ == "supertonic") {
+            if (duration_predictor_.empty() || text_encoder_.empty() ||
+                vector_estimator_.empty() || vocoder_.empty() ||
+                tts_json_.empty() || unicode_indexer_.empty() ||
+                voice_style_.empty()) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "sherpa-onnx Supertonic requires duration_predictor, text_encoder, vector_estimator, vocoder, tts_json, unicode_indexer, and voice_style artifacts");
+            }
+            config.model.supertonic.duration_predictor =
+                duration_predictor_.c_str();
+            config.model.supertonic.text_encoder = text_encoder_.c_str();
+            config.model.supertonic.vector_estimator =
+                vector_estimator_.c_str();
+            config.model.supertonic.vocoder = vocoder_.c_str();
+            config.model.supertonic.tts_json = tts_json_.c_str();
+            config.model.supertonic.unicode_indexer =
+                unicode_indexer_.c_str();
+            config.model.supertonic.voice_style = voice_style_.c_str();
+        } else if (engine_ == "vits") {
+            if (model_path_.empty() || tokens_.empty()) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "sherpa-onnx VITS model and tokens artifacts are required");
+            }
+            config.model.vits.model = model_path_.c_str();
+            config.model.vits.tokens = tokens_.c_str();
+            config.model.vits.lexicon = lexicon_.c_str();
+            config.model.vits.data_dir = data_dir_.c_str();
+            config.model.vits.dict_dir = dict_dir_.c_str();
+            config.model.vits.noise_scale = 0.667f;
+            config.model.vits.noise_scale_w = 0.8f;
+            config.model.vits.length_scale = 1.0f;
+        } else {
+            return foundation::Err<void>(
+                foundation::ErrorCode::InvalidArgument,
+                "unsupported sherpa-onnx TTS engine: " + engine_);
+        }
+        config.model.num_threads = *threads;
         config.model.provider = provider_.c_str();
         config.max_num_sentences = 1;
+        config.silence_scale = 0.2f;
         tts_ = SherpaOnnxCreateOfflineTts(&config);
-        if (!tts_) return foundation::Err<void>(foundation::ErrorCode::Unavailable, "sherpa-onnx failed to load TTS model");
+        if (!tts_) {
+            return foundation::Err<void>(
+                foundation::ErrorCode::Unavailable,
+                "sherpa-onnx failed to load " + engine_ + " TTS model");
+        }
         set_loaded(true);
         return foundation::Ok();
     }
 
     foundation::Result<void> unload() override {
         set_loaded(false);
-        if (tts_) SherpaOnnxDestroyOfflineTts(tts_);
-        tts_ = nullptr;
+        release_tts();
         return foundation::Ok();
     }
 
@@ -144,16 +267,17 @@ public:
         if (request.format != "wav" && request.format != "pcm") {
             return foundation::Err<model::AudioResult>(foundation::ErrorCode::InvalidArgument, "sherpa-onnx runtime supports wav and pcm responses");
         }
-        int speaker = 0;
-        if (request.voice != "default") {
-            try { speaker = std::stoi(request.voice); }
-            catch (...) { return foundation::Err<model::AudioResult>(foundation::ErrorCode::InvalidArgument, "voice must be default or a numeric speaker id"); }
+        if (!std::isfinite(request.speed) || request.speed < 0.25f || request.speed > 4.0f) {
+            return foundation::Err<model::AudioResult>(foundation::ErrorCode::InvalidArgument, "speech speed must be finite and between 0.25 and 4");
         }
-        if (speaker < 0 || speaker >= SherpaOnnxOfflineTtsNumSpeakers(tts_)) {
-            return foundation::Err<model::AudioResult>(foundation::ErrorCode::InvalidArgument, "voice speaker id is out of range");
+        auto speaker = speaker_id(
+            request.voice, SherpaOnnxOfflineTtsNumSpeakers(tts_));
+        if (!speaker) {
+            return foundation::Err<model::AudioResult>(
+                speaker.error().code, speaker.error().message);
         }
         SherpaOnnxGenerationConfig config{};
-        config.sid = speaker;
+        config.sid = *speaker;
         config.speed = request.speed;
         config.silence_scale = 0.2f;
         StreamState state{&stream, request.format == "pcm", false};
@@ -176,12 +300,25 @@ public:
     }
 
 private:
+    void release_tts() noexcept {
+        if (tts_) SherpaOnnxDestroyOfflineTts(tts_);
+        tts_ = nullptr;
+    }
+
     const SherpaOnnxOfflineTts* tts_{nullptr};
+    std::string engine_;
     std::string model_path_;
     std::string tokens_;
     std::string lexicon_;
     std::string data_dir_;
     std::string dict_dir_;
+    std::string duration_predictor_;
+    std::string text_encoder_;
+    std::string vector_estimator_;
+    std::string vocoder_;
+    std::string tts_json_;
+    std::string unicode_indexer_;
+    std::string voice_style_;
     std::string provider_;
 };
 

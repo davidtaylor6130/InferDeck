@@ -24,6 +24,7 @@ target_link_libraries(gateway
         foundation
         model
         observability
+        optimize
         nlohmann_json::nlohmann_json
         httplib::httplib
 )

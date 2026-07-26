@@ -75,15 +75,25 @@ public:
 
     [[nodiscard]] std::vector<StoreDownload> downloads() const;
     [[nodiscard]] nlohmann::json installed() const;
+    [[nodiscard]] nlohmann::json library() const;
 
 private:
     foundation::Result<StoreFile> resolve_file(
         const std::string& repo, const std::string& filename,
         const std::string& runtime, const std::string& modality);
     foundation::Result<void> start(std::uint64_t id);
+    void worker_entry(std::uint64_t id,
+                      const std::shared_ptr<std::atomic<bool>>& done) noexcept;
     void run(std::uint64_t id);
+    void fail_job(std::uint64_t id, std::string error) noexcept;
+    void finish_job(std::uint64_t id, std::string state, std::string error = {});
+    void reap_completed_workers();
+    void prune_completed_jobs_locked();
     void load_manifest();
     foundation::Result<void> save_manifest();
+
+    static constexpr std::size_t kMaxActiveInstalls = 2;
+    static constexpr std::size_t kMaxRetainedJobs = 100;
 
     std::filesystem::path root_;
     std::string token_;
@@ -93,7 +103,10 @@ private:
     std::unordered_map<std::uint64_t, StoreDownload> downloads_;
     std::unordered_map<std::uint64_t, std::shared_ptr<std::atomic<bool>>> cancellations_;
     std::unordered_map<std::uint64_t, std::thread> workers_;
+    std::unordered_map<std::uint64_t, std::shared_ptr<std::atomic<bool>>> worker_done_;
+    std::unordered_map<std::string, std::uint64_t> reserved_names_;
     nlohmann::json installed_{nlohmann::json::object()};
+    std::mutex manifest_mutex_;
     std::uint64_t next_id_{1};
 };
 

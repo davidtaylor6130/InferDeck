@@ -53,7 +53,7 @@ bool ModelRegistry::has(const std::string& name) const {
     return entries_.find(name) != entries_.end();
 }
 
-const ModelInfo& ModelRegistry::get_info(const std::string& name) const {
+ModelInfo ModelRegistry::get_info(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = entries_.find(name);
     if (it == entries_.end()) {

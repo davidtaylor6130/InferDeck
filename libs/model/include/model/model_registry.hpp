@@ -28,7 +28,7 @@ public:
     void unregister_model(const std::string& name);
 
     [[nodiscard]] bool has(const std::string& name) const;
-    [[nodiscard]] const ModelInfo& get_info(const std::string& name) const;
+    [[nodiscard]] ModelInfo get_info(const std::string& name) const;
     [[nodiscard]] std::vector<std::string> list() const;
     [[nodiscard]] std::size_t size() const;
 

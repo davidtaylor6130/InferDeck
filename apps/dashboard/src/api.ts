@@ -42,11 +42,84 @@ async function putJson<T>(path: string, body: unknown, timeoutMs = 30_000): Prom
   return payload;
 }
 
+async function deleteJson<T>(path: string, timeoutMs = 30_000): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'DELETE',
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { Accept: 'application/json' },
+  });
+  const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
+  if (!response.ok) throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
+  return payload;
+}
+
 export interface ConfigDocument {
   yaml: string;
   revision: string;
+  activeYaml: string;
+  activeRevision: string;
+  runningRevision: string;
+  hasActiveProfile: boolean;
+  usingActiveProfile: boolean;
+  fallbackReason?: string;
   restartRequired: boolean;
   secretSentinel?: string;
+}
+
+export interface ConfigApplyResult {
+  ok: boolean;
+  activeRevision: string;
+  hasActiveProfile: boolean;
+  restartRequired: boolean;
+  applyScheduled: boolean;
+}
+
+export interface ProfileOptimizationInput {
+  model: string;
+  contextPerSlot: number;
+  slots: number;
+  minSlots: number;
+  nBatch: number;
+  nUbatch: number;
+  cacheTypeK: string;
+  cacheTypeV: string;
+}
+
+export interface ProfileOptimizationCandidate {
+  contextPerSlot: number;
+  slots: number;
+  nBatch: number;
+  nUbatch: number;
+  cacheTypeK: string;
+  cacheTypeV: string;
+  flashAttention: string;
+  estimatedVramMb: number;
+  reserveVramMb: number;
+  qualityScore: number;
+  speedScore: number;
+  parallelismScore: number;
+  headroomScore: number;
+  overallScore: number;
+  fits: boolean;
+  reasons: string[];
+}
+
+export interface ProfileOptimizationResult {
+  model: string;
+  mode: 'profile_estimate';
+  measured: false;
+  observedTokensPerSecond: number;
+  modelFileMb: number;
+  totalVramMb: number;
+  weights: {
+    quality: number;
+    speed: number;
+    parallelism: number;
+    headroom: number;
+  };
+  recommended: ProfileOptimizationCandidate;
+  candidates: ProfileOptimizationCandidate[];
+  notes: string[];
 }
 
 export interface StoreModel {
@@ -58,6 +131,9 @@ export interface StoreModel {
   likes: number;
   private: boolean;
   gated: boolean | string;
+  lastModified?: string;
+  hasVision?: boolean;
+  recommended?: boolean;
 }
 
 export interface StoreFile {
@@ -90,6 +166,24 @@ export interface StoreDownload {
   installedPath: string;
 }
 
+export interface InstalledStoreModel {
+  id?: string;
+  name?: string;
+  family?: string;
+  runtime?: string;
+  modality?: string;
+  capabilities?: string[];
+  path?: string;
+  size?: number;
+  sha256?: string;
+  vramRequiredMb?: number;
+  quantization?: string;
+  artifactCount?: number;
+  hasVision?: boolean;
+  configured?: boolean;
+  managed?: boolean;
+}
+
 export interface MediaJob {
   id: number;
   model: string;
@@ -98,13 +192,76 @@ export interface MediaJob {
   state: string;
 }
 
+type JsonObject = Record<string, unknown>;
+
+function asObject(value: unknown): JsonObject {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as JsonObject
+    : {};
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function asStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every(item => typeof item === 'string')
+    ? value
+    : undefined;
+}
+
+function normalizeModel(value: unknown): ModelInfo | null {
+  const entry = asObject(value);
+  const id = asString(entry.id);
+  if (!id) return null;
+
+  const inferdeck = asObject(entry.inferdeck);
+  const resources = asObject(inferdeck.resources);
+  const residency = asObject(inferdeck.residency);
+  const loaded = asBoolean(residency.loaded) ?? asBoolean(entry.loaded) ?? false;
+  const configuredSlots = asNumber(entry.n_slots) ?? asNumber(resources.configured_slots) ?? 0;
+  const actualSlots = asNumber(residency.slots);
+  const normalized: ModelInfo = {
+    id,
+    family: asString(entry.family),
+    runtime: asString(entry.runtime) ?? asString(inferdeck.runtime),
+    runtime_available: asBoolean(entry.runtime_available) ?? asBoolean(inferdeck.runtime_available),
+    modality: asString(entry.modality) ?? asString(inferdeck.modality),
+    capabilities: asStringArray(entry.capabilities) ?? asStringArray(inferdeck.capabilities),
+    context_size: asNumber(entry.context_size) ?? 0,
+    vram_required_mb: asNumber(entry.vram_required_mb) ?? asNumber(resources.vram_required_mb) ?? 0,
+    n_slots: loaded && actualSlots !== undefined ? actualSlots : configuredSlots,
+    has_vision: asBoolean(entry.has_vision) ?? false,
+    loaded,
+    primary: asBoolean(residency.primary) ?? asBoolean(entry.primary),
+    free_slots: asNumber(residency.free_slots) ?? asNumber(entry.free_slots),
+    active_requests: asNumber(residency.active_requests) ?? asNumber(entry.active_requests),
+  };
+  const resizing = asBoolean(residency.resizing) ?? asBoolean(entry.resizing);
+  if (resizing !== undefined) {
+    (normalized as ModelInfo & { resizing?: boolean }).resizing = resizing;
+  }
+  return normalized;
+}
+
 export function getStatus(): Promise<StatusPayload> {
   return getJson<StatusPayload>('/api/status');
 }
 
 export async function getModels(): Promise<ModelInfo[]> {
-  const body = await getJson<{ data: ModelInfo[] }>('/v1/models');
-  return Array.isArray(body.data) ? body.data : [];
+  const body = await getJson<{ data?: unknown }>('/v1/models');
+  if (!Array.isArray(body.data)) return [];
+  return body.data
+    .map(normalizeModel)
+    .filter((model): model is ModelInfo => model !== null);
 }
 
 export async function getJobs(limit = 100): Promise<JobRecord[]> {
@@ -135,8 +292,79 @@ export function saveConfig(yaml: string, revision: string): Promise<ConfigDocume
   return putJson<ConfigDocument & { ok: boolean }>('/api/config', { yaml, revision });
 }
 
-export async function searchStore(query: string, runtime = '', modality = ''): Promise<StoreModel[]> {
-  const params = new URLSearchParams({ q: query });
+export function saveActiveConfig(yaml: string, revision: string): Promise<ConfigApplyResult> {
+  return putJson<ConfigApplyResult>('/api/config/active', { yaml, revision });
+}
+
+export function optimizeProfile(input: ProfileOptimizationInput): Promise<ProfileOptimizationResult> {
+  return postJson<ProfileOptimizationResult>('/api/optimize/profile', input);
+}
+
+export function resetActiveConfig(): Promise<{ ok: boolean; removed: boolean; restartRequired: boolean; applyScheduled: boolean }> {
+  return deleteJson('/api/config/active');
+}
+
+const delay = (milliseconds: number) =>
+  new Promise<void>(resolve => globalThis.setTimeout(resolve, milliseconds));
+
+class ConfigFallbackError extends Error {}
+
+async function waitForConfig(
+  predicate: (config: ConfigDocument) => boolean,
+  description: string,
+  timeoutMs: number,
+  pollMs: number,
+): Promise<ConfigDocument> {
+  const deadline = Date.now() + timeoutMs;
+  let lastFailure = 'InferDeck has not returned yet.';
+  while (Date.now() < deadline) {
+    try {
+      const config = await getJson<ConfigDocument>('/api/config', Math.min(3_000, timeoutMs));
+      if (config.fallbackReason) {
+        throw new ConfigFallbackError(`InferDeck rejected the saved profile: ${config.fallbackReason}`);
+      }
+      if (predicate(config)) return config;
+      lastFailure = 'InferDeck returned, but the requested profile is not active yet.';
+    } catch (error) {
+      if (error instanceof ConfigFallbackError) throw error;
+      lastFailure = error instanceof Error ? error.message : String(error);
+    }
+    await delay(pollMs);
+  }
+  throw new Error(`Timed out waiting for ${description}. ${lastFailure}`);
+}
+
+export function waitForActiveConfig(
+  revision: string,
+  timeoutMs = 180_000,
+  pollMs = 750,
+): Promise<ConfigDocument> {
+  return waitForConfig(
+    config => config.usingActiveProfile &&
+      config.activeRevision === revision &&
+      config.runningRevision === revision,
+    'InferDeck to apply the active profile',
+    timeoutMs,
+    pollMs,
+  );
+}
+
+export function waitForStableConfig(
+  timeoutMs = 180_000,
+  pollMs = 750,
+): Promise<ConfigDocument> {
+  return waitForConfig(
+    config => !config.hasActiveProfile &&
+      !config.usingActiveProfile &&
+      config.runningRevision === config.revision,
+    'InferDeck to restore the stable profile',
+    timeoutMs,
+    pollMs,
+  );
+}
+
+export async function searchStore(query: string, runtime = '', modality = '', limit = 50): Promise<StoreModel[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
   if (runtime) params.set('runtime', runtime);
   if (modality) params.set('modality', modality);
   const body = await getJson<{ models: StoreModel[] }>(`/api/model-store/search?${params}`);
@@ -154,7 +382,11 @@ export function installStoreModel(file: StoreFile, modelName: string): Promise<{
   });
 }
 
-export async function getStoreActivity(): Promise<{ downloads: StoreDownload[]; installed: Record<string, unknown> }> {
+export async function getStoreActivity(): Promise<{
+  downloads: StoreDownload[];
+  installed: Record<string, InstalledStoreModel>;
+  library: InstalledStoreModel[];
+}> {
   return getJson('/api/model-store/downloads');
 }
 

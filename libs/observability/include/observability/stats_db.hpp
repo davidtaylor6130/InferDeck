@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -19,6 +20,8 @@ struct RequestRow {
   double tokens_per_second{};
   int status_code{};
   int slot_id{-1};
+  double input_audio_seconds{};
+  std::int64_t input_characters{};
 };
 
 struct SwapRow {
@@ -39,6 +42,8 @@ struct ModelUsageRow {
   double total_duration_ms{};
   double peak_tokens_per_second{};
   std::int64_t last_timestamp_unix_ms{};
+  double input_audio_seconds{};
+  std::int64_t input_characters{};
 };
 
 struct UsageBucketRow {
@@ -49,6 +54,16 @@ struct UsageBucketRow {
   std::int64_t total_tokens{};
   std::int64_t requests{};
   std::int64_t successful_requests{};
+  double input_audio_seconds{};
+  std::int64_t input_characters{};
+};
+
+struct LifetimeTotals {
+  std::int64_t requests{};
+  std::int64_t swaps{};
+  std::int64_t prompt_tokens{};
+  std::int64_t completion_tokens{};
+  double total_duration_ms{};
 };
 
 class StatsDb {
@@ -65,11 +80,12 @@ public:
   std::vector<RequestRow> recent_requests(int limit = 100) const;
   std::vector<SwapRow>    recent_swaps(int limit = 100) const;
   std::vector<ModelUsageRow> model_usage() const;
+  LifetimeTotals lifetime_totals() const;
   std::vector<UsageBucketRow> monthly_usage(int months = 0) const;
   std::vector<UsageBucketRow> daily_usage(int days = 30) const;
   std::vector<UsageBucketRow> hourly_usage(int hours = 24) const;
 
-  bool healthy() const noexcept { return healthy_; }
+  bool healthy() const noexcept { return healthy_.load(); }
   const std::string& path() const noexcept { return path_; }
 
 private:
@@ -80,7 +96,7 @@ private:
   std::string path_;
   void* db_{nullptr};
   mutable std::mutex mtx_;
-  bool healthy_{false};
+  std::atomic<bool> healthy_{false};
 };
 
 }

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -37,8 +39,12 @@ public:
     void shutdown();
     void set_level(LogLevel level);
 
-    [[nodiscard]] LogLevel level() const noexcept { return level_; }
-    [[nodiscard]] bool initialized() const noexcept { return initialized_; }
+    [[nodiscard]] LogLevel level() const noexcept {
+        return level_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] bool initialized() const noexcept {
+        return initialized_.load(std::memory_order_acquire);
+    }
 
     void log(LogLevel lvl, std::string_view event, std::string_view message);
 
@@ -48,9 +54,11 @@ private:
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
 
-    std::mutex init_mu_;
-    LogLevel level_{LogLevel::Info};
-    bool initialized_{false};
+    std::mutex state_mu_;
+    std::shared_ptr<spdlog::logger> logger_;
+    std::shared_ptr<spdlog::logger> previous_default_logger_;
+    std::atomic<LogLevel> level_{LogLevel::Info};
+    std::atomic_bool initialized_{false};
 };
 
 namespace detail {

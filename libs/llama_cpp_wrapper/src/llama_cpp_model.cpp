@@ -1,10 +1,13 @@
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
+#include "llama_cpp_wrapper/streaming_tool_call_state.hpp"
 #include "llama_cpp_wrapper/continuous_batch_scheduler.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -88,89 +91,6 @@ std::string random_string(std::size_t n = 32) {
 
 std::string gen_tool_call_id() {
   return random_string();
-}
-
-static int common_prefix_length(
-    const std::vector<int>& previous,
-    const std::vector<llama_token>& current) {
-  const auto n = std::min(previous.size(), current.size());
-  std::size_t i = 0;
-  while (i < n && previous[i] == current[i]) {
-    ++i;
-  }
-  return static_cast<int>(i);
-}
-
-static void take_recurrent_checkpoint(
-    llama_context* ctx, int seq_id, int pos,
-    std::vector<uint8_t>& out_buf, int& out_pos) {
-  const size_t sz = llama_state_seq_get_size_ext(
-      ctx, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-  if (sz == 0) { out_buf.clear(); return; }
-  out_buf.resize(sz);
-  const size_t written = llama_state_seq_get_data_ext(
-      ctx, out_buf.data(), sz, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-  if (written != sz) { out_buf.clear(); return; }
-  out_pos = pos;
-}
-
-static int prepare_prompt_cache(
-    llama_context* ctx,
-    const std::vector<int>& previous_prompt_tokens,
-    const std::vector<llama_token>& prompt_tokens,
-    int seq_id,
-    const std::string& model_name,
-    const std::vector<uint8_t>& checkpoint_buf,
-    int checkpoint_pos) {
-  int n_past = common_prefix_length(previous_prompt_tokens, prompt_tokens);
-  if (n_past >= static_cast<int>(prompt_tokens.size()) && n_past > 0) {
-    --n_past;
-  }
-  auto* mem = llama_get_memory(ctx);
-  if (n_past <= 0) {
-    llama_memory_clear(mem, true);
-    return 0;
-  }
-  const auto pos_max = llama_memory_seq_pos_max(mem, seq_id);
-  if (n_past > pos_max) {
-    LOG_INFO("llama_prompt_cache_extend",
-             "model={} cached_prompt_tokens={} prompt_tokens={}",
-             model_name,
-             n_past,
-             prompt_tokens.size());
-    return n_past;
-  }
-  if (!llama_memory_seq_rm(mem, seq_id, n_past, -1)) {
-    if (!checkpoint_buf.empty() && checkpoint_pos <= n_past) {
-      llama_memory_clear(mem, true);
-      const size_t restored = llama_state_seq_set_data_ext(
-          ctx, checkpoint_buf.data(), checkpoint_buf.size(),
-          seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-      if (restored > 0) {
-        LOG_INFO("llama_prompt_cache_checkpoint_restore",
-                 "model={} checkpoint_pos={} n_past={} prompt_tokens={}",
-                 model_name,
-                 checkpoint_pos,
-                 n_past,
-                 prompt_tokens.size());
-        return checkpoint_pos;
-      }
-    }
-    LOG_WARN("llama_prompt_cache_fallback",
-             "model={} cached_prompt_tokens={} reason=seq_rm_failed pos_min={} pos_max={}",
-             model_name,
-             n_past,
-             llama_memory_seq_pos_min(mem, seq_id),
-             llama_memory_seq_pos_max(mem, seq_id));
-    llama_memory_clear(mem, true);
-    return 0;
-  }
-  LOG_INFO("llama_prompt_cache_reuse",
-           "model={} cached_prompt_tokens={} prompt_tokens={}",
-           model_name,
-           n_past,
-           prompt_tokens.size());
-  return n_past;
 }
 
 static bool maybe_truncate_prompt(
@@ -513,16 +433,36 @@ std::vector<llama_token> tokenize_stop_strings(
   std::vector<llama_token> tokens;
   for (const auto& stop_str : stops) {
     if (stop_str.empty()) continue;
+    llama_token token{};
     int n = llama_tokenize(vocab, stop_str.c_str(), static_cast<int>(stop_str.size()),
-                           nullptr, 0, false, true);
+                           &token, 1, false, true);
     if (n == 1) {
-      std::vector<llama_token> tmp(1);
-      llama_tokenize(vocab, stop_str.c_str(), static_cast<int>(stop_str.size()),
-                     tmp.data(), n, false, true);
-      tokens.push_back(tmp[0]);
+      tokens.push_back(token);
     }
   }
   return tokens;
+}
+
+std::string token_to_piece(const llama_vocab* vocab, llama_token token) {
+  std::array<char, 256> local{};
+  int n = llama_token_to_piece(
+      vocab, token, local.data(), static_cast<int>(local.size()), 0, true);
+  if (n >= 0) {
+    return std::string(local.data(), static_cast<std::size_t>(n));
+  }
+
+  std::vector<char> buffer(
+      static_cast<std::size_t>(-static_cast<int64_t>(n)));
+  while (true) {
+    n = llama_token_to_piece(
+        vocab, token, buffer.data(), static_cast<int>(buffer.size()), 0, true);
+    if (n >= 0) {
+      return std::string(buffer.data(), static_cast<std::size_t>(n));
+    }
+    const auto required = static_cast<std::size_t>(-static_cast<int64_t>(n));
+    if (required <= buffer.size()) return {};
+    buffer.resize(required);
+  }
 }
 
 std::string tool_call_json(const common_chat_tool_call& tc) {
@@ -1090,7 +1030,7 @@ Result<void> LlamaCppModel::reset_all_slots() noexcept {
   for (auto& s : slots_) {
     s.busy = false;
     s.last_prompt_tokens.clear();
-    s.recurrent_checkpoint.clear();
+    s.recurrent_checkpoint.reset();
     s.checkpoint_pos = 0;
   }
   return Result<void>{};
@@ -1228,7 +1168,8 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
     }
     const int n_tools_defined = body.contains("tools") && body["tools"].is_array()
                                   ? static_cast<int>(body["tools"].size()) : 0;
-    const int max_tok = body.value("max_tokens", -1);
+    const int max_tok = body.value(
+        "max_tokens", inferdeck::model::k_max_tokens_use_context_budget);
     LOG_INFO("request_shape",
              "model={} msgs={} [sys={} sys_chars={} user={} asst={} tool_results={} tool_result_chars={}] "
              "tools_defined={} max_tokens={}",
@@ -1457,6 +1398,37 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
       return Result<PredictSetup>(std::unexpect, make_error(ErrorCode::Internal, "tokenization failed"));
   }
   s.prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
+  s.checkpoint_capture_pos = n_tokens;
+  const auto& generation_prompt = s.parser_params.generation_prompt;
+  if (!generation_prompt.empty() &&
+      prompt.size() >= generation_prompt.size() &&
+      prompt.compare(
+          prompt.size() - generation_prompt.size(),
+          generation_prompt.size(),
+          generation_prompt) == 0) {
+    const std::string stable_prefix =
+        prompt.substr(0, prompt.size() - generation_prompt.size());
+    std::vector<llama_token> stable_tokens(stable_prefix.size() + 16);
+    int stable_count = llama_tokenize(
+        vocab_, stable_prefix.data(), static_cast<int>(stable_prefix.size()),
+        stable_tokens.data(), static_cast<int>(stable_tokens.size()),
+        add_bos, true);
+    if (stable_count < 0) {
+      stable_tokens.resize(static_cast<std::size_t>(-stable_count));
+      stable_count = llama_tokenize(
+          vocab_, stable_prefix.data(), static_cast<int>(stable_prefix.size()),
+          stable_tokens.data(), static_cast<int>(stable_tokens.size()),
+          add_bos, true);
+    }
+    if (stable_count >= 0) {
+      stable_tokens.resize(static_cast<std::size_t>(stable_count));
+      const int capture_pos = detail::recurrent_checkpoint_capture_pos(
+          s.prompt_tokens, stable_tokens);
+      if (capture_pos > 0) {
+        s.checkpoint_capture_pos = capture_pos;
+      }
+    }
+  }
 
   // Per-slot context window = n_ctx_seq (total context / n_slots as set during load)
   s.n_ctx_seq = static_cast<int>(llama_n_ctx_seq(shared_ctx_));
@@ -1464,7 +1436,7 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
   if (n_tokens >= s.n_ctx_seq) {
     if (!cfg_.truncate_prompt)
       return Result<PredictSetup>(std::unexpect,
-          make_error(ErrorCode::InvalidArgument,
+          make_error(ErrorCode::ContextLengthExceeded,
                      "This model's maximum context length is " + std::to_string(s.n_ctx_seq) +
                      " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
                      " tokens. Please reduce the length of the messages."));
@@ -1507,11 +1479,8 @@ Result<void> LlamaCppModel::drain_task(SlotTask& task, const OnToken& on_token) 
       return Result<void>(std::unexpect, make_error(ErrorCode::Internal, ev.error_msg));
     if (ev.is_done)
       return Result<void>{};
-    if (!on_token(ev.id)) {
-      // Caller wants to stop early (stop string hit, client disconnect, etc.)
+    if (!on_token(ev.id) && !task.caller_stop.load())
       task.caller_cancel.store(true);
-      // Continue draining until the scheduler acknowledges with a done event
-    }
   }
 }
 
@@ -1543,6 +1512,9 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   task.slot_id             = slot_id;
   task.prompt_tokens       = setup.prompt_tokens;
   task.last_prompt_tokens  = setup.last_prompt_tokens;
+  task.recurrent_checkpoint = std::move(setup.recurrent_checkpoint);
+  task.checkpoint_pos       = setup.checkpoint_pos;
+  task.checkpoint_capture_pos = setup.checkpoint_capture_pos;
   task.sampler             = setup.smp;   // scheduler takes ownership
   task.max_tokens          = setup.max_tokens;
   task.stop_tokens         = setup.stop_tokens;
@@ -1551,14 +1523,13 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
 
   auto drain_res = drain_task(task, [&](llama_token id) -> bool {
     if (string_stopped) return false; // already stopping
-    char buf[256];
-    const int n = llama_token_to_piece(vocab_, id, buf, sizeof(buf), 0, true);
-    if (n > 0) generated.append(buf, static_cast<std::size_t>(n));
+    generated.append(token_to_piece(vocab_, id));
     for (const auto& stop : setup.stop_strings) {
       if (!stop.empty() && generated.size() >= stop.size() &&
           generated.compare(generated.size() - stop.size(), stop.size(), stop) == 0) {
         generated.resize(generated.size() - stop.size());
         string_stopped = true;
+        task.caller_stop.store(true);
         return false; // do NOT push this token — it's part of the stop string
       }
     }
@@ -1636,6 +1607,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   generated.reserve(4096);
   std::vector<llama_token> decoded_ids;
   StreamingChatParserState parser_state(setup.parser_params);
+  detail::StreamingToolCallState tool_call_stream_state;
   bool callback_aborted = false;
   bool string_stopped = false;
 
@@ -1643,6 +1615,9 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   task.slot_id            = slot_id;
   task.prompt_tokens      = setup.prompt_tokens;
   task.last_prompt_tokens = setup.last_prompt_tokens;
+  task.recurrent_checkpoint = std::move(setup.recurrent_checkpoint);
+  task.checkpoint_pos      = setup.checkpoint_pos;
+  task.checkpoint_capture_pos = setup.checkpoint_capture_pos;
   task.sampler            = setup.smp;
   task.max_tokens         = setup.max_tokens;
   task.stop_tokens        = setup.stop_tokens;
@@ -1653,10 +1628,8 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   auto drain_res = drain_task(task, [&](llama_token id) -> bool {
     if (callback_aborted || string_stopped) return false;
 
-    char buf[256];
-    const int n = llama_token_to_piece(vocab_, id, buf, sizeof(buf), 0, true);
-    if (n > 0) {
-      std::string piece(buf, static_cast<std::size_t>(n));
+    std::string piece = token_to_piece(vocab_, id);
+    if (!piece.empty()) {
       generated.append(piece);
 
       for (const auto& stop : setup.stop_strings) {
@@ -1664,6 +1637,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
             generated.compare(generated.size() - stop.size(), stop.size(), stop) == 0) {
           generated.resize(generated.size() - stop.size());
           string_stopped = true;
+          task.caller_stop.store(true);
           return false; // do NOT push this token — it's part of the stop string
         }
       }
@@ -1683,6 +1657,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
           callback_aborted = true;
           return false;
         }
+        tool_call_stream_state.observe(delta);
       }
     }
     return true;
@@ -1730,6 +1705,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty())
         continue;
       if (!callback(delta)) return Result<InferenceResult>(std::move(out));
+      tool_call_stream_state.observe(delta);
     }
     auto msg = parse_final_message_with_ids(generated, setup.parser_params);
     apply_parsed_message(out, msg);
@@ -1746,7 +1722,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
     }
   }
 
-  if (fallback_tool_calls_used) {
+  if (fallback_tool_calls_used && tool_call_stream_state.should_emit_fallback()) {
     for (std::size_t i = 0; i < out.tool_calls.size(); ++i) {
       const auto& tc = out.tool_calls[i];
       InferenceDelta delta;

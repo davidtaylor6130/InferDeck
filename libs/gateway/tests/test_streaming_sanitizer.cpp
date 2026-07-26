@@ -5,6 +5,36 @@
 #include <string>
 
 using inferdeck::gateway::StreamingSanitizer;
+using inferdeck::gateway::Utf8StreamBuffer;
+
+TEST_CASE("Utf8StreamBuffer: complete text passes through", "[sanitizer][utf8]") {
+    Utf8StreamBuffer buffer;
+    REQUIRE(buffer.on_chunk("plain text") == "plain text");
+    REQUIRE(buffer.empty());
+    REQUIRE(buffer.finish().empty());
+}
+
+TEST_CASE("Utf8StreamBuffer: split multibyte sequences are held", "[sanitizer][utf8]") {
+    Utf8StreamBuffer buffer;
+
+    REQUIRE(buffer.on_chunk(std::string("A\xc3", 2)) == "A");
+    REQUIRE(buffer.on_chunk(std::string("\xbc", 1)) == std::string("\xc3\xbc", 2));
+
+    REQUIRE(buffer.on_chunk(std::string("\xe2\x82", 2)).empty());
+    REQUIRE(buffer.on_chunk(std::string("\xac", 1)) == std::string("\xe2\x82\xac", 3));
+
+    REQUIRE(buffer.on_chunk(std::string("\xf0\x9f\x92", 3)).empty());
+    REQUIRE(buffer.on_chunk(std::string("\xa1", 1)) == std::string("\xf0\x9f\x92\xa1", 4));
+    REQUIRE(buffer.empty());
+}
+
+TEST_CASE("Utf8StreamBuffer: malformed and incomplete bytes are not dropped", "[sanitizer][utf8]") {
+    Utf8StreamBuffer buffer;
+    REQUIRE(buffer.on_chunk(std::string("\x80", 1)) == std::string("\x80", 1));
+    REQUIRE(buffer.on_chunk(std::string("\xe2\x82", 2)).empty());
+    REQUIRE(buffer.finish() == std::string("\xe2\x82", 2));
+    REQUIRE(buffer.empty());
+}
 
 TEST_CASE("StreamingSanitizer: plain text passes through", "[sanitizer]") {
     StreamingSanitizer s;

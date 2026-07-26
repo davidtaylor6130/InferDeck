@@ -11,6 +11,7 @@ namespace inferdeck::foundation {
 enum class ErrorCode {
     Ok = 0,
     InvalidArgument,
+    ContextLengthExceeded,
     NotFound,
     NotLoaded,
     AlreadyExists,

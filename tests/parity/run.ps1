@@ -127,14 +127,26 @@ $failing = 0
 $totalScore = 0.0
 
 foreach ($e in $entries) {
-    $minScore = if ($e.PSObject.Properties.Match('min_score').Count -gt 0) { $e.min_score } else { 0.95 }
-    $body = @{
-        model = $Model
-        stream = $false
-        messages = @(
-            if ($e.prompt) { @{ role = "user"; content = $e.prompt } }
-        )
-    } | ConvertTo-Json -Depth 8 -Compress
+    if ($e.PSObject.Properties.Match('min_score').Count -eq 0) {
+        throw "Baseline entry '$($e.id)' is missing min_score; re-record the baseline"
+    }
+    if ($e.PSObject.Properties.Match('request').Count -eq 0) {
+        throw "Baseline entry '$($e.id)' is missing its recorded request; re-record the baseline"
+    }
+    if ($e.request.PSObject.Properties.Match('messages').Count -eq 0) {
+        throw "Baseline entry '$($e.id)' has no recorded messages"
+    }
+    $minScore = [double]$e.min_score
+    if ($minScore -lt 0.0 -or $minScore -gt 1.0) {
+        throw "Baseline entry '$($e.id)' has invalid min_score $minScore"
+    }
+    $request = [ordered]@{ model = $Model }
+    foreach ($property in $e.request.PSObject.Properties) {
+        if ($property.Name -ne 'model') {
+            $request[$property.Name] = $property.Value
+        }
+    }
+    $body = $request | ConvertTo-Json -Depth 8 -Compress
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $resp = Invoke-RestMethod -Uri "$GatewayUrl/v1/chat/completions" `

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -53,7 +54,10 @@ private:
   std::chrono::milliseconds poll_interval_{100};
   std::chrono::milliseconds max_staleness_{2000};
 
+  mutable std::mutex lifecycle_mtx_;
   mutable std::mutex mtx_;
+  std::condition_variable sample_cv_;
+  std::condition_variable poll_cv_;
   GpuStats latest_;
 
   std::atomic<bool> running_{false};

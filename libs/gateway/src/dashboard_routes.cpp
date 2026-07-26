@@ -1,9 +1,11 @@
 #include "gateway/dashboard_routes.hpp"
 
 #include "foundation/logging.hpp"
+#include "optimize/profile_optimizer.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -11,12 +13,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef _WIN32
@@ -35,6 +39,36 @@ namespace {
 
 namespace model = inferdeck::model;
 namespace observability = inferdeck::observability;
+namespace optimize = inferdeck::optimize;
+
+constexpr std::size_t max_dashboard_streams = 64;
+std::atomic<std::size_t> dashboard_streams{0};
+
+struct DashboardStreamLease {
+    std::atomic<bool> held{false};
+
+    bool acquire() {
+        auto count = dashboard_streams.load();
+        while (count < max_dashboard_streams) {
+            if (dashboard_streams.compare_exchange_weak(count, count + 1)) {
+                held.store(true);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void release() {
+        bool expected = true;
+        if (held.compare_exchange_strong(expected, false)) {
+            dashboard_streams.fetch_sub(1);
+        }
+    }
+
+    ~DashboardStreamLease() {
+        release();
+    }
+};
 
 struct ScalarSpan {
     std::size_t begin{0};
@@ -288,10 +322,42 @@ nlohmann::json build_dashboard_jobs(const observability::StatsDb& stats_db, int 
             {"tokensPerSecond", row.tokens_per_second},
             {"durationMs", row.duration_ms},
             {"httpStatus", row.status_code},
-            {"slotId", row.slot_id}
+            {"slotId", row.slot_id},
+            {"inputAudioSeconds", row.input_audio_seconds},
+            {"inputCharacters", row.input_characters}
         });
     }
     return {{"jobs", jobs}};
+}
+
+nlohmann::json profile_candidate_json(
+    const optimize::ProfileCandidate& candidate) {
+    return {
+        {"contextPerSlot", candidate.context_per_slot},
+        {"slots", candidate.slots},
+        {"nBatch", candidate.n_batch},
+        {"nUbatch", candidate.n_ubatch},
+        {"cacheTypeK", candidate.cache_type_k},
+        {"cacheTypeV", candidate.cache_type_v},
+        {"flashAttention", candidate.flash_attention},
+        {"estimatedVramMb", candidate.estimated_vram_mb},
+        {"reserveVramMb", candidate.reserve_vram_mb},
+        {"qualityScore", candidate.quality_score},
+        {"speedScore", candidate.speed_score},
+        {"parallelismScore", candidate.parallelism_score},
+        {"headroomScore", candidate.headroom_score},
+        {"overallScore", candidate.overall_score},
+        {"fits", candidate.fits},
+        {"reasons", candidate.reasons},
+    };
+}
+
+double artifact_size_mb(const std::string& path) {
+    if (path.empty()) return 0.0;
+    std::error_code error;
+    const auto bytes = std::filesystem::file_size(path, error);
+    return error ? 0.0
+                 : static_cast<double>(bytes) / (1024.0 * 1024.0);
 }
 
 double percentile(std::vector<double>& sorted_values, double p) {
@@ -333,7 +399,9 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
             {"totalTokens", row.prompt_tokens + row.completion_tokens},
             {"peakTokensPerSecond", row.peak_tokens_per_second},
             {"avgTokensPerSecond", avg_tps},
-            {"lastTimestampUnixMs", row.last_timestamp_unix_ms}
+            {"lastTimestampUnixMs", row.last_timestamp_unix_ms},
+            {"inputAudioSeconds", row.input_audio_seconds},
+            {"inputCharacters", row.input_characters}
         });
     }
 
@@ -347,13 +415,19 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
                 {"completionTokens", row.completion_tokens},
                 {"totalTokens", row.total_tokens},
                 {"requests", row.requests},
-                {"successfulRequests", row.successful_requests}
+                {"successfulRequests", row.successful_requests},
+                {"inputAudioSeconds", row.input_audio_seconds},
+                {"inputCharacters", row.input_characters}
             });
         }
         return out;
     };
-    auto monthly = bucket_json(stats_db.monthly_usage());
-    auto daily = bucket_json(stats_db.daily_usage(31));
+    const auto monthly_rows = stats_db.monthly_usage();
+    std::unordered_set<std::string> recorded_months;
+    for (const auto& row : monthly_rows) recorded_months.insert(row.bucket);
+    const bool daily_all_time = recorded_months.size() < 12;
+    auto monthly = bucket_json(monthly_rows);
+    auto daily = bucket_json(stats_db.daily_usage(daily_all_time ? 0 : 31));
     auto hourly = bucket_json(stats_db.hourly_usage(24));
 
     std::vector<double> latencies;
@@ -416,6 +490,7 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
         {"tokenUsage", usage},
         {"monthlyTokenUsage", monthly},
         {"dailyTokenUsage", daily},
+        {"dailyTokenUsageAllTime", daily_all_time},
         {"hourlyTokenUsage", hourly},
         {"models", model_json["models"]},
         {"current", model_json["current"]},
@@ -427,6 +502,111 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
 
 void register_dashboard_routes(httplib::Server& server, const DashboardDeps& deps,
                                const RouteWrapper& wrap) {
+    server.Post(R"(^/api/optimize/profile$)",
+                wrap([deps](const httplib::Request& req,
+                            httplib::Response& resp) {
+        if (deps.gw.coordinator.active_request_count() > 0 ||
+            deps.gw.coordinator.queued_request_count() > 0) {
+            write_error(resp, 409, "optimization_busy",
+                        "profile analysis waits until active and queued requests are zero");
+            return;
+        }
+        if (deps.gw.swap_tracker && deps.gw.swap_tracker->snapshot().swapping) {
+            write_error(resp, 409, "optimization_busy",
+                        "profile analysis waits until the current model swap finishes");
+            return;
+        }
+        const auto gpu = deps.gpu.latest();
+        if (!gpu.available || gpu.vram_total_mb <= 0.0) {
+            write_error(resp, 503, "optimization_hardware_unavailable",
+                        "GPU VRAM telemetry is required for profile analysis");
+            return;
+        }
+        if (gpu.utilization_pct > 20.0) {
+            write_error(resp, 409, "optimization_busy",
+                        "GPU utilization is above the 20 percent safety threshold");
+            return;
+        }
+        try {
+            const auto body = nlohmann::json::parse(req.body);
+            const std::string model_name = body.value("model", "");
+            auto registered =
+                deps.gw.coordinator.registry().get_info_result(model_name);
+            if (!registered) {
+                write_error(resp, 404, "optimization_model_not_found",
+                            registered.error().message);
+                return;
+            }
+            const auto& info = *registered;
+            if (info.runtime != "llama_cpp") {
+                write_error(resp, 400, "optimization_runtime_unsupported",
+                            "profile analysis currently supports llama.cpp LLM models");
+                return;
+            }
+
+            optimize::ProfileInput input;
+            input.model = model_name;
+            input.total_vram_mb = gpu.vram_total_mb;
+            input.model_file_mb =
+                artifact_size_mb(info.gguf_path) +
+                (info.has_vision ? artifact_size_mb(info.mmproj_path) : 0.0);
+            input.configured_vram_mb = info.vram_required_mb;
+            input.context_per_slot =
+                body.value("contextPerSlot", info.context_size);
+            input.slots = body.value("slots", info.n_slots);
+            input.min_slots = body.value("minSlots", info.min_slots);
+            input.n_batch = body.value("nBatch", 512);
+            input.n_ubatch = body.value("nUbatch", input.n_batch);
+            input.cache_type_k =
+                body.value("cacheTypeK", std::string{"q8_0"});
+            input.cache_type_v =
+                body.value("cacheTypeV", std::string{"q8_0"});
+
+            if (deps.gw.stats_db) {
+                for (const auto& usage : deps.gw.stats_db->model_usage()) {
+                    if (usage.model != model_name ||
+                        usage.total_duration_ms <= 0.0) {
+                        continue;
+                    }
+                    input.observed_tokens_per_second =
+                        static_cast<double>(usage.completion_tokens) /
+                        (usage.total_duration_ms / 1000.0);
+                    break;
+                }
+            }
+
+            const auto result = optimize::recommend_profile(input);
+            nlohmann::json candidates = nlohmann::json::array();
+            for (const auto& candidate : result.candidates) {
+                candidates.push_back(profile_candidate_json(candidate));
+            }
+            write_json(resp, 200, {
+                {"model", model_name},
+                {"mode", "profile_estimate"},
+                {"measured", result.measured},
+                {"observedTokensPerSecond",
+                 input.observed_tokens_per_second},
+                {"modelFileMb", input.model_file_mb},
+                {"totalVramMb", input.total_vram_mb},
+                {"weights", {
+                    {"quality", result.quality_weight},
+                    {"speed", result.speed_weight},
+                    {"parallelism", result.parallelism_weight},
+                    {"headroom", result.headroom_weight},
+                }},
+                {"recommended",
+                 profile_candidate_json(result.recommended)},
+                {"candidates", std::move(candidates)},
+                {"notes", result.notes},
+            });
+        } catch (const std::invalid_argument& error) {
+            write_error(resp, 400, "invalid_optimization_profile",
+                        error.what());
+        } catch (const std::exception& error) {
+            write_error(resp, 422, "optimization_failed", error.what());
+        }
+    }));
+
     server.Get(R"(^/api/model-store/search$)", wrap([deps](const httplib::Request& req,
                                                             httplib::Response& resp) {
         if (!deps.model_store) {
@@ -480,7 +660,8 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         nlohmann::json downloads = nlohmann::json::array();
         for (const auto& download : deps.model_store->downloads()) downloads.push_back(to_json(download));
         write_json(resp, 200, {{"downloads", std::move(downloads)},
-                               {"installed", deps.model_store->installed()}});
+                               {"installed", deps.model_store->installed()},
+                               {"library", deps.model_store->library()}});
     }));
 
     server.Post(R"(^/api/model-store/downloads$)", wrap([deps](const httplib::Request& req,
@@ -546,19 +727,29 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
     server.Get(R"(^/api/config$)", wrap([deps](const httplib::Request& req,
                                                httplib::Response& resp) {
         (void)req;
-        if (deps.config_file.empty()) {
+        if (deps.base_config_file.empty()) {
             write_error(resp, 503, "config_unavailable", "configuration path is unavailable");
             return;
         }
-        const std::string current = read_text(deps.config_file);
-        if (current.empty()) {
+        const std::string base = read_text(deps.base_config_file);
+        if (base.empty()) {
             write_error(resp, 500, "config_read_failed", "configuration file is empty or unreadable");
             return;
         }
+        const std::string active = deps.active_config_file.empty()
+            ? std::string{}
+            : read_text(deps.active_config_file);
+        const std::string desired_revision = config_revision(active.empty() ? base : active);
         write_json(resp, 200, {
-            {"yaml", mask_config_secret(current)},
-            {"revision", config_revision(current)},
-            {"restartRequired", false},
+            {"yaml", mask_config_secret(base)},
+            {"revision", config_revision(base)},
+            {"activeYaml", mask_config_secret(active.empty() ? base : active)},
+            {"activeRevision", desired_revision},
+            {"runningRevision", deps.running_config_revision},
+            {"hasActiveProfile", !active.empty()},
+            {"usingActiveProfile", deps.using_active_config},
+            {"fallbackReason", deps.config_fallback_reason},
+            {"restartRequired", deps.running_config_revision != desired_revision},
             {"secretSentinel", "__INFERDECK_SECRET__"},
         });
     }));
@@ -584,7 +775,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             write_error(resp, 400, "invalid_config_update", "configuration size is invalid");
             return;
         }
-        const std::string current = read_text(deps.config_file);
+        const std::string current = read_text(deps.base_config_file);
         if (current.empty()) {
             write_error(resp, 500, "config_read_failed", "configuration file is empty or unreadable");
             return;
@@ -598,12 +789,16 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             write_error(resp, 503, "config_validation_unavailable", "configuration validator is unavailable");
             return;
         }
+        if (!deps.request_config_reload) {
+            write_error(resp, 503, "config_reload_unavailable", "automatic configuration reload is unavailable");
+            return;
+        }
         auto valid = deps.validate_config(submitted);
         if (!valid) {
             write_error(resp, 400, "invalid_configuration", valid.error().message);
             return;
         }
-        auto written = write_config_atomic(deps.config_file, submitted);
+        auto written = write_config_atomic(deps.base_config_file, submitted);
         if (!written) {
             write_error(resp, 500, "config_write_failed", written.error().message);
             return;
@@ -612,6 +807,103 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             {"ok", true},
             {"revision", config_revision(submitted)},
             {"restartRequired", true},
+        });
+    }));
+
+    server.Put(R"(^/api/config/active$)", wrap([deps](const httplib::Request& req,
+                                                      httplib::Response& resp) {
+        static std::mutex active_write_mutex;
+        std::lock_guard lock(active_write_mutex);
+        if (deps.base_config_file.empty() || deps.active_config_file.empty()) {
+            write_error(resp, 503, "config_unavailable", "configuration paths are unavailable");
+            return;
+        }
+        nlohmann::json body;
+        try {
+            body = nlohmann::json::parse(req.body);
+        } catch (const std::exception& error) {
+            write_error(resp, 400, "invalid_json", error.what());
+            return;
+        }
+        if (!body.contains("yaml") || !body["yaml"].is_string() ||
+            !body.contains("revision") || !body["revision"].is_string()) {
+            write_error(resp, 400, "invalid_config_update", "yaml and revision are required");
+            return;
+        }
+        std::string submitted = body["yaml"].get<std::string>();
+        if (submitted.empty() || submitted.size() > 2 * 1024 * 1024) {
+            write_error(resp, 400, "invalid_config_update", "configuration size is invalid");
+            return;
+        }
+        const std::string base = read_text(deps.base_config_file);
+        const std::string saved_active = read_text(deps.active_config_file);
+        const std::string& current = saved_active.empty() ? base : saved_active;
+        if (current.empty()) {
+            write_error(resp, 500, "config_read_failed", "configuration file is empty or unreadable");
+            return;
+        }
+        if (body["revision"].get<std::string>() != config_revision(current)) {
+            write_error(resp, 409, "config_conflict", "active configuration changed; reload before saving");
+            return;
+        }
+        submitted = restore_config_secret(std::move(submitted), current);
+        if (!deps.validate_config) {
+            write_error(resp, 503, "config_validation_unavailable", "configuration validator is unavailable");
+            return;
+        }
+        auto valid = deps.validate_config(submitted);
+        if (!valid) {
+            write_error(resp, 400, "invalid_configuration", valid.error().message);
+            return;
+        }
+        auto written = write_config_atomic(deps.active_config_file, submitted);
+        if (!written) {
+            write_error(resp, 500, "config_write_failed", written.error().message);
+            return;
+        }
+        auto reload = deps.request_config_reload();
+        if (!reload) {
+            write_error(resp, 503, "config_reload_failed", reload.error().message);
+            return;
+        }
+        write_json(resp, 200, {
+            {"ok", true},
+            {"activeRevision", config_revision(submitted)},
+            {"hasActiveProfile", true},
+            {"restartRequired", false},
+            {"applyScheduled", true},
+        });
+    }));
+
+    server.Delete(R"(^/api/config/active$)", wrap([deps](const httplib::Request&,
+                                                         httplib::Response& resp) {
+        if (deps.active_config_file.empty()) {
+            write_error(resp, 503, "config_unavailable", "active configuration path is unavailable");
+            return;
+        }
+        if (!deps.request_config_reload) {
+            write_error(resp, 503, "config_reload_unavailable", "automatic configuration reload is unavailable");
+            return;
+        }
+        std::error_code error;
+        const bool removed = std::filesystem::remove(deps.active_config_file, error);
+        if (error) {
+            write_error(resp, 500, "config_reset_failed", error.message());
+            return;
+        }
+        if (removed) {
+            auto reload = deps.request_config_reload();
+            if (!reload) {
+                write_error(resp, 503, "config_reload_failed", reload.error().message);
+                return;
+            }
+        }
+        write_json(resp, 200, {
+            {"ok", true},
+            {"removed", removed},
+            {"hasActiveProfile", false},
+            {"restartRequired", false},
+            {"applyScheduled", removed},
         });
     }));
 
@@ -700,20 +992,26 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         resp.set_content(nlohmann::json{{"logs", logs}}.dump(), "application/json");
     }));
 
-    server.Get(R"(^/api/events/stream$)", [deps](const httplib::Request& req,
+    server.Get(R"(^/api/events/stream$)", wrap([deps](const httplib::Request& req,
                                                  httplib::Response& resp) {
         (void)req;
         if (!deps.gw.events) {
             resp.status = 503;
             return;
         }
-        auto sub = deps.gw.events->subscribe();
+        auto lease = std::make_shared<DashboardStreamLease>();
+        if (!lease->acquire()) {
+            write_error(resp, 503, "too_many_event_streams",
+                        "dashboard event stream limit reached");
+            return;
+        }
+        auto sub = deps.gw.events->subscribe(64);
         LOG_INFO("sse_subscribe", "subscribers={}", deps.gw.events->subscriber_count());
         resp.set_header("Cache-Control", "no-cache");
         resp.set_header("X-Accel-Buffering", "no");
         resp.set_chunked_content_provider(
             "text/event-stream",
-            [sub](std::size_t, httplib::DataSink& sink) -> bool {
+            [sub, lease](std::size_t, httplib::DataSink& sink) -> bool {
                 if (sub->closed()) return false;
                 auto ev = sub->wait_for(std::chrono::milliseconds{2000});
                 if (!sink.is_writable()) return false;
@@ -725,12 +1023,13 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                 }
                 return sink.write(out.data(), out.size());
             },
-            [sub, deps](bool) {
+            [sub, lease, deps](bool) {
                 sub->close();
+                lease->release();
                 LOG_INFO("sse_unsubscribe", "subscribers={}",
                          deps.gw.events ? deps.gw.events->subscriber_count() : 0);
             });
-    });
+    }));
 }
 
 } // namespace inferdeck::gateway

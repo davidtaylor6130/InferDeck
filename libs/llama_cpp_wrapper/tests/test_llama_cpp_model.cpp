@@ -1,11 +1,15 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <vector>
 
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
+#include "llama_cpp_wrapper/streaming_tool_call_state.hpp"
+#include "foundation/logging.hpp"
 #include "model/imodel.hpp"
 
 using namespace inferdeck;
@@ -186,6 +190,79 @@ TEST_CASE("LlamaCppModel: slot_busy out-of-range returns false", "[llama][slots]
   REQUIRE_FALSE(m.slot_busy(0));
 }
 
+TEST_CASE("StreamingToolCallState suppresses fallback after a tool delta", "[llama][streaming]") {
+  llama_wrapper::detail::StreamingToolCallState state;
+  InferenceDelta content;
+  content.content = "answer";
+  state.observe(content);
+  REQUIRE(state.should_emit_fallback());
+
+  InferenceDelta reasoning;
+  reasoning.reasoning_text = "thinking";
+  state.observe(reasoning);
+  REQUIRE(state.should_emit_fallback());
+
+  InferenceDelta tool;
+  tool.tool_calls.push_back(ToolCallDelta{0, "call_1", "function", "lookup", "{"});
+  state.observe(tool);
+  REQUIRE_FALSE(state.should_emit_fallback());
+}
+
+TEST_CASE("ContinuousBatchScheduler rejects work after stopping", "[llama][scheduler]") {
+  ContinuousBatchScheduler scheduler(nullptr, nullptr, nullptr, 1);
+  scheduler.stop();
+
+  SlotTask task;
+  scheduler.submit(&task);
+
+  std::unique_lock lock(task.out_mtx);
+  REQUIRE(task.out_cv.wait_for(
+      lock, std::chrono::seconds(1), [&task] { return !task.out_queue.empty(); }));
+  const auto event = std::move(task.out_queue.front());
+  REQUIRE(event.is_done);
+  REQUIRE(event.is_error);
+  REQUIRE(event.error_msg == "scheduler stopped");
+}
+
+TEST_CASE("ContinuousBatchScheduler generation limit includes the current token",
+          "[llama][scheduler]") {
+  REQUIRE(detail::generation_limit_reached(0, 1));
+  REQUIRE_FALSE(detail::generation_limit_reached(0, 2));
+  REQUIRE(detail::generation_limit_reached(1, 2));
+  REQUIRE(detail::generation_limit_reached(0, 0));
+}
+
+TEST_CASE("Recurrent checkpoint eligibility requires a reusable prefix",
+          "[llama][scheduler][recurrent]") {
+  REQUIRE(detail::recurrent_checkpoint_usable(4096, 128, 256, 512));
+  REQUIRE(detail::recurrent_checkpoint_usable(4096, 128, 128, 128));
+  REQUIRE_FALSE(detail::recurrent_checkpoint_usable(0, 128, 256, 512));
+  REQUIRE_FALSE(detail::recurrent_checkpoint_usable(4096, 0, 256, 512));
+  REQUIRE_FALSE(detail::recurrent_checkpoint_usable(4096, 257, 256, 512));
+  REQUIRE_FALSE(detail::recurrent_checkpoint_usable(4096, 513, 600, 512));
+}
+
+TEST_CASE("Recurrent checkpoint capture stops before the generation prompt",
+          "[llama][scheduler][recurrent]") {
+  const std::vector<llama_token> prompt{1, 2, 3, 4, 5};
+  const std::vector<llama_token> stable_prefix{1, 2, 3};
+  REQUIRE(detail::recurrent_checkpoint_capture_pos(prompt, stable_prefix) == 3);
+
+  const std::vector<llama_token> divergent_prefix{1, 2, 9, 4};
+  REQUIRE(detail::recurrent_checkpoint_capture_pos(prompt, divergent_prefix) == 2);
+}
+
+TEST_CASE("SlotTask keeps checkpoint storage alive",
+          "[llama][scheduler][recurrent]") {
+  auto checkpoint = std::make_shared<std::vector<uint8_t>>(32, 7);
+  SlotTask task;
+  task.recurrent_checkpoint = checkpoint;
+  checkpoint.reset();
+  REQUIRE(task.recurrent_checkpoint);
+  REQUIRE(task.recurrent_checkpoint->size() == 32);
+  REQUIRE(task.recurrent_checkpoint->front() == 7);
+}
+
 // ---------------------------------------------------------------------------
 // Recurrent-checkpoint tests — require a real model.
 // Run with: ctest -L unit -R "recurrent" --tests-regex . -V
@@ -198,12 +275,24 @@ std::string test_model_path() {
   const char* p = std::getenv("INFERDECK_TEST_MODEL");
   return p ? std::string(p) : std::string{};
 }
+
+struct ScopedTestLogger {
+  ScopedTestLogger() {
+    foundation::LogConfig config;
+    config.level = foundation::LogLevel::Debug;
+    foundation::Logger::instance().initialize(config);
+  }
+  ~ScopedTestLogger() {
+    foundation::Logger::instance().shutdown();
+  }
+};
 }  // namespace
 
 TEST_CASE("recurrent checkpoint: second predict on same slot reuses cache",
           "[llama][recurrent][.][requires_model]") {
   const auto gguf = test_model_path();
   if (gguf.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
 
   LlamaCppModel::init_backend();
   ModelInfo minfo;
@@ -241,6 +330,7 @@ TEST_CASE("recurrent checkpoint: multi-turn conversation reuses cache on second 
           "[llama][recurrent][.][requires_model]") {
   const auto gguf = test_model_path();
   if (gguf.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
 
   LlamaCppModel::init_backend();
   ModelInfo minfo;

@@ -13,6 +13,8 @@
 
 namespace inferdeck::model {
 
+inline constexpr int k_max_tokens_use_context_budget = -1;
+
 struct ChatMessage {
     std::string role{};
     std::string content{};
@@ -46,7 +48,7 @@ struct InferenceRequest {
     std::vector<ChatMessage> messages{};
     std::string tools_json{};
     std::string openai_body_json{};
-    int max_tokens{512};
+    int max_tokens{k_max_tokens_use_context_budget};
     // Sampler params are optional so the server can tell an explicit client
     // value apart from "unset" (issue #42). When unset, the server-side
     // SamplingConfig default applies; when set, the client value wins.
@@ -128,11 +130,22 @@ struct TranscriptionRequest {
     float temperature{0.0f};
 };
 
+struct TranscriptionSegment {
+    int id{0};
+    float start_seconds{0.0f};
+    float end_seconds{0.0f};
+    std::string text;
+    std::vector<int> tokens;
+    float avg_logprob{0.0f};
+    float no_speech_probability{0.0f};
+};
+
 struct TranscriptionResult {
     std::string text;
     std::string language;
     float duration_seconds{0.0f};
     float inference_ms{0.0f};
+    std::vector<TranscriptionSegment> segments;
 };
 
 class IImageBackend {

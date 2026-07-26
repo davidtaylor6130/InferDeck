@@ -132,8 +132,16 @@ private:
         bool preparing{false};
     };
 
+    struct ActiveLease {
+        std::string model;
+        int backend_slot{0};
+    };
+
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
+    foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot);
+    foundation::Result<int> backend_slot_for_lease_locked(
+        const std::string& name, int lease_id) const;
     foundation::Result<void> prepare_capacity_for(const std::string& name);
     int estimated_vram_locked() const;
     int available_vram_locked() const;
@@ -145,6 +153,9 @@ private:
     std::optional<std::string> current_loaded_;
     int active_requests_{0};
     std::unordered_map<std::string, int> active_requests_by_model_;
+    std::unordered_map<int, ActiveLease> active_leases_;
+    std::int64_t next_lease_id_{1};
+    std::unordered_set<std::string> draining_models_;
     std::unordered_set<std::string> resizing_models_;
     int vram_budget_mb_{0};
     int vram_safety_margin_mb_{1024};

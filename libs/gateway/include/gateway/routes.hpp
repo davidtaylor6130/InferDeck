@@ -34,14 +34,21 @@ void record_request(observability::Metrics* metrics,
                     const std::string& model_name,
                     const model::InferenceResult& result,
                     int status_code,
-                    int slot_id);
+                    int slot_id,
+                    double input_audio_seconds = 0.0,
+                    std::int64_t input_characters = 0);
 void record_request(const GatewayDeps& deps,
                     const std::string& model_name,
                     const model::InferenceResult& result,
                     int status_code,
-                    int slot_id);
+                    int slot_id,
+                    double input_audio_seconds = 0.0,
+                    std::int64_t input_characters = 0);
 
 void write_json(httplib::Response& resp, int status, const nlohmann::json& body);
+nlohmann::json make_error_json(int status, const std::string& code,
+                               const std::string& message,
+                               nlohmann::json param = nullptr);
 void write_error(httplib::Response& resp, int status, const std::string& code,
                  const std::string& message);
 std::string header_value(const httplib::Request& req, const std::string& name);
