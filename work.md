@@ -1033,3 +1033,41 @@ existing SQL usage ledger retained.
   - reserved #70 as the explicit uncompleted sherpa-onnx bundle follow-up;
   - prepared PR #63 to distinguish issues it closes from work it only partially
     addresses or leaves as a follow-up.
+- A final integration review caught and fixed the dashboard API normalizer
+  dropping optimization metadata from `/v1/models`. The API regression now
+  proves the complete measured record reaches `ModelInfo`, not only the
+  gateway JSON or a fixture rendered directly by the page test.
+- Pushed the final optimization commits to `origin/alpha-v2` and updated PR #63
+  with explicit closing links for the completed issues, partial links for
+  #53/#56/#57, and #70 as the unclosed follow-up.
+- Deployed the matching Release gateway and dashboard to live
+  `C:\InferDeck` through the idle-service rollback guard:
+  - the first managed command remained medium-integrity and Windows rejected
+    service control before replacing any artifact;
+  - the normal Windows UAC path then completed successfully;
+  - rollback snapshot:
+    `C:\InferDeck\backups\v060-precutover-20260726-162800`;
+  - deployed gateway SHA-256:
+    `AA4B491ACE8AFCB8E4CBEF960F0DD413532EBB577F8DF7144DFB25D867D6937C`;
+  - the deployed and Release-build hashes match.
+- Updated only the live Qwen3.6-27B optimization data through InferDeck's own
+  active-profile API. The automatic headless reload completed with matching
+  active and running revision `3eee3284b566a8db`.
+- Live discovery now reports:
+  - optimization status `measured`;
+  - measurement date `2026-07-26`;
+  - quality three of three;
+  - single throughput 50.16 tokens per second;
+  - parallel throughput 51.24 tokens per second.
+- Live dashboard asset verification returned HTTP 200 and confirmed:
+  - `Measured optimized` is present;
+  - `Auto-optimize` is present;
+  - the obsolete `Auto-optimize with benchmark` label is absent;
+  - the green success style is included.
+- The in-app browser controller could not initialize because its managed
+  sandbox metadata was unavailable. This was an environment-only inspection
+  limitation; the live API, served index, exact production asset, automated
+  render test, and production build all passed.
+- Final live state remained healthy and idle with zero running requests, zero
+  queued requests, no swap, no resident model, 6,986 persisted requests, and
+  the same `C:/InferDeck/data/stats.db` production ledger.
