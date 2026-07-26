@@ -33,6 +33,14 @@ describe('getModels', () => {
         n_slots: 4,
         has_vision: false,
         loaded: true,
+        optimization: {
+          status: 'measured',
+          measured_at: '2026-07-26',
+          quality_passes: 3,
+          quality_total: 3,
+          single_tokens_per_second: 50.16,
+          parallel_tokens_per_second: 51.24,
+        },
         inferdeck: {
           residency: {
             loaded: true,
@@ -65,6 +73,14 @@ describe('getModels', () => {
       free_slots: 1,
       active_requests: 1,
       resizing: true,
+      optimization: {
+        status: 'measured',
+        measured_at: '2026-07-26',
+        quality_passes: 3,
+        quality_total: 3,
+        single_tokens_per_second: 50.16,
+        parallel_tokens_per_second: 51.24,
+      },
     });
   });
 

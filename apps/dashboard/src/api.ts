@@ -265,6 +265,11 @@ function normalizeModel(value: unknown): ModelInfo | null {
   const inferdeck = asObject(entry.inferdeck);
   const resources = asObject(inferdeck.resources);
   const residency = asObject(inferdeck.residency);
+  const optimization = asObject(
+    Object.keys(asObject(entry.optimization)).length
+      ? entry.optimization
+      : inferdeck.optimization,
+  );
   const loaded = asBoolean(residency.loaded) ?? asBoolean(entry.loaded) ?? false;
   const configuredSlots = asNumber(entry.n_slots) ?? asNumber(resources.configured_slots) ?? 0;
   const actualSlots = asNumber(residency.slots);
@@ -284,6 +289,17 @@ function normalizeModel(value: unknown): ModelInfo | null {
     free_slots: asNumber(residency.free_slots) ?? asNumber(entry.free_slots),
     active_requests: asNumber(residency.active_requests) ?? asNumber(entry.active_requests),
   };
+  const optimizationStatus = asString(optimization.status);
+  if (optimizationStatus) {
+    normalized.optimization = {
+      status: optimizationStatus,
+      measured_at: asString(optimization.measured_at),
+      quality_passes: asNumber(optimization.quality_passes),
+      quality_total: asNumber(optimization.quality_total),
+      single_tokens_per_second: asNumber(optimization.single_tokens_per_second),
+      parallel_tokens_per_second: asNumber(optimization.parallel_tokens_per_second),
+    };
+  }
   const resizing = asBoolean(residency.resizing) ?? asBoolean(entry.resizing);
   if (resizing !== undefined) {
     (normalized as ModelInfo & { resizing?: boolean }).resizing = resizing;
