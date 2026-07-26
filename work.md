@@ -829,3 +829,77 @@ existing SQL usage ledger retained.
 - This section records checkout and isolated-runtime completion. Live
   `C:\InferDeck` deployment is recorded separately after guarded service
   cutover and live health/performance verification.
+
+### 2026-07-26 adaptive MTP live cutover and production verification
+
+- Performed an idle-service cutover of the matching Release gateway,
+  production dashboard bundle, and base YAML into `C:\InferDeck`.
+- The guarded deployment:
+  - required zero active requests, zero queued requests, no swap, and no
+    resident model;
+  - backed up the previous executable, dashboard, and base YAML under
+    `C:\InferDeck\backups\v060-precutover-20260726-142432`;
+  - verified the deployed executable and YAML by SHA-256;
+  - restarted the LocalSystem NSSM service through Windows elevation;
+  - required a successful `/v1/health` response and would have restored all
+    three backed-up artifacts on failure.
+- Deployed hashes:
+  - `inferdeck-gateway.exe`:
+    `5C03AC4EB1EAE457C9313EF97F47CC350C849924522EA594C5C9F68522D1247C`;
+  - `config/gateway.yml`:
+    `8E9A5E32022942BBCFE5318C2507D3CEE1324AA434E13721C7DE76085D7B9C47`.
+- Preserved the existing active profile instead of replacing it with the base
+  YAML. Merged only the Qwen3.6-27B MTP artifact, four-slot minimum, Q4/Q4 KV,
+  batch geometry, speculative controls, and measured VRAM requirement. Other
+  live overrides, including slot-count differences for other models, remain
+  intact.
+- Saving the active profile triggered InferDeck's automatic headless reload.
+  No hardware restart or manual service restart was required for the profile
+  change. Active and running revision both became
+  `c2383d0165e31267`.
+- Production data continuity before performance verification:
+  - database: `C:/InferDeck/data/stats.db`;
+  - lifetime requests: 6,949;
+  - lifetime tokens: 262,846,499.
+- InferDeck's live measured-optimisation endpoint completed a real one-candidate
+  trial:
+  - quality: three of three probes passed;
+  - selected trial: 32,768 context per slot, four slots, Q4/Q8 KV;
+  - single generation throughput: 38.08 tokens per second;
+  - four-request aggregate generation throughput: 51.52 tokens per second;
+  - actual peak VRAM: 25,166.25 MB;
+  - the trial restored the previous empty residency and did not write
+    artificial benchmark traffic into the production usage ledger.
+- The measured optimiser trial above was not applied because it reduced the
+  explicit 100,000-token-per-slot requirement. The active profile remained
+  four slots with 100,000 context tokens per slot and Q4/Q4 KV.
+- Exact active-profile verification through the normal InferDeck
+  `/v1/chat/completions` API:
+  - gateway load logs confirmed 400,000 shared context tokens, four slots,
+    100,000 context tokens per slot, target batch/micro-batch 2,048/2,048,
+    Q4/Q4 KV, MTP depth two, and a one-active-request MTP limit;
+  - a 256-token single request reached 50.16 generation tokens per second and
+    43.55 end-to-end tokens per second;
+  - it accepted 143 of 224 drafted tokens, or 63.84 percent;
+  - four simultaneous 256-token requests completed 1,024 output tokens at
+    51.24 aggregate end-to-end tokens per second;
+  - the next 128-token single request logged `scheduler_mtp_resync`, reached
+    57.15 generation tokens per second and 51.04 end-to-end tokens per second,
+    and accepted 78 of 98 drafted tokens.
+- The exact live results meet the requested performance envelope directly
+  through InferDeck: approximately 40 to 50+ tokens per second for a single
+  request and 50 to 60 aggregate tokens per second across four concurrent
+  requests.
+- All six normal API verification requests were intentionally retained in the
+  production ledger:
+  - lifetime requests increased exactly from 6,949 to 6,955;
+  - lifetime prompt tokens increased by 196;
+  - lifetime completion tokens increased by 1,408;
+  - lifetime tokens increased exactly from 262,846,499 to 262,848,103.
+- Unloaded Qwen3.6-27B after verification. Final service state:
+  - healthy;
+  - zero running and zero queued requests;
+  - no resident model;
+  - 30,997 MB available from the 32,021 MB InferDeck VRAM budget;
+  - active and running YAML revisions match;
+  - production SQL database remains `C:/InferDeck/data/stats.db`.
