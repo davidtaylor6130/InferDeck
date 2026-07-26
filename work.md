@@ -264,9 +264,6 @@ pass so this file remains a complete issue, PR, and release-note source.
 
 ## Changes in progress
 
-- Live v0.5.3 cutover and post-cutover proof for the profile analyser. The
-  release is built and staged, but Windows UAC has not launched the elevated
-  deployment helper yet.
 - A measured in-process quality benchmark remains a separate maintenance-mode
   design because testing reload-only settings requires model reloads. The
   dashboard must not mislabel synthetic or heuristic scoring as measured.
@@ -435,14 +432,32 @@ pass so this file remains a complete issue, PR, and release-note source.
   - `/v1/health` remained healthy;
   - the persistent database remained
     `C:/InferDeck/data/stats.db` with 6,925 requests.
-- No workaround was used to bypass Windows service permissions. Accepting the
-  UAC prompt is the only remaining cutover action.
+- No workaround was used to bypass Windows service permissions. At that point,
+  accepting the UAC prompt was the only remaining cutover action.
 - After the one-click follow-up, another guarded launch was attempted while
   active/queued requests were zero, swap was idle, and GPU utilization was
   approximately 1.7 percent. One idle model was resident.
 - The elevated helper again did not start or publish a result. The audit
   confirmed no backup, no helper process, live v0.5.2 still running, a healthy
   SQL database at `C:/InferDeck/data/stats.db`, and 6,926 persisted requests.
+- The final interactive elevation was accepted and the guarded helper completed
+  successfully:
+  - rollback backup:
+    `C:\InferDeck\backups\v053-precutover-20260726-103735`;
+  - live gateway version: `0.5.3`;
+  - live binary SHA-256:
+    `C7E435BD17D92024E105F3312B609AE1104E2AED571611202A54B0559051D19B`;
+  - live executable and static `index.html` hashes match the release artifacts;
+  - the stale dashboard bundle was removed and the live assets are
+    `index-DJvAaKNm.js` plus `index-D68mq8yi.css`;
+  - `/v1/health` returned HTTP 200 with the retained
+    `C:/InferDeck/data/stats.db` ledger and 6,949 requests;
+  - the live optimiser returned HTTP 200 for Qwen3.6 27B with 100,000 context
+    per slot, four slots, Q4/Q8 KV cache, 2,048/2,048 batches, and a fitting
+    24,000 MB estimate;
+  - `0.0.0.0:11434` is listening;
+  - both `192.168.0.168:11434` and Tailscale
+    `100.95.44.9:11434` returned HTTP 200 for the health API and dashboard.
 
 ## GitHub issue candidates
 
@@ -513,8 +528,8 @@ recommendations without pretending estimates are measured benchmarks.
 - Kept measured quality benchmarking separate and truthfully labelled as a
   future maintenance-mode feature.
 
-Deployment and live verification are pending.
-The live v0.5.2 service remains healthy until the v0.5.3 UAC prompt is accepted.
+Deployed and verified live on loopback, LAN, and Tailscale with the existing SQL
+usage ledger retained.
 
 ### 2026-07-26 direct v0.5.3 cutover audit
 
@@ -536,3 +551,6 @@ The live v0.5.2 service remains healthy until the v0.5.3 UAC prompt is accepted.
   - the lifetime request count remains available at 6,949.
 - No partial v0.5.3 installation was left live and no security boundary was
   bypassed.
+- A subsequent interactive elevation was accepted. The same guarded helper
+  completed successfully, deployed the matching v0.5.3 gateway and dashboard,
+  and passed the complete post-cutover verification recorded above.
