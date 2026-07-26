@@ -140,6 +140,11 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
                       <td className="py-2.5 pr-4">
                         <p className="font-mono text-text-primary">{compactModel(model.id)}</p>
                         <p className="text-xs text-text-muted">{model.family || 'unknown family'}</p>
+                        {model.optimization?.status === 'measured' && (
+                          <div className="mt-1">
+                            <Badge label="Measured optimized" tone="good" />
+                          </div>
+                        )}
                       </td>
                       <td className="py-2.5 pr-4">
                         <Badge label={modalityLabel(model.modality)} tone={section === 'dictation' ? 'violet' : 'info'} />
@@ -175,8 +180,11 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
                             </Button>
                           )}
                           {section === 'llm' && (
-                            <Button tone="blue" onClick={() => setEditing({ model, autoOptimize: true })}>
-                              Auto-optimize with benchmark
+                            <Button
+                              tone={model.optimization?.status === 'measured' ? 'green' : 'blue'}
+                              onClick={() => setEditing({ model, autoOptimize: true })}
+                            >
+                              Auto-optimize
                             </Button>
                           )}
                           <Button onClick={() => setEditing({ model, autoOptimize: false })}>Model details</Button>
@@ -589,7 +597,7 @@ const ModelConfigDialog: React.FC<{
                           disabled={optimizing || benchmarkRunning || busy || index < 0}
                           onClick={() => { void analyzeProfile(); }}
                         >
-                          {benchmarkRunning ? 'Benchmarking model...' : 'Auto-optimize with benchmark'}
+                          {benchmarkRunning ? 'Benchmarking model...' : 'Auto-optimize'}
                         </Button>
                         {benchmarkRunning && (
                           <Button onClick={() => { void cancelBenchmark(); }}>

@@ -45,12 +45,14 @@ export const Stat: React.FC<{
 export const Button: React.FC<{
   children: React.ReactNode;
   onClick?: () => void;
-  tone?: 'blue' | 'neutral' | 'danger';
+  tone?: 'blue' | 'green' | 'neutral' | 'danger';
   disabled?: boolean;
   className?: string;
 }> = ({ children, onClick, tone = 'neutral', disabled, className = '' }) => {
   const palette = tone === 'blue'
     ? 'border-queue-blue/40 bg-queue-blue/15 text-queue-blue hover:bg-queue-blue/25'
+    : tone === 'green'
+      ? 'border-success-green/40 bg-success-green/15 text-success-green hover:bg-success-green/25'
     : tone === 'danger'
       ? 'border-danger-rose/40 bg-danger-rose/15 text-danger-rose hover:bg-danger-rose/25'
       : 'border-white/15 bg-white/[0.06] text-text-primary hover:bg-white/[0.12]';

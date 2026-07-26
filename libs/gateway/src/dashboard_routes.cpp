@@ -279,6 +279,14 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"free_slots", resident == residency.end() ? 0 : resident->second.free_slots},
             {"active_requests", resident == residency.end() ? 0 : resident->second.active_requests},
             {"has_vision", info.has_vision},
+            {"optimization", {
+                {"status", info.optimization.status},
+                {"measured_at", info.optimization.measured_at},
+                {"quality_passes", info.optimization.quality_passes},
+                {"quality_total", info.optimization.quality_total},
+                {"single_tokens_per_second", info.optimization.single_tokens_per_second},
+                {"parallel_tokens_per_second", info.optimization.parallel_tokens_per_second},
+            }},
         });
     }
     nlohmann::json running = nlohmann::json::array();

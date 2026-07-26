@@ -65,7 +65,16 @@ const value: GatewayValue = {
   statsHistory: [stats],
   status,
   models: [
-    { id: 'qwen3.6-35b-a3b', family: 'qwen3.6', modality: 'text', context_size: 100_000, vram_required_mb: 22_000, n_slots: 2, has_vision: true, loaded: true },
+    {
+      id: 'qwen3.6-35b-a3b', family: 'qwen3.6', modality: 'text',
+      context_size: 100_000, vram_required_mb: 22_000, n_slots: 2,
+      has_vision: true, loaded: true,
+      optimization: {
+        status: 'measured', measured_at: '2026-07-26',
+        quality_passes: 3, quality_total: 3,
+        single_tokens_per_second: 50.16, parallel_tokens_per_second: 51.24,
+      },
+    },
     { id: 'parakeet-tdt-0.6b-v3', family: 'parakeet', runtime: 'sherpa_onnx', runtime_available: true, modality: 'audio_transcription', context_size: 0, vram_required_mb: 0, n_slots: 1, has_vision: false, loaded: true },
     { id: 'supertonic-3', family: 'supertonic', runtime: 'sherpa_onnx', runtime_available: true, modality: 'audio_speech', context_size: 0, vram_required_mb: 0, n_slots: 1, has_vision: false, loaded: false },
   ],
@@ -106,7 +115,10 @@ describe('pages', () => {
     expect(dictation).toContain('Recording and playback stay in clients');
     expect(dictation).not.toContain('microphone');
     expect(llm).toContain('Model details');
-    expect(llm).toContain('Auto-optimize with benchmark');
+    expect(llm).toContain('Auto-optimize');
+    expect(llm).not.toContain('Auto-optimize with benchmark');
+    expect(llm).toContain('text-success-green');
+    expect(llm).toContain('Measured optimized');
     expect(llm).toContain('Saving applies the active profile automatically');
     expect(llm).not.toContain('next restart');
   });

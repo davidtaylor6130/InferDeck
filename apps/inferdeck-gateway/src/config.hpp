@@ -505,6 +505,23 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
             info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";
             info.chat_template_path = m["chat_template_path"] ? m["chat_template_path"].as<std::string>() : "";
+            if (m["optimization"] && m["optimization"].IsMap()) {
+                const auto optimization = m["optimization"];
+                info.optimization.status = optimization["status"]
+                    ? optimization["status"].as<std::string>() : "";
+                info.optimization.measured_at = optimization["measured_at"]
+                    ? optimization["measured_at"].as<std::string>() : "";
+                info.optimization.quality_passes = optimization["quality_passes"]
+                    ? optimization["quality_passes"].as<int>() : 0;
+                info.optimization.quality_total = optimization["quality_total"]
+                    ? optimization["quality_total"].as<int>() : 0;
+                info.optimization.single_tokens_per_second =
+                    optimization["single_tokens_per_second"]
+                        ? optimization["single_tokens_per_second"].as<double>() : 0.0;
+                info.optimization.parallel_tokens_per_second =
+                    optimization["parallel_tokens_per_second"]
+                        ? optimization["parallel_tokens_per_second"].as<double>() : 0.0;
+            }
             // Per-model sampling overrides inherit the global block, then apply
             // any keys present in this entry (issue #42).
             info.sampling = cfg.sampling;

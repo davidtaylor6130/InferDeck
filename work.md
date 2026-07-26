@@ -459,22 +459,34 @@ pass so this file remains a complete issue, PR, and release-note source.
   - both `192.168.0.168:11434` and Tailscale
     `100.95.44.9:11434` returned HTTP 200 for the health API and dashboard.
 
-## GitHub issue candidates
+## GitHub issue coverage
 
-- Preserve LAN-wide binding as an explicit home-lab compatibility contract.
-- Make statistics storage path stable across Windows service accounts and
-  restarts.
-- Add native neural STT/TTS runtimes and OpenAI-compatible audio accounting.
-- Split dashboard navigation by AI service and responsibility.
-- Add safe active-profile hot apply with stable-baseline fallback.
-- Make model catalogue recommendations adoption- and hardware-aware.
-- Reconcile externally downloaded model libraries in the Models UI.
-- Add an atomic multi-artifact sherpa-onnx repository bundle installer.
-- Make all usage and cost summaries respect the selected time range.
-- Keep portfolio ROI global and standardize line charts across AI services.
-- Add a safety-gated background model profile optimizer.
-- Design an explicit maintenance-mode measured benchmark that persists across
-  reload-only trials and restores the original active profile on failure.
+Every substantive product workstream in this log is now represented by a
+formatted GitHub issue. Build, deployment, rollback, and live-probe entries are
+validation evidence for those product issues and PR #63 rather than separate
+features.
+
+| Workstream | GitHub issue | PR #63 relationship |
+| --- | --- | --- |
+| Home-LAN and Tailscale-routed access | #64 | Closes |
+| Stable lifetime statistics and token ledger | #65 | Closes |
+| Native in-process TTS | #54 | Closes |
+| Native in-process STT | #55 | Closes |
+| Dashboard service split, time-ranged costs, line charts, and global ROI | #15, #17, #66 | Closes |
+| GUI configuration editor | #58 | Closes |
+| Active-profile hot apply and stable fallback | #67 | Closes |
+| Shared in-process runtime architecture | #52 | Closes |
+| Cross-modality scheduling and cancellation | #59 | Closes |
+| Embeddings and Responses APIs | #60, #61 | Closes |
+| Model capability and residency discovery | #62 | Closes |
+| Resource-aware residency and capacity planning | #56 | Partially addresses |
+| Hardware-aware model store and external inventory | #57 | Partially addresses |
+| Atomic sherpa-onnx bundle installation | #70 | Follow-up; remains open |
+| In-process image runtime/API | #53 | Partially addresses |
+| Safety-gated measured profile optimizer | #68 | Closes |
+| Adaptive in-process MTP and generation-only TPS | #69 | Closes |
+| Canonical OpenCode model inventory | #71 | Closes |
+| Measured optimization provenance in Operate | #72 | Closes |
 
 ## Pull request summary
 
@@ -987,3 +999,37 @@ existing SQL usage ledger retained.
   GitHub reports the PR conflict-free and mergeable. The repository did not
   attach a pull-request workflow run to the head commit, so the complete local
   build/test gate above is the recorded verification evidence.
+
+### 2026-07-26 measured optimization provenance and GitHub issue audit
+
+- Added optional per-model optimization provenance to the profile data:
+  measured state, measurement date, quality pass count, single-request
+  generation throughput, and parallel throughput.
+- Marked the Qwen3.6-27B profile with the already completed live measurements:
+  three of three quality probes, 50.16 single-request generation tokens per
+  second, and 51.24 four-request aggregate end-to-end tokens per second.
+- Carried the metadata through model discovery and dashboard status without a
+  model-name conditional.
+- The LLM Operate page now:
+  - shows a `Measured optimized` badge when profile data reports a measured
+    optimization;
+  - uses a green `Auto-optimize` button for measured profiles;
+  - keeps the normal blue action for profiles without measured provenance;
+  - removes `with benchmark` from the button label while retaining the detailed
+    measured-benchmark explanation inside the dialog.
+- Added configuration and dashboard regression coverage for the data-driven
+  marker and button state.
+- Validation:
+  - 32 of 32 dashboard tests passed;
+  - dashboard TypeScript checking and production Vite build passed;
+  - configuration tests passed with 70 assertions across nine test cases;
+  - gateway route tests passed with 743 assertions across 66 test cases;
+  - the affected Release gateway, configuration tests, and route tests rebuilt
+    successfully after normalizing the duplicate Windows `Path`/`PATH` child
+    build environment.
+- Completed a full GitHub issue audit for this work log:
+  - reused existing #15, #17, and #52 through #62 where their scope matched;
+  - created #64 through #72 for previously untracked workstreams;
+  - reserved #70 as the explicit uncompleted sherpa-onnx bundle follow-up;
+  - prepared PR #63 to distinguish issues it closes from work it only partially
+    addresses or leaves as a follow-up.

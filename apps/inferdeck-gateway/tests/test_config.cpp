@@ -95,6 +95,12 @@ TEST_CASE("Repository Qwen 27B profile enables the measured adaptive MTP setting
     CHECK(qwen->mtp_draft_tokens == 2);
     CHECK(qwen->mtp_p_min == 0.0f);
     CHECK(qwen->mtp_max_active_requests == 1);
+    CHECK(qwen->optimization.status == "measured");
+    CHECK(qwen->optimization.measured_at == "2026-07-26");
+    CHECK(qwen->optimization.quality_passes == 3);
+    CHECK(qwen->optimization.quality_total == 3);
+    CHECK(qwen->optimization.single_tokens_per_second == 50.16);
+    CHECK(qwen->optimization.parallel_tokens_per_second == 51.24);
 }
 
 TEST_CASE("Repository gateway configuration exposes bounded CPU speech models",

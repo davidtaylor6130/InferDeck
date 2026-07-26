@@ -21,6 +21,15 @@ struct SamplingConfig {
     std::vector<std::string> dry_seq_breakers{"\n", ":", "\"", "*"};
 };
 
+struct ProfileOptimizationInfo {
+    std::string status{};
+    std::string measured_at{};
+    int quality_passes{0};
+    int quality_total{0};
+    double single_tokens_per_second{0.0};
+    double parallel_tokens_per_second{0.0};
+};
+
 struct ModelInfo {
     std::string name{};
     std::string family{};
@@ -49,6 +58,7 @@ struct ModelInfo {
     std::string chat_template_path{};
     std::map<std::string, std::string> artifacts{};
     SamplingConfig sampling{};
+    ProfileOptimizationInfo optimization{};
 
     [[nodiscard]] bool supports(const std::string& capability) const;
 };

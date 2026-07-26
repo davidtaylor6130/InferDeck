@@ -2,6 +2,15 @@ export type Tone = 'good' | 'warn' | 'critical' | 'idle' | 'info' | 'violet';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline';
 
+export interface ModelOptimizationInfo {
+  status: string;
+  measured_at?: string;
+  quality_passes?: number;
+  quality_total?: number;
+  single_tokens_per_second?: number;
+  parallel_tokens_per_second?: number;
+}
+
 export interface ModelInfo {
   id: string;
   family?: string;
@@ -17,6 +26,7 @@ export interface ModelInfo {
   primary?: boolean;
   free_slots?: number;
   active_requests?: number;
+  optimization?: ModelOptimizationInfo;
 }
 
 export interface GpuSample {
