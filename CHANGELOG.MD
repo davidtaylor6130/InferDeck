@@ -1,5 +1,14 @@
 # InferDeck - Changelog
 
+## [0.6.1] - 2026-07-26
+
+### Fixed
+- **Windows release build setup** now takes the pnpm version exclusively from
+  the root `packageManager` declaration, preventing the release workflow from
+  aborting on conflicting pnpm 9 and pnpm 10 inputs.
+
+---
+
 ## [0.6.0] - 2026-07-26
 
 ### Added

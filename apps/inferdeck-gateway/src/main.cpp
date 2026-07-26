@@ -65,7 +65,7 @@ std::atomic<bool> g_reload{false};
 httplib::Server* g_server = nullptr;
 std::once_flag g_llama_init_once;
 constexpr int runtime_reload_result = 75;
-constexpr std::string_view gateway_version = "0.6.0";
+constexpr std::string_view gateway_version = "0.6.1";
 
 std::string config_revision(const std::string& text) {
     std::uint64_t hash = 1469598103934665603ULL;
