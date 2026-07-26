@@ -903,3 +903,78 @@ existing SQL usage ledger retained.
   - 30,997 MB available from the 32,021 MB InferDeck VRAM budget;
   - active and running YAML revisions match;
   - production SQL database remains `C:/InferDeck/data/stats.db`.
+
+### 2026-07-26 main-integration review and OpenCode model inventory
+
+- Audited the complete `main...alpha-v2` history before publication:
+  - `main` and `origin/main` are at the v0.4.0 merge commit `798b2ef`;
+  - `main` is the merge base and `alpha-v2` is not behind it, so no synthetic
+    merge-from-main commit is required;
+  - the connected GitHub repository had no existing open pull request for
+    `alpha-v2`;
+  - local `alpha-v2` contained ten additional commits beyond the previously
+    published `origin/alpha-v2`.
+- Reviewed 155 changed paths covering the runtime registry, resource-aware
+  scheduling, Responses/embeddings/media APIs, model store, active
+  configuration editor, headless dashboard, measured profile optimiser, and
+  adaptive MTP runtime.
+- Corrected merge-readiness findings:
+  - removed trailing whitespace caught by `git diff --check`;
+  - added the v0.6.0 changelog covering the complete alpha scope and live
+    verification;
+  - aligned `inferdeck-bench --version` with gateway/dashboard v0.6.0;
+  - replaced the obsolete agent rule that prohibited MTP with the implemented
+    adaptive single-request/concurrent-request invariant;
+  - corrected the project OpenCode catalog from 40,960 to 100,000 context
+    tokens for `qwen3.6-27b`;
+  - added the installed `qwen3-coder-next` 262,144-context model to the project
+    OpenCode catalog.
+- Public-tree secret-pattern review found only the deliberately fake
+  `sk-inferdeck-local-dev-token-do-not-use-in-prod` fixture already used by
+  authentication tests; no real private key or provider token was found in the
+  alpha delta.
+- Merge gate:
+  - complete Release build passed;
+  - all 115 C++ unit/integration tests passed;
+  - all 32 dashboard tests passed;
+  - TypeScript checking and production Vite build passed;
+  - `inferdeck-bench --version` returned `0.6.0`;
+  - `git diff --check` passed after the whitespace correction.
+- Environment-only retries recorded for reproducibility:
+  - the first MSBuild invocation inherited duplicate Windows `Path` and `PATH`
+    keys and failed with `MSB6001`; the normalized child environment build
+    passed;
+  - the sandbox denied weak canonicalization of the foundation test's own
+    temporary directory and Vite workspace traversal; the identical tests
+    passed outside that filesystem sandbox.
+- OpenCode inventory:
+  - installed OpenCode version: 1.18.3;
+  - provider: `inferdeck` through `@ai-sdk/openai-compatible`;
+  - LAN API base: `http://192.168.0.168:11434/v1`;
+  - global default and small model are both `inferdeck/qwen3.6-27b`, avoiding a
+    model swap for lightweight title work when using the dense 27B profile;
+  - the InferDeck project config overrides those defaults with
+    `qwen3-coder-30b-a3b` as primary and `qwen2.5-coder-3b` as small model;
+  - automatic compaction and pruning are enabled with a 16,000-token reserve.
+- Live model-selection facts captured for OpenCode optimisation:
+  - `qwen3-coder-30b-a3b`: 262,144 context, 20,000 MB admission estimate, one
+    slot; best balanced primary coding model and able to co-reside with the
+    2,500 MB small coder;
+  - `qwen3.6-27b`: four 100,000-token slots, 29,791 MB, adaptive MTP; measured
+    quality-first dense option at 50.16 single generation tokens/s and 51.24
+    aggregate end-to-end tokens/s;
+  - `qwen3.6-35b-a3b`: four live slots, 100,096 context, 24,000 MB; the
+    historically dominant general/agent model by local usage;
+  - `qwen3-coder-next`: 262,144 context, 29,000 MB, one slot; high-context
+    coding option but too close to the VRAM ceiling to pair safely with another
+    substantial model without fresh admission testing;
+  - `qwen2.5-coder-3b`: 32,768 context, 2,500 MB, four live slots; intended for
+    titles, summaries, and cheap helper tasks when it can co-reside;
+  - `gpt-oss-20b`: 32,768 context, 13,000 MB, eight slots; fast parallel helper
+    option, but its shorter context makes it unsuitable as the only long-agent
+    primary;
+  - `gemma-4-26b-a4b`: four 100,000-token slots, 13,000 MB; efficient
+    general/review alternative, currently advertised as text-only;
+  - `gemma-4-31b`: 65,536 context, 29,000 MB, one slot and only one historical
+    production request; not recommended as a default without more quality and
+    performance evidence.

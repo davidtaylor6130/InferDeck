@@ -1,5 +1,52 @@
 # InferDeck - Changelog
 
+## [0.6.0] - 2026-07-26
+
+### Added
+- **Headless operations dashboard** with separate LLM and dictation areas,
+  combined lifetime usage and ROI reporting, line-chart time ranges, live
+  diagnostics, model-profile editing, and the version shown in the sidebar.
+- **Active configuration profiles with automatic reload.** Dashboard changes
+  are validated, saved atomically, and applied without a hardware restart;
+  the shipped base YAML remains the recovery profile.
+- **Integrated model store** for discovering, filtering, downloading, and
+  tracking Hugging Face artifacts against the available hardware.
+- **Native local speech runtimes:** Parakeet TDT transcription and Supertonic
+  neural speech synthesis run in-process on CPU so the GPU remains available
+  for LLM workloads.
+- **OpenAI-compatible Responses, embeddings, transcription, and speech APIs**
+  behind the same resource-aware coordinator as chat completions.
+- **Measured model-profile optimisation** with fixed-seed quality probes,
+  sustained single-request generation throughput, concurrent aggregate
+  throughput, load time, and actual peak-VRAM measurement.
+- **Adaptive in-process MTP decoding** for Qwen3.6-27B: single requests use
+  speculative decoding while concurrent requests automatically use ordinary
+  continuous batching and resynchronise MTP before the next single request.
+
+### Fixed
+- **Lifetime usage persistence** now resolves the production SQLite database
+  independently of service account and working directory, preserving request,
+  token, throughput, and estimated-cost history across restarts.
+- **LAN accessibility** remains bound to `0.0.0.0` and is covered by a
+  configuration regression test.
+- **Generation throughput accounting** excludes prompt-prefill duration while
+  retaining total request duration for latency statistics.
+- **Dashboard configuration safety** hides recovery controls, preserves secret
+  values, validates revisions, and falls back to the stable base profile if an
+  active profile cannot load.
+- **OpenCode and OpenAI compatibility hardening** for streaming tool calls,
+  response shapes, model IDs, swap serialization, context discovery, and
+  long-running agent sessions.
+
+### Verified
+- Release gateway build, 115 C++ unit/integration tests, 32 dashboard tests,
+  TypeScript checking, and the production dashboard build.
+- Live Qwen3.6-27B at four 100,000-token slots: 50.16 generation tokens/s for
+  one request and 51.24 aggregate end-to-end tokens/s across four concurrent
+  requests.
+
+---
+
 ## [0.4.0] - 2026-07-04
 
 ### Added

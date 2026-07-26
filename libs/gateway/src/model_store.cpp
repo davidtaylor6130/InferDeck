@@ -191,7 +191,7 @@ Result<std::string> sha256_file(const std::filesystem::path& path) {
 #endif
 }
 
-} 
+}
 
 nlohmann::json to_json(const StoreDownload& download) {
     return {

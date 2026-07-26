@@ -200,7 +200,10 @@ Concurrency invariants:
 - **NO subprocess.** Don't call `llama-server.exe`. Don't `system()` or `popen()`.
 - **NO proxy design.** Use the llama.cpp library directly.
 - **NO MMProj load on demand.** mmproj stays loaded for vision models.
-- **NO MTP for now.** Conflicts with n_parallel>1.
+- **MTP is adaptive, not globally concurrent.** The selected Qwen3.6-27B
+  profile uses MTP for one runnable request, switches to ordinary continuous
+  batching at two or more requests, keeps fallback sticky until each request
+  ends, and resynchronises the paired caches before MTP resumes.
 - **NO comments unless asked.**
 
 ## Dashboard

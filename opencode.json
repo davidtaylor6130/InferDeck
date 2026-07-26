@@ -29,6 +29,14 @@
             "output": ["text"]
           }
         },
+        "qwen3-coder-next:latest": {
+          "name": "qwen3-coder-next",
+          "limit": { "context": 262144, "output": 16384 },
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
+        },
         "gemma-4-26b-a4b:latest": {
           "name": "gemma-4-26b-a4b",
           "limit": { "context": 100000, "output": 16384 },
@@ -63,7 +71,7 @@
         },
         "qwen3.6-27b:latest": {
           "name": "qwen3.6-27b",
-          "limit": { "context": 40960, "output": 8192 },
+          "limit": { "context": 100000, "output": 8192 },
           "modalities": {
             "input": ["text"],
             "output": ["text"]
