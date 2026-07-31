@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/banner.svg" alt="InferDeck — self-hosted AI gateway for Windows" width="100%"/>
+<img src="docs/assets/banner.svg" alt="InferDeck, self-hosted AI gateway for Windows" width="100%"/>
 
 <br/>
 
@@ -18,19 +18,11 @@ exposes OpenAI- and Anthropic-compatible APIs on `:11434`, and serves a live Rea
 
 </div>
 
-<!-- TODO(assets): dashboard screenshot — drop a capture of the Overview page at
-     docs/assets/dashboard-overview.png and uncomment:
-
-<p align="center">
-  <img src="docs/assets/dashboard-overview.png" alt="InferDeck dashboard — live GPU telemetry, tokens/sec, and swap progress" width="90%"/>
-</p>
--->
-
 ---
 
 ## Why InferDeck
 
-My "AI server" is also my gaming and dev PC — a Windows machine upgraded with
+My "AI server" is also my gaming and dev PC, a Windows machine upgraded with
 a Radeon AI PRO R9700. I wasn't willing to switch it to Linux or maintain a
 dual boot just to serve models, and I was already building
 [Universal Agent Manager](https://github.com/davidtaylor6130/Universal-Agent-Manager),
@@ -41,50 +33,51 @@ None of the existing options fit that setup. **LM Studio**'s server ate too
 much system RAM. **Ollama** was slow and a faff to control programmatically.
 Raw **llama-server.exe** generates well but is hard to manage over the
 network. **vLLM** is built for a different scale than a single-GPU Windows
-box. So I built my own gateway that matches `llama-server.exe`'s behaviour
-token-for-token — the ≥ 0.95 parity gate in CI exists for exactly this
-reason — while adding the control layer the others lacked. It was also a
-welcome excuse to get back into a serious modern-C++ project.
+box. So I built my own gateway that aims to retain `llama-server.exe`'s
+response quality, with a manually provisioned parity harness for comparison,
+while adding the control layer the others lacked. It was also a welcome excuse
+to get back into a serious modern-C++ project.
 
-The guiding idea is simple: **one GPU, fully under your control, never
-dropping work.** Most local-LLM setups on Windows are a stack of loosely
-coupled processes — a server binary, a proxy, a separate UI, and a script that
-restarts whatever fell over — and when two clients hit the GPU at once, one of
+The guiding idea is simple: **one GPU, fully under your control, with
+overlapping work queued.** Most local-LLM setups on Windows are a stack of
+loosely coupled processes: a server binary, a proxy, a separate UI, and a script that
+restarts whatever fell over. When two clients hit the GPU at once, one of
 them usually just fails. InferDeck collapses all of that into **one process**
 where every model is managed from the dashboard and overlapping requests are
 **queued and scheduled, not rejected**: built to run unattended on a
 single-GPU workstation and serve coding agents (opencode, Open WebUI,
 Claude-style clients) around the clock.
 
-It links `llama.dll` and drives the llama.cpp C API directly — no
-`llama-server.exe` subprocess, no proxying, no orphan processes — and wraps it
+It links `llama.dll` and drives the llama.cpp C API directly, with no
+`llama-server.exe` subprocess, proxying, or orphan processes. It wraps this
 with the operational layer that raw llama.cpp doesn't have: hot model swapping,
 KV-cache reuse across agent turns, request history, cost tracking, and a
 real-time dashboard.
 
 Text generation is the first modality, not the last. The longer-term goal is a
-single gateway where **one GPU time-shares every local AI workload** — LLM
+single gateway where **one GPU time-shares every local AI workload**: LLM
 inference, speech-to-text, text-to-speech, image and video generation, and
-post-training/quantization jobs — all behind the same API, the same scheduler,
+post-training/quantisation jobs, all behind the same API, the same scheduler,
 and the same dashboard. See the [roadmap](#roadmap).
 
 > [!NOTE]
 > InferDeck is a working daily-driver, but it's also deliberately a
 > **learning project**. Part of the goal is to explore the problem space, so
 > some subsystems take the experimental route where a boring, conventional one
-> would do — that's a feature, not an accident. The parity gate and test
+> would do. That is a feature, not an accident. The parity harness and test
 > suites are there to keep the experiments honest.
 
 ## Features
 
 ### Inference engine
+
 - **In-process llama.cpp (Vulkan).** Direct C-API integration with no backend
   subprocess, proxy, or orphan process.
 - **Multi-model residency with async hot swap.** Models register in
   `config/gateway.yml`; the coordinator admits resident models within the
   configured single-GPU VRAM budget.
   `POST /v1/swap/to/:name` drains active requests, unloads, loads the new
-  GGUF, and streams progress to the dashboard over SSE — with cancellation.
+  GGUF, and streams progress to the dashboard over SSE, with cancellation.
 - **KV-cache reuse.** Longest-common-prefix prompt matching, so multi-turn
   agent sessions reuse full-attention KV state and hybrid recurrent
   checkpoints instead of re-prefilling the whole conversation each turn.
@@ -92,35 +85,48 @@ and the same dashboard. See the [roadmap](#roadmap).
   the in-process multimodal projector path is implemented.
 
 ### API
+
 - **OpenAI-compatible** `POST /v1/chat/completions`: SSE streaming,
   tool calls, `reasoning_content`, llama-server-style prompt truncation on
   context overflow instead of a hard error.
-- **Anthropic Messages API** at `POST /v1/messages`.
+- **OpenAI Responses and embeddings APIs** at `POST /v1/responses` and
+  `POST /v1/embeddings`. Responses is stateless; unsupported storage,
+  background, and conversation fields are rejected explicitly.
+- **Anthropic Messages API** at `POST /v1/messages`, with token counting at
+  `POST /v1/messages/count_tokens`.
 - **Anthropic model aliases.** Map requested Claude model names (`claude-*`) to
   local models via `anthropic.model_aliases` in `config/gateway.yml`, so
   Anthropic-API clients (e.g. Claude Code) route to the intended local model.
   Unknown non-empty model IDs are rejected instead of silently rerouted.
-- **Native audio APIs.** CPU-only Parakeet TDT 0.6B v3 transcription at
+- **Optional native audio APIs.** CPU-only Parakeet TDT 0.6B v3 transcription at
   `POST /v1/audio/transcriptions` and in-process Supertonic 3 neural speech
   synthesis at `POST /v1/audio/speech`, both behind the same model admission
   path.
-- Discovery and ops endpoints: `/v1/models`, `/v1/health`, `/v1/metrics`.
+- **Optional image generation** at `POST /v1/images/generations` through the
+  compile-gated stable-diffusion.cpp runtime.
+- Discovery and operations endpoints: `GET /v1/models`, `GET /v1/health`,
+  `GET /v1/metrics`, and `GET /v1/stats/history`.
 
 ### Live dashboard
+
 React 19 + Vite + Tailwind, driven by one SSE connection with a bounded
 30-second status fallback. The task views cover operation, model residency,
-usage assumptions, and diagnostics. Voice capture and playback belong to API
-clients such as Open WebUI, not the administration dashboard.
+model discovery and downloads, usage assumptions, and diagnostics. Voice
+capture and playback belong to API clients such as Open WebUI, not the
+administration dashboard.
 
 ### Observability & quality
+
 - Every request and swap is recorded three ways: in-memory metrics, SQLite
   history (`stats.db`), and SSE events. p50/p95 latency, daily/hourly usage
   buckets, lifetime counters.
 - Catch2 unit/integration suites and a streaming tool-call harness cover API
-  shape and runtime behavior. Real-model parity remains a manually provisioned
+  shape and runtime behaviour. Real-model parity remains a manually provisioned
   hardware test.
-- `inferdeck-bench --dry-run` validates search-space parsing and optimizer
-  mechanics; real inference scoring is not implemented yet.
+- `build/bin/Release/inferdeck-bench.exe --dry-run` validates search-space
+  parsing and optimiser mechanics. The dashboard can run measured, fixed-seed
+  quality and throughput benchmarks before staging a model profile for
+  validation and hot application.
 
 ## Architecture
 
@@ -129,7 +135,7 @@ clients such as Open WebUI, not the administration dashboard.
   HTTP :11434 │  libs/gateway        /v1 routes, /api dashboard routes, SSE,        │
   ────────────▶                      streaming sanitizer, SwapTracker, auth, CORS   │
               │  libs/model          ModelRegistry + BackendCoordinator (slots,     │
-              │                      drain-on-swap, 30s acquisition queue)          │
+              │                      drain-on-swap, priority/ageing queue)           │
               │  libs/llama_cpp_wrapper  LlamaCppModel: template/tokenize/decode/   │
               │                      sample, LCP prompt-cache reuse                 │
               │  libs/observability  GPU telemetry (PDH/DXGI), Metrics,             │
@@ -153,11 +159,12 @@ responsive mid-generation.
 ```
 apps/inferdeck-gateway/    exe entry: config, dependency wiring, routes, static files
 apps/dashboard/            React dashboard (built output is committed and served by the exe)
-apps/benchmark-runner/     inferdeck-bench sampler-optimization harness
+apps/benchmark-runner/     inferdeck-bench sampler-optimisation harness
 apps/hardware-adlx-helper/ standalone ADLX probe experiment; not launched by the gateway
 libs/                      gateway, model, llama_cpp_wrapper, observability, optimize, foundation
 config/                    gateway.yml, per-model sampler profiles
-tests/                     Catch2 unit/integration, parity gate, fixtures, stress
+tests/                     Catch2 integration and parity suites, plus request fixtures
+Testing/                   manual streaming, overflow, compaction, and cache-reuse harnesses
 docs/                      API reference, architecture notes, deploy guide
 ```
 
@@ -165,27 +172,68 @@ docs/                      API reference, architecture notes, deploy guide
 
 ## Quick start
 
+### Clone
+
+`llama.cpp` and `Vulkan-Headers` are pinned Git submodules:
+
+```bash
+git clone --recurse-submodules https://github.com/davidtaylor6130/InferDeck.git
+cd InferDeck
+```
+
+If the repository was cloned without submodules, initialise them before
+configuring the build:
+
+```bash
+git submodule update --init --recursive
+```
+
 ### Prerequisites
 
 - Windows 10/11 x64, a Vulkan-capable GPU
-- Visual Studio 2022 (MSVC, C++23), CMake ≥ 3.27, vcpkg, Vulkan SDK
-- Node.js + pnpm (dashboard only)
-
-llama.cpp is cloned into `libs/third_party/` (not a submodule).
+- Visual Studio 2022 (MSVC, C++23), CMake ≥ 3.27, Vulkan SDK, and vcpkg
+  with `VCPKG_ROOT` set
+- Node.js 22 + pnpm 9 (dashboard only)
 
 ### Build from source
 
-```bash
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DINFERDECK_BUILD_TESTS=ON
-cmake --build build --target inferdeck-gateway --config Release -j
-
-# Install the pinned in-process Whisper source and default model
-./scripts/setup-whisper-runtime.ps1
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  -DINFERDECK_BUILD_TESTS=ON
+cmake --build build --config Release --parallel
 
 # Dashboard (output lands in apps/inferdeck-gateway/static/)
 pnpm install
 pnpm --filter dashboard build
 ```
+
+### Optional speech setup
+
+The active speech models are Parakeet TDT 0.6B v3 and Supertonic 3 through
+sherpa-onnx. There is no complete automated setup script for this configuration.
+Supply a sherpa-onnx installation prefix containing
+`include/sherpa-onnx/c-api/c-api.h`, `lib/sherpa-onnx-c-api.lib`, and the
+matching runtime DLLs, then configure with its path:
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  -DINFERDECK_BUILD_TESTS=ON `
+  -DINFERDECK_SHERPA_ONNX_ROOT=C:/path/to/sherpa-onnx-install
+```
+
+Download the Parakeet and Supertonic model artefacts separately, then update
+their `artifacts` paths in `config/gateway.yml`. The existing
+`scripts/setup-whisper-runtime.ps1` installs the optional whisper.cpp fallback;
+it does not set up the active Parakeet or Supertonic models.
+
+> [!WARNING]
+> The default homelab configuration binds to `0.0.0.0`, disables
+> authentication, and allows all CORS origins. Do not expose it directly to
+> the public internet. Use it only on a trusted LAN or through a VPN, firewall,
+> or properly configured reverse proxy. Enable authentication and restrict
+> CORS origins where appropriate.
 
 ### Run
 
@@ -200,8 +248,10 @@ curl http://localhost:11434/v1/health
 # Dashboard: http://localhost:11434/
 ```
 
-Point any OpenAI-compatible client at `http://localhost:11434/v1` with any API
-key — for example:
+Point an OpenAI-compatible client at `http://localhost:11434/v1`. With the
+default authentication setting, clients that require a key may use a
+placeholder. When authentication is enabled, send the configured Bearer token.
+For example:
 
 ```bash
 curl http://localhost:11434/v1/chat/completions \
@@ -211,15 +261,18 @@ curl http://localhost:11434/v1/chat/completions \
 
 ### Test
 
-```bash
+```powershell
 # C++ unit + integration
 ctest --test-dir build -C Release --output-on-failure -L "unit|integration"
 
 # Dashboard unit tests
 pnpm --filter dashboard test
 
-# Parity gate vs raw llama-server (slow, needs real GGUFs)
-bash tests/parity/run.sh
+# Real-model parity needs raw llama-server and InferDeck running with the same model
+pwsh -File tests/parity/record_baseline.ps1 -Model qwen3.6-27b
+pwsh -File tests/parity/run.ps1 `
+  -BaselinePath tests/parity/baselines/qwen3.6-27b.jsonl `
+  -Model qwen3.6-27b
 ```
 
 ## API surface
@@ -227,64 +280,83 @@ bash tests/parity/run.sh
 | Endpoint | Notes |
 | --- | --- |
 | `POST /v1/chat/completions` | OpenAI-compatible; SSE streaming, tool calls, reasoning content |
-| `POST /v1/messages` | Anthropic Messages API |
-| `POST /v1/audio/transcriptions` | Request-scoped PCM WAV to text via in-process Parakeet TDT |
-| `POST /v1/audio/speech` | Text to request-scoped audio via in-process Supertonic 3 |
-| `GET /v1/models` · `/v1/health` · `/v1/metrics` | discovery + ops |
-| `POST /v1/swap/to/:name` | async swap, `202` + SSE progress; `/v1/swap/cancel`, `/v1/swap/status` |
-| `GET /api/status` · `/api/jobs` · `/api/logs` · `/api/pricing` | dashboard data |
+| `POST /v1/responses` | Stateless OpenAI Responses compatibility; streaming, tools, reasoning, and structured output translation |
+| `POST /v1/embeddings` | OpenAI-compatible float or base64 embeddings for registered embedding models |
+| `POST /v1/messages` · `POST /v1/messages/count_tokens` | Anthropic Messages compatibility and token counting |
+| `POST /v1/audio/transcriptions` | Request-scoped WAV to text via Parakeet TDT when sherpa-onnx is linked |
+| `POST /v1/audio/speech` | Text to request-scoped WAV or PCM via Supertonic 3 when sherpa-onnx is linked |
+| `POST /v1/images/generations` | Base64 PNG generation when stable-diffusion.cpp is linked and an image model is registered |
+| `GET /v1/models` · `GET /v1/health` · `GET /v1/metrics` · `GET /v1/stats/history` | model discovery, health, live metrics, and usage history |
+| `POST /v1/swap/to/:name` | async swap, `202` + SSE progress; `POST /v1/swap/cancel`; `GET /v1/swap/status` |
+| `GET /api/status` · `GET /api/jobs` · `GET /api/logs` · `GET /api/pricing` | dashboard data |
 | `GET /api/events/stream` | SSE: `stats` (~1 Hz), `model`, `request` events |
+| `GET /api/model-store/search` · `GET /api/model-store/inspect` | dashboard model discovery and artefact inspection |
+| `GET /api/model-store/downloads` · `POST /api/model-store/downloads` | list or start downloads |
+| `POST /api/model-store/downloads/:id/cancel` · `POST /api/model-store/downloads/:id/resume` | cancel or resume a download |
+| `POST /api/model-store/remove` | remove an inactive model-store entry and its managed artefact |
 
 ## Roadmap
 
-The destination: **one GPU, every modality, zero dropped requests** — a single
-gateway that schedules all local AI workloads the way it schedules chat
+The destination is **one GPU with shared scheduling for every modality**: a
+single gateway that manages local AI workloads the way it manages chat
 completions today.
 
 **Hardening the core**
-- [ ] **Durable request queue** across all workloads — overlapping calls wait
-  their turn (with queue position surfaced in the dashboard) instead of being
-  rejected, even across model swaps.
+- [x] **Shared request queue** across text, embeddings, image, speech, and
+  transcription. It supports priorities with ageing, cancellation, queue
+  position reporting, and preparation across model swaps. It is in memory, not
+  durable across gateway restarts.
 - [x] **Recurrent-state checkpoints** for hybrid linear-attention models
   (e.g. Qwen3.6-A3B), so they get the same KV-cache reuse as full-attention
   models instead of re-prefilling every turn.
-- [ ] **Structured error codes** across the API surface and UTF-8 hold-back in
-  the streaming path for clean multi-byte output.
-- [x] **GitHub Actions CI** running the unit/integration suites on every push.
+- [x] **Structured error codes and UTF-8 hold-back** in the streaming paths for
+  clean multi-byte output and consistent API errors.
+- [ ] **CI on every push.** The current GitHub Actions release workflow builds
+  and tests version tags and manual runs, but does not run on each push.
 
-**Beyond text — the multi-modal gateway**
-- [x] **Speech-to-text** (`/v1/audio/transcriptions`, whisper.cpp) and
-  **text-to-speech** (`/v1/audio/speech`) behind the same slot scheduler.
-- [ ] **Image generation** (`/v1/images/generations`, stable-diffusion.cpp) —
-  the swap machinery already handles "unload the LLM, load something else."
-- [ ] **Video generation** as local open-model pipelines mature — long-running
-  jobs with progress streamed over the existing SSE channel.
-- [ ] **Post-training & quantization jobs** — GGUF quantization and LoRA
+**Beyond text: the multimodal gateway**
+- [x] **Speech-to-text** (`/v1/audio/transcriptions`, Parakeet TDT) and
+  **text-to-speech** (`/v1/audio/speech`, Supertonic 3) through the optional
+  sherpa-onnx runtime and the shared coordinator.
+- [x] **Image generation API and adapter** (`/v1/images/generations`) through
+  the optional stable-diffusion.cpp runtime. The dependency and model are not
+  bundled.
+- [ ] **Video generation** as local open-model pipelines mature, using
+  long-running jobs with progress streamed over the existing SSE channel.
+- [ ] **Post-training and quantisation jobs**, including GGUF quantisation and LoRA
   fine-tuning launched and monitored from the dashboard, queued into GPU idle
   time alongside inference.
 
 **Expanding the engine**
 - [x] **True parallel slots (continuous batching).** Decode multiple concurrent
   requests against one resident model in a single batched `llama_decode` loop
-  (one shared context, `n_seq_max` sequences) instead of serializing them behind
-  a per-model lock — turning today's slot *queue* into real concurrency.
-- [ ] **Speculative decoding** (draft-model and MTP) once it coexists with
-  parallel slots.
-- [ ] **Embeddings endpoint** (`/v1/embeddings`) for local RAG pipelines.
-- [ ] **Dual-model residency** on high-VRAM and multi-GPU machines — serve a
-  small fast model alongside the large one with no swap latency.
-- [ ] **Automated sampler tuning** end-to-end: Optuna-driven per-model profiles
-  promoted from `inferdeck-bench` runs with one click in the dashboard.
+  (one shared context, `n_seq_max` sequences) instead of serialising them behind
+  a per-model lock, turning the slot queue into real concurrency.
+- [x] **OpenAI Responses API** (`/v1/responses`) for stateless text input,
+  tools, reasoning, structured outputs, and typed streaming events. Vision is
+  still rejected because no model can currently advertise vision support.
+- [x] **Embeddings endpoint** (`/v1/embeddings`) for local RAG pipelines.
+- [x] **Adaptive MTP decoding** for configured Qwen3.6 models at low
+  concurrency, with ordinary continuous batching used outside the MTP window.
+- [ ] **Draft-model speculative decoding.** Only MTP is implemented.
+- [x] **Multi-model residency** when the detected or configured VRAM budget can
+  fit more than one model, with conservative single-resident behaviour when no
+  budget is known.
+- [x] **Measured profile optimisation** using the in-house search and dashboard
+  benchmark flow. It measures quality, throughput, load time, and peak VRAM
+  before staging the recommended configuration.
 
 **Expanding the platform**
-- [ ] **Linux support** — the inference core is portable; the GPU telemetry
+- [x] **Integrated model store** for Hugging Face discovery, verified downloads,
+  cancellation/resume, registration, and safe removal on Windows.
+- [ ] **Linux support.** The inference core is portable; the GPU telemetry
   layer (PDH/DXGI/ADLX) needs a sysfs/NVML equivalent.
-- [ ] **Multi-user mode** — API keys, per-key usage attribution, and rate
-  limits, so one workstation can serve a small team.
-- [ ] **Remote fallback routing** — optionally proxy requests to a cloud
+- [ ] **Multi-user mode.** The current authentication setting is one shared
+  Bearer token, without per-key usage attribution or rate limits.
+- [ ] **Remote fallback routing**, optionally proxying requests to a cloud
   provider when the local model is mid-swap or over capacity.
 
-Suggestions and issues are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+Suggestions and issues are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
@@ -299,7 +371,7 @@ Suggestions and issues are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Acknowledgements
 
 InferDeck stands on [llama.cpp](https://github.com/ggml-org/llama.cpp) by
-Georgi Gerganov and contributors — the parity gate exists precisely because
+Georgi Gerganov and contributors. The parity gate exists precisely because
 matching its quality is the bar.
 
 ## License
