@@ -39,14 +39,14 @@ while adding the control layer the others lacked. It was also a welcome excuse
 to get back into a serious modern-C++ project.
 
 The guiding idea is simple: **one GPU, fully under your control, with
-overlapping work queued.** Most local-LLM setups on Windows are a stack of
-loosely coupled processes: a server binary, a proxy, a separate UI, and a script that
-restarts whatever fell over. When two clients hit the GPU at once, one of
-them usually just fails. InferDeck collapses all of that into **one process**
-where every model is managed from the dashboard and overlapping requests are
-**queued and scheduled, not rejected**: built to run unattended on a
-single-GPU workstation and serve coding agents (opencode, Open WebUI,
-Claude-style clients) around the clock.
+overlapping work queued.** My first attempt was a bodged-together stack of a
+server binary, proxy, separate UI, and a script that restarted whatever fell
+over. It proved the idea, but it was awkward to operate reliably. InferDeck is
+the deliberate replacement: **one process** where every model is managed from
+the dashboard and overlapping requests are **queued and scheduled, not
+rejected**. It is built to run unattended on a single-GPU workstation and
+serve coding agents (opencode, Open WebUI, Claude-style clients) around the
+clock.
 
 It links `llama.dll` and drives the llama.cpp C API directly, with no
 `llama-server.exe` subprocess, proxying, or orphan processes. It wraps this
@@ -98,12 +98,13 @@ and the same dashboard. See the [roadmap](#roadmap).
   local models via `anthropic.model_aliases` in `config/gateway.yml`, so
   Anthropic-API clients (e.g. Claude Code) route to the intended local model.
   Unknown non-empty model IDs are rejected instead of silently rerouted.
-- **Optional native audio APIs.** CPU-only Parakeet TDT 0.6B v3 transcription at
-  `POST /v1/audio/transcriptions` and in-process Supertonic 3 neural speech
-  synthesis at `POST /v1/audio/speech`, both behind the same model admission
-  path.
-- **Optional image generation** at `POST /v1/images/generations` through the
-  compile-gated stable-diffusion.cpp runtime.
+- **Experimental native audio APIs.** Code paths exist for CPU-only Parakeet
+  TDT 0.6B v3 transcription at `POST /v1/audio/transcriptions` and in-process
+  Supertonic 3 speech synthesis at `POST /v1/audio/speech`. These paths have
+  not yet been thoroughly tested end to end.
+- **Experimental image generation API.** A compile-gated
+  stable-diffusion.cpp path exists at `POST /v1/images/generations`, but it has
+  not yet been thoroughly tested end to end.
 - Discovery and operations endpoints: `GET /v1/models`, `GET /v1/health`,
   `GET /v1/metrics`, and `GET /v1/stats/history`.
 
@@ -212,6 +213,8 @@ pnpm --filter dashboard build
 
 The active speech models are Parakeet TDT 0.6B v3 and Supertonic 3 through
 sherpa-onnx. There is no complete automated setup script for this configuration.
+The integration is still experimental and has not yet been thoroughly tested
+end to end.
 Supply a sherpa-onnx installation prefix containing
 `include/sherpa-onnx/c-api/c-api.h`, `lib/sherpa-onnx-c-api.lib`, and the
 matching runtime DLLs, then configure with its path:
@@ -283,9 +286,9 @@ pwsh -File tests/parity/run.ps1 `
 | `POST /v1/responses` | Stateless OpenAI Responses compatibility; streaming, tools, reasoning, and structured output translation |
 | `POST /v1/embeddings` | OpenAI-compatible float or base64 embeddings for registered embedding models |
 | `POST /v1/messages` · `POST /v1/messages/count_tokens` | Anthropic Messages compatibility and token counting |
-| `POST /v1/audio/transcriptions` | Request-scoped WAV to text via Parakeet TDT when sherpa-onnx is linked |
-| `POST /v1/audio/speech` | Text to request-scoped WAV or PCM via Supertonic 3 when sherpa-onnx is linked |
-| `POST /v1/images/generations` | Base64 PNG generation when stable-diffusion.cpp is linked and an image model is registered |
+| `POST /v1/audio/transcriptions` | Experimental, not yet fully tested; intended to provide request-scoped WAV-to-text via Parakeet TDT when sherpa-onnx is linked |
+| `POST /v1/audio/speech` | Experimental, not yet fully tested; intended to provide request-scoped WAV or PCM output via Supertonic 3 when sherpa-onnx is linked |
+| `POST /v1/images/generations` | Experimental, not yet fully tested; intended to provide base64 PNG generation when stable-diffusion.cpp is linked and an image model is registered |
 | `GET /v1/models` · `GET /v1/health` · `GET /v1/metrics` · `GET /v1/stats/history` | model discovery, health, live metrics, and usage history |
 | `POST /v1/swap/to/:name` | async swap, `202` + SSE progress; `POST /v1/swap/cancel`; `GET /v1/swap/status` |
 | `GET /api/status` · `GET /api/jobs` · `GET /api/logs` · `GET /api/pricing` | dashboard data |
@@ -315,12 +318,15 @@ completions today.
   and tests version tags and manual runs, but does not run on each push.
 
 **Beyond text: the multimodal gateway**
-- [x] **Speech-to-text** (`/v1/audio/transcriptions`, Parakeet TDT) and
-  **text-to-speech** (`/v1/audio/speech`, Supertonic 3) through the optional
-  sherpa-onnx runtime and the shared coordinator.
-- [x] **Image generation API and adapter** (`/v1/images/generations`) through
-  the optional stable-diffusion.cpp runtime. The dependency and model are not
-  bundled.
+- [ ] **Speech-to-text** (`/v1/audio/transcriptions`, Parakeet TDT). The route
+  and optional sherpa-onnx integration exist, but end-to-end testing is still
+  outstanding.
+- [ ] **Text-to-speech** (`/v1/audio/speech`, Supertonic 3). The route and
+  optional sherpa-onnx integration exist, but end-to-end testing is still
+  outstanding.
+- [ ] **Image generation API and adapter** (`/v1/images/generations`). The
+  compile-gated stable-diffusion.cpp path exists, but the dependency and model
+  are not bundled and end-to-end testing is still outstanding.
 - [ ] **Video generation** as local open-model pipelines mature, using
   long-running jobs with progress streamed over the existing SSE channel.
 - [ ] **Post-training and quantisation jobs**, including GGUF quantisation and LoRA
