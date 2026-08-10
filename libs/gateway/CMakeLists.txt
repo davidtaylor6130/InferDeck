@@ -9,6 +9,7 @@ set(GATEWAY_SOURCES
     src/dashboard_routes.cpp
     src/metrics_builder.cpp
     src/model_store.cpp
+    src/audio_decoder.cpp
     src/media_routes.cpp
     src/profile_benchmark.cpp
 )
@@ -18,6 +19,8 @@ add_library(gateway STATIC ${GATEWAY_SOURCES})
 target_include_directories(gateway
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/vendor
 )
 
 target_link_libraries(gateway

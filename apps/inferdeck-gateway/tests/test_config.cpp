@@ -69,6 +69,25 @@ TEST_CASE("Repository gateway configuration keeps statistics in the installed ru
     CHECK(config.stats_db_path == "C:/InferDeck/data/stats.db");
 }
 
+TEST_CASE("Repository Gemma 31B profile is the safe default",
+          "[config][gemma4]") {
+    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "config" / "gateway.yml";
+    const auto config = load_config(path);
+    CHECK(config.default_model == "gemma-4-31b");
+    const auto gemma = std::find_if(
+        config.models.begin(), config.models.end(),
+        [](const auto& model) { return model.name == "gemma-4-31b"; });
+    REQUIRE(gemma != config.models.end());
+    CHECK(gemma->gguf_path ==
+          "C:/Inferdeck/models/unsloth/gemma-4-31B-it-GGUF/"
+          "gemma-4-31B-it-UD-Q4_K_XL.gguf");
+    CHECK(gemma->n_slots == 1);
+    CHECK(gemma->context_size == 262144);
+    CHECK(gemma->vram_required_mb == 29000);
+    CHECK_FALSE(gemma->mtp_enabled);
+}
+
 TEST_CASE("Repository Qwen 27B profile enables the measured adaptive MTP settings",
           "[config][mtp]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
@@ -103,7 +122,7 @@ TEST_CASE("Repository Qwen 27B profile enables the measured adaptive MTP setting
     CHECK(qwen->optimization.parallel_tokens_per_second == 51.24);
 }
 
-TEST_CASE("Repository gateway configuration exposes bounded CPU speech models",
+TEST_CASE("Repository gateway configuration exposes native speech models",
           "[config][speech-config]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "config" / "gateway.yml";
@@ -137,9 +156,18 @@ TEST_CASE("Repository gateway configuration exposes bounded CPU speech models",
     CHECK(std::none_of(
         config.models.begin(), config.models.end(),
         [](const auto& model) { return model.runtime == "windows_sapi"; }));
-    CHECK(std::none_of(
+
+    const auto whisper = std::find_if(
         config.models.begin(), config.models.end(),
-        [](const auto& model) { return model.name == "whisper-base-en"; }));
+        [](const auto& model) { return model.name == "whisper-base-en"; });
+    REQUIRE(whisper != config.models.end());
+    CHECK(whisper->runtime == "whisper_cpp");
+    CHECK(whisper->modality == "audio_transcription");
+    CHECK(whisper->vram_required_mb == 0);
+    CHECK(whisper->artifacts.at("model") ==
+          "E:/InferDeck/models/stt/whisper/ggml-base.en.bin");
+    CHECK(whisper->artifacts.at("provider") == "cpu");
+    CHECK(whisper->artifacts.at("num_threads") == "4");
 }
 
 TEST_CASE("Gateway configuration rejects unsafe operational values", "[config]") {

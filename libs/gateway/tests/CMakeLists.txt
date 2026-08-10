@@ -60,6 +60,10 @@ target_link_libraries(route_tests
         Catch2::Catch2WithMain
 )
 
+target_compile_definitions(route_tests PRIVATE
+    INFERDECK_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
 set_target_properties(sanitizer_tests PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON

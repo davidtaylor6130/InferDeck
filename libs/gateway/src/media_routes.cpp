@@ -1,5 +1,7 @@
 #include "gateway/media_routes.hpp"
 
+#include "audio_decoder.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -118,7 +120,7 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
     options.prepare = [&deps, model_name] {
         auto loaded = ensure_model_loaded(deps, model_name);
         if (loaded.ok) return foundation::Ok();
-        return foundation::Err<void>(foundation::ErrorCode::Unavailable, loaded.message);
+        return foundation::Err<void>(loaded.error_code, loaded.message);
     };
     return deps.coordinator.acquire_slot(model_name, options);
 }
@@ -128,6 +130,7 @@ int status_for(foundation::ErrorCode code) {
     if (code == foundation::ErrorCode::NotFound) return 404;
     if (code == foundation::ErrorCode::Cancelled) return 499;
     if (code == foundation::ErrorCode::Timeout) return 504;
+    if (code == foundation::ErrorCode::ResourceBusy) return 503;
     if (code == foundation::ErrorCode::Unavailable || code == foundation::ErrorCode::NotLoaded) return 503;
     return 500;
 }
@@ -180,11 +183,12 @@ std::uint32_t u32(const char* data) {
 }
 
 foundation::Result<model::TranscriptionRequest> decode_wav(
-    const std::string& content, const httplib::MultipartFormData& form) {
+    const std::string& content) {
     if (content.size() < 44 || std::memcmp(content.data(), "RIFF", 4) != 0 ||
         std::memcmp(content.data() + 8, "WAVE", 4) != 0) {
-        return foundation::Err<model::TranscriptionRequest>(foundation::ErrorCode::InvalidArgument,
-                                                             "only RIFF/WAVE audio is supported");
+        return foundation::Err<model::TranscriptionRequest>(
+            foundation::ErrorCode::InvalidArgument,
+            "audio is not RIFF/WAVE");
     }
     std::uint16_t format = 0;
     std::uint16_t channels = 0;
@@ -248,6 +252,12 @@ foundation::Result<model::TranscriptionRequest> decode_wav(
         }
         request.pcm[frame] = mixed / channels;
     }
+    return foundation::Ok(std::move(request));
+}
+
+foundation::Result<model::TranscriptionRequest> apply_transcription_parameters(
+    model::TranscriptionRequest request,
+    const httplib::MultipartFormData& form) {
     if (form.has_field("language")) request.language = form.get_field("language");
     if (form.has_field("prompt")) request.prompt = form.get_field("prompt");
     if (form.has_field("temperature")) {
@@ -269,6 +279,17 @@ foundation::Result<model::TranscriptionRequest> decode_wav(
                                                              "invalid transcription parameters");
     }
     return foundation::Ok(std::move(request));
+}
+
+foundation::Result<model::TranscriptionRequest> decode_audio(
+    const std::string& content, const httplib::MultipartFormData& form) {
+    foundation::Result<model::TranscriptionRequest> decoded =
+        content.size() >= 12 && std::memcmp(content.data(), "RIFF", 4) == 0 &&
+                std::memcmp(content.data() + 8, "WAVE", 4) == 0
+            ? decode_wav(content)
+            : decode_compressed_audio(content);
+    if (!decoded) return decoded;
+    return apply_transcription_parameters(std::move(*decoded), form);
 }
 
 std::string timestamp(float seconds, char separator) {
@@ -422,6 +443,9 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     const std::string default_format =
         wav_runtime ? "wav" : "mp3";
     request.format = body.value("response_format", default_format);
+    if (wav_runtime && request.format == "mp3") {
+        request.format = "wav";
+    }
     const auto input_characters = utf8_character_count(request.input);
     static const std::array formats{"mp3", "opus", "aac", "flac", "wav", "pcm"};
     if (model_name.empty() || request.input.empty() || request.input.size() > 65536 ||
@@ -623,7 +647,7 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
                     "response_format must be json, text, verbose_json, srt, or vtt");
         return;
     }
-    auto decoded = decode_wav(file.content, req.form);
+    auto decoded = decode_audio(file.content, req.form);
     if (!decoded) { write_error(resp, 400, "invalid_audio", decoded.error().message); return; }
     const double input_audio_seconds =
         static_cast<double>(decoded->pcm.size()) /

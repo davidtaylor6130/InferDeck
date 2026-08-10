@@ -1,0 +1,88 @@
+server:
+  host: "127.0.0.1"
+  port: 11435
+
+logging:
+  level: "info"
+  file: "logs/gateway.test-voice.log"
+
+auth:
+  required: false
+  token: ""
+
+cors:
+  origins:
+    - "*"
+
+state:
+  file: "~/.inferdeck/state.test-voice.json"
+
+default_model: "gemma-4-31b"
+
+observability:
+  stats_db: ""
+  adlx_helper: ""
+  telemetry_poll_ms: 1000
+
+gateway:
+  auto_swap: true
+  n_batch: 2048
+  n_ubatch: 2048
+  use_mmap: false
+  use_mlock: false
+  n_gpu_layers: null
+  flash_attn: "auto"
+  kv_offload: true
+  op_offload: true
+  cache_type_k: "q4_0"
+  cache_type_v: "q8_0"
+  swa_full: false
+
+model_registry:
+  - name: "whisper-base-en"
+    family: "whisper"
+    runtime: "whisper_cpp"
+    modality: "audio_transcription"
+    capabilities:
+      - "audio_transcription"
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 0
+    artifacts:
+      model: "E:/InferDeck/models/stt/whisper/ggml-base.en.bin"
+
+  - name: "supertonic-3"
+    family: "supertonic"
+    runtime: "sherpa_onnx"
+    modality: "audio_speech"
+    capabilities:
+      - "audio_speech"
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 0
+    artifacts:
+      engine: "supertonic"
+      duration_predictor: "C:/InferDeck/models/tts/supertonic-3/duration_predictor.int8.onnx"
+      text_encoder: "C:/InferDeck/models/tts/supertonic-3/text_encoder.int8.onnx"
+      vector_estimator: "C:/InferDeck/models/tts/supertonic-3/vector_estimator.int8.onnx"
+      vocoder: "C:/InferDeck/models/tts/supertonic-3/vocoder.int8.onnx"
+      tts_json: "C:/InferDeck/models/tts/supertonic-3/tts.json"
+      unicode_indexer: "C:/InferDeck/models/tts/supertonic-3/unicode_indexer.bin"
+      voice_style: "C:/InferDeck/models/tts/supertonic-3/voice.bin"
+      provider: "cpu"
+      num_threads: "4"
+
+  - name: "gemma-4-31b"
+    family: "gemma4"
+    gguf_path: "C:/Inferdeck/models/unsloth/gemma-4-31B-it-GGUF/gemma-4-31B-it-UD-Q4_K_XL.gguf"
+    mmproj_path: "C:/Inferdeck/models/unsloth/gemma-4-31B-it-GGUF/mmproj-BF16.gguf"
+    n_slots: 1
+    vram_required_mb: 29000
+    context_size: 262144
+    has_vision: false
+    sampling:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 64
+      min_p: 0.0
+      repeat_penalty: 1.0

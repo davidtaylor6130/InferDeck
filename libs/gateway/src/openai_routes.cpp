@@ -57,10 +57,7 @@ foundation::Result<int> acquire_for_request(
     options.prepare = [&deps, &model_name] {
         auto loaded = ensure_model_loaded(deps, model_name);
         if (loaded.ok) return foundation::Ok();
-        const auto code = loaded.status == 404 ? foundation::ErrorCode::NotFound
-            : loaded.code == "model_not_loaded" ? foundation::ErrorCode::NotLoaded
-            : foundation::ErrorCode::Unavailable;
-        return foundation::Err<void>(code, loaded.message);
+        return foundation::Err<void>(loaded.error_code, loaded.message);
     };
     return deps.coordinator.acquire_slot(model_name, options);
 }

@@ -19,6 +19,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -1207,15 +1210,15 @@ TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speec
                        {"voice", "default"}, {"response_format", "mp3"},
                        {"speed", 1.0}}.dump(), "application/json");
     REQUIRE(response);
-    CHECK(response->status == 400);
-    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
-          "unsupported_response_format");
+    CHECK(response->status == 200);
+    CHECK(response->get_header_value("Content-Type") == "audio/wav");
+    CHECK(response->body == "RIFF");
     const auto usage = ts.stats_db.model_usage();
     REQUIRE(usage.size() == 1);
     CHECK(usage[0].model == "speech-model");
-    CHECK(usage[0].requests == 2);
-    CHECK(usage[0].successful_requests == 1);
-    CHECK(usage[0].input_characters == 5);
+    CHECK(usage[0].requests == 3);
+    CHECK(usage[0].successful_requests == 2);
+    CHECK(usage[0].input_characters == 10);
     CHECK(usage[0].input_audio_seconds == 0.0);
     ts.stop();
 }
@@ -1276,6 +1279,36 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     CHECK(usage[0].successful_requests == 5);
     CHECK(usage[0].input_audio_seconds == Catch::Approx(0.05));
     CHECK(usage[0].input_characters == 0);
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/audio/transcriptions accepts Open WebUI MP3", "[routes][transcriptions]") {
+    TestServer ts;
+    auto info = make_info("whisper-model");
+    info.runtime = "whisper_cpp";
+    info.modality = "audio_transcription";
+    info.capabilities = {"audio_transcription"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("whisper-model"));
+    REQUIRE(ts.start());
+
+    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "libs/third_party/llama.cpp/tools/mtmd/test-2.mp3";
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    const std::string audio(std::istreambuf_iterator<char>{input}, {});
+    REQUIRE_FALSE(audio.empty());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto response = client.Post(
+        "/v1/audio/transcriptions", httplib::UploadFormDataItems{
+            {"file", audio, "voice-mode.mp3", "audio/mpeg"},
+            {"model", "whisper-model", "", ""},
+            {"language", "en", "", ""},
+        });
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body)["text"] == "test transcript");
     ts.stop();
 }
 
@@ -1701,6 +1734,39 @@ TEST_CASE("ensure_model_loaded: load failure is returned after completion",
     REQUIRE(result.status == 503);
     REQUIRE(result.code == "swap_failed");
     REQUIRE(result.message == "model load failed: mock load failed");
+}
+
+TEST_CASE("ensure_model_loaded: active GPU capacity is reported as transient",
+          "[routes][swap][residency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto model = std::make_unique<IModelMock>(info);
+        model->vram_mb.store(info.vram_required_mb);
+        return model;
+    });
+    auto active = make_info("gemma");
+    active.vram_required_mb = 5000;
+    auto waiting = make_info("qwen");
+    waiting.vram_required_mb = 5000;
+    registry.register_model(active);
+    registry.register_model(waiting);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.load("gemma"));
+    auto slot = coordinator.acquire_slot("gemma");
+    REQUIRE(slot);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+
+    const auto result = ensure_model_loaded(deps, "qwen");
+
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.status == 503);
+    REQUIRE(result.code == "capacity_busy");
+    REQUIRE(result.error_code == ErrorCode::ResourceBusy);
+    REQUIRE(coordinator.release_slot("gemma", *slot));
 }
 
 TEST_CASE("SwapTracker owns the worker and joins it at destruction",

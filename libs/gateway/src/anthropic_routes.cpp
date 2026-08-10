@@ -973,10 +973,7 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
         opts.prepare = [&deps, &model_name] {
             auto loaded = ensure_model_loaded(deps, model_name);
             if (loaded.ok) return foundation::Ok();
-            const auto code = loaded.status == 404 ? foundation::ErrorCode::NotFound
-                : loaded.code == "model_not_loaded" ? foundation::ErrorCode::NotLoaded
-                : foundation::ErrorCode::Unavailable;
-            return foundation::Err<void>(code, loaded.message);
+            return foundation::Err<void>(loaded.error_code, loaded.message);
         };
         auto sr = deps.coordinator.acquire_slot(model_name, opts);
         if (!sr) {

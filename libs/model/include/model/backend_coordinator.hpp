@@ -130,6 +130,7 @@ private:
         time_point deadline{};
         std::function<bool()> cancelled{};
         bool preparing{false};
+        std::optional<std::uint64_t> retry_after_generation{};
     };
 
     struct ActiveLease {
@@ -163,6 +164,7 @@ private:
     std::condition_variable cv_;
     std::deque<SlotWaiter> waiters_;
     std::uint64_t next_waiter_id_{1};
+    std::uint64_t resource_generation_{0};
     std::size_t max_queue_size_{128};
     std::recursive_mutex swap_mutex_;
     std::atomic<bool> swap_in_progress_{false};

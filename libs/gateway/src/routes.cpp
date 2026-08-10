@@ -177,18 +177,27 @@ foundation::Result<void> perform_swap(const GatewayDeps& deps,
     publish_model_event(deps, result ? "ready" : (cancelled ? "cancelled" : "failed"),
                         from, target, elapsed, error);
     if (deps.swap_tracker) {
-        deps.swap_tracker->end(result.has_value(), error, cancelled);
+        deps.swap_tracker->end(
+            result.has_value(), error, cancelled,
+            result ? foundation::ErrorCode::Ok : result.error().code);
     }
     return result;
 }
 
 EnsureLoadedResult swap_start_error(const SwapStartResult& started) {
     const auto error = started.body.value("error", nlohmann::json::object());
+    const auto code = error.value("code", "swap_start_failed");
+    const auto error_code = started.status == 404
+        ? foundation::ErrorCode::NotFound
+        : started.status >= 500 && code == "swap_start_failed"
+            ? foundation::ErrorCode::Internal
+            : foundation::ErrorCode::Unavailable;
     return {
         false,
         started.status,
-        error.value("code", "swap_start_failed"),
+        code,
         error.value("message", "model swap could not be started"),
+        error_code,
     };
 }
 
@@ -498,7 +507,7 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
                 (info ? info->runtime : std::string("unknown")))};
     }
     auto current = deps.coordinator.get_loaded_model();
-    if (current && *current == model_name) {
+    if (deps.coordinator.is_loaded(model_name)) {
         return {200, {{"status", "ready"},
                       {"model", model_name},
                       {"message", "model already loaded"}}};
@@ -539,26 +548,29 @@ EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
                                        const std::string& model_name) {
     if (maintenance_mode_active(deps)) {
         return {false, 503, "maintenance_mode",
-                "measured model optimization is running; retry after it restores the active profile"};
+                "measured model optimization is running; retry after it restores the active profile",
+                foundation::ErrorCode::Unavailable};
     }
     if (deps.coordinator.is_loaded(model_name)) {
-        return {true, 200, "", ""};
+        return {true, 200, "", "", foundation::ErrorCode::Ok};
     }
     if (!deps.auto_swap) {
         return {false, 503, "model_not_loaded",
-                "model not loaded; POST /v1/swap/to/" + model_name + " then retry"};
+                "model not loaded; POST /v1/swap/to/" + model_name + " then retry",
+                foundation::ErrorCode::NotLoaded};
     }
 
     if (!deps.swap_tracker) {
         return {false, 503, "swap_executor_unavailable",
-                "model swap executor is unavailable"};
+                "model swap executor is unavailable",
+                foundation::ErrorCode::Unavailable};
     }
 
     LOG_INFO("auto_swap_begin", "requested={}", model_name);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes{5};
     while (std::chrono::steady_clock::now() < deadline) {
         if (deps.coordinator.is_loaded(model_name)) {
-            return {true, 200, "", ""};
+            return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
 
         auto started = start_swap_async(deps, model_name);
@@ -568,28 +580,33 @@ EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
         }
 
         if (deps.coordinator.is_loaded(model_name)) {
-            return {true, 200, "", ""};
+            return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
         if (!deps.swap_tracker->wait_until_idle(deadline)) {
             break;
         }
 
         if (deps.coordinator.is_loaded(model_name)) {
-            return {true, 200, "", ""};
+            return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
         const auto snap = deps.swap_tracker->snapshot();
         if (snap.target == model_name) {
             if (snap.last_cancelled) {
                 return {false, 503, "swap_cancelled",
-                        "model load was cancelled: " + model_name};
+                        "model load was cancelled: " + model_name,
+                        foundation::ErrorCode::Cancelled};
             }
             if (!snap.last_error.empty()) {
-                return {false, 503, "swap_failed",
-                        "model load failed: " + snap.last_error};
+                return {false, 503,
+                        snap.last_error_code == foundation::ErrorCode::ResourceBusy
+                            ? "capacity_busy" : "swap_failed",
+                        "model load failed: " + snap.last_error,
+                        snap.last_error_code};
             }
         }
     }
-    return {false, 503, "swap_timeout", "model load timed out: " + model_name};
+    return {false, 503, "swap_timeout", "model load timed out: " + model_name,
+            foundation::ErrorCode::Timeout};
 }
 
 void handle_swap_to(const httplib::Request& req, httplib::Response& resp,
@@ -716,10 +733,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         opts.prepare = [&deps, &model_name] {
             auto loaded = ensure_model_loaded(deps, model_name);
             if (loaded.ok) return foundation::Ok();
-            const auto code = loaded.status == 404 ? foundation::ErrorCode::NotFound
-                : loaded.code == "model_not_loaded" ? foundation::ErrorCode::NotLoaded
-                : foundation::ErrorCode::Unavailable;
-            return foundation::Err<void>(code, loaded.message);
+            return foundation::Err<void>(loaded.error_code, loaded.message);
         };
         auto sr = deps.coordinator.acquire_slot(model_name, opts);
         if (!sr) {

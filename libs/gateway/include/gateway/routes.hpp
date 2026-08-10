@@ -69,6 +69,7 @@ struct EnsureLoadedResult {
     int status{503};
     std::string code{};
     std::string message{};
+    foundation::ErrorCode error_code{foundation::ErrorCode::Unavailable};
 };
 
 // Ensure `model_name` is loaded, waiting out any in-progress swap (e.g. two

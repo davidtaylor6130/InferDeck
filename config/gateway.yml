@@ -23,7 +23,7 @@ model_store:
   root: "models/store"
   hf_token: ""
 
-default_model: "qwen3.6-27b"
+default_model: "gemma-4-31b"
 
 observability:
   # Keep lifetime usage independent of the Windows service account and cwd.
@@ -116,6 +116,20 @@ model_registry:
       joiner: "C:/InferDeck/models/stt/parakeet-tdt-0.6b-v3/joiner.int8.onnx"
       tokens: "C:/InferDeck/models/stt/parakeet-tdt-0.6b-v3/tokens.txt"
       model_type: "nemo_transducer"
+      provider: "cpu"
+      num_threads: "4"
+
+  - name: "whisper-base-en"
+    family: "whisper"
+    runtime: "whisper_cpp"
+    modality: "audio_transcription"
+    capabilities:
+      - "audio_transcription"
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 0
+    artifacts:
+      model: "E:/InferDeck/models/stt/whisper/ggml-base.en.bin"
       provider: "cpu"
       num_threads: "4"
 
@@ -250,7 +264,7 @@ model_registry:
     mmproj_path: "C:/Inferdeck/models/unsloth/gemma-4-31B-it-GGUF/mmproj-BF16.gguf"
     n_slots: 1
     vram_required_mb: 29000
-    context_size: 65536
+    context_size: 262144
     has_vision: false
     sampling:
       temperature: 1.0

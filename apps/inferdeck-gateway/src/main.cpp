@@ -720,8 +720,14 @@ int run_gateway(const fs::path& config_path) {
     CorsMiddleware cors(cfg.cors_origins);
 
     if (!cfg.default_model.empty() && registry.has(cfg.default_model)) {
-        LOG_INFO("default_model_deferred", "name={} (deferred until P10 LlamaCppModel lands)",
-                 cfg.default_model);
+        LOG_INFO("default_model_load_begin", "name={}", cfg.default_model);
+        auto loaded = coordinator.load(cfg.default_model);
+        if (loaded) {
+            LOG_INFO("default_model_load_complete", "name={}", cfg.default_model);
+        } else {
+            LOG_ERROR("default_model_load_failed", "name={} error={}",
+                      cfg.default_model, loaded.error().message);
+        }
     }
 
     httplib::Server server;

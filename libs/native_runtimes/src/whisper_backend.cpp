@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <charconv>
 #include <cmath>
 #include <filesystem>
 #include <memory>
@@ -25,6 +26,29 @@ model::ModelInfo transcription_info(model::ModelInfo info) {
     info.n_slots = 1;
     info.min_slots = 1;
     return info;
+}
+
+std::string artifact(const model::ModelInfo& info, const std::string& key) {
+    const auto found = info.artifacts.find(key);
+    return found == info.artifacts.end() ? std::string{} : found->second;
+}
+
+foundation::Result<int> thread_count(const model::ModelInfo& info) {
+    const auto configured = artifact(info, "num_threads");
+    if (configured.empty()) {
+        return foundation::Ok(static_cast<int>(
+            std::min(4U, std::max(1U, std::thread::hardware_concurrency()))));
+    }
+    int value = 0;
+    const auto [end, error] = std::from_chars(
+        configured.data(), configured.data() + configured.size(), value);
+    if (error != std::errc{} || end != configured.data() + configured.size() ||
+        value < 1 || value > 64) {
+        return foundation::Err<int>(
+            foundation::ErrorCode::InvalidArgument,
+            "whisper.cpp num_threads must be an integer between 1 and 64");
+    }
+    return foundation::Ok(value);
 }
 
 std::vector<float> resample(const std::vector<float>& input, int input_rate) {
@@ -66,7 +90,10 @@ class WhisperBackend final : public model::FixedBackend, public model::ITranscri
 public:
     explicit WhisperBackend(model::ModelInfo info)
         : FixedBackend(transcription_info(std::move(info))),
-          model_path_(info_.artifacts.contains("model") ? info_.artifacts.at("model") : info_.gguf_path) {}
+          model_path_(info_.artifacts.contains("model") ? info_.artifacts.at("model") : info_.gguf_path),
+          provider_(artifact(info_, "provider")) {
+        if (provider_.empty()) provider_ = "cpu";
+    }
 
     ~WhisperBackend() override { release_context(); }
 
@@ -77,11 +104,18 @@ public:
         if (!std::filesystem::is_regular_file(model_path_)) {
             return foundation::Err<void>(foundation::ErrorCode::NotFound, "whisper.cpp model artifact was not found: " + model_path_);
         }
+        if (provider_ != "cpu" && provider_ != "gpu" && provider_ != "auto") {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "whisper.cpp provider must be cpu, gpu, or auto");
+        }
+        auto threads = thread_count(info_);
+        if (!threads) return foundation::Err<void>(threads.error().code, threads.error().message);
+        n_threads_ = *threads;
         auto params = whisper_context_default_params();
-        params.use_gpu = true;
-        params.flash_attn = true;
+        params.use_gpu = provider_ != "cpu";
+        params.flash_attn = params.use_gpu;
         context_ = whisper_init_from_file_with_params(model_path_.c_str(), params);
-        if (!context_) {
+        if (!context_ && provider_ == "auto") {
             params.use_gpu = false;
             params.flash_attn = false;
             context_ = whisper_init_from_file_with_params(model_path_.c_str(), params);
@@ -118,7 +152,7 @@ public:
         }
         auto pcm = resample(request.pcm, request.sample_rate);
         auto params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-        params.n_threads = static_cast<int>(std::max(1U, std::thread::hardware_concurrency()));
+        params.n_threads = n_threads_;
         params.language = language.empty() || language == "auto" ? nullptr : language.c_str();
         params.detect_language = language.empty() || language == "auto";
         params.initial_prompt = request.prompt.empty() ? nullptr : request.prompt.c_str();
@@ -185,6 +219,8 @@ private:
 
     whisper_context* context_{nullptr};
     std::string model_path_;
+    std::string provider_;
+    int n_threads_{1};
 };
 
 }

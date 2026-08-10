@@ -987,7 +987,7 @@ TEST_CASE("BackendCoordinator: shrinks idle capacity before loading", "[model][c
     REQUIRE(coordinator.get_vram_usage() == 9000);
 }
 
-TEST_CASE("BackendCoordinator: active model cannot be shrunk or evicted", "[model][coordinator][residency]") {
+TEST_CASE("BackendCoordinator: active model defers eviction", "[model][coordinator][residency]") {
     ModelRegistry reg;
     reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
         auto backend = std::make_unique<IModelMock>(i);
@@ -1010,10 +1010,194 @@ TEST_CASE("BackendCoordinator: active model cannot be shrunk or evicted", "[mode
     REQUIRE(slot.has_value());
     auto result = coordinator.swap_to("b");
     REQUIRE_FALSE(result.has_value());
-    REQUIRE(result.error().code == ErrorCode::OutOfMemory);
+    REQUIRE(result.error().code == ErrorCode::ResourceBusy);
     REQUIRE(coordinator.is_loaded("a"));
     REQUIRE_FALSE(coordinator.is_loaded("b"));
     REQUIRE(coordinator.release_slot("a", *slot).has_value());
+}
+
+TEST_CASE("BackendCoordinator: impossible residency remains a hard VRAM error",
+          "[model][coordinator][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        return backend;
+    });
+    auto model = make_info("too-large");
+    model.vram_required_mb = 10000;
+    reg.register_model(model);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+
+    auto result = coordinator.swap_to("too-large");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::OutOfMemory);
+}
+
+TEST_CASE("BackendCoordinator: capacity-blocked request stays queued until active release",
+          "[model][coordinator][queue][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto active = make_info("gemma");
+    active.vram_required_mb = 5000;
+    active.n_slots = 1;
+    active.min_slots = 1;
+    auto waiting = make_info("qwen");
+    waiting.vram_required_mb = 5000;
+    waiting.n_slots = 1;
+    waiting.min_slots = 1;
+    reg.register_model(active);
+    reg.register_model(waiting);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+
+    REQUIRE(coordinator.swap_to("gemma").has_value());
+    auto held = coordinator.acquire_slot("gemma");
+    REQUIRE(held.has_value());
+
+    Result<int> result = Err<int>(ErrorCode::Internal, "not run");
+    std::jthread waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        options.prepare = [&] { return coordinator.swap_to("qwen"); };
+        result = coordinator.acquire_slot("qwen", options);
+    });
+    for (int attempt = 0; attempt < 500 &&
+         coordinator.last_resource_decision().find("waiting for active residency") ==
+             std::string::npos;
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    CHECK(coordinator.last_resource_decision().find("waiting for active residency") !=
+          std::string::npos);
+    CHECK_FALSE(coordinator.is_loaded("qwen"));
+    REQUIRE(coordinator.release_slot("gemma", *held).has_value());
+    waiter.join();
+
+    REQUIRE(result.has_value());
+    CHECK_FALSE(coordinator.is_loaded("gemma"));
+    CHECK(coordinator.is_loaded("qwen"));
+    REQUIRE(coordinator.release_slot("qwen", *result).has_value());
+}
+
+TEST_CASE("BackendCoordinator: VRAM pressure preserves zero-VRAM voice residency",
+          "[model][coordinator][residency][voice]") {
+    ModelRegistry reg;
+    const auto factory = [](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    };
+    reg.set_factory(factory);
+    reg.register_factory("sherpa_onnx", factory);
+    auto voice = make_info("voice");
+    voice.runtime = "sherpa_onnx";
+    voice.modality = "audio_speech";
+    voice.vram_required_mb = 0;
+    voice.n_slots = 1;
+    voice.min_slots = 1;
+    auto active = make_info("gemma");
+    active.vram_required_mb = 5000;
+    active.n_slots = 1;
+    active.min_slots = 1;
+    auto target = make_info("qwen");
+    target.vram_required_mb = 5000;
+    target.n_slots = 1;
+    target.min_slots = 1;
+    reg.register_model(voice);
+    reg.register_model(active);
+    reg.register_model(target);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+
+    REQUIRE(coordinator.load("gemma").has_value());
+    REQUIRE(coordinator.load("voice").has_value());
+    CHECK(coordinator.get_loaded_model() == "gemma");
+    auto held = coordinator.acquire_slot("gemma");
+    REQUIRE(held.has_value());
+
+    auto blocked = coordinator.swap_to("qwen");
+    REQUIRE_FALSE(blocked.has_value());
+    CHECK(blocked.error().code == ErrorCode::ResourceBusy);
+    CHECK(coordinator.is_loaded("voice"));
+    CHECK(coordinator.get_loaded_model() == "gemma");
+
+    REQUIRE(coordinator.release_slot("gemma", *held).has_value());
+    REQUIRE(coordinator.swap_to("qwen").has_value());
+    CHECK(coordinator.is_loaded("voice"));
+    CHECK_FALSE(coordinator.is_loaded("gemma"));
+    CHECK(coordinator.is_loaded("qwen"));
+    CHECK(coordinator.get_loaded_model() == "qwen");
+}
+
+TEST_CASE("BackendCoordinator: resident voice bypasses a capacity-blocked LLM waiter",
+          "[model][coordinator][queue][residency][voice]") {
+    ModelRegistry reg;
+    const auto factory = [](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    };
+    reg.set_factory(factory);
+    reg.register_factory("sherpa_onnx", factory);
+    auto voice = make_info("voice");
+    voice.runtime = "sherpa_onnx";
+    voice.modality = "audio_speech";
+    voice.vram_required_mb = 0;
+    voice.n_slots = 1;
+    voice.min_slots = 1;
+    auto active = make_info("gemma");
+    active.vram_required_mb = 5000;
+    active.n_slots = 1;
+    active.min_slots = 1;
+    auto target = make_info("qwen");
+    target.vram_required_mb = 5000;
+    target.n_slots = 1;
+    target.min_slots = 1;
+    reg.register_model(voice);
+    reg.register_model(active);
+    reg.register_model(target);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.load("gemma"));
+    REQUIRE(coordinator.load("voice"));
+    auto held = coordinator.acquire_slot("gemma");
+    REQUIRE(held);
+
+    Result<int> qwen_slot = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        options.prepare = [&] { return coordinator.swap_to("qwen"); };
+        qwen_slot = coordinator.acquire_slot("qwen", options);
+    });
+    for (int attempt = 0; attempt < 100 &&
+         coordinator.last_resource_decision().find("waiting") == std::string::npos;
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    REQUIRE(coordinator.last_resource_decision().find("waiting") != std::string::npos);
+
+    AcquireSlotOptions voice_options;
+    voice_options.timeout = std::chrono::milliseconds{100};
+    auto voice_slot = coordinator.acquire_slot("voice", voice_options);
+    REQUIRE(voice_slot);
+    REQUIRE(coordinator.release_slot("voice", *voice_slot));
+    REQUIRE(coordinator.release_slot("gemma", *held));
+    waiter.join();
+    REQUIRE(qwen_slot);
+    REQUIRE(coordinator.release_slot("qwen", *qwen_slot));
 }
 
 TEST_CASE("BackendCoordinator: evicts idle model only after resize options", "[model][coordinator][residency]") {

@@ -41,13 +41,14 @@ foundation::Result<void> BackendCoordinator::load(const std::string& name) {
     std::lock_guard<std::recursive_mutex> swap_lock(swap_mutex_);
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (current_loaded_.has_value() && *current_loaded_ == name) {
-            auto it = instances_.find(name);
-            if (it != instances_.end() && it->second && it->second->is_loaded()) {
-                return foundation::Ok();
-            }
-        }
         auto existing = instances_.find(name);
+        if (existing != instances_.end() && existing->second &&
+            existing->second->is_loaded()) {
+            if (existing->second->estimate_vram_mb(existing->second->n_slots()) > 0) {
+                current_loaded_ = name;
+            }
+            return foundation::Ok();
+        }
         if (existing == instances_.end() || !existing->second) {
             auto backend = registry_.create_result(name);
             if (!backend) {
@@ -61,7 +62,10 @@ foundation::Result<void> BackendCoordinator::load(const std::string& name) {
     if (!r) return r;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        current_loaded_ = name;
+        if (inst->estimate_vram_mb(inst->n_slots()) > 0) {
+            current_loaded_ = name;
+            ++resource_generation_;
+        }
     }
     cv_.notify_all();
     (void)inst->reset_all_slots();
@@ -85,6 +89,7 @@ foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
     auto drain_deadline = clock::now() + std::chrono::milliseconds{30000};
     std::unique_ptr<IBackend> instance;
     bool was_primary = false;
+    int released_vram = 0;
     {
         std::unique_lock<std::mutex> lock(mutex_);
         draining_models_.insert(name);
@@ -104,6 +109,7 @@ foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
         }
         auto it = instances_.find(name);
         if (it != instances_.end() && it->second) {
+            released_vram = it->second->estimate_vram_mb(it->second->n_slots());
             instance = std::move(it->second);
             instances_.erase(it);
         }
@@ -124,32 +130,20 @@ foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
         }
         if (r) active_requests_by_model_.erase(name);
         draining_models_.erase(name);
+        if (r && released_vram > 0) ++resource_generation_;
     }
     cv_.notify_all();
     return r;
 }
 
 foundation::Result<void> BackendCoordinator::ensure_loaded(const std::string& name) {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (current_loaded_.has_value() && *current_loaded_ == name) {
-            auto it = instances_.find(name);
-            if (it != instances_.end() && it->second && it->second->is_loaded()) {
-                return foundation::Ok();
-            }
-        }
-    }
+    if (is_loaded(name)) return foundation::Ok();
     return load(name);
 }
 
 foundation::Result<void> BackendCoordinator::swap_to(const std::string& name) {
   std::lock_guard<std::recursive_mutex> swap_lock(swap_mutex_);
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (current_loaded_.has_value() && *current_loaded_ == name) {
-      return foundation::Ok();
-    }
-  }
+  if (is_loaded(name)) return foundation::Ok();
   if (vram_budget_mb() <= 0) {
     auto drain_r = unload_current();
     if (!drain_r) return drain_r;
@@ -180,12 +174,7 @@ foundation::Result<void> BackendCoordinator::swap_to(const std::string& name) {
 foundation::Result<void> BackendCoordinator::swap_to_cancellable(
     const std::string& name, std::chrono::milliseconds timeout) {
   std::lock_guard<std::recursive_mutex> swap_lock(swap_mutex_);
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (current_loaded_.has_value() && *current_loaded_ == name) {
-      return foundation::Ok();
-    }
-  }
+  if (is_loaded(name)) return foundation::Ok();
   if (swap_cancel_.load()) {
     reset_swap_cancel();
     return foundation::Err(foundation::ErrorCode::Cancelled, "swap cancelled before start");
@@ -258,9 +247,19 @@ int BackendCoordinator::get_vram_usage() const {
 }
 
 void BackendCoordinator::set_vram_budget(int total_mb, int safety_margin_mb) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    vram_budget_mb_ = std::max(0, total_mb);
-    vram_safety_margin_mb_ = std::max(0, safety_margin_mb);
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int budget = std::max(0, total_mb);
+        const int margin = std::max(0, safety_margin_mb);
+        changed = budget != vram_budget_mb_ || margin != vram_safety_margin_mb_;
+        if (changed) {
+            vram_budget_mb_ = budget;
+            vram_safety_margin_mb_ = margin;
+            ++resource_generation_;
+        }
+    }
+    if (changed) cv_.notify_all();
 }
 
 int BackendCoordinator::vram_budget_mb() const {
@@ -319,7 +318,7 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
     }
     const std::uint64_t waiter_id = next_waiter_id_++;
     waiters_.push_back({waiter_id, name, std::clamp(opts.priority, -100, 100),
-                        clock::now(), deadline, opts.cancelled, false});
+                        clock::now(), deadline, opts.cancelled, false, std::nullopt});
     while (true) {
         const auto now = clock::now();
         if (opts.cancelled && opts.cancelled()) {
@@ -343,8 +342,16 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             if (opts.prepare && waiter_is_next_locked(waiter_id, now)) {
                 auto waiter = std::find_if(waiters_.begin(), waiters_.end(),
                     [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
+                if (waiter != waiters_.end() && waiter->retry_after_generation &&
+                    *waiter->retry_after_generation == resource_generation_) {
+                    cv_.wait_until(lock, std::min(
+                        deadline, now + std::chrono::milliseconds{100}));
+                    continue;
+                }
                 if (waiter != waiters_.end() && !waiter->preparing) {
+                    waiter->retry_after_generation.reset();
                     waiter->preparing = true;
+                    const auto generation_before = resource_generation_;
                     lock.unlock();
                     auto prepared = opts.prepare();
                     lock.lock();
@@ -352,6 +359,13 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
                         [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
                     if (waiter != waiters_.end()) waiter->preparing = false;
                     if (!prepared) {
+                        if (prepared.error().code == foundation::ErrorCode::ResourceBusy) {
+                            if (waiter != waiters_.end() &&
+                                resource_generation_ == generation_before) {
+                                waiter->retry_after_generation = generation_before;
+                            }
+                            continue;
+                        }
                         erase_waiter_locked(waiter_id);
                         cv_.notify_all();
                         return foundation::Err<int>(prepared.error().code, prepared.error().message);
@@ -412,6 +426,9 @@ foundation::Result<void> BackendCoordinator::release_slot(
         if (active_requests_ > 0) --active_requests_;
         auto active = active_requests_by_model_.find(name);
         if (active != active_requests_by_model_.end() && active->second > 0) --active->second;
+        if (it->second->estimate_vram_mb(it->second->n_slots()) > 0) {
+            ++resource_generation_;
+        }
     }
     cv_.notify_all();
     return foundation::Ok();
@@ -455,6 +472,10 @@ bool BackendCoordinator::waiter_is_next_locked(std::uint64_t id, time_point now)
     const SlotWaiter* selected = nullptr;
     std::int64_t selected_score = 0;
     for (const auto& waiter : waiters_) {
+        if (waiter.retry_after_generation &&
+            *waiter.retry_after_generation == resource_generation_) {
+            continue;
+        }
         const auto age = std::chrono::duration_cast<std::chrono::seconds>(now - waiter.enqueued).count();
         const auto score = static_cast<std::int64_t>(waiter.priority) + age;
         if (!selected || score > selected_score || (score == selected_score && waiter.id < selected->id)) {
@@ -684,10 +705,17 @@ int BackendCoordinator::available_vram_locked() const {
 }
 
 void BackendCoordinator::select_primary_locked() {
+    current_loaded_.reset();
+    int selected_vram = 0;
     for (const auto& [name, backend] : instances_) {
         if (backend && backend->is_loaded()) {
+            const int vram = backend->estimate_vram_mb(backend->n_slots());
+            if (vram <= 0 || vram < selected_vram ||
+                (vram == selected_vram && current_loaded_ && name > *current_loaded_)) {
+                continue;
+            }
             current_loaded_ = name;
-            return;
+            selected_vram = vram;
         }
     }
 }
@@ -719,6 +747,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::str
                 const auto active = active_requests_by_model_.find(loaded_name);
                 if (loaded_name == name || !backend || !backend->is_loaded() ||
                     (active != active_requests_by_model_.end() && active->second > 0) ||
+                    backend->estimate_vram_mb(backend->n_slots()) <= 0 ||
                     !backend->can_resize_slots() || backend->n_slots() <= backend->min_slots()) continue;
                 candidate = loaded_name;
                 next_slots = backend->n_slots() - 1;
@@ -739,6 +768,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::str
             if (resized) {
                 last_resource_decision_ = "shrunk " + candidate + " to " +
                     std::to_string(next_slots) + " slots for " + name;
+                ++resource_generation_;
             }
         }
         cv_.notify_all();
@@ -747,15 +777,19 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::str
 
     while (true) {
         std::string candidate;
+        int candidate_vram = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (available_vram_locked() >= required) return foundation::Ok();
             for (const auto& [loaded_name, backend] : instances_) {
                 const auto active = active_requests_by_model_.find(loaded_name);
+                const int estimated = backend && backend->is_loaded()
+                    ? backend->estimate_vram_mb(backend->n_slots()) : 0;
                 if (loaded_name != name && backend && backend->is_loaded() &&
+                    estimated > candidate_vram &&
                     (active == active_requests_by_model_.end() || active->second == 0)) {
                     candidate = loaded_name;
-                    break;
+                    candidate_vram = estimated;
                 }
             }
         }
@@ -769,10 +803,33 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::str
     }
 
     int available = 0;
+    int maximum_available = 0;
+    bool blocked_by_active = false;
+    std::string blockers;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         available = available_vram_locked();
-        last_resource_decision_ = "insufficient VRAM for " + name;
+        for (const auto& [loaded_name, backend] : instances_) {
+            const auto active = active_requests_by_model_.find(loaded_name);
+            if (!backend || !backend->is_loaded() ||
+                backend->estimate_vram_mb(backend->n_slots()) <= 0 ||
+                active == active_requests_by_model_.end() || active->second <= 0) {
+                continue;
+            }
+            if (!blockers.empty()) blockers += ",";
+            blockers += loaded_name;
+            blocked_by_active = true;
+        }
+        maximum_available = std::max(0, vram_budget_mb_ - vram_safety_margin_mb_);
+        if (blocked_by_active && required <= maximum_available) {
+            last_resource_decision_ = "waiting for active residency before loading " + name;
+        } else {
+            last_resource_decision_ = "insufficient VRAM for " + name;
+        }
+    }
+    if (blocked_by_active && required <= maximum_available) {
+        return foundation::Err<void>(foundation::ErrorCode::ResourceBusy,
+            "VRAM capacity for " + name + " is temporarily held by active model(s): " + blockers);
     }
     return foundation::Err<void>(foundation::ErrorCode::OutOfMemory,
         "insufficient VRAM for " + name + ": required_mb=" + std::to_string(required) +
