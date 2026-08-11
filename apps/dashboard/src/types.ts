@@ -55,7 +55,7 @@ export interface StatsEvent {
 }
 
 export interface ModelEvent {
-  state: 'swapping' | 'ready' | 'failed' | 'cancelled' | 'unloaded';
+  state: 'swapping' | 'waiting' | 'ready' | 'failed' | 'cancelled' | 'unloaded';
   from: string;
   to: string;
   durationMs: number;

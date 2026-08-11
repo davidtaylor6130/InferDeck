@@ -964,14 +964,20 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
 
     int slot_id = -1;
     {
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::minutes{5};
+        const std::function<bool()> cancelled = [&req] {
+            return req.is_connection_closed();
+        };
         model::AcquireSlotOptions opts;
         opts.timeout = std::chrono::minutes{5};
         opts.block = true;
         opts.priority = body.contains("priority") && body["priority"].is_number_integer()
             ? std::clamp(body["priority"].get<int>(), -100, 100) : 0;
-        opts.cancelled = [&req] { return req.is_connection_closed(); };
-        opts.prepare = [&deps, &model_name] {
-            auto loaded = ensure_model_loaded(deps, model_name);
+        opts.cancelled = cancelled;
+        opts.prepare = [&deps, &model_name, deadline, cancelled] {
+            auto loaded = ensure_model_loaded(
+                deps, model_name, deadline, cancelled);
             if (loaded.ok) return foundation::Ok();
             return foundation::Err<void>(loaded.error_code, loaded.message);
         };

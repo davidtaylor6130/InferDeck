@@ -83,6 +83,27 @@ inferdeck::model::TranscriptionRequest load_wav(const std::string& path) {
 
 }
 
+TEST_CASE("Whisper GPU providers require VRAM accounting",
+          "[native-runtimes][whisper]") {
+    inferdeck::model::ModelRegistry registry;
+    inferdeck::native_runtimes::register_factories(registry);
+    inferdeck::model::ModelInfo info;
+    info.name = "whisper-gpu-unaccounted";
+    info.runtime = "whisper_cpp";
+    info.modality = "audio_transcription";
+    info.artifacts["model"] = "missing.gguf";
+    info.artifacts["provider"] = "gpu";
+    info.vram_required_mb = 0;
+    registry.register_model(info);
+
+    auto created = registry.create_result(info.name);
+    REQUIRE(created);
+    const auto loaded = created.value()->load();
+    REQUIRE_FALSE(loaded);
+    CHECK(loaded.error().code == inferdeck::foundation::ErrorCode::InvalidArgument);
+    CHECK(loaded.error().message.find("VRAM accounting") != std::string::npos);
+}
+
 TEST_CASE("Whisper runtime transcribes a real WAV in-process", "[native-runtimes][whisper][integration]") {
     const char* model_path = std::getenv("INFERDECK_WHISPER_TEST_MODEL");
     const char* audio_path = std::getenv("INFERDECK_WHISPER_TEST_AUDIO");

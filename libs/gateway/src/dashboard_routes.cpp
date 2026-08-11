@@ -497,7 +497,13 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
     std::sort(latencies.begin(), latencies.end());
 
     const auto swap = deps.gw.swap_tracker ? deps.gw.swap_tracker->snapshot() : SwapSnapshot{};
-    auto loaded = coordinator.get_loaded_model();
+    bool gpu_locked = false;
+    std::string gpu_lock_owner;
+    for (const auto& item : coordinator.residency()) {
+        if (item.active_requests <= 0 || item.estimated_vram_mb <= 0) continue;
+        gpu_locked = true;
+        if (gpu_lock_owner.empty() || item.primary) gpu_lock_owner = item.name;
+    }
     auto model_json = build_dashboard_models(coordinator);
     nlohmann::json queued_requests = nlohmann::json::array();
     for (const auto& item : coordinator.queue()) {
@@ -516,8 +522,8 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
             {"running", coordinator.active_request_count()},
             {"queued", coordinator.queued_request_count()},
             {"requests", queued_requests},
-            {"gpuLocked", coordinator.active_request_count() > 0},
-            {"lockOwner", loaded.value_or("")},
+            {"gpuLocked", gpu_locked},
+            {"lockOwner", gpu_lock_owner},
             {"vramBudgetMb", coordinator.vram_budget_mb()},
             {"vramAvailableMb", coordinator.vram_available_mb()},
             {"resourceDecision", coordinator.last_resource_decision()},
@@ -527,7 +533,7 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
             {"target", swap.target},
             {"from", swap.from},
             {"startedUnixMs", swap.started_unix_ms},
-            {"lastError", swap.last_error}
+            {"lastError", swap.last_deferred ? std::string{} : swap.last_error}
         }},
         {"hardware", hardware},
         {"summary", {

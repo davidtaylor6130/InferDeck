@@ -46,6 +46,7 @@ struct GatewayConfig {
     int vram_budget_mb{0};
     int vram_safety_margin_mb{1024};
     int max_queue_size{128};
+    int voice_session_grace_ms{15000};
     model::SamplingConfig sampling{};  // global sampler defaults (issue #42)
     std::map<std::string, std::string> anthropic_model_aliases{};
     std::string model_store_root{"models/store"};
@@ -164,6 +165,12 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  std::string("gateway.") + key + " must be positive");
                 }
+            }
+            if (gateway["voice_session_grace_ms"] &&
+                (gateway["voice_session_grace_ms"].as<int>() < 1000 ||
+                 gateway["voice_session_grace_ms"].as<int>() > 120000)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.voice_session_grace_ms must be between 1000 and 120000");
             }
             if (gateway["n_batch"] && gateway["n_ubatch"] &&
                 gateway["n_ubatch"].as<int>() > gateway["n_batch"].as<int>()) {
@@ -437,6 +444,7 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["vram_budget_mb"]) cfg.vram_budget_mb = g["vram_budget_mb"].as<int>();
         if (g["vram_safety_margin_mb"]) cfg.vram_safety_margin_mb = g["vram_safety_margin_mb"].as<int>();
         if (g["max_queue_size"]) cfg.max_queue_size = g["max_queue_size"].as<int>();
+        if (g["voice_session_grace_ms"]) cfg.voice_session_grace_ms = g["voice_session_grace_ms"].as<int>();
         if (g["sampling"]) parse_sampling(g["sampling"], cfg.sampling);
     }
     if (root["anthropic"] && root["anthropic"]["model_aliases"] &&

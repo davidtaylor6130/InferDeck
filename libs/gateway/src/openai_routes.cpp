@@ -50,12 +50,18 @@ std::string base64_floats(const std::vector<float>& values) {
 foundation::Result<int> acquire_for_request(
     const httplib::Request& req, const GatewayDeps& deps,
     const std::string& model_name, int priority) {
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::minutes{5};
+    const std::function<bool()> cancelled = [&req] {
+        return req.is_connection_closed();
+    };
     model::AcquireSlotOptions options;
     options.timeout = std::chrono::minutes{5};
     options.priority = std::clamp(priority, -100, 100);
-    options.cancelled = [&req] { return req.is_connection_closed(); };
-    options.prepare = [&deps, &model_name] {
-        auto loaded = ensure_model_loaded(deps, model_name);
+    options.cancelled = cancelled;
+    options.prepare = [&deps, &model_name, deadline, cancelled] {
+        auto loaded = ensure_model_loaded(
+            deps, model_name, deadline, cancelled);
         if (loaded.ok) return foundation::Ok();
         return foundation::Err<void>(loaded.error_code, loaded.message);
     };

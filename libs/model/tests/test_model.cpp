@@ -31,6 +31,8 @@ public:
     std::atomic<bool> load_should_fail{false};
     std::atomic<bool> unload_should_fail{false};
     std::atomic<int> load_delay_ms{0};
+    std::atomic<bool> load_started{false};
+    std::function<void()> load_gate{};
     std::atomic<bool> loaded{false};
     std::atomic<int> vram_mb{4096};
     std::atomic<int> max_slots{2};
@@ -56,9 +58,11 @@ public:
 
     Result<void> load() override {
         record("load");
+        load_started.store(true);
         if (load_should_fail.load()) {
             return Err<void>(ErrorCode::Internal, "mock load failure");
         }
+        if (load_gate) load_gate();
         int delay = load_delay_ms.load();
         if (delay > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delay));
@@ -1198,6 +1202,514 @@ TEST_CASE("BackendCoordinator: resident voice bypasses a capacity-blocked LLM wa
     waiter.join();
     REQUIRE(qwen_slot);
     REQUIRE(coordinator.release_slot("qwen", *qwen_slot));
+}
+
+TEST_CASE("BackendCoordinator: resident voice bypasses a preparing LLM waiter",
+          "[model][coordinator][queue][residency][voice]") {
+    ModelRegistry reg;
+    const auto factory = [](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        if (i.name == "qwen") backend->load_delay_ms.store(300);
+        return backend;
+    };
+    reg.set_factory(factory);
+    reg.register_factory("sherpa_onnx", factory);
+    auto voice = make_info("voice");
+    voice.runtime = "sherpa_onnx";
+    voice.modality = "audio_speech";
+    voice.vram_required_mb = 0;
+    voice.n_slots = 1;
+    voice.min_slots = 1;
+    auto active = make_info("gemma");
+    active.vram_required_mb = 5000;
+    active.n_slots = 1;
+    active.min_slots = 1;
+    auto target = make_info("qwen");
+    target.vram_required_mb = 5000;
+    target.n_slots = 1;
+    target.min_slots = 1;
+    reg.register_model(voice);
+    reg.register_model(active);
+    reg.register_model(target);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.load("gemma"));
+    REQUIRE(coordinator.load("voice"));
+    auto held = coordinator.acquire_slot("gemma");
+    REQUIRE(held);
+
+    Result<int> qwen_slot = Err<int>(ErrorCode::Internal, "not completed");
+    std::atomic<bool> qwen_acquired{false};
+    std::jthread waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        options.prepare = [&] { return coordinator.swap_to("qwen"); };
+        qwen_slot = coordinator.acquire_slot("qwen", options);
+        qwen_acquired.store(qwen_slot.has_value());
+    });
+    for (int attempt = 0; attempt < 500 &&
+         coordinator.last_resource_decision().find("waiting") == std::string::npos;
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    REQUIRE(coordinator.last_resource_decision().find("waiting") != std::string::npos);
+    REQUIRE(coordinator.release_slot("gemma", *held));
+
+    IModelMock* qwen = nullptr;
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        qwen = const_cast<IModelMock*>(
+            dynamic_cast<const IModelMock*>(coordinator.get_backend("qwen")));
+        if (qwen && qwen->load_started.load() && !qwen->loaded.load()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    REQUIRE(qwen);
+    REQUIRE(qwen->load_started.load());
+    REQUIRE_FALSE(qwen->loaded.load());
+
+    AcquireSlotOptions voice_options;
+    voice_options.timeout = std::chrono::milliseconds{100};
+    auto voice_slot = coordinator.acquire_slot("voice", voice_options);
+    REQUIRE(voice_slot);
+    std::this_thread::sleep_for(std::chrono::milliseconds{350});
+    CHECK_FALSE(qwen_acquired.load());
+    REQUIRE(coordinator.release_slot("voice", *voice_slot));
+    waiter.join();
+    REQUIRE(qwen_slot);
+    REQUIRE(coordinator.release_slot("qwen", *qwen_slot));
+}
+
+TEST_CASE("BackendCoordinator: runnable voice bypasses a busy loaded waiter",
+          "[model][coordinator][queue][residency][voice]") {
+    ModelRegistry reg;
+    const auto factory = [](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    };
+    reg.set_factory(factory);
+    reg.register_factory("sherpa_onnx", factory);
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    auto voice = make_info("voice");
+    voice.runtime = "sherpa_onnx";
+    voice.modality = "audio_speech";
+    voice.vram_required_mb = 0;
+    voice.n_slots = 1;
+    voice.min_slots = 1;
+    reg.register_model(chat);
+    reg.register_model(voice);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("chat"));
+    REQUIRE(coordinator.load("voice"));
+    auto held = coordinator.acquire_slot("chat");
+    REQUIRE(held);
+
+    Result<int> queued = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        queued = coordinator.acquire_slot("chat", options);
+    });
+    for (int attempt = 0; attempt < 500 && coordinator.queued_request_count() == 0;
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    REQUIRE(coordinator.queued_request_count() == 1);
+
+    AcquireSlotOptions voice_options;
+    voice_options.timeout = std::chrono::milliseconds{100};
+    auto voice_slot = coordinator.acquire_slot("voice", voice_options);
+    REQUIRE(voice_slot);
+    REQUIRE(coordinator.release_slot("voice", *voice_slot));
+    REQUIRE(coordinator.release_slot("chat", *held));
+    waiter.join();
+    REQUIRE(queued);
+    REQUIRE(coordinator.release_slot("chat", *queued));
+}
+
+TEST_CASE("BackendCoordinator: one cold prepare completes before another can swap",
+          "[model][coordinator][queue][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        if (i.name == "a") backend->load_delay_ms.store(150);
+        return backend;
+    });
+    auto a = make_info("a");
+    a.vram_required_mb = 5000;
+    a.n_slots = 1;
+    a.min_slots = 1;
+    auto b = make_info("b");
+    b.vram_required_mb = 5000;
+    b.n_slots = 1;
+    b.min_slots = 1;
+    reg.register_model(a);
+    reg.register_model(b);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(5000, 0);
+
+    Result<int> a_slot = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread first([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        options.prepare = [&] { return coordinator.swap_to("a"); };
+        a_slot = coordinator.acquire_slot("a", options);
+    });
+    IModelMock* a_backend = nullptr;
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        a_backend = const_cast<IModelMock*>(
+            dynamic_cast<const IModelMock*>(coordinator.get_backend("a")));
+        if (a_backend && a_backend->load_started.load() &&
+            !a_backend->loaded.load()) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    REQUIRE(a_backend);
+    REQUIRE(a_backend->load_started.load());
+    REQUIRE_FALSE(a_backend->loaded.load());
+
+    Result<int> b_slot = Err<int>(ErrorCode::Internal, "not completed");
+    std::atomic<bool> b_acquired{false};
+    std::jthread second([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        options.priority = 100;
+        options.prepare = [&] { return coordinator.swap_to("b"); };
+        b_slot = coordinator.acquire_slot("b", options);
+        b_acquired.store(b_slot.has_value());
+    });
+    first.join();
+
+    REQUIRE(a_slot);
+    CHECK(coordinator.is_loaded("a"));
+    CHECK_FALSE(coordinator.is_loaded("b"));
+    CHECK_FALSE(b_acquired.load());
+    const auto* b_backend = dynamic_cast<const IModelMock*>(
+        coordinator.get_backend("b"));
+    CHECK((!b_backend || !b_backend->load_started.load()));
+
+    REQUIRE(coordinator.release_slot("a", *a_slot));
+    second.join();
+    REQUIRE(b_slot);
+    CHECK_FALSE(coordinator.is_loaded("a"));
+    CHECK(coordinator.is_loaded("b"));
+    REQUIRE(coordinator.release_slot("b", *b_slot));
+}
+
+TEST_CASE("BackendCoordinator: primary selection uses modality rather than VRAM",
+          "[model][coordinator][residency]") {
+    ModelRegistry reg;
+    const auto factory = [](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        return backend;
+    };
+    reg.set_factory(factory);
+    reg.register_factory("sherpa_onnx", factory);
+    auto gpu_text = make_info("gpu-text");
+    gpu_text.vram_required_mb = 4096;
+    auto cpu_text = make_info("cpu-text");
+    cpu_text.vram_required_mb = 0;
+    auto voice = make_info("voice");
+    voice.runtime = "sherpa_onnx";
+    voice.modality = "audio_speech";
+    voice.vram_required_mb = 0;
+    reg.register_model(gpu_text);
+    reg.register_model(cpu_text);
+    reg.register_model(voice);
+    BackendCoordinator coordinator(reg);
+
+    REQUIRE(coordinator.load("gpu-text"));
+    REQUIRE(coordinator.load("cpu-text"));
+    REQUIRE(coordinator.load("voice"));
+    CHECK(coordinator.get_loaded_model() == "cpu-text");
+    REQUIRE(coordinator.unload_current());
+    CHECK_FALSE(coordinator.is_loaded("cpu-text"));
+    CHECK(coordinator.is_loaded("gpu-text"));
+    CHECK(coordinator.is_loaded("voice"));
+    CHECK(coordinator.get_loaded_model() == "gpu-text");
+}
+
+TEST_CASE("BackendCoordinator: no-budget sidecar swap preserves the primary model",
+          "[model][coordinator][residency][voice]") {
+    ModelRegistry reg;
+    const auto factory = [](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        return backend;
+    };
+    reg.set_factory(factory);
+    reg.register_factory("sherpa_onnx", factory);
+    auto text = make_info("text");
+    text.vram_required_mb = 4096;
+    auto voice = make_info("voice");
+    voice.runtime = "sherpa_onnx";
+    voice.modality = "audio_speech";
+    voice.vram_required_mb = 0;
+    reg.register_model(text);
+    reg.register_model(voice);
+    BackendCoordinator coordinator(reg);
+
+    REQUIRE(coordinator.load("text"));
+    REQUIRE(coordinator.swap_to("voice"));
+    CHECK(coordinator.is_loaded("text"));
+    CHECK(coordinator.is_loaded("voice"));
+    CHECK(coordinator.get_loaded_model() == "text");
+}
+
+TEST_CASE("BackendCoordinator: cold sidecar acquires during a GPU prepare",
+          "[model][coordinator][residency][voice]") {
+    ModelRegistry reg;
+    auto allow_qwen = std::make_shared<std::atomic<bool>>(false);
+    auto allow_voice = std::make_shared<std::atomic<bool>>(false);
+    const auto factory = [allow_qwen, allow_voice](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        if (i.name == "qwen") {
+            backend->load_gate = [allow_qwen] {
+                while (!allow_qwen->load()) std::this_thread::yield();
+            };
+        }
+        if (i.name == "voice") {
+            backend->load_gate = [allow_voice] {
+                while (!allow_voice->load()) std::this_thread::yield();
+            };
+        }
+        return backend;
+    };
+    reg.set_factory(factory);
+    reg.register_factory("sherpa_onnx", factory);
+    auto qwen = make_info("qwen");
+    qwen.vram_required_mb = 5000;
+    auto voice = make_info("voice");
+    voice.runtime = "sherpa_onnx";
+    voice.modality = "audio_speech";
+    voice.vram_required_mb = 0;
+    reg.register_model(qwen);
+    reg.register_model(voice);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(5000, 0);
+
+    AcquireSlotOptions qwen_options;
+    qwen_options.timeout = std::chrono::seconds{1};
+    qwen_options.prepare = [&] { return coordinator.swap_to("qwen"); };
+    Result<int> qwen_slot = Err<int>(ErrorCode::Internal, "not completed");
+    std::atomic<bool> qwen_acquired{false};
+    std::jthread loader([&] {
+        qwen_slot = coordinator.acquire_slot("qwen", qwen_options);
+        qwen_acquired.store(qwen_slot.has_value());
+    });
+    IModelMock* qwen_backend = nullptr;
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        qwen_backend = const_cast<IModelMock*>(
+            dynamic_cast<const IModelMock*>(coordinator.get_backend("qwen")));
+        if (qwen_backend && qwen_backend->load_started.load() &&
+            !qwen_backend->loaded.load()) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    REQUIRE(qwen_backend);
+    REQUIRE(qwen_backend->load_started.load());
+    REQUIRE_FALSE(qwen_backend->loaded.load());
+    AcquireSlotOptions voice_options;
+    voice_options.timeout = std::chrono::seconds{1};
+    voice_options.priority = 100;
+    voice_options.prepare = [&] { return coordinator.swap_to("voice"); };
+    Result<int> voice_slot = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread voice_loader([&] {
+        voice_slot = coordinator.acquire_slot("voice", voice_options);
+    });
+    IModelMock* voice_backend = nullptr;
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        voice_backend = const_cast<IModelMock*>(
+            dynamic_cast<const IModelMock*>(coordinator.get_backend("voice")));
+        if (voice_backend && voice_backend->load_started.load()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    const bool voice_started_during_qwen_prepare =
+        voice_backend && voice_backend->load_started.load();
+    allow_qwen->store(true);
+    for (int attempt = 0; attempt < 500 && !qwen_backend->loaded.load(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    CHECK(voice_started_during_qwen_prepare);
+    CHECK(qwen_backend->loaded.load());
+    CHECK_FALSE(qwen_acquired.load());
+    allow_voice->store(true);
+    voice_loader.join();
+    REQUIRE(voice_slot);
+    CHECK(coordinator.is_loaded("voice"));
+    REQUIRE(coordinator.release_slot("voice", *voice_slot));
+    loader.join();
+    REQUIRE(qwen_slot);
+    REQUIRE(coordinator.release_slot("qwen", *qwen_slot));
+    CHECK(coordinator.is_loaded("qwen"));
+}
+
+TEST_CASE("BackendCoordinator: cold sidecar lock wait respects deadline",
+          "[model][coordinator][voice][deadline]") {
+    ModelRegistry reg;
+    auto release_first = std::make_shared<std::atomic<bool>>(false);
+    const auto factory = [release_first](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(0);
+        if (info.name == "voice-a") {
+            backend->load_gate = [release_first] {
+                while (!release_first->load()) std::this_thread::yield();
+            };
+        }
+        return backend;
+    };
+    reg.set_factory(factory);
+    reg.register_factory("sherpa_onnx", factory);
+    auto voice_a = make_info("voice-a");
+    voice_a.runtime = "sherpa_onnx";
+    voice_a.modality = "audio_speech";
+    voice_a.vram_required_mb = 0;
+    auto voice_b = voice_a;
+    voice_b.name = "voice-b";
+    reg.register_model(voice_a);
+    reg.register_model(voice_b);
+    BackendCoordinator coordinator(reg);
+
+    Result<void> first_load = Err<void>(ErrorCode::Internal, "not completed");
+    std::jthread first([&] { first_load = coordinator.load("voice-a"); });
+    IModelMock* first_backend = nullptr;
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        first_backend = const_cast<IModelMock*>(
+            dynamic_cast<const IModelMock*>(coordinator.get_backend("voice-a")));
+        if (first_backend && first_backend->load_started.load()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    const auto second_load = coordinator.load_with_lock_deadline(
+        "voice-b", std::chrono::steady_clock::now() +
+            std::chrono::milliseconds{30}, {});
+    release_first->store(true);
+    first.join();
+
+    REQUIRE(first_backend);
+    REQUIRE(first_backend->load_started.load());
+    REQUIRE(first_load);
+    REQUIRE_FALSE(second_load);
+    CHECK(second_load.error().code == ErrorCode::Timeout);
+    CHECK_FALSE(coordinator.is_loaded("voice-b"));
+}
+
+TEST_CASE("BackendCoordinator: voice session reservation bridges media gaps",
+          "[model][coordinator][queue][voice]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto qwen = make_info("qwen");
+    qwen.n_slots = 1;
+    auto gemma = make_info("gemma");
+    gemma.n_slots = 1;
+    reg.register_model(qwen);
+    reg.register_model(gemma);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("qwen"));
+    REQUIRE(coordinator.load("gemma"));
+    auto held_qwen = coordinator.acquire_slot("qwen");
+    REQUIRE(held_qwen);
+
+    Result<int> queued_qwen = Err<int>(ErrorCode::Internal, "not completed");
+    std::atomic<bool> qwen_acquired{false};
+    std::jthread qwen_waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{1};
+        queued_qwen = coordinator.acquire_slot("qwen", options);
+        qwen_acquired.store(queued_qwen.has_value());
+    });
+    for (int attempt = 0; attempt < 500 && coordinator.queued_request_count() == 0;
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    REQUIRE(coordinator.queued_request_count() == 1);
+    const auto session_token = coordinator.reserve_priority_session(
+        "openwebui", "gemma", std::chrono::milliseconds{20});
+    const auto held_session =
+        coordinator.hold_priority_session("openwebui", "gemma");
+    REQUIRE(held_session == session_token);
+    REQUIRE(coordinator.release_slot("qwen", *held_qwen));
+    std::this_thread::sleep_for(std::chrono::milliseconds{30});
+    CHECK_FALSE(qwen_acquired.load());
+
+    AcquireSlotOptions voice_chat;
+    voice_chat.priority = 100;
+    voice_chat.reservation_key = "openwebui";
+    auto gemma_slot = coordinator.acquire_slot("gemma", voice_chat);
+    REQUIRE(gemma_slot);
+    std::this_thread::sleep_for(std::chrono::milliseconds{30});
+    REQUIRE(coordinator.release_slot("gemma", *gemma_slot));
+    coordinator.complete_priority_session_hold(
+        "openwebui", session_token, std::chrono::milliseconds{100});
+    std::this_thread::sleep_for(std::chrono::milliseconds{30});
+    CHECK_FALSE(qwen_acquired.load());
+
+    coordinator.release_priority_session("openwebui", session_token);
+    qwen_waiter.join();
+    REQUIRE(queued_qwen);
+    REQUIRE(coordinator.release_slot("qwen", *queued_qwen));
+}
+
+TEST_CASE("BackendCoordinator: stale voice token cannot clear a newer session",
+          "[model][coordinator][voice]") {
+    ModelRegistry reg;
+    reg.register_model(make_info("gemma"));
+    BackendCoordinator coordinator(reg);
+    const auto old_token = coordinator.reserve_priority_session(
+        "openwebui", "gemma", std::chrono::seconds{1});
+    const auto new_token = coordinator.reserve_priority_session(
+        "openwebui", "gemma", std::chrono::seconds{1});
+
+    coordinator.release_priority_session("openwebui", old_token);
+    CHECK(coordinator.priority_session_matches("openwebui", "gemma"));
+    coordinator.release_priority_session("openwebui", new_token);
+    CHECK_FALSE(coordinator.priority_session_matches("openwebui", "gemma"));
+}
+
+TEST_CASE("BackendCoordinator: voice reservation stops a destructive GPU swap",
+          "[model][coordinator][voice][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        return backend;
+    });
+    auto gemma = make_info("gemma");
+    gemma.vram_required_mb = 5000;
+    auto qwen = make_info("qwen");
+    qwen.vram_required_mb = 5000;
+    reg.register_model(gemma);
+    reg.register_model(qwen);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(5000, 0);
+    REQUIRE(coordinator.load("gemma"));
+    const auto token = coordinator.reserve_priority_session(
+        "openwebui", "gemma", std::chrono::seconds{1});
+
+    const auto swapped = coordinator.swap_to("qwen");
+
+    REQUIRE_FALSE(swapped);
+    CHECK(swapped.error().code == ErrorCode::ResourceBusy);
+    CHECK(coordinator.is_loaded("gemma"));
+    CHECK_FALSE(coordinator.is_loaded("qwen"));
+    coordinator.release_priority_session("openwebui", token);
 }
 
 TEST_CASE("BackendCoordinator: evicts idle model only after resize options", "[model][coordinator][residency]") {

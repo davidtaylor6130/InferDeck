@@ -62,6 +62,7 @@ namespace observability = inferdeck::observability;
 
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_reload{false};
+std::atomic<bool> g_default_model_loading{false};
 httplib::Server* g_server = nullptr;
 std::once_flag g_llama_init_once;
 constexpr int runtime_reload_result = 75;
@@ -109,7 +110,7 @@ void my_terminate_handler() {
 
 void signal_handler(int sig) {
     g_stop.store(true);
-    if (g_server) g_server->stop();
+    if (g_server && !g_default_model_loading.load()) g_server->stop();
     std::cerr << "\nreceived signal " << sig << ", stopping\n";
 }
 
@@ -573,6 +574,7 @@ int run_gateway(const fs::path& config_path) {
 
     g_stop.store(false);
     g_reload.store(false);
+    g_default_model_loading.store(false);
     const auto config_selection = load_config_with_active(config_path);
     auto cfg = config_selection.config;
     const auto running_config_revision =
@@ -650,6 +652,7 @@ int run_gateway(const fs::path& config_path) {
     std::atomic<bool> maintenance_mode{false};
     GatewayDeps deps{coordinator, "15", cfg.auto_swap,
                      cfg.default_model, cfg.anthropic_model_aliases,
+                     cfg.voice_session_grace_ms,
                      &metrics, &stats_db, &events, &swap_tracker,
                      &maintenance_mode};
     ProfileBenchmarkManager profile_benchmark{
@@ -719,17 +722,6 @@ int run_gateway(const fs::path& config_path) {
     AuthMiddleware auth(ac);
     CorsMiddleware cors(cfg.cors_origins);
 
-    if (!cfg.default_model.empty() && registry.has(cfg.default_model)) {
-        LOG_INFO("default_model_load_begin", "name={}", cfg.default_model);
-        auto loaded = coordinator.load(cfg.default_model);
-        if (loaded) {
-            LOG_INFO("default_model_load_complete", "name={}", cfg.default_model);
-        } else {
-            LOG_ERROR("default_model_load_failed", "name={} error={}",
-                      cfg.default_model, loaded.error().message);
-        }
-    }
-
     httplib::Server server;
     server.new_task_queue = [] {
         return new httplib::ThreadPool(std::max(32u, std::thread::hardware_concurrency() * 2u));
@@ -742,6 +734,12 @@ int run_gateway(const fs::path& config_path) {
                             httplib::Response& resp) {
             LOG_INFO("http_request_begin", "method={} path={}", req.method, req.path);
             cors.apply(req, resp);
+            if (g_stop.load() || g_reload.load()) {
+                resp.set_header("Retry-After", "1");
+                write_error(resp, 503, "server_stopping",
+                            "gateway shutdown or reload is in progress");
+                return;
+            }
             std::string auth_header = header_value(req, "Authorization");
             if (auth_header.empty()) {
                 // Anthropic SDK clients (e.g. Claude Code) authenticate via x-api-key.
@@ -885,19 +883,54 @@ int run_gateway(const fs::path& config_path) {
     std::atomic<bool> reload_monitor_stop{false};
     std::thread reload_monitor([&] {
         while (!reload_monitor_stop.load()) {
-            if (g_reload.load()) {
+            if (g_reload.load() || g_stop.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds{350});
-                if (!reload_monitor_stop.load()) server.stop();
+                if (reload_monitor_stop.load()) return;
+                if (g_default_model_loading.load()) continue;
+                server.stop();
                 return;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds{25});
         }
     });
 
-    LOG_INFO("server_listening", "host={} port={}", cfg.host, cfg.port);
-    const bool listen_ok = server.listen(cfg.host.c_str(), cfg.port);
+    std::thread default_model_loader;
+    bool listen_ok = false;
+    const bool bound = server.bind_to_port(cfg.host.c_str(), cfg.port);
+    if (bound) {
+        if (!cfg.default_model.empty() && registry.has(cfg.default_model)) {
+            g_default_model_loading.store(true);
+            default_model_loader = std::thread(
+                [&coordinator, default_model = cfg.default_model] {
+                    LOG_INFO("default_model_load_begin", "name={}", default_model);
+                    model::AcquireSlotOptions options;
+                    options.timeout = std::chrono::minutes{5};
+                    options.priority = -100;
+                    options.cancelled = [] {
+                        return g_stop.load() || g_reload.load();
+                    };
+                    options.prepare = [&coordinator, default_model] {
+                        return coordinator.swap_to(default_model);
+                    };
+                    auto slot = coordinator.acquire_slot(default_model, options);
+                    auto loaded = slot
+                        ? coordinator.release_slot(default_model, *slot)
+                        : foundation::Err<void>(slot.error().code, slot.error().message);
+                    if (loaded) {
+                        LOG_INFO("default_model_load_complete", "name={}", default_model);
+                    } else {
+                        LOG_ERROR("default_model_load_failed", "name={} error={}",
+                                  default_model, loaded.error().message);
+                    }
+                    g_default_model_loading.store(false);
+                });
+        }
+        LOG_INFO("server_listening", "host={} port={}", cfg.host, cfg.port);
+        listen_ok = server.listen_after_bind();
+    }
     reload_monitor_stop.store(true);
     if (reload_monitor.joinable()) reload_monitor.join();
+    if (default_model_loader.joinable()) default_model_loader.join();
     g_server = nullptr;
 
     if (g_reload.load()) {

@@ -16,6 +16,7 @@
 #include <thread>
 #include <unordered_map>
 #include <limits>
+#include <utility>
 
 namespace inferdeck::gateway {
 
@@ -38,6 +39,58 @@ struct MediaJob {
 std::mutex jobs_mutex;
 std::unordered_map<std::uint64_t, MediaJob> jobs;
 std::atomic<std::uint64_t> next_job_id{1};
+std::mutex decode_mutex;
+std::condition_variable decode_cv;
+bool decode_busy{false};
+
+class DecodePermit {
+public:
+    DecodePermit() = default;
+    DecodePermit(const DecodePermit&) = delete;
+    DecodePermit& operator=(const DecodePermit&) = delete;
+    DecodePermit(DecodePermit&& other) noexcept
+        : held_(std::exchange(other.held_, false)) {}
+    DecodePermit& operator=(DecodePermit&&) = delete;
+    ~DecodePermit() { release(); }
+    void release() {
+        if (!held_) return;
+        {
+            std::lock_guard lock(decode_mutex);
+            decode_busy = false;
+            held_ = false;
+        }
+        decode_cv.notify_one();
+    }
+
+private:
+    friend foundation::Result<DecodePermit> acquire_decode_permit(
+        const httplib::Request&, const std::shared_ptr<MediaJob>&);
+    bool held_{true};
+};
+
+foundation::Result<DecodePermit> acquire_decode_permit(
+    const httplib::Request& req, const std::shared_ptr<MediaJob>& job) {
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::seconds{30};
+    std::unique_lock lock(decode_mutex);
+    while (decode_busy) {
+        if (req.is_connection_closed() || job->cancelled->load()) {
+            return foundation::Err<DecodePermit>(
+                foundation::ErrorCode::Cancelled,
+                "request cancelled while waiting for audio decoding");
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return foundation::Err<DecodePermit>(
+                foundation::ErrorCode::Timeout,
+                "timeout waiting for audio decoding");
+        }
+        decode_cv.wait_until(lock, std::min(
+            deadline, std::chrono::steady_clock::now() +
+                std::chrono::milliseconds{100}));
+    }
+    decode_busy = true;
+    return foundation::Ok(DecodePermit{});
+}
 
 std::shared_ptr<MediaJob> begin_job(const std::string& model, const std::string& modality) {
     auto job = std::make_shared<MediaJob>();
@@ -75,6 +128,41 @@ struct SlotGuard {
     void disarm() { coordinator = nullptr; }
 };
 
+class VoiceSessionGuard {
+public:
+    VoiceSessionGuard(const httplib::Request& req, const GatewayDeps& deps)
+        : coordinator_(&deps.coordinator), key_(request_client_key(req)),
+          duration_(deps.voice_session_grace_ms) {
+        if (deps.default_model.empty() || deps.voice_session_grace_ms <= 0) {
+            coordinator_ = nullptr;
+            return;
+        }
+        token_ = coordinator_->reserve_priority_session(
+            key_, deps.default_model,
+            duration_);
+    }
+    VoiceSessionGuard(const VoiceSessionGuard&) = delete;
+    VoiceSessionGuard& operator=(const VoiceSessionGuard&) = delete;
+    ~VoiceSessionGuard() {
+        if (coordinator_) coordinator_->release_priority_session(key_, token_);
+    }
+    void keep() { coordinator_ = nullptr; }
+    void refresh_and_keep() {
+        if (coordinator_) {
+            (void)coordinator_->refresh_priority_session(key_, token_, duration_);
+        }
+        keep();
+    }
+    const std::string& key() const { return key_; }
+    std::uint64_t token() const { return token_; }
+
+private:
+    model::BackendCoordinator* coordinator_{};
+    std::string key_;
+    std::chrono::milliseconds duration_{};
+    std::uint64_t token_{0};
+};
+
 struct SpeechStreamState {
     static constexpr std::size_t max_pending_chunks = 64;
     static constexpr std::size_t max_pending_bytes = 2 * 1024 * 1024;
@@ -95,6 +183,8 @@ struct SpeechStreamState {
     std::int64_t input_characters{0};
     std::atomic<bool> failed{false};
     std::shared_ptr<MediaJob> job;
+    std::string session_key;
+    std::uint64_t session_token{0};
 
     SpeechStreamState(const GatewayDeps& source) : deps(source) {}
     ~SpeechStreamState() { if (worker.joinable()) worker.join(); }
@@ -107,7 +197,12 @@ struct SpeechStreamState {
         record_media(deps, model, duration_ms, status, slot, 0.0,
                      status == 200 ? input_characters : 0);
         finish_job(job, status == 200 ? "completed" : status == 499 ? "cancelled" : "failed");
-        if (coordinator) (void)coordinator->release_slot(model, slot);
+        if (coordinator) {
+            (void)coordinator->release_slot(model, slot);
+            if (!session_key.empty() && session_token != 0) {
+                coordinator->release_priority_session(session_key, session_token);
+            }
+        }
     }
 };
 
@@ -115,10 +210,17 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
                                             const GatewayDeps& deps,
                                             const std::string& model_name,
                                             const std::shared_ptr<MediaJob>& job) {
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::seconds{30};
+    const std::function<bool()> cancelled = [&req, job] {
+        return req.is_connection_closed() || job->cancelled->load();
+    };
     model::AcquireSlotOptions options;
-    options.cancelled = [&req, job] { return req.is_connection_closed() || job->cancelled->load(); };
-    options.prepare = [&deps, model_name] {
-        auto loaded = ensure_model_loaded(deps, model_name);
+    options.priority = 100;
+    options.cancelled = cancelled;
+    options.prepare = [&deps, model_name, deadline, cancelled] {
+        auto loaded = ensure_model_loaded(
+            deps, model_name, deadline, cancelled);
         if (loaded.ok) return foundation::Ok();
         return foundation::Err<void>(loaded.error_code, loaded.message);
     };
@@ -459,6 +561,7 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
         write_error(resp, 400, "unsupported_response_format", "this speech runtime supports wav and pcm responses");
         return;
     }
+    VoiceSessionGuard voice_session(req, deps);
     auto job = begin_job(model_name, "audio_speech");
     resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
     auto slot = acquire_media_slot(req, deps, model_name, job);
@@ -512,6 +615,8 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     state->slot = *slot;
     state->job = job;
     state->input_characters = input_characters;
+    state->session_key = voice_session.key();
+    state->session_token = voice_session.token();
     try {
         state->worker = std::thread([state, request] {
             try {
@@ -583,6 +688,7 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
         return;
     }
     guard.disarm();
+    voice_session.keep();
     const std::string content_type = request.format == "wav" ? "audio/wav" :
                                      request.format == "pcm" ? "audio/pcm" :
                                      request.format == "opus" ? "audio/ogg" :
@@ -630,9 +736,9 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         write_error(resp, 400, "invalid_transcription_request", "multipart file and model fields are required");
         return;
     }
-    const auto file = req.form.get_file("file");
-    if (file.content.empty() || file.content.size() > 100 * 1024 * 1024) {
-        write_error(resp, 400, "invalid_audio", "audio must be between 1 byte and 100 MB");
+    const auto& file = req.form.files.find("file")->second;
+    if (file.content.empty() || file.content.size() > 25 * 1024 * 1024) {
+        write_error(resp, 400, "invalid_audio", "audio must be between 1 byte and 25 MB");
         return;
     }
     const std::string model_name = req.form.get_field("model");
@@ -647,16 +753,20 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
                     "response_format must be json, text, verbose_json, srt, or vtt");
         return;
     }
-    auto decoded = decode_audio(file.content, req.form);
-    if (!decoded) { write_error(resp, 400, "invalid_audio", decoded.error().message); return; }
-    const double input_audio_seconds =
-        static_cast<double>(decoded->pcm.size()) /
-        static_cast<double>(decoded->sample_rate);
+    VoiceSessionGuard voice_session(req, deps);
     auto job = begin_job(model_name, "audio_transcription");
     resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
+    auto decode_permit = acquire_decode_permit(req, job);
+    if (!decode_permit) { const int status = status_for(decode_permit.error().code); write_error(resp, status, "transcription_admission_failed", decode_permit.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
     auto slot = acquire_media_slot(req, deps, model_name, job);
     if (!slot) { const int status = status_for(slot.error().code); write_error(resp, status, "transcription_admission_failed", slot.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
     SlotGuard guard{&deps.coordinator, model_name, *slot};
+    auto decoded = decode_audio(file.content, req.form);
+    decode_permit->release();
+    if (!decoded) { write_error(resp, 400, "invalid_audio", decoded.error().message); record_media(deps, model_name, 0, 400, *slot); finish_job(job, "failed"); return; }
+    const double input_audio_seconds =
+        static_cast<double>(decoded->pcm.size()) /
+        static_cast<double>(decoded->sample_rate);
     auto result = deps.coordinator.transcribe(model_name, *slot, *decoded,
         [&req, &deps, &model_name, job](int progress) {
             update_job(job, progress);
@@ -681,6 +791,7 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
     record_media(deps, model_name, result->inference_ms, 200, *slot,
                  input_audio_seconds, 0);
     finish_job(job, "completed");
+    voice_session.refresh_and_keep();
 }
 
 }

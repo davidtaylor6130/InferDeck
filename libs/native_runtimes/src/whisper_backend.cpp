@@ -101,12 +101,16 @@ public:
         set_loaded(false);
         release_context();
         if (model_path_.empty()) return foundation::Err<void>(foundation::ErrorCode::InvalidArgument, "whisper.cpp model artifact is missing");
-        if (!std::filesystem::is_regular_file(model_path_)) {
-            return foundation::Err<void>(foundation::ErrorCode::NotFound, "whisper.cpp model artifact was not found: " + model_path_);
-        }
         if (provider_ != "cpu" && provider_ != "gpu" && provider_ != "auto") {
             return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                          "whisper.cpp provider must be cpu, gpu, or auto");
+        }
+        if (provider_ != "cpu" && info_.vram_required_mb <= 0) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "whisper.cpp GPU providers require positive VRAM accounting");
+        }
+        if (!std::filesystem::is_regular_file(model_path_)) {
+            return foundation::Err<void>(foundation::ErrorCode::NotFound, "whisper.cpp model artifact was not found: " + model_path_);
         }
         auto threads = thread_count(info_);
         if (!threads) return foundation::Err<void>(threads.error().code, threads.error().message);

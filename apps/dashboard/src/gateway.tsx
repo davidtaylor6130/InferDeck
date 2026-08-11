@@ -59,6 +59,7 @@ function requestActivity(event: RequestEvent): ActivityItem {
 function swapActivity(event: ModelEvent): ActivityItem {
   const labels: Record<ModelEvent['state'], string> = {
     swapping: `Swapping to ${compactModel(event.to)}`,
+    waiting: `Waiting to load ${compactModel(event.to)}`,
     ready: `Loaded ${compactModel(event.to)}`,
     failed: `Swap to ${compactModel(event.to)} failed`,
     cancelled: `Swap to ${compactModel(event.to)} cancelled`,
@@ -68,9 +69,11 @@ function swapActivity(event: ModelEvent): ActivityItem {
     id: `swap-${event.timestampUnixMs}-${event.state}`,
     kind: 'swap',
     label: labels[event.state],
-    detail: event.state === 'failed' ? event.error : event.durationMs > 0 ? formatDuration(event.durationMs) : '',
+    detail: event.state === 'failed' || event.state === 'waiting'
+      ? event.error
+      : event.durationMs > 0 ? formatDuration(event.durationMs) : '',
     timestampUnixMs: event.timestampUnixMs || Date.now(),
-    tone: event.state === 'failed' ? 'critical' : event.state === 'swapping' ? 'info' : event.state === 'ready' ? 'good' : 'idle',
+    tone: event.state === 'failed' ? 'critical' : event.state === 'swapping' || event.state === 'waiting' ? 'info' : event.state === 'ready' ? 'good' : 'idle',
   };
 }
 
@@ -114,7 +117,7 @@ function isStatsEvent(value: unknown): value is StatsEvent {
 
 function isModelEvent(value: unknown): value is ModelEvent {
   if (!isObject(value)) return false;
-  return ['swapping', 'ready', 'failed', 'cancelled', 'unloaded'].includes(String(value.state))
+  return ['swapping', 'waiting', 'ready', 'failed', 'cancelled', 'unloaded'].includes(String(value.state))
     && typeof value.from === 'string'
     && typeof value.to === 'string'
     && typeof value.error === 'string'
@@ -202,7 +205,7 @@ export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (next.state === 'swapping') {
           setSwap({ swapping: true, target: next.to, from: next.from, startedUnixMs: next.timestampUnixMs, lastError: '' });
         } else {
-          setSwap({ swapping: false, target: next.to, from: next.from, startedUnixMs: 0, lastError: next.error || '' });
+          setSwap({ swapping: false, target: next.to, from: next.from, startedUnixMs: 0, lastError: next.state === 'failed' ? next.error : '' });
           void refresh();
         }
         setActivity(items => [swapActivity(next), ...items].slice(0, ACTIVITY_LIMIT));

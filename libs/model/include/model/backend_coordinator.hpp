@@ -25,6 +25,7 @@ struct AcquireSlotOptions {
     bool block{true};
     int priority{0};
     std::function<bool()> cancelled{};
+    std::string reservation_key{};
     std::function<foundation::Result<void>()> prepare{};
 };
 
@@ -57,6 +58,10 @@ public:
     foundation::Result<void> unregister(const std::string& name);
 
     foundation::Result<void> load(const std::string& name);
+    foundation::Result<void> load_with_lock_deadline(
+        const std::string& name,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& cancelled);
     foundation::Result<void> unload_current();
     foundation::Result<void> unload(const std::string& name);
 
@@ -84,6 +89,20 @@ public:
     void set_max_queue_size(std::size_t size);
     [[nodiscard]] std::size_t queued_request_count() const;
     [[nodiscard]] std::vector<QueueInfo> queue() const;
+    std::uint64_t reserve_priority_session(const std::string& key,
+                                           const std::string& model,
+                                           std::chrono::milliseconds duration);
+    bool refresh_priority_session(const std::string& key,
+                                  std::uint64_t token,
+                                  std::chrono::milliseconds duration);
+    [[nodiscard]] std::optional<std::uint64_t> hold_priority_session(
+        const std::string& key, const std::string& model);
+    void complete_priority_session_hold(const std::string& key,
+                                        std::uint64_t token,
+                                        std::chrono::milliseconds duration);
+    void release_priority_session(const std::string& key, std::uint64_t token);
+    [[nodiscard]] bool priority_session_matches(
+        const std::string& key, const std::string& model) const;
 
     foundation::Result<InferenceResult> predict(
         const std::string& name, int slot_id, const InferenceRequest& req);
@@ -129,7 +148,9 @@ private:
         time_point enqueued{};
         time_point deadline{};
         std::function<bool()> cancelled{};
+        std::string reservation_key{};
         bool preparing{false};
+        bool prepared{false};
         std::optional<std::uint64_t> retry_after_generation{};
     };
 
@@ -138,12 +159,21 @@ private:
         int backend_slot{0};
     };
 
+    bool priority_media_active_locked() const;
+    bool model_is_primary_locked(const std::string& name) const;
+    bool model_is_priority_media_locked(const std::string& name) const;
+    bool model_is_independent_sidecar_locked(const std::string& name) const;
+    bool request_waits_for_priority_media_locked(
+        const std::string& name, const std::string& reservation_key) const;
+    bool waiter_is_actionable_locked(const SlotWaiter& waiter) const;
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
     foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot);
     foundation::Result<int> backend_slot_for_lease_locked(
         const std::string& name, int lease_id) const;
     foundation::Result<void> prepare_capacity_for(const std::string& name);
+    foundation::Result<void> require_priority_session_allows(
+        const std::string& name);
     int estimated_vram_locked() const;
     int available_vram_locked() const;
     void select_primary_locked();
@@ -166,7 +196,16 @@ private:
     std::uint64_t next_waiter_id_{1};
     std::uint64_t resource_generation_{0};
     std::size_t max_queue_size_{128};
+    struct PrioritySession {
+        std::string model;
+        time_point deadline{};
+        std::uint64_t token{0};
+        std::size_t active_holds{0};
+    };
+    std::unordered_map<std::string, PrioritySession> priority_sessions_;
+    std::uint64_t next_priority_session_token_{1};
     std::recursive_mutex swap_mutex_;
+    std::recursive_mutex sidecar_mutex_;
     std::atomic<bool> swap_in_progress_{false};
     std::atomic<bool> swap_cancel_{false};
 };

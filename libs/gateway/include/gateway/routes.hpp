@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <atomic>
+#include <functional>
 #include <map>
 #include <string>
 
@@ -23,6 +24,7 @@ struct GatewayDeps {
     bool auto_swap{true};
     std::string default_model{};
     std::map<std::string, std::string> anthropic_model_aliases{};
+    int voice_session_grace_ms{15000};
     observability::Metrics* metrics{nullptr};
     observability::StatsDb* stats_db{nullptr};
     foundation::EventBus* events{nullptr};
@@ -56,13 +58,15 @@ nlohmann::json make_error_json(int status, const std::string& code,
 void write_error(httplib::Response& resp, int status, const std::string& code,
                  const std::string& message);
 std::string header_value(const httplib::Request& req, const std::string& name);
+std::string request_client_key(const httplib::Request& req);
 
 struct SwapStartResult {
     int status{200};
     nlohmann::json body;
 };
 
-SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name);
+SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name,
+                                 bool defer_resource_busy = false);
 
 struct EnsureLoadedResult {
     bool ok{false};
@@ -77,6 +81,10 @@ struct EnsureLoadedResult {
 // failure, `status`/`code`/`message` describe the error for the caller to emit.
 EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
                                        const std::string& model_name);
+EnsureLoadedResult ensure_model_loaded(
+    const GatewayDeps& deps, const std::string& model_name,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& cancelled);
 
 void handle_models(const httplib::Request& req, httplib::Response& resp,
                    const GatewayDeps& deps);

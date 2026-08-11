@@ -50,7 +50,7 @@ Routes dispatch through the coordinator and a typed modality interface. They nev
 ## Request lifecycle
 
 1. The route validates and bounds the complete request before admission.
-2. The shared coordinator queue records model, priority, arrival time, deadline, and cancellation callback.
+2. The shared coordinator queue records model, priority, arrival time, deadline, cancellation callback, and any client-scoped voice-session reservation.
 3. The head request asks the resource planner to make its model resident.
 4. The planner uses configured or DXGI-reported VRAM minus the safety margin. It may keep the current residents, shrink idle calibrated slot pools, evict an idle resident, or reject the request.
 5. A slot increments the per-model and global active-request counts. Inference runs without holding the coordinator mutex.
@@ -58,6 +58,10 @@ Routes dispatch through the coordinator and a typed modality interface. They nev
 7. The route streams or returns output, records metrics/SQLite/EventBus activity, releases the slot, and leaves model residency to policy.
 
 This lifecycle is shared by text, embeddings, image, TTS, and STT. A swap or load does not create a second modality-specific queue.
+
+Successful STT reserves the configured default conversation model for the same client through the STT-to-chat hand-off. The matching chat runs at media priority, and TTS releases the reservation. `gateway.voice_session_grace_ms` bounds abandoned sessions; clients behind a shared address can send `X-InferDeck-Voice-Session` to provide a distinct key.
+
+Priority is preemptive at queue and swap boundaries. A native backend load that has already begun remains non-preemptive because model libraries do not expose a safe generic cancellation point; CPU voice can still run, and the reserved conversation model is selected at the next safe swap boundary.
 
 ## Residency and automatic expansion
 

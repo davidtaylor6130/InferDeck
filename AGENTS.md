@@ -128,7 +128,7 @@ Dashboard (`/api`, registered in `libs/gateway/src/dashboard_routes.cpp`):
   Named events, each ~1Hz or on occurrence:
   - `stats`: gpu{utilizationPct,vramUsedMb,temperatureC,powerW}, loadedModel,
     activeRequests, swapping, lifetime counters, uptime
-  - `model`: state=swapping|ready|failed|cancelled|unloaded, from, to, durationMs, error
+  - `model`: state=swapping|waiting|ready|failed|cancelled|unloaded, from, to, durationMs, error
   - `request`: model, tokens, durationMs, tokensPerSecond, status
 
 ## Architecture Quick Reference
@@ -159,6 +159,9 @@ Concurrency invariants:
   with a 30s timeout, so an IModel can't be destroyed mid-predict.
 - `StreamState` is shared_ptr-owned by both the inference thread and
   the chunked provider; `finish_once` is idempotent via CAS.
+- CPU STT/TTS sidecars bypass GPU preparation. A successful STT request
+  reserves the default chat model for that client through TTS; the bounded
+  grace is configured by `gateway.voice_session_grace_ms`.
 
 ## Design rules learned the hard way (do not regress)
 

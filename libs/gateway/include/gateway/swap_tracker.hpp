@@ -21,6 +21,7 @@ struct SwapSnapshot {
     std::string last_error;
     foundation::ErrorCode last_error_code{foundation::ErrorCode::Ok};
     bool last_cancelled{false};
+    bool last_deferred{false};
     std::int64_t started_unix_ms{0};
 };
 
@@ -57,6 +58,7 @@ public:
             state_.last_error.clear();
             state_.last_error_code = foundation::ErrorCode::Ok;
             state_.last_cancelled = false;
+            state_.last_deferred = false;
         }
         if (completed.joinable()) completed.join();
 
@@ -87,13 +89,15 @@ public:
     }
 
     void end(bool success, const std::string& error, bool cancelled = false,
-             foundation::ErrorCode error_code = foundation::ErrorCode::Unavailable) {
+             foundation::ErrorCode error_code = foundation::ErrorCode::Unavailable,
+             bool deferred = false) {
         {
             std::lock_guard<std::mutex> lock(mtx_);
             state_.swapping = false;
             state_.last_error = success ? std::string{} : error;
             state_.last_error_code = success ? foundation::ErrorCode::Ok : error_code;
             state_.last_cancelled = !success && cancelled;
+            state_.last_deferred = !success && deferred;
         }
         cv_.notify_all();
     }
