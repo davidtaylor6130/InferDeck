@@ -64,7 +64,7 @@ struct InferenceRequest {
 
 struct ChatTemplateMeta {
     std::string thinking_start_tag;
-    std::string thinking_end_tag;
+    std::vector<std::string> thinking_end_tags;
     std::vector<std::string> preserved_tokens;
     bool supports_thinking = false;
 };

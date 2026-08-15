@@ -33,34 +33,6 @@ endif()
 # --- llama.cpp: internal Vulkan runtime ---
 # InferDeck owns llama.cpp in-process; do not build or launch llama-server.exe.
 set(_llama_source_dir "${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/llama.cpp")
-set(_llama_checkpoint_patch "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/llama-cpp-mtp-checkpoint-state.patch")
-find_package(Git REQUIRED)
-execute_process(
-    COMMAND "${GIT_EXECUTABLE}" -C "${_llama_source_dir}" apply --check "${_llama_checkpoint_patch}"
-    RESULT_VARIABLE _llama_patch_applicable
-    OUTPUT_QUIET
-    ERROR_QUIET
-)
-if(_llama_patch_applicable EQUAL 0)
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" -C "${_llama_source_dir}" apply "${_llama_checkpoint_patch}"
-        RESULT_VARIABLE _llama_patch_result
-        ERROR_VARIABLE _llama_patch_error
-    )
-    if(NOT _llama_patch_result EQUAL 0)
-        message(FATAL_ERROR "Failed to patch llama.cpp: ${_llama_patch_error}")
-    endif()
-else()
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" -C "${_llama_source_dir}" apply --reverse --check "${_llama_checkpoint_patch}"
-        RESULT_VARIABLE _llama_patch_present
-        OUTPUT_QUIET
-        ERROR_QUIET
-    )
-    if(NOT _llama_patch_present EQUAL 0)
-        message(FATAL_ERROR "llama.cpp MTP checkpoint patch does not match the pinned source")
-    endif()
-endif()
 
 set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)

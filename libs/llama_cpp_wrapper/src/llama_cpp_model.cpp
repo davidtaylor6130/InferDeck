@@ -847,8 +847,9 @@ Result<void> LlamaCppModel::load() {
   }
 
   llama_model_params mparams = llama_model_default_params();
-  mparams.use_mmap = cfg_.use_mmap;
-  mparams.use_mlock = cfg_.use_mlock;
+  mparams.load_mode = cfg_.use_mmap
+      ? (cfg_.use_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP)
+      : (cfg_.use_mlock ? LLAMA_LOAD_MODE_MLOCK : LLAMA_LOAD_MODE_NONE);
   mparams.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
 
   llama_backend_init();
@@ -1489,7 +1490,7 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
 
   ChatTemplateMeta meta;
   meta.thinking_start_tag = chat_params.thinking_start_tag;
-  meta.thinking_end_tag = chat_params.thinking_end_tag;
+  meta.thinking_end_tags = chat_params.thinking_end_tags;
   meta.preserved_tokens = chat_params.preserved_tokens;
   meta.supports_thinking = chat_params.supports_thinking;
 
@@ -1616,12 +1617,19 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
     }
     mtmd::bitmaps bitmaps;
     for (const auto& data : tmpl_res->media) {
-      mtmd::bitmap bitmap(mtmd_helper_bitmap_init_from_buf(
-          mtmd_, data.data(), data.size()));
+      auto decoded = mtmd_helper_bitmap_init_from_buf(
+          mtmd_, data.data(), data.size(), false);
+      mtmd::bitmap bitmap(decoded.bitmap);
+      mtmd_helper::video_ptr video(decoded.video_ctx);
       if (!bitmap.ptr) {
         return Result<PredictSetup>(std::unexpect,
             make_error(ErrorCode::InvalidArgument,
                        "image payload could not be decoded"));
+      }
+      if (video) {
+        return Result<PredictSetup>(std::unexpect,
+            make_error(ErrorCode::InvalidArgument,
+                       "only image media is supported for chat inference"));
       }
       bitmaps.entries.push_back(std::move(bitmap));
     }

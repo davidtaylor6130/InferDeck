@@ -204,7 +204,6 @@ private:
     int n_batch_;
     int mtp_max_active_requests_;
     common_context_seq_rm_type draft_seq_rm_type_;
-    bool target_pre_norm_enabled_;
 
     std::mutex sub_mtx_;
     std::condition_variable sub_cv_;

@@ -52,8 +52,7 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(
       vocab_(vocab),
       n_batch_(n_batch),
       mtp_max_active_requests_(std::max(1, mtp_max_active_requests)),
-      draft_seq_rm_type_(draft_seq_rm_type),
-      target_pre_norm_enabled_(speculative != nullptr) {
+      draft_seq_rm_type_(draft_seq_rm_type) {
     thread_ = std::thread([this] { run_loop(); });
 }
 
@@ -141,7 +140,6 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
     const auto clear_sequence = [&] {
         if (mem) llama_memory_seq_rm(mem, seq_id, 0, -1);
         if (draft_mem) llama_memory_seq_rm(draft_mem, seq_id, 0, -1);
-        common_speculative_mtp_state_seq_clear(speculative_, seq_id);
     };
 
     if (has_media) {
@@ -281,15 +279,10 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
                     task->recurrent_draft_checkpoint->size(),
                     seq_id,
                     LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                const size_t mtp_restored =
-                    common_speculative_mtp_state_seq_set_data(
-                        speculative_,
-                        seq_id,
-                        task->recurrent_mtp_checkpoint->data(),
-                        task->recurrent_mtp_checkpoint->size());
+                common_speculative_set_state(
+                    speculative_, seq_id, *task->recurrent_mtp_checkpoint);
                 restored =
-                    draft_restored == task->recurrent_draft_checkpoint->size() &&
-                    mtp_restored == task->recurrent_mtp_checkpoint->size();
+                    draft_restored == task->recurrent_draft_checkpoint->size();
             }
             if (restored) {
                 const bool target_checkpoint_trimmed = llama_memory_seq_rm(
@@ -494,10 +487,6 @@ void ContinuousBatchScheduler::run_loop() {
                     if (media == t->media_chunks.end() || !media->data || !mtmd_) {
                         throw std::runtime_error("invalid multimodal prompt chunk");
                     }
-                    if (speculative_ && target_pre_norm_enabled_) {
-                        llama_set_embeddings_pre_norm(ctx_, false, false);
-                        target_pre_norm_enabled_ = false;
-                    }
                     llama_pos new_position = t->n_pos;
                     const auto media_started = std::chrono::steady_clock::now();
                     LOG_INFO("vision_chunk_eval_begin",
@@ -611,8 +600,6 @@ void ContinuousBatchScheduler::run_loop() {
                         llama_memory_seq_rm(draft_mem, t->slot_id, 0, -1);
                     }
                 }
-                common_speculative_mtp_state_seq_clear(
-                    speculative_, t->slot_id);
                 active_.erase(std::remove(active_.begin(), active_.end(), t), active_.end());
             }
             for (auto* t : stopped) {
@@ -648,10 +635,6 @@ void ContinuousBatchScheduler::run_loop() {
         }
 
         // ---- Decode ----
-        if (speculative_ && target_pre_norm_enabled_ != process_mtp) {
-            llama_set_embeddings_pre_norm(ctx_, process_mtp, false);
-            target_pre_norm_enabled_ = process_mtp;
-        }
         const int rc = llama_decode(ctx_, batch);
         if (rc != 0) {
             LOG_ERROR("scheduler_decode_failed", "llama_decode rc={} batch_tokens={}", rc, batch.n_tokens);
@@ -692,20 +675,10 @@ void ContinuousBatchScheduler::run_loop() {
             std::shared_ptr<const std::vector<uint8_t>> mtp_checkpoint;
             if (draft_ctx_) {
                 draft_checkpoint = capture_context(draft_ctx_);
-                const size_t mtp_size =
-                    common_speculative_mtp_state_seq_get_size(
-                        speculative_, t->slot_id);
-                if (mtp_size > 0) {
-                    auto data = std::make_shared<std::vector<uint8_t>>(mtp_size);
-                    const size_t written =
-                        common_speculative_mtp_state_seq_get_data(
-                            speculative_,
-                            t->slot_id,
-                            data->data(),
-                            mtp_size);
-                    if (written == mtp_size) {
-                        mtp_checkpoint = std::move(data);
-                    }
+                auto data = std::make_shared<std::vector<uint8_t>>();
+                if (common_speculative_get_state(
+                        speculative_, t->slot_id, *data)) {
+                    mtp_checkpoint = std::move(data);
                 }
                 if (!draft_checkpoint || !mtp_checkpoint) {
                     continue;
