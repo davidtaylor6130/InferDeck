@@ -851,6 +851,7 @@ Result<void> LlamaCppModel::load() {
       ? (cfg_.use_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP)
       : (cfg_.use_mlock ? LLAMA_LOAD_MODE_MLOCK : LLAMA_LOAD_MODE_NONE);
   mparams.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
+  mparams.load_mtp = cfg_.mtp_enabled;
 
   llama_backend_init();
   const char* sys_info = llama_print_system_info();
