@@ -1,0 +1,113 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index e591bab87..76804a990 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -1366,6 +1366,89 @@ void common_speculative_free(common_speculative * spec) {
+     delete spec;
+ }
+ 
++size_t common_speculative_mtp_state_seq_get_size(
++        const common_speculative * spec,
++        llama_seq_id seq_id) {
++    if (spec == nullptr || seq_id < 0) {
++        return 0;
++    }
++    for (const auto & impl : spec->impls) {
++        if (impl->type != COMMON_SPECULATIVE_TYPE_DRAFT_MTP) {
++            continue;
++        }
++        const auto * mtp = static_cast<const common_speculative_state_draft_mtp *>(impl.get());
++        if ((size_t) seq_id >= mtp->pending_h.size()) {
++            return 0;
++        }
++        return mtp->pending_h[seq_id].size() * sizeof(float);
++    }
++    return 0;
++}
++
++size_t common_speculative_mtp_state_seq_get_data(
++        const common_speculative * spec,
++        llama_seq_id seq_id,
++        uint8_t * dst,
++        size_t size) {
++    const size_t expected = common_speculative_mtp_state_seq_get_size(spec, seq_id);
++    if (expected == 0 || dst == nullptr || size < expected) {
++        return 0;
++    }
++    for (const auto & impl : spec->impls) {
++        if (impl->type != COMMON_SPECULATIVE_TYPE_DRAFT_MTP) {
++            continue;
++        }
++        const auto * mtp = static_cast<const common_speculative_state_draft_mtp *>(impl.get());
++        std::memcpy(dst, mtp->pending_h[seq_id].data(), expected);
++        return expected;
++    }
++    return 0;
++}
++
++size_t common_speculative_mtp_state_seq_set_data(
++        common_speculative * spec,
++        llama_seq_id seq_id,
++        const uint8_t * src,
++        size_t size) {
++    const size_t expected = common_speculative_mtp_state_seq_get_size(spec, seq_id);
++    if (expected == 0 || src == nullptr || size != expected) {
++        return 0;
++    }
++    for (auto & impl : spec->impls) {
++        if (impl->type != COMMON_SPECULATIVE_TYPE_DRAFT_MTP) {
++            continue;
++        }
++        auto * mtp = static_cast<common_speculative_state_draft_mtp *>(impl.get());
++        std::memcpy(mtp->pending_h[seq_id].data(), src, expected);
++        return expected;
++    }
++    return 0;
++}
++
++void common_speculative_mtp_state_seq_clear(
++        common_speculative * spec,
++        llama_seq_id seq_id) {
++    if (spec == nullptr || seq_id < 0) {
++        return;
++    }
++    for (auto & impl : spec->impls) {
++        if (impl->type != COMMON_SPECULATIVE_TYPE_DRAFT_MTP) {
++            continue;
++        }
++        auto * mtp = static_cast<common_speculative_state_draft_mtp *>(impl.get());
++        if ((size_t) seq_id >= mtp->pending_h.size()) {
++            return;
++        }
++        std::fill(mtp->pending_h[seq_id].begin(), mtp->pending_h[seq_id].end(), 0.0f);
++        mtp->verify_h[seq_id].clear();
++        mtp->verify_h_rows[seq_id] = 0;
++        mtp->last_n_drafted[seq_id] = 0;
++        spec->dparams[seq_id].drafting = false;
++        spec->impl_last[seq_id] = nullptr;
++        return;
++    }
++}
++
+ common_speculative_draft_params & common_speculative_get_draft_params(
+         common_speculative * spec,
+         llama_seq_id seq_id) {
+diff --git a/common/speculative.h b/common/speculative.h
+index f24bac79e..680a6880d 100644
+--- a/common/speculative.h
++++ b/common/speculative.h
+@@ -65,6 +65,14 @@ void common_speculative_draft(common_speculative * spec);
+ // informs the speculative context that n_accepted tokens were accepted by the target model
+ void common_speculative_accept(common_speculative * spec, llama_seq_id, uint16_t n_accepted);
+ 
++size_t common_speculative_mtp_state_seq_get_size(const common_speculative * spec, llama_seq_id seq_id);
++
++size_t common_speculative_mtp_state_seq_get_data(const common_speculative * spec, llama_seq_id seq_id, uint8_t * dst, size_t size);
++
++size_t common_speculative_mtp_state_seq_set_data(common_speculative * spec, llama_seq_id seq_id, const uint8_t * src, size_t size);
++
++void common_speculative_mtp_state_seq_clear(common_speculative * spec, llama_seq_id seq_id);
++
+ // print statistics about the speculative decoding
+ void common_speculative_print_stats(const common_speculative * spec);
+ 

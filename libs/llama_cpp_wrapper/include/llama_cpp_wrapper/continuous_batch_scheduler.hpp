@@ -19,6 +19,8 @@ struct llama_context;
 struct llama_model;
 struct llama_vocab;
 struct common_speculative;
+struct mtmd_context;
+struct mtmd_input_chunk;
 
 namespace inferdeck::llama_wrapper {
 
@@ -98,8 +100,18 @@ struct SlotTask {
     // ---- Input (filled by caller before submit) ----
     int slot_id{-1};                          // also the llama sequence ID (0..n_slots-1)
     std::vector<llama_token> prompt_tokens;
+    struct MediaChunk {
+        int token_start{0};
+        int token_count{0};
+        int position_count{0};
+        std::shared_ptr<mtmd_input_chunk> data;
+    };
+    std::vector<MediaChunk> media_chunks;
+    int prompt_position_count{0};
     std::vector<int> last_prompt_tokens;      // previous call's tokens (KV reuse hint)
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_draft_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_mtp_checkpoint;
     int checkpoint_pos{0};
     int checkpoint_capture_pos{0};
     common_sampler* sampler{nullptr};         // scheduler takes ownership; freed on completion
@@ -131,6 +143,8 @@ struct SlotTask {
     // ---- Output (written by scheduler before done event, read by caller after) ----
     int out_cached_prompt_tokens{0};
     std::shared_ptr<const std::vector<uint8_t>> out_recurrent_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> out_recurrent_draft_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> out_recurrent_mtp_checkpoint;
     int out_checkpoint_pos{0};
     bool out_mtp_cache_synced{true};
     float out_generation_duration_ms{0.0f};
@@ -154,6 +168,7 @@ public:
         llama_context* ctx,
         llama_context* draft_ctx,
         common_speculative* speculative,
+        mtmd_context* mtmd,
         llama_model* model,
         const llama_vocab* vocab,
         int n_batch,
@@ -183,6 +198,7 @@ private:
     llama_context* ctx_;
     llama_context* draft_ctx_;
     common_speculative* speculative_;
+    mtmd_context* mtmd_;
     llama_model* model_;
     const llama_vocab* vocab_;
     int n_batch_;
