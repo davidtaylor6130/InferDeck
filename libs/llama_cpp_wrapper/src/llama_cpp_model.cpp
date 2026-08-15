@@ -1636,6 +1636,7 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
     }
     mtmd_input_text input{
         prompt.c_str(),
+        prompt.size(),
         add_bos,
         true,
     };
