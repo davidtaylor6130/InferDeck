@@ -88,7 +88,45 @@ TEST_CASE("Repository Gemma 31B profile is the safe default",
     CHECK_FALSE(gemma->mtp_enabled);
 }
 
-TEST_CASE("Repository Qwen 27B profile enables the measured adaptive MTP settings",
+TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
+          "[config][mtp]") {
+    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "config" / "gateway.yml";
+    const auto config = load_config(path);
+    const auto qwen = std::find_if(
+        config.models.begin(), config.models.end(),
+        [](const auto& model) { return model.name == "qwen3.8-27b"; });
+    REQUIRE(qwen != config.models.end());
+    CHECK(qwen->family == "qwen3.8");
+    CHECK(qwen->gguf_path ==
+          "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/"
+          "Qwen3.8-27B-Q4_K_M.gguf");
+    CHECK(qwen->mmproj_path ==
+          "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/"
+          "mmproj-F16.gguf");
+    CHECK(qwen->n_slots == 4);
+    CHECK(qwen->min_slots == 4);
+    CHECK(qwen->context_size == 100000);
+    CHECK(qwen->vram_required_mb == 30000);
+    REQUIRE(qwen->n_batch);
+    REQUIRE(qwen->n_ubatch);
+    CHECK(*qwen->n_batch == 2048);
+    CHECK(*qwen->n_ubatch == 2048);
+    CHECK(qwen->cache_type_k == "q4_0");
+    CHECK(qwen->cache_type_v == "q4_0");
+    CHECK(qwen->mtp_enabled);
+    CHECK(qwen->mtp_draft_tokens == 2);
+    CHECK(qwen->mtp_p_min == 0.0f);
+    CHECK(qwen->mtp_max_active_requests == 1);
+    CHECK(qwen->has_vision);
+    CHECK(qwen->sampling.temperature == 1.0f);
+    CHECK(qwen->sampling.top_p == 0.95f);
+    CHECK(qwen->sampling.top_k == 20);
+    CHECK(qwen->sampling.min_p == 0.0f);
+    CHECK(qwen->sampling.repeat_penalty == 1.0f);
+}
+
+TEST_CASE("Repository Qwen 3.6 27B profile enables the measured adaptive MTP settings",
           "[config][mtp]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "config" / "gateway.yml";
@@ -208,6 +246,13 @@ model_registry:
 model_registry:
   - name: false-vision
     gguf_path: model.gguf
+    has_vision: true
+)"));
+    CHECK(validate_config_text(R"(
+model_registry:
+  - name: vision
+    gguf_path: model.gguf
+    mmproj_path: mmproj.gguf
     has_vision: true
 )"));
     CHECK_FALSE(validate_config_text(R"(

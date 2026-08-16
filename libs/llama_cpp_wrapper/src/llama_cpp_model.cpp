@@ -35,7 +35,9 @@
 #include "llama.h"
 #include "ggml.h"
 #include "foundation/logging.hpp"
+#include "base64.hpp"
 #include "chat.h"
+#include "mtmd-helper.h"
 #include "sampling.h"
 #include "speculative.h"
 #include <nlohmann/json.hpp>
@@ -322,6 +324,56 @@ std::string normalize_path(const std::string& p) {
   std::error_code ec;
   if (std::filesystem::exists(path, ec)) return std::filesystem::absolute(path, ec).string();
   return p;
+}
+
+template <typename Json>
+std::vector<std::vector<uint8_t>> extract_image_media(Json& messages) {
+  std::vector<std::vector<uint8_t>> media;
+  for (auto& message : messages) {
+    if (!message.is_object() || !message.contains("content") ||
+        !message["content"].is_array()) {
+      continue;
+    }
+    for (auto& part : message["content"]) {
+      if (!part.is_object()) continue;
+      const auto type = part.value("type", std::string{});
+      if (type != "image_url" && type != "image" && type != "input_image") {
+        continue;
+      }
+      if (!part.contains("image_url")) {
+        throw std::invalid_argument("image input requires image_url");
+      }
+      const auto& value = part["image_url"];
+      std::string url;
+      if (value.is_string()) {
+        url = value.template get<std::string>();
+      } else if (value.is_object() && value.contains("url") && value["url"].is_string()) {
+        url = value["url"].template get<std::string>();
+      } else {
+        throw std::invalid_argument("image_url must be a string or an object with a string url");
+      }
+      const auto comma = url.find(',');
+      if (comma == std::string::npos ||
+          !url.starts_with("data:image/") ||
+          url.substr(0, comma).find(";base64") == std::string::npos) {
+        throw std::invalid_argument("image_url must be a base64 data:image URL");
+      }
+      const auto encoded = url.substr(comma + 1);
+      if (encoded.empty() || encoded.size() > 32U * 1024U * 1024U) {
+        throw std::invalid_argument("image payload is empty or exceeds 32 MiB encoded");
+      }
+      const auto decoded = base64::decode(encoded);
+      if (decoded.empty()) {
+        throw std::invalid_argument("image payload decoded to empty data");
+      }
+      media.emplace_back(decoded.begin(), decoded.end());
+      part = Json{
+          {"type", "media_marker"},
+          {"text", mtmd_default_marker()},
+      };
+    }
+  }
+  return media;
 }
 
 std::string role_to_template_role(const std::string& role) {
@@ -733,6 +785,7 @@ void LlamaCppModel::shutdown_backend() {
 LlamaCppModel::LlamaCppModel(inferdeck::model::ModelInfo info, LlamaCppConfig cfg)
     : info_(std::move(info)), cfg_(std::move(cfg)) {
   resolved_gguf_path_ = normalize_path(info_.gguf_path);
+  resolved_mmproj_path_ = normalize_path(info_.mmproj_path);
 }
 
 LlamaCppModel::~LlamaCppModel() {
@@ -755,6 +808,10 @@ LlamaCppModel::~LlamaCppModel() {
   if (shared_ctx_) {
     llama_free(shared_ctx_);
     shared_ctx_ = nullptr;
+  }
+  if (mtmd_) {
+    mtmd_free(mtmd_);
+    mtmd_ = nullptr;
   }
   if (chat_templates_) {
     common_chat_templates_free(chat_templates_);
@@ -780,11 +837,21 @@ Result<void> LlamaCppModel::load() {
     return Result<void>(std::unexpect,
         make_error(ErrorCode::NotFound, "gguf not found: " + resolved_gguf_path_.string()));
   }
+  if (info_.has_vision && resolved_mmproj_path_.empty()) {
+    return Result<void>(std::unexpect,
+        make_error(ErrorCode::NotFound, "vision model has no mmproj_path"));
+  }
+  if (info_.has_vision && !std::filesystem::exists(resolved_mmproj_path_, ec)) {
+    return Result<void>(std::unexpect,
+        make_error(ErrorCode::NotFound, "mmproj not found: " + resolved_mmproj_path_.string()));
+  }
 
   llama_model_params mparams = llama_model_default_params();
-  mparams.use_mmap = cfg_.use_mmap;
-  mparams.use_mlock = cfg_.use_mlock;
+  mparams.load_mode = cfg_.use_mmap
+      ? (cfg_.use_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP)
+      : (cfg_.use_mlock ? LLAMA_LOAD_MODE_MLOCK : LLAMA_LOAD_MODE_NONE);
   mparams.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
+  mparams.load_mtp = cfg_.mtp_enabled;
 
   llama_backend_init();
   const char* sys_info = llama_print_system_info();
@@ -842,6 +909,32 @@ Result<void> LlamaCppModel::load() {
           make_error(ErrorCode::ParseError, "common_chat_templates_init returned null"));
     }
   }
+  if (info_.has_vision) {
+    auto mtmd_params = mtmd_context_params_default();
+    mtmd_params.use_gpu = true;
+    mtmd_params.n_threads = cfg_.n_threads;
+    mtmd_params.flash_attn_type = flash_attn_from_string(cfg_.flash_attn);
+    mtmd_ = mtmd_init_from_file(
+        resolved_mmproj_path_.string().c_str(), model_, mtmd_params);
+    if (mtmd_ == nullptr || !mtmd_support_vision(mtmd_)) {
+      if (mtmd_) {
+        mtmd_free(mtmd_);
+        mtmd_ = nullptr;
+      }
+      if (chat_templates_) {
+        common_chat_templates_free(chat_templates_);
+        chat_templates_ = nullptr;
+      }
+      llama_model_free(model_);
+      model_ = nullptr;
+      vocab_ = nullptr;
+      return Result<void>(std::unexpect,
+          make_error(ErrorCode::ParseError,
+                     "failed to load vision projector: " + resolved_mmproj_path_.string()));
+    }
+    LOG_INFO("vision_projector_loaded",
+             "model={} path={}", info_.name, resolved_mmproj_path_.string());
+  }
   auto ctx_res = init_shared_context_locked();
   if (!ctx_res.has_value()) {
     if (speculative_) {
@@ -850,9 +943,15 @@ Result<void> LlamaCppModel::load() {
     }
     if (draft_ctx_) { llama_free(draft_ctx_); draft_ctx_ = nullptr; }
     if (shared_ctx_) { llama_free(shared_ctx_); shared_ctx_ = nullptr; }
+    if (mtmd_) { mtmd_free(mtmd_); mtmd_ = nullptr; }
     slots_.clear();
+    if (chat_templates_) {
+      common_chat_templates_free(chat_templates_);
+      chat_templates_ = nullptr;
+    }
     llama_model_free(model_);
     model_ = nullptr;
+    vocab_ = nullptr;
     return ctx_res;
   }
   // Populate chat_template_meta_ once from the model's Jinja template.
@@ -977,6 +1076,7 @@ Result<void> LlamaCppModel::init_shared_context_locked() {
         shared_ctx_,
         draft_ctx_,
         speculative_,
+        mtmd_,
         model_,
         vocab_,
         cfg_.n_batch,
@@ -1009,6 +1109,10 @@ Result<void> LlamaCppModel::unload() {
   if (shared_ctx_) {
     llama_free(shared_ctx_);
     shared_ctx_ = nullptr;
+  }
+  if (mtmd_) {
+    mtmd_free(mtmd_);
+    mtmd_ = nullptr;
   }
   if (chat_templates_) {
     common_chat_templates_free(chat_templates_);
@@ -1132,6 +1236,8 @@ Result<void> LlamaCppModel::reset_all_slots() noexcept {
     s.busy = false;
     s.last_prompt_tokens.clear();
     s.recurrent_checkpoint.reset();
+    s.recurrent_draft_checkpoint.reset();
+    s.recurrent_mtp_checkpoint.reset();
     s.checkpoint_pos = 0;
     s.mtp_cache_synced = true;
   }
@@ -1217,6 +1323,20 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
     } catch (const std::exception& e) {
       return Result<ChatTemplateResult>(std::unexpect,
           make_error(ErrorCode::ParseError, std::string("invalid OpenAI request JSON: ") + e.what()));
+    }
+  }
+  std::vector<std::vector<uint8_t>> media;
+  if (body.contains("messages") && body["messages"].is_array()) {
+    try {
+      media = extract_image_media(body["messages"]);
+    } catch (const std::exception& e) {
+      return Result<ChatTemplateResult>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument, e.what()));
+    }
+    if (!media.empty() && mtmd_ == nullptr) {
+      return Result<ChatTemplateResult>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument,
+                     "image input requires a loaded vision projector"));
     }
   }
 
@@ -1338,7 +1458,7 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
   // reuse), drop the oldest *whole* non-system messages and re-template until
   // the prompt fits the budget. The leading system block and the most recent
   // turn are always preserved.
-  if (max_prompt_tokens > 0) {
+  if (max_prompt_tokens > 0 && media.empty()) {
     auto count_prompt_tokens = [&](const std::string& p) -> int {
       if (p.empty()) return 0;
       const int n = llama_tokenize(vocab_, p.data(), static_cast<int>(p.size()),
@@ -1371,12 +1491,13 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
 
   ChatTemplateMeta meta;
   meta.thinking_start_tag = chat_params.thinking_start_tag;
-  meta.thinking_end_tag = chat_params.thinking_end_tag;
+  meta.thinking_end_tags = chat_params.thinking_end_tags;
   meta.preserved_tokens = chat_params.preserved_tokens;
   meta.supports_thinking = chat_params.supports_thinking;
 
   ChatTemplateResult result;
   result.prompt = chat_params.prompt;
+  result.media = std::move(media);
   result.stop_strings = chat_params.additional_stops;
   result.parser_params = common_chat_parser_params(chat_params);
   result.parser_params.reasoning_format = inputs.reasoning_format;
@@ -1486,23 +1607,128 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
   s.stop_tokens     = tokenize_stop_strings(vocab_, s.stop_strings);
 
   const std::string& prompt = tmpl_res->prompt;
-  s.prompt_tokens.resize(prompt.size() + 16);
   const bool add_bos = llama_vocab_get_add_bos(vocab_);
-  int n_tokens = llama_tokenize(vocab_, prompt.data(), static_cast<int>(prompt.size()),
-                                s.prompt_tokens.data(), static_cast<int>(s.prompt_tokens.size()),
-                                add_bos, true);
-  if (n_tokens < 0) {
-    s.prompt_tokens.resize(static_cast<std::size_t>(-n_tokens));
-    n_tokens = llama_tokenize(vocab_, prompt.data(), static_cast<int>(prompt.size()),
-                              s.prompt_tokens.data(), static_cast<int>(s.prompt_tokens.size()),
-                              add_bos, true);
-    if (n_tokens < 0)
-      return Result<PredictSetup>(std::unexpect, make_error(ErrorCode::Internal, "tokenization failed"));
+  const bool has_media = !tmpl_res->media.empty();
+  int n_tokens = 0;
+  if (has_media) {
+    if (mtmd_ == nullptr) {
+      return Result<PredictSetup>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument,
+                     "image input requires a loaded vision projector"));
+    }
+    mtmd::bitmaps bitmaps;
+    for (const auto& data : tmpl_res->media) {
+      auto decoded = mtmd_helper_bitmap_init_from_buf(
+          mtmd_, data.data(), data.size(), false);
+      mtmd::bitmap bitmap(decoded.bitmap);
+      mtmd_helper::video_ptr video(decoded.video_ctx);
+      if (!bitmap.ptr) {
+        return Result<PredictSetup>(std::unexpect,
+            make_error(ErrorCode::InvalidArgument,
+                       "image payload could not be decoded"));
+      }
+      if (video) {
+        return Result<PredictSetup>(std::unexpect,
+            make_error(ErrorCode::InvalidArgument,
+                       "only image media is supported for chat inference"));
+      }
+      bitmaps.entries.push_back(std::move(bitmap));
+    }
+    mtmd_input_text input{
+        prompt.c_str(),
+        prompt.size(),
+        add_bos,
+        true,
+    };
+    mtmd::input_chunks chunks(mtmd_input_chunks_init());
+    auto bitmap_ptrs = bitmaps.c_ptr();
+    const auto vision_tokenize_started = std::chrono::steady_clock::now();
+    const int tokenized = mtmd_tokenize(
+        mtmd_, chunks.ptr.get(), &input,
+        bitmap_ptrs.data(), bitmap_ptrs.size());
+    if (tokenized != 0) {
+      return Result<PredictSetup>(std::unexpect,
+          make_error(ErrorCode::InvalidArgument,
+                     "multimodal prompt tokenization failed (rc=" +
+                     std::to_string(tokenized) + ")"));
+    }
+    LOG_INFO("vision_prompt_tokenized",
+             "model={} images={} chunks={} tokens={} positions={} duration_ms={:.3f}",
+             info_.name,
+             tmpl_res->media.size(),
+             chunks.size(),
+             mtmd_helper_get_n_tokens(chunks.ptr.get()),
+             mtmd_helper_get_n_pos(chunks.ptr.get()),
+             std::chrono::duration<float, std::milli>(
+                 std::chrono::steady_clock::now() - vision_tokenize_started).count());
+    s.prompt_position_count = static_cast<int>(
+        mtmd_helper_get_n_pos(chunks.ptr.get()));
+    for (std::size_t index = 0; index < chunks.size(); ++index) {
+      const auto* chunk = chunks[index];
+      const auto type = mtmd_input_chunk_get_type(chunk);
+      if (type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+        std::size_t count = 0;
+        const auto* tokens = mtmd_input_chunk_get_tokens_text(chunk, &count);
+        s.prompt_tokens.insert(s.prompt_tokens.end(), tokens, tokens + count);
+      } else if (type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+        const int token_start = static_cast<int>(s.prompt_tokens.size());
+        const int token_count = static_cast<int>(
+            mtmd_input_chunk_get_n_tokens(chunk));
+        auto* copy = mtmd_input_chunk_copy(chunk);
+        if (copy == nullptr || token_count <= 0) {
+          if (copy) mtmd_input_chunk_free(copy);
+          return Result<PredictSetup>(std::unexpect,
+              make_error(ErrorCode::Internal,
+                         "multimodal prompt produced an invalid image chunk"));
+        }
+        s.prompt_tokens.insert(
+            s.prompt_tokens.end(), token_count, LLAMA_TOKEN_NULL);
+        s.media_chunks.push_back({
+            token_start,
+            token_count,
+            static_cast<int>(mtmd_input_chunk_get_n_pos(chunk)),
+            std::shared_ptr<mtmd_input_chunk>(
+                copy, [](mtmd_input_chunk* value) {
+                  mtmd_input_chunk_free(value);
+                }),
+        });
+      } else {
+        return Result<PredictSetup>(std::unexpect,
+            make_error(ErrorCode::InvalidArgument,
+                       "only image media is supported for chat inference"));
+      }
+    }
+    n_tokens = static_cast<int>(s.prompt_tokens.size());
+    if (s.prompt_tokens.empty() ||
+        s.prompt_tokens.back() == LLAMA_TOKEN_NULL) {
+      return Result<PredictSetup>(std::unexpect,
+          make_error(ErrorCode::Internal,
+                     "multimodal chat template did not produce a text generation suffix"));
+    }
+    s.checkpoint_capture_pos = 0;
+  } else {
+    s.prompt_tokens.resize(prompt.size() + 16);
+    n_tokens = llama_tokenize(
+        vocab_, prompt.data(), static_cast<int>(prompt.size()),
+        s.prompt_tokens.data(), static_cast<int>(s.prompt_tokens.size()),
+        add_bos, true);
+    if (n_tokens < 0) {
+      s.prompt_tokens.resize(static_cast<std::size_t>(-n_tokens));
+      n_tokens = llama_tokenize(
+          vocab_, prompt.data(), static_cast<int>(prompt.size()),
+          s.prompt_tokens.data(), static_cast<int>(s.prompt_tokens.size()),
+          add_bos, true);
+      if (n_tokens < 0) {
+        return Result<PredictSetup>(std::unexpect,
+            make_error(ErrorCode::Internal, "tokenization failed"));
+      }
+    }
+    s.prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
+    s.prompt_position_count = n_tokens;
+    s.checkpoint_capture_pos = n_tokens;
   }
-  s.prompt_tokens.resize(static_cast<std::size_t>(n_tokens));
-  s.checkpoint_capture_pos = n_tokens;
   const auto& generation_prompt = s.parser_params.generation_prompt;
-  if (!generation_prompt.empty() &&
+  if (!has_media && !generation_prompt.empty() &&
       prompt.size() >= generation_prompt.size() &&
       prompt.compare(
           prompt.size() - generation_prompt.size(),
@@ -1535,18 +1761,23 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
   // Per-slot context window = n_ctx_seq (total context / n_slots as set during load)
   s.n_ctx_seq = static_cast<int>(llama_n_ctx_seq(shared_ctx_));
 
-  if (n_tokens >= s.n_ctx_seq) {
-    if (!cfg_.truncate_prompt)
+  const int prompt_context = s.prompt_position_count > 0
+      ? s.prompt_position_count
+      : n_tokens;
+  if (prompt_context >= s.n_ctx_seq) {
+    if (!cfg_.truncate_prompt || has_media)
       return Result<PredictSetup>(std::unexpect,
           make_error(ErrorCode::ContextLengthExceeded,
                      "This model's maximum context length is " + std::to_string(s.n_ctx_seq) +
-                     " tokens. However, your messages resulted in " + std::to_string(n_tokens) +
+                     " tokens. However, your messages resulted in " + std::to_string(prompt_context) +
                      " tokens. Please reduce the length of the messages."));
     maybe_truncate_prompt(s.prompt_tokens, s.n_ctx_seq, req.max_tokens, info_.name);
     n_tokens = static_cast<int>(s.prompt_tokens.size());
+    s.prompt_position_count = n_tokens;
   }
 
-  const int ctx_budget = std::max(1, s.n_ctx_seq - n_tokens - 1);
+  const int ctx_budget = std::max(
+      1, s.n_ctx_seq - s.prompt_position_count - 1);
   s.max_tokens = req.max_tokens > 0 ? std::min(req.max_tokens, ctx_budget) : ctx_budget;
 
   // Snapshot per-slot KV state under the mutex (scheduler may touch these after submit)
@@ -1554,6 +1785,8 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
     std::lock_guard lk(mtx_);
     s.last_prompt_tokens   = slots_[slot_id].last_prompt_tokens;
     s.recurrent_checkpoint = slots_[slot_id].recurrent_checkpoint;
+    s.recurrent_draft_checkpoint = slots_[slot_id].recurrent_draft_checkpoint;
+    s.recurrent_mtp_checkpoint = slots_[slot_id].recurrent_mtp_checkpoint;
     s.checkpoint_pos       = slots_[slot_id].checkpoint_pos;
     s.mtp_cache_synced     = slots_[slot_id].mtp_cache_synced;
   }
@@ -1614,8 +1847,12 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   SlotTask task;
   task.slot_id             = slot_id;
   task.prompt_tokens       = setup.prompt_tokens;
+  task.media_chunks        = std::move(setup.media_chunks);
+  task.prompt_position_count = setup.prompt_position_count;
   task.last_prompt_tokens  = setup.last_prompt_tokens;
   task.recurrent_checkpoint = std::move(setup.recurrent_checkpoint);
+  task.recurrent_draft_checkpoint = std::move(setup.recurrent_draft_checkpoint);
+  task.recurrent_mtp_checkpoint = std::move(setup.recurrent_mtp_checkpoint);
   task.checkpoint_pos       = setup.checkpoint_pos;
   task.checkpoint_capture_pos = setup.checkpoint_capture_pos;
   task.mtp_cache_synced    = setup.mtp_cache_synced;
@@ -1653,6 +1890,8 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
     slot.last_prompt_tokens.insert(slot.last_prompt_tokens.end(),
                                    decoded_ids.begin(), decoded_ids.end());
     slot.recurrent_checkpoint = std::move(task.out_recurrent_checkpoint);
+    slot.recurrent_draft_checkpoint = std::move(task.out_recurrent_draft_checkpoint);
+    slot.recurrent_mtp_checkpoint = std::move(task.out_recurrent_mtp_checkpoint);
     slot.checkpoint_pos       = task.out_checkpoint_pos;
     slot.mtp_cache_synced     = task.out_mtp_cache_synced;
   }
@@ -1722,8 +1961,12 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   SlotTask task;
   task.slot_id            = slot_id;
   task.prompt_tokens      = setup.prompt_tokens;
+  task.media_chunks       = std::move(setup.media_chunks);
+  task.prompt_position_count = setup.prompt_position_count;
   task.last_prompt_tokens = setup.last_prompt_tokens;
   task.recurrent_checkpoint = std::move(setup.recurrent_checkpoint);
+  task.recurrent_draft_checkpoint = std::move(setup.recurrent_draft_checkpoint);
+  task.recurrent_mtp_checkpoint = std::move(setup.recurrent_mtp_checkpoint);
   task.checkpoint_pos      = setup.checkpoint_pos;
   task.checkpoint_capture_pos = setup.checkpoint_capture_pos;
   task.mtp_cache_synced    = setup.mtp_cache_synced;
@@ -1784,6 +2027,8 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
     slot.last_prompt_tokens.insert(slot.last_prompt_tokens.end(),
                                    decoded_ids.begin(), decoded_ids.end());
     slot.recurrent_checkpoint = std::move(task.out_recurrent_checkpoint);
+    slot.recurrent_draft_checkpoint = std::move(task.out_recurrent_draft_checkpoint);
+    slot.recurrent_mtp_checkpoint = std::move(task.out_recurrent_mtp_checkpoint);
     slot.checkpoint_pos       = task.out_checkpoint_pos;
     slot.mtp_cache_synced     = task.out_mtp_cache_synced;
   }

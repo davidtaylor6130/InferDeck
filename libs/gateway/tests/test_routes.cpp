@@ -1587,6 +1587,35 @@ TEST_CASE("Routes: text models reject image input before inference",
     ts.stop();
 }
 
+TEST_CASE("Routes: vision models admit image input and preserve the payload",
+          "[routes][vision]") {
+    TestServer ts;
+    auto info = make_info("vision-model");
+    info.has_vision = true;
+    info.mmproj_path = "mmproj.gguf";
+    ts.registry.register_model(std::move(info));
+    REQUIRE(ts.coordinator.load("vision-model"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"vision-model","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]})",
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+
+    const auto* model = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend("vision-model"));
+    REQUIRE(model);
+    const auto body = nlohmann::json::parse(model->last_request_json);
+    CHECK(body["messages"][0]["content"][1]["type"] == "image_url");
+    CHECK(body["messages"][0]["content"][1]["image_url"]["url"] ==
+          "data:image/png;base64,AA==");
+    CHECK(ts.metrics.total_requests() == 1);
+    ts.stop();
+}
+
 TEST_CASE("Routes: chat stream applies producer backpressure until disconnect",
           "[routes][chat][stream][backpressure]") {
     TestServer ts;

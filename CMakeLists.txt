@@ -32,6 +32,8 @@ endif()
 
 # --- llama.cpp: internal Vulkan runtime ---
 # InferDeck owns llama.cpp in-process; do not build or launch llama-server.exe.
+set(_llama_source_dir "${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/llama.cpp")
+
 set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)

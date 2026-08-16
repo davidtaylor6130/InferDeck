@@ -20,6 +20,7 @@ struct llama_vocab;
 struct llama_sampler;
 struct common_speculative;
 struct common_chat_templates;
+struct mtmd_context;
 using llama_token = int32_t;
 
 namespace inferdeck::llama_wrapper {
@@ -28,6 +29,7 @@ using ChatTemplateMeta = inferdeck::model::ChatTemplateMeta;
 
 struct ChatTemplateResult {
   std::string prompt;
+  std::vector<std::vector<uint8_t>> media;
   std::vector<std::string> stop_strings;
   common_chat_parser_params parser_params;
   common_params_sampling sampling_params;
@@ -107,6 +109,8 @@ private:
     bool busy{false};
     std::vector<int> last_prompt_tokens;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_draft_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_mtp_checkpoint;
     int checkpoint_pos{0};
     bool mtp_cache_synced{true};
   };
@@ -121,6 +125,8 @@ private:
   // Per-inference setup: tokenize, KV-state snapshot, sampler construction.
   struct PredictSetup {
     std::vector<llama_token> prompt_tokens;
+    std::vector<SlotTask::MediaChunk> media_chunks;
+    int prompt_position_count{0};
     std::vector<std::string> stop_strings;
     std::vector<llama_token> stop_tokens;
     common_chat_parser_params parser_params;
@@ -130,6 +136,8 @@ private:
     int n_ctx_seq{0};
     std::vector<int> last_prompt_tokens;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_draft_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_mtp_checkpoint;
     int checkpoint_pos{0};
     int checkpoint_capture_pos{0};
     bool mtp_cache_synced{true};
@@ -152,9 +160,11 @@ private:
   llama_context* shared_ctx_{nullptr};
   llama_context* draft_ctx_{nullptr};
   common_speculative* speculative_{nullptr};
+  mtmd_context* mtmd_{nullptr};
   std::unique_ptr<ContinuousBatchScheduler> scheduler_;
   std::vector<SlotState> slots_;
   std::filesystem::path resolved_gguf_path_;
+  std::filesystem::path resolved_mmproj_path_;
   common_chat_templates* chat_templates_{nullptr};
   ChatTemplateMeta chat_template_meta_;
 };

@@ -306,9 +306,13 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "runtime and modality do not match for: " + name);
                 }
-                if (entry["has_vision"] && entry["has_vision"].as<bool>()) {
-                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
-                                                 "vision input is not implemented for: " + name);
+                if (entry["has_vision"] && entry["has_vision"].as<bool>() &&
+                    (runtime != "llama_cpp" ||
+                     !entry["mmproj_path"] || entry["mmproj_path"].IsNull() ||
+                     entry["mmproj_path"].as<std::string>().empty())) {
+                    return foundation::Err<void>(
+                        foundation::ErrorCode::InvalidArgument,
+                        "vision model requires llama_cpp and mmproj_path: " + name);
                 }
                 if (entry["speculative"]) {
                     const auto speculative = entry["speculative"];

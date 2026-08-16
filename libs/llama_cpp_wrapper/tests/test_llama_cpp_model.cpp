@@ -84,6 +84,34 @@ TEST_CASE("LlamaCppModel: empty gguf_path returns NotFound", "[llama][load]") {
   LlamaCppModel::shutdown_backend();
 }
 
+TEST_CASE("LlamaCppModel: vision requires an existing projector", "[llama][vision][load]") {
+  const auto dir = std::filesystem::temp_directory_path() /
+      "inferdeck_llama_vision_test";
+  std::filesystem::create_directories(dir);
+  const auto gguf = write_fake_gguf(dir);
+
+  ModelInfo missing_path;
+  missing_path.name = "vision-missing-path";
+  missing_path.gguf_path = gguf.string();
+  missing_path.has_vision = true;
+  LlamaCppModel without_path(missing_path);
+  const auto no_path = without_path.load();
+  REQUIRE_FALSE(no_path.has_value());
+  CHECK(no_path.error().code == ErrorCode::NotFound);
+  CHECK(no_path.error().message == "vision model has no mmproj_path");
+
+  ModelInfo missing_file = missing_path;
+  missing_file.name = "vision-missing-file";
+  missing_file.mmproj_path = (dir / "missing-mmproj.gguf").string();
+  LlamaCppModel without_file(missing_file);
+  const auto no_file = without_file.load();
+  REQUIRE_FALSE(no_file.has_value());
+  CHECK(no_file.error().code == ErrorCode::NotFound);
+  CHECK(no_file.error().message.starts_with("mmproj not found:"));
+
+  std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("LlamaCppModel: info() returns registered info", "[llama][info]") {
   ModelInfo info;
   info.name = "test-model";
@@ -279,12 +307,24 @@ TEST_CASE("Recurrent checkpoint capture stops before the generation prompt",
 TEST_CASE("SlotTask keeps checkpoint storage alive",
           "[llama][scheduler][recurrent]") {
   auto checkpoint = std::make_shared<std::vector<uint8_t>>(32, 7);
+  auto draft_checkpoint = std::make_shared<std::vector<uint8_t>>(16, 5);
+  auto mtp_checkpoint = std::make_shared<std::vector<uint8_t>>(8, 3);
   SlotTask task;
   task.recurrent_checkpoint = checkpoint;
+  task.recurrent_draft_checkpoint = draft_checkpoint;
+  task.recurrent_mtp_checkpoint = mtp_checkpoint;
   checkpoint.reset();
+  draft_checkpoint.reset();
+  mtp_checkpoint.reset();
   REQUIRE(task.recurrent_checkpoint);
   REQUIRE(task.recurrent_checkpoint->size() == 32);
   REQUIRE(task.recurrent_checkpoint->front() == 7);
+  REQUIRE(task.recurrent_draft_checkpoint);
+  REQUIRE(task.recurrent_draft_checkpoint->size() == 16);
+  REQUIRE(task.recurrent_draft_checkpoint->front() == 5);
+  REQUIRE(task.recurrent_mtp_checkpoint);
+  REQUIRE(task.recurrent_mtp_checkpoint->size() == 8);
+  REQUIRE(task.recurrent_mtp_checkpoint->front() == 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +337,11 @@ namespace {
 // Returns the gguf path from INFERDECK_TEST_MODEL env var, or empty string.
 std::string test_model_path() {
   const char* p = std::getenv("INFERDECK_TEST_MODEL");
+  return p ? std::string(p) : std::string{};
+}
+
+std::string test_mtp_model_path() {
+  const char* p = std::getenv("INFERDECK_TEST_MTP_MODEL");
   return p ? std::string(p) : std::string{};
 }
 
@@ -389,6 +434,48 @@ TEST_CASE("recurrent checkpoint: multi-turn conversation reuses cache on second 
   auto r2 = lm.predict(slot_id, req2);
   REQUIRE(r2.has_value());
   REQUIRE(r2->cached_prompt_tokens > 0);
+
+  (void)lm.release_slot(slot_id);
+  (void)lm.unload();
+  LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("MTP recurrent checkpoint reuses an identical prompt",
+          "[llama][recurrent][mtp][.][requires_mtp_model]") {
+  const auto gguf = test_mtp_model_path();
+  if (gguf.empty()) SKIP("INFERDECK_TEST_MTP_MODEL not set");
+  ScopedTestLogger logger;
+
+  LlamaCppModel::init_backend();
+  ModelInfo minfo;
+  minfo.name             = "test-mtp-checkpoint";
+  minfo.gguf_path        = gguf;
+  minfo.n_slots          = 1;
+  minfo.context_size     = 512;
+  minfo.vram_required_mb = 0;
+  LlamaCppConfig config;
+  config.n_batch = 512;
+  config.n_ubatch = 512;
+  config.cache_type_k = "q4_0";
+  config.cache_type_v = "q4_0";
+  config.mtp_enabled = true;
+  config.mtp_draft_tokens = 2;
+  config.mtp_max_active_requests = 1;
+  LlamaCppModel lm(minfo, config);
+  REQUIRE(lm.load().has_value());
+
+  auto slot_r = lm.acquire_slot();
+  REQUIRE(slot_r.has_value());
+  const int slot_id = slot_r.value();
+
+  InferenceRequest req;
+  req.messages = {ChatMessage{"user", "Reply with only CACHE_OK."}};
+  req.max_tokens = 4;
+  auto first = lm.predict(slot_id, req);
+  REQUIRE(first.has_value());
+  auto second = lm.predict(slot_id, req);
+  REQUIRE(second.has_value());
+  REQUIRE(second->cached_prompt_tokens > 0);
 
   (void)lm.release_slot(slot_id);
   (void)lm.unload();
