@@ -1907,11 +1907,14 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   out.cached_prompt_tokens  = task.out_cached_prompt_tokens;
   out.completion_tokens     = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
+  out.prompt_duration_ms = task.out_prompt_duration_ms;
   out.generation_duration_ms = task.out_generation_duration_ms > 0.0f
       ? task.out_generation_duration_ms
       : out.duration_ms;
   out.tokens_per_second = detail::generation_tokens_per_second(
       out.completion_tokens, out.generation_duration_ms);
+  out.mtp_drafted_tokens = task.n_drafted;
+  out.mtp_accepted_tokens = task.n_draft_accepted;
   if (out.completion_tokens >= setup.max_tokens)
     out.finish_reason = "length";
 
@@ -2044,11 +2047,14 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   out.cached_prompt_tokens = task.out_cached_prompt_tokens;
   out.completion_tokens    = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
+  out.prompt_duration_ms = task.out_prompt_duration_ms;
   out.generation_duration_ms = task.out_generation_duration_ms > 0.0f
       ? task.out_generation_duration_ms
       : out.duration_ms;
   out.tokens_per_second = detail::generation_tokens_per_second(
       out.completion_tokens, out.generation_duration_ms);
+  out.mtp_drafted_tokens = task.n_drafted;
+  out.mtp_accepted_tokens = task.n_draft_accepted;
   if (out.completion_tokens >= setup.max_tokens)
     out.finish_reason = "length";
 

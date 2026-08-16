@@ -12,11 +12,18 @@
 
 #include <chrono>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <string>
 
 namespace inferdeck::gateway {
+
+enum class ComputeResource : std::uint8_t {
+    None,
+    Cpu,
+    Gpu,
+};
 
 struct GatewayDeps {
     model::BackendCoordinator& coordinator;
@@ -29,10 +36,13 @@ struct GatewayDeps {
     observability::StatsDb* stats_db{nullptr};
     foundation::EventBus* events{nullptr};
     SwapTracker* swap_tracker{nullptr};
-    std::atomic<bool>* maintenance_mode{nullptr};
+    std::atomic<ComputeResource>* maintenance_resource{nullptr};
 };
 
 bool maintenance_mode_active(const GatewayDeps& deps) noexcept;
+ComputeResource model_compute_resource(const model::ModelInfo& info) noexcept;
+bool maintenance_blocks_model(const GatewayDeps& deps,
+                              const std::string& model_name) noexcept;
 
 void record_request(observability::Metrics* metrics,
                     observability::StatsDb* stats_db,
@@ -42,14 +52,25 @@ void record_request(observability::Metrics* metrics,
                     int status_code,
                     int slot_id,
                     double input_audio_seconds = 0.0,
-                    std::int64_t input_characters = 0);
+                    std::int64_t input_characters = 0,
+                    const std::string& resolved_model_name = {});
 void record_request(const GatewayDeps& deps,
                     const std::string& model_name,
                     const model::InferenceResult& result,
                     int status_code,
                     int slot_id,
                     double input_audio_seconds = 0.0,
-                    std::int64_t input_characters = 0);
+                    std::int64_t input_characters = 0,
+                    const std::string& resolved_model_name = {});
+
+struct ResolvedModelName {
+    std::string requested;
+    std::string resolved;
+    bool alias{false};
+};
+
+foundation::Result<ResolvedModelName> resolve_model_name(
+    const GatewayDeps& deps, const std::string& requested);
 
 void write_json(httplib::Response& resp, int status, const nlohmann::json& body);
 nlohmann::json make_error_json(int status, const std::string& code,

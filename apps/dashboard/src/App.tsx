@@ -1,5 +1,8 @@
 import React, { useEffect, useState } from 'react';
+import { XMarkIcon } from '@heroicons/react/24/outline';
+import { getHealth, getPricing } from './api';
 import { Badge } from './components/ui';
+import { COST_STORAGE_KEY } from './cost';
 import type { DashboardSection } from './dashboardSections';
 import { GatewayProvider, useGateway } from './gateway';
 import { OverviewPage } from './pages/OverviewPage';
@@ -9,14 +12,15 @@ import { UsagePage } from './pages/UsagePage';
 import { SystemPage } from './pages/SystemPage';
 import { compactModel, timeAgo } from './utils';
 import { INFERDECK_VERSION } from './version';
+import logoUrl from '../../../Assets/Logo.png';
 
 export type PageId =
   | 'home'
-  | 'llm/operate'
+  | 'llm/settings'
   | 'llm/models'
   | 'llm/usage'
   | 'llm/diagnostics'
-  | 'dictation/operate'
+  | 'dictation/settings'
   | 'dictation/models'
   | 'dictation/usage'
   | 'dictation/diagnostics';
@@ -29,12 +33,12 @@ interface DashboardPage {
 
 export const DASHBOARD_PAGES: ReadonlyArray<DashboardPage> = [
   { id: 'home', label: 'Home' },
-  { id: 'llm/operate', label: 'Operate', section: 'llm' },
-  { id: 'llm/models', label: 'Models', section: 'llm' },
+  { id: 'llm/settings', label: 'Model Settings', section: 'llm' },
+  { id: 'llm/models', label: 'Model Store', section: 'llm' },
   { id: 'llm/usage', label: 'Usage', section: 'llm' },
   { id: 'llm/diagnostics', label: 'Diagnostics', section: 'llm' },
-  { id: 'dictation/operate', label: 'Operate', section: 'dictation' },
-  { id: 'dictation/models', label: 'Models', section: 'dictation' },
+  { id: 'dictation/settings', label: 'Model Settings', section: 'dictation' },
+  { id: 'dictation/models', label: 'Model Store', section: 'dictation' },
   { id: 'dictation/usage', label: 'Usage', section: 'dictation' },
   { id: 'dictation/diagnostics', label: 'Diagnostics', section: 'dictation' },
 ];
@@ -44,6 +48,8 @@ const LEGACY_ROUTES: Record<string, PageId> = {
   models: 'llm/models',
   usage: 'llm/usage',
   system: 'llm/diagnostics',
+  'llm/operate': 'llm/settings',
+  'dictation/operate': 'dictation/settings',
 };
 
 function pageFromHash(): PageId {
@@ -71,9 +77,12 @@ const Shell: React.FC = () => {
   return (
     <div className="app-shell flex min-h-screen">
       <aside className="hidden w-52 shrink-0 flex-col border-r border-border-slate bg-deck-navy px-4 py-5 md:flex">
-        <div className="mb-6 px-2">
-          <span className="text-base font-semibold text-text-primary">InferDeck</span>
-          <span className="mt-0.5 block text-xs text-text-muted">Local inference</span>
+        <div className="mb-6 flex items-center gap-3 px-2">
+          <img src={logoUrl} alt="" className="h-9 w-9 rounded-md object-cover" />
+          <div>
+            <span className="text-base font-semibold text-text-primary">InferDeck</span>
+            <span className="mt-0.5 block text-xs text-text-muted">Local inference</span>
+          </div>
         </div>
         <nav className="flex flex-col" aria-label="Dashboard">
           <NavLink id="home" label="Home" page={page} />
@@ -99,14 +108,15 @@ const Shell: React.FC = () => {
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar page={page} />
         <ConnectionBanner />
+        <HealthNotices />
         <main className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
           <div className="mx-auto max-w-[1280px]">
             {page === 'home' && <OverviewPage />}
-            {page === 'llm/operate' && <OperatePage section="llm" />}
+            {page === 'llm/settings' && <OperatePage section="llm" />}
             {page === 'llm/models' && <ModelsPage section="llm" />}
             {page === 'llm/usage' && <UsagePage section="llm" />}
             {page === 'llm/diagnostics' && <SystemPage section="llm" />}
-            {page === 'dictation/operate' && <OperatePage section="dictation" />}
+            {page === 'dictation/settings' && <OperatePage section="dictation" />}
             {page === 'dictation/models' && <ModelsPage section="dictation" />}
             {page === 'dictation/usage' && <UsagePage section="dictation" />}
             {page === 'dictation/diagnostics' && <SystemPage section="dictation" />}
@@ -156,7 +166,7 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
           return (
             <a
               key={section}
-              href={`#${section}/operate`}
+              href={`#${section}/settings`}
               aria-current={active ? 'true' : undefined}
               className={`shrink-0 rounded px-2.5 py-1.5 text-xs ${active ? 'bg-white/10 text-text-primary' : 'text-text-muted'}`}
             >
@@ -180,6 +190,64 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
         </nav>
       )}
     </header>
+  );
+};
+
+const HealthNotices: React.FC = () => {
+  const { models } = useGateway();
+  const [notices, setNotices] = useState<string[]>([]);
+  const [dismissed, setDismissed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    Promise.allSettled([getHealth(), getPricing()]).then(results => {
+      if (!active) return;
+      const next: string[] = [];
+      const health = results[0];
+      const pricing = results[1];
+      if (health.status === 'rejected') {
+        next.push('Gateway health details are unavailable. Check Diagnostics for connection and log details.');
+      } else if (!health.value.db_healthy) {
+        next.push('Usage database is unhealthy. Request history and cost totals may be incomplete.');
+      }
+      if (pricing.status === 'rejected' || pricing.value.length === 0) {
+        next.push('Server pricing is not configured. Cost estimates cannot be shared consistently across devices.');
+      }
+      try {
+        const local = JSON.parse(localStorage.getItem(COST_STORAGE_KEY) || '{}') as Record<string, { userEdited?: boolean }>;
+        if (Object.values(local).some(entry => entry?.userEdited)) {
+          next.push('This browser has legacy local price overrides. They are ignored; migrate the values into Model Settings, then clear the site data.');
+        }
+      } catch {
+        next.push('This browser has unreadable legacy pricing data. It is ignored; clear the site data before trusting prior cost estimates.');
+      }
+      const unavailable = models.filter(model => model.runtime_available === false);
+      if (unavailable.length) {
+        next.push(`${unavailable.length} configured model runtime${unavailable.length === 1 ? ' is' : 's are'} unavailable on this build.`);
+      }
+      setNotices(next);
+    });
+    return () => { active = false; };
+  }, [models]);
+
+  if (dismissed || notices.length === 0) return null;
+  return (
+    <aside className="border-b border-warning-amber/30 bg-warning-amber/10 px-4 py-2 text-sm text-warning-amber sm:px-6" aria-label="Configuration notices">
+      <div className="flex items-start justify-between gap-4">
+        <ul className="space-y-1">
+          {notices.map(notice => <li key={notice}>{notice}</li>)}
+        </ul>
+        <button
+          type="button"
+          aria-label="Dismiss configuration notices"
+          title="Dismiss configuration notices"
+          onClick={() => setDismissed(true)}
+          className="rounded p-1 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning-amber"
+        >
+          <XMarkIcon className="h-4 w-4" aria-hidden="true" />
+        </button>
+      </div>
+    </aside>
   );
 };
 

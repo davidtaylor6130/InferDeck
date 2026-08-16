@@ -2,6 +2,7 @@
 
 #include "gateway/model_store.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -249,6 +250,111 @@ public:
     }
 };
 
+class SherpaBundleTransport : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string&, const std::string&) override {
+        const std::string checksum = "9f86d081884c7d659a2feaa0c55ad015"
+                                     "a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        return foundation::Ok(nlohmann::json{
+            {"sha", "revision"}, {"pipeline_tag", "automatic-speech-recognition"},
+            {"siblings", nlohmann::json::array({
+                {{"rfilename", "encoder.onnx"}, {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "decoder.onnx"}, {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "joiner.onnx"}, {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "config/tokens.txt"}, {"lfs", {{"size", 4}, {"sha256", checksum}}}}
+            })}
+        });
+    }
+};
+
+class IncompleteSherpaTransport final : public SherpaBundleTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string&, const std::string&) override {
+        const std::string checksum = "9f86d081884c7d659a2feaa0c55ad015"
+                                     "a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        return foundation::Ok(nlohmann::json{
+            {"sha", "revision"}, {"pipeline_tag", "automatic-speech-recognition"},
+            {"siblings", nlohmann::json::array({
+                {{"rfilename", "encoder.onnx"}, {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "decoder.onnx"}, {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "tokens.txt"}, {"lfs", {{"size", 4}, {"sha256", checksum}}}}
+            })}
+        });
+    }
+};
+
+class CorruptSherpaTransport final : public SherpaBundleTransport {
+public:
+    foundation::Result<void> download(
+        const std::string&, const std::string&,
+        const std::filesystem::path& destination, std::uint64_t offset,
+        const std::function<bool(std::uint64_t)>& progress) override {
+        std::ofstream output(destination, std::ios::binary |
+                            (offset ? std::ios::app : std::ios::trunc));
+        output << "xxxx";
+        output.close();
+        progress(offset + 4);
+        return foundation::Ok();
+    }
+};
+
+class ResumableSherpaTransport final : public SherpaBundleTransport {
+public:
+    foundation::Result<void> download(
+        const std::string&, const std::string&,
+        const std::filesystem::path& destination, std::uint64_t offset,
+        const std::function<bool(std::uint64_t)>& progress) override {
+        if (!interrupted_.exchange(true)) {
+            std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+            output << "te";
+            output.close();
+            progress(2);
+            {
+                std::lock_guard lock(mutex_);
+                waiting_ = true;
+            }
+            changed_.notify_all();
+            std::unique_lock lock(mutex_);
+            changed_.wait(lock, [this] { return released_; });
+            return foundation::Err<void>(foundation::ErrorCode::Cancelled,
+                                         "interrupted by test");
+        }
+        std::ofstream output(destination, std::ios::binary |
+                            (offset ? std::ios::app : std::ios::trunc));
+        const std::string bytes = offset == 2 ? "st" : "test";
+        output << bytes;
+        output.close();
+        if (!progress(offset + bytes.size())) {
+            return foundation::Err<void>(foundation::ErrorCode::Cancelled,
+                                         "cancelled");
+        }
+        return foundation::Ok();
+    }
+
+    void wait_until_interrupted() {
+        std::unique_lock lock(mutex_);
+        REQUIRE(changed_.wait_for(lock, std::chrono::seconds{2},
+                                  [this] { return waiting_; }));
+    }
+
+    void release() {
+        {
+            std::lock_guard lock(mutex_);
+            released_ = true;
+        }
+        changed_.notify_all();
+    }
+
+private:
+    std::atomic<bool> interrupted_{false};
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool waiting_{false};
+    bool released_{false};
+};
+
 }
 
 TEST_CASE("Model store filters search results by runtime", "[model-store]") {
@@ -263,6 +369,111 @@ TEST_CASE("Model store filters search results by runtime", "[model-store]") {
         REQUIRE(result->size() == 1);
         CHECK((*result)[0]["id"] == "owner/image");
         CHECK((*result)[0]["modality"] == "image");
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store installs verified sherpa repositories as one atomic bundle",
+          "[model-store][sherpa]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<SherpaBundleTransport>());
+        const auto inspected = store.inspect("owner/bundle");
+        REQUIRE(inspected);
+        const auto bundle = std::find_if(inspected->at("files").begin(),
+                                         inspected->at("files").end(),
+            [](const auto& file) {
+                return file.value("name", "") == "__inferdeck_sherpa_bundle__";
+            });
+        REQUIRE(bundle != inspected->at("files").end());
+        CHECK(bundle->value("compatible", false));
+        CHECK(bundle->value("artifactCount", 0) == 4);
+
+        const auto install = store.install(
+            "owner/bundle", "__inferdeck_sherpa_bundle__", "sherpa_onnx",
+            "audio_transcription", "parakeet-bundle");
+        REQUIRE(install);
+        const auto job = wait_for_terminal(store, *install);
+        REQUIRE(job);
+        CHECK(job->state == "installed");
+        const auto info = registry.get_info_result("parakeet-bundle");
+        REQUIRE(info);
+        CHECK(info->artifacts.contains("encoder"));
+        CHECK(info->artifacts.contains("decoder"));
+        CHECK(info->artifacts.contains("joiner"));
+        CHECK(info->artifacts.contains("tokens"));
+        CHECK(std::filesystem::is_directory(job->installed_path));
+        CHECK_FALSE(std::filesystem::exists(
+            std::filesystem::path(job->installed_path).string() + ".bundle.partial"));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store rejects incomplete and corrupt sherpa bundles",
+          "[model-store][sherpa]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore incomplete(root / "incomplete", "", coordinator,
+                                       std::make_unique<IncompleteSherpaTransport>());
+        const auto inspected = incomplete.inspect("owner/incomplete");
+        REQUIRE(inspected);
+        const auto bundle = std::find_if(inspected->at("files").begin(),
+                                         inspected->at("files").end(), [](const auto& file) {
+            return file.value("name", "") == "__inferdeck_sherpa_bundle__";
+        });
+        REQUIRE(bundle != inspected->at("files").end());
+        CHECK_FALSE(bundle->value("compatible", true));
+        CHECK_FALSE(incomplete.install(
+            "owner/incomplete", "__inferdeck_sherpa_bundle__", "sherpa_onnx",
+            "audio_transcription", "incomplete-model"));
+
+        gateway::ModelStore corrupt(root / "corrupt", "", coordinator,
+                                    std::make_unique<CorruptSherpaTransport>());
+        const auto install = corrupt.install(
+            "owner/corrupt", "__inferdeck_sherpa_bundle__", "sherpa_onnx",
+            "audio_transcription", "corrupt-model");
+        REQUIRE(install);
+        const auto job = wait_for_terminal(corrupt, *install);
+        REQUIRE(job);
+        CHECK(job->state == "failed");
+        CHECK_FALSE(registry.has("corrupt-model"));
+        CHECK_FALSE(std::filesystem::exists(
+            root / "corrupt" / "sherpa_onnx" / "owner_corrupt" /
+            "corrupt-model.bundle.partial"));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store resumes a cancelled sherpa bundle as one job",
+          "[model-store][sherpa]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto transport = std::make_unique<ResumableSherpaTransport>();
+    auto* resumable = transport.get();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        const auto install = store.install(
+            "owner/resume", "__inferdeck_sherpa_bundle__", "sherpa_onnx",
+            "audio_transcription", "resumed-model");
+        REQUIRE(install);
+        resumable->wait_until_interrupted();
+        REQUIRE(store.cancel(*install));
+        resumable->release();
+        const auto cancelled = wait_for_terminal(store, *install);
+        REQUIRE(cancelled);
+        REQUIRE(cancelled->state == "cancelled");
+        REQUIRE(store.resume(*install));
+        const auto installed = wait_for_terminal(store, *install);
+        REQUIRE(installed);
+        CHECK(installed->state == "installed");
+        CHECK(registry.has("resumed-model"));
+        CHECK(std::filesystem::is_directory(installed->installed_path));
     }
     std::filesystem::remove_all(root);
 }
@@ -351,11 +562,13 @@ TEST_CASE("Model store exposes sherpa neural TTS metadata artifacts",
                                   std::make_unique<FakeTransport>());
         auto result = store.inspect("owner/tts");
         REQUIRE(result);
-        REQUIRE((*result)["files"].size() == 2);
+        REQUIRE((*result)["files"].size() == 3);
         CHECK((*result)["files"][0]["name"] == "model.onnx");
         CHECK((*result)["files"][0]["runtime"] == "sherpa_onnx");
         CHECK((*result)["files"][1]["name"] == "tts.json");
         CHECK((*result)["files"][1]["runtime"] == "sherpa_onnx");
+        CHECK((*result)["files"][2]["name"] == "__inferdeck_sherpa_bundle__");
+        CHECK_FALSE((*result)["files"][2]["compatible"]);
     }
     std::filesystem::remove_all(root);
 }
@@ -559,6 +772,8 @@ TEST_CASE("Model store serializes concurrent manifest updates",
         const auto second_job = wait_for_terminal(store, *second);
         REQUIRE(first_job);
         REQUIRE(second_job);
+        INFO("first install error: " << first_job->error);
+        INFO("second install error: " << second_job->error);
         CHECK(first_job->state == "installed");
         CHECK(second_job->state == "installed");
         CHECK(registry.has("first"));
@@ -573,3 +788,41 @@ TEST_CASE("Model store serializes concurrent manifest updates",
     std::filesystem::remove_all(root);
 }
 #endif
+
+TEST_CASE("Model store archives and permanently deletes managed artifacts",
+          "[model-store][retire]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    const auto archive_root = root / "archive";
+    {
+        gateway::ModelStore store(root / "store", archive_root, "", coordinator,
+                                  std::make_unique<SuccessfulTransport>());
+        const auto archived_install = store.install(
+            "owner/archive", "model.gguf", "llama_cpp", "text", "archived-model");
+        REQUIRE(archived_install);
+        const auto archived_job = wait_for_terminal(store, *archived_install);
+        REQUIRE(archived_job);
+        REQUIRE(archived_job->state == "installed");
+        const auto archived_source = std::filesystem::path(archived_job->installed_path);
+        REQUIRE(store.archive("archived-model"));
+        CHECK_FALSE(std::filesystem::exists(archived_source));
+        CHECK(std::filesystem::exists(
+            archive_root / "archived-model" / archived_source.filename()));
+        CHECK_FALSE(registry.has("archived-model"));
+        CHECK_FALSE(store.installed().contains("archived-model"));
+
+        const auto deleted_install = store.install(
+            "owner/delete", "model.gguf", "llama_cpp", "text", "deleted-model");
+        REQUIRE(deleted_install);
+        const auto deleted_job = wait_for_terminal(store, *deleted_install);
+        REQUIRE(deleted_job);
+        REQUIRE(deleted_job->state == "installed");
+        const auto deleted_source = std::filesystem::path(deleted_job->installed_path);
+        REQUIRE(store.remove("deleted-model"));
+        CHECK_FALSE(std::filesystem::exists(deleted_source));
+        CHECK_FALSE(registry.has("deleted-model"));
+        CHECK_FALSE(store.installed().contains("deleted-model"));
+    }
+    std::filesystem::remove_all(root);
+}

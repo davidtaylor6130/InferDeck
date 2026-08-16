@@ -72,7 +72,7 @@ export const OverviewPage: React.FC = () => {
   const tokensIn = summary?.promptTokens ?? stats?.lifetimeTokensIn ?? 0;
   const tokensOut = summary?.completionTokens ?? stats?.lifetimeTokensOut ?? 0;
   const totalLifetimeTokens = tokensIn + tokensOut;
-  const llmCost = estimatePortfolioCostAvoided(llmUsage, savedCosts, costDefaults.defaults, costDefaults.fallback);
+  const llmCost = estimatePortfolioCostAvoided(llmUsage, {}, costDefaults.defaults, costDefaults.fallback);
   const dictationCost = estimatePortfolioCostAvoided(dictationUsage, savedCosts, costDefaults.defaults, costDefaults.fallback);
   const totalCost = llmCost + dictationCost;
   const portfolio = getCostConfigForModel(ALL_MODELS, savedCosts, costDefaults.defaults, costDefaults.fallback);
@@ -128,7 +128,7 @@ export const OverviewPage: React.FC = () => {
       ALL_MODELS,
       DEFAULT_COST_CONFIG,
       llmMonthly,
-      savedCosts,
+      {},
       costDefaults.defaults,
       costDefaults.fallback,
       usageRange,
@@ -136,7 +136,7 @@ export const OverviewPage: React.FC = () => {
       llmHourly,
       Boolean(status?.dailyTokenUsageAllTime),
     ),
-    [llmMonthly, savedCosts, costDefaults, usageRange, llmDaily, llmHourly, status?.dailyTokenUsageAllTime],
+    [llmMonthly, costDefaults, usageRange, llmDaily, llmHourly, status?.dailyTokenUsageAllTime],
   );
   const dictationSeries = useMemo(
     () => buildTokenSeries(
@@ -213,7 +213,7 @@ export const OverviewPage: React.FC = () => {
       <section className="grid gap-4 xl:grid-cols-2">
         <ServiceSummary
           title="LLM"
-          href="#llm/operate"
+          href="#llm/settings"
           registered={llmModels.length}
           loaded={loadedLlm.length}
           requests={llmRequests}
@@ -226,7 +226,7 @@ export const OverviewPage: React.FC = () => {
         />
         <ServiceSummary
           title="Dictation"
-          href="#dictation/operate"
+          href="#dictation/settings"
           registered={dictationModels.length}
           loaded={loadedDictation.length}
           requests={dictationRequests}

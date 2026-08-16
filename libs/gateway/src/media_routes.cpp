@@ -178,6 +178,7 @@ struct SpeechStreamState {
     model::BackendCoordinator* coordinator{};
     GatewayDeps deps;
     std::string model;
+    std::string requested_model;
     int slot{-1};
     float duration_ms{0};
     std::int64_t input_characters{0};
@@ -194,7 +195,8 @@ struct SpeechStreamState {
         aborted.store(status == 499);
         cv.notify_all();
         if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) worker.join();
-        record_media(deps, model, duration_ms, status, slot, 0.0,
+        record_media(deps, requested_model.empty() ? model : requested_model,
+                     duration_ms, status, slot, 0.0,
                      status == 200 ? input_characters : 0);
         finish_job(job, status == 200 ? "completed" : status == 499 ? "cancelled" : "failed");
         if (coordinator) {
@@ -243,8 +245,10 @@ void record_media(const GatewayDeps& deps, const std::string& model_name,
                   std::int64_t input_characters) {
     model::InferenceResult metrics;
     metrics.duration_ms = duration_ms;
+    const auto resolved = deps.coordinator.registry().resolve(model_name);
     record_request(deps, model_name, metrics, status, slot,
-                   input_audio_seconds, input_characters);
+                   input_audio_seconds, input_characters,
+                   resolved ? *resolved : model_name);
 }
 
 std::int64_t utf8_character_count(const std::string& text) {
@@ -489,6 +493,7 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     try { body = nlohmann::json::parse(req.body); }
     catch (const std::exception& error) { write_error(resp, 400, "invalid_json", error.what()); return; }
     const std::string model_name = body.value("model", deps.default_model);
+    const auto resolved_model = resolve_model_name(deps, model_name);
     model::ImageGenerationRequest request;
     request.prompt = body.value("prompt", "");
     request.negative_prompt = body.value("negative_prompt", "");
@@ -499,7 +504,7 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     const std::string size = body.value("size", "1024x1024");
     char trailing = '\0';
     if (std::sscanf(size.c_str(), "%dx%d%c", &request.width, &request.height, &trailing) != 2 ||
-        model_name.empty() || request.prompt.empty() || request.prompt.size() > 32768 ||
+        model_name.empty() || !resolved_model || request.prompt.empty() || request.prompt.size() > 32768 ||
         request.negative_prompt.size() > 32768 || request.count < 1 || request.count > 4 ||
         request.width < 256 || request.height < 256 || request.width > 2048 || request.height > 2048 ||
         request.width % 64 != 0 || request.height % 64 != 0 || request.steps < 1 || request.steps > 200 ||
@@ -509,10 +514,11 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     }
     auto job = begin_job(model_name, "image");
     resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
-    auto slot = acquire_media_slot(req, deps, model_name, job);
+    const std::string& runtime_model = resolved_model->resolved;
+    auto slot = acquire_media_slot(req, deps, runtime_model, job);
     if (!slot) { const int status = status_for(slot.error().code); write_error(resp, status, "image_admission_failed", slot.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
-    SlotGuard guard{&deps.coordinator, model_name, *slot};
-    auto result = deps.coordinator.generate_images(model_name, *slot, request,
+    SlotGuard guard{&deps.coordinator, runtime_model, *slot};
+    auto result = deps.coordinator.generate_images(runtime_model, *slot, request,
         [&req, &deps, &model_name, job](int progress) {
             update_job(job, progress);
             if (deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "image"}, {"progress", progress}}.dump());
@@ -534,11 +540,15 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     try { body = nlohmann::json::parse(req.body); }
     catch (const std::exception& error) { write_error(resp, 400, "invalid_json", error.what()); return; }
     const std::string model_name = body.value("model", deps.default_model);
+    const auto resolved_model = resolve_model_name(deps, model_name);
     model::SpeechRequest request;
     request.input = body.value("input", "");
     request.voice = body.value("voice", "");
     request.speed = body.value("speed", 1.0f);
-    const auto info = deps.coordinator.registry().get_info_result(model_name);
+    const auto info = resolved_model
+        ? deps.coordinator.registry().get_info_result(resolved_model->resolved)
+        : foundation::Err<model::ModelInfo>(foundation::ErrorCode::NotFound,
+                                            "model not registered: " + model_name);
     const bool wav_runtime =
         info && (info->runtime == "sherpa_onnx" ||
                  info->runtime == "windows_sapi");
@@ -550,7 +560,7 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     }
     const auto input_characters = utf8_character_count(request.input);
     static const std::array formats{"mp3", "opus", "aac", "flac", "wav", "pcm"};
-    if (model_name.empty() || request.input.empty() || request.input.size() > 65536 ||
+    if (model_name.empty() || !resolved_model || request.input.empty() || request.input.size() > 65536 ||
         request.voice.empty() || request.voice.size() > 128 ||
         std::find(formats.begin(), formats.end(), request.format) == formats.end() ||
         !std::isfinite(request.speed) || request.speed < 0.25f || request.speed > 4.0f) {
@@ -564,13 +574,14 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     VoiceSessionGuard voice_session(req, deps);
     auto job = begin_job(model_name, "audio_speech");
     resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
-    auto slot = acquire_media_slot(req, deps, model_name, job);
+    const std::string& runtime_model = resolved_model->resolved;
+    auto slot = acquire_media_slot(req, deps, runtime_model, job);
     if (!slot) { const int status = status_for(slot.error().code); write_error(resp, status, "speech_admission_failed", slot.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
-    SlotGuard guard{&deps.coordinator, model_name, *slot};
+    SlotGuard guard{&deps.coordinator, runtime_model, *slot};
     if (request.format == "wav") {
         try {
             auto result = deps.coordinator.synthesize(
-                model_name, *slot, request,
+                runtime_model, *slot, request,
                 [&req, job](const std::byte*, std::size_t) {
                     return !req.is_connection_closed() &&
                            !job->cancelled->load();
@@ -611,7 +622,8 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     }
     auto state = std::make_shared<SpeechStreamState>(deps);
     state->coordinator = &deps.coordinator;
-    state->model = model_name;
+    state->model = runtime_model;
+    state->requested_model = model_name;
     state->slot = *slot;
     state->job = job;
     state->input_characters = input_characters;
@@ -753,21 +765,27 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
                     "response_format must be json, text, verbose_json, srt, or vtt");
         return;
     }
+    const auto resolved_model = resolve_model_name(deps, model_name);
+    if (!resolved_model) {
+        write_error(resp, 404, "model_not_found", resolved_model.error().message);
+        return;
+    }
+    const std::string& runtime_model = resolved_model->resolved;
     VoiceSessionGuard voice_session(req, deps);
     auto job = begin_job(model_name, "audio_transcription");
     resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
     auto decode_permit = acquire_decode_permit(req, job);
     if (!decode_permit) { const int status = status_for(decode_permit.error().code); write_error(resp, status, "transcription_admission_failed", decode_permit.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
-    auto slot = acquire_media_slot(req, deps, model_name, job);
+    auto slot = acquire_media_slot(req, deps, runtime_model, job);
     if (!slot) { const int status = status_for(slot.error().code); write_error(resp, status, "transcription_admission_failed", slot.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
-    SlotGuard guard{&deps.coordinator, model_name, *slot};
+    SlotGuard guard{&deps.coordinator, runtime_model, *slot};
     auto decoded = decode_audio(file.content, req.form);
     decode_permit->release();
     if (!decoded) { write_error(resp, 400, "invalid_audio", decoded.error().message); record_media(deps, model_name, 0, 400, *slot); finish_job(job, "failed"); return; }
     const double input_audio_seconds =
         static_cast<double>(decoded->pcm.size()) /
         static_cast<double>(decoded->sample_rate);
-    auto result = deps.coordinator.transcribe(model_name, *slot, *decoded,
+    auto result = deps.coordinator.transcribe(runtime_model, *slot, *decoded,
         [&req, &deps, &model_name, job](int progress) {
             update_job(job, progress);
             if (deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "audio_transcription"}, {"progress", progress}}.dump());

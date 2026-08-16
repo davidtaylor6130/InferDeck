@@ -69,12 +69,11 @@ TEST_CASE("Repository gateway configuration keeps statistics in the installed ru
     CHECK(config.stats_db_path == "C:/InferDeck/data/stats.db");
 }
 
-TEST_CASE("Repository Gemma 31B profile is the safe default",
+TEST_CASE("Repository retains the tuned Gemma 31B profile",
           "[config][gemma4]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "config" / "gateway.yml";
     const auto config = load_config(path);
-    CHECK(config.default_model == "gemma-4-31b");
     const auto gemma = std::find_if(
         config.models.begin(), config.models.end(),
         [](const auto& model) { return model.name == "gemma-4-31b"; });
@@ -93,6 +92,7 @@ TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "config" / "gateway.yml";
     const auto config = load_config(path);
+    CHECK(config.default_model == "qwen3.8-27b");
     const auto qwen = std::find_if(
         config.models.begin(), config.models.end(),
         [](const auto& model) { return model.name == "qwen3.8-27b"; });
@@ -158,6 +158,9 @@ TEST_CASE("Repository Qwen 3.6 27B profile enables the measured adaptive MTP set
     CHECK(qwen->optimization.quality_total == 3);
     CHECK(qwen->optimization.single_tokens_per_second == 50.16);
     CHECK(qwen->optimization.parallel_tokens_per_second == 51.24);
+    CHECK_FALSE(qwen->optimization.schedule_enabled);
+    CHECK(qwen->optimization.schedule_window_start == "03:00");
+    CHECK(qwen->optimization.schedule_window_end == "04:00");
 }
 
 TEST_CASE("Repository gateway configuration exposes native speech models",
@@ -285,6 +288,25 @@ model_registry:
     gguf_path: model.gguf
     n_batch: 256
     n_ubatch: 512
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: text-only
+    gguf_path: model.gguf
+    context_size: 4096
+model_aliases:
+  - name: assistant
+    target: text-only
+    required_context_size: 8192
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: text-only
+    gguf_path: model.gguf
+model_aliases:
+  - name: vision-assistant
+    target: text-only
+    required_capabilities: [vision]
 )"));
 }
 

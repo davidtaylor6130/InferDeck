@@ -1,6 +1,7 @@
 #pragma once
 
 #include "foundation/result.hpp"
+#include "gateway/routes.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_info.hpp"
@@ -24,17 +25,29 @@ struct ProfileBenchmarkPrompt {
     int max_tokens{64};
 };
 
+struct ProfileBenchmarkConcurrencyMetrics {
+    int requests{0};
+    double aggregate_tokens_per_second{0.0};
+    double average_request_tokens_per_second{0.0};
+    int mtp_requests{0};
+    int mtp_drafted_tokens{0};
+    int mtp_accepted_tokens{0};
+};
+
 struct ProfileBenchmarkTrialMetrics {
     double load_ms{0.0};
+    double prompt_tokens_per_second{0.0};
     double average_tokens_per_second{0.0};
     double parallel_tokens_per_second{0.0};
     double average_time_to_first_token_ms{0.0};
     double peak_vram_mb{0.0};
     double quality_score{0.0};
+    double performance_index{100.0};
     int prompt_tokens{0};
     int completion_tokens{0};
     int quality_passes{0};
     int quality_total{0};
+    std::vector<ProfileBenchmarkConcurrencyMetrics> concurrency;
     std::vector<std::string> output_samples;
 };
 
@@ -59,7 +72,9 @@ struct ProfileBenchmarkSnapshot {
     bool measured{true};
     bool cancel_requested{false};
     bool restored{false};
+    bool has_baseline{false};
     bool has_recommendation{false};
+    ProfileBenchmarkTrial baseline;
     optimize::ProfileCandidate recommended;
     std::vector<ProfileBenchmarkTrial> trials;
 };
@@ -78,7 +93,7 @@ class ProfileBenchmarkManager {
 public:
     ProfileBenchmarkManager(model::BackendCoordinator& coordinator,
                             SwapTracker* swap_tracker,
-                            std::atomic<bool>& maintenance_mode,
+                            std::atomic<ComputeResource>& maintenance_resource,
                             ProfileBenchmarkTrialRunner runner);
     ~ProfileBenchmarkManager();
 
@@ -104,7 +119,7 @@ private:
 
     model::BackendCoordinator& coordinator_;
     SwapTracker* swap_tracker_{nullptr};
-    std::atomic<bool>& maintenance_mode_;
+    std::atomic<ComputeResource>& maintenance_resource_;
     ProfileBenchmarkTrialRunner runner_;
     mutable std::mutex mutex_;
     ProfileBenchmarkSnapshot state_;

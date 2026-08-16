@@ -39,6 +39,7 @@ struct StoreDownload {
     std::uint64_t bytes_downloaded{0};
     std::uint64_t bytes_total{0};
     std::string installed_path;
+    std::vector<StoreFile> artifacts;
 };
 
 class IModelStoreTransport {
@@ -56,6 +57,9 @@ std::unique_ptr<IModelStoreTransport> make_native_model_store_transport();
 
 class ModelStore {
 public:
+    ModelStore(std::filesystem::path root, std::filesystem::path archive_root, std::string token,
+               model::BackendCoordinator& coordinator,
+               std::unique_ptr<IModelStoreTransport> transport = {});
     ModelStore(std::filesystem::path root, std::string token,
                model::BackendCoordinator& coordinator,
                std::unique_ptr<IModelStoreTransport> transport = {});
@@ -72,6 +76,7 @@ public:
     foundation::Result<void> cancel(std::uint64_t id);
     foundation::Result<void> resume(std::uint64_t id);
     foundation::Result<void> remove(const std::string& model_name);
+    foundation::Result<void> archive(const std::string& model_name);
 
     [[nodiscard]] std::vector<StoreDownload> downloads() const;
     [[nodiscard]] nlohmann::json installed() const;
@@ -81,21 +86,28 @@ private:
     foundation::Result<StoreFile> resolve_file(
         const std::string& repo, const std::string& filename,
         const std::string& runtime, const std::string& modality);
+    foundation::Result<std::vector<StoreFile>> resolve_bundle(
+        const std::string& repo, const std::string& runtime,
+        const std::string& modality);
     foundation::Result<void> start(std::uint64_t id);
     void worker_entry(std::uint64_t id,
                       const std::shared_ptr<std::atomic<bool>>& done) noexcept;
     void run(std::uint64_t id);
+    void run_bundle(std::uint64_t id, const StoreDownload& job,
+                    const std::shared_ptr<std::atomic<bool>>& cancelled);
     void fail_job(std::uint64_t id, std::string error) noexcept;
     void finish_job(std::uint64_t id, std::string state, std::string error = {});
     void reap_completed_workers();
     void prune_completed_jobs_locked();
     void load_manifest();
     foundation::Result<void> save_manifest();
+    foundation::Result<void> retire(const std::string& model_name, bool archive_artifact);
 
     static constexpr std::size_t kMaxActiveInstalls = 2;
     static constexpr std::size_t kMaxRetainedJobs = 100;
 
     std::filesystem::path root_;
+    std::filesystem::path archive_root_;
     std::string token_;
     model::BackendCoordinator& coordinator_;
     std::unique_ptr<IModelStoreTransport> transport_;

@@ -55,7 +55,12 @@ foundation::Result<void> BackendCoordinator::unregister(const std::string& name)
         }
         instances_.erase(name);
     }
-    registry_.unregister_model(name);
+    try {
+        registry_.unregister_model(name);
+    } catch (const std::exception& error) {
+        return foundation::Err<void>(foundation::ErrorCode::AlreadyExists,
+                                     error.what());
+    }
     return foundation::Ok();
 }
 

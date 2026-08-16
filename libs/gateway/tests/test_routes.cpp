@@ -544,6 +544,44 @@ TEST_CASE("Routes: GET /v1/models marks loaded model", "[routes][models]") {
     ts.stop();
 }
 
+TEST_CASE("Routes: stable aliases resolve while preserving request attribution",
+          "[routes][models][aliases]") {
+    TestServer ts;
+    auto concrete = make_info("qwen-concrete");
+    concrete.capabilities = {"chat_completions", "responses"};
+    ts.registry.register_model(concrete);
+    REQUIRE(ts.registry.set_alias({"assistant-stable", "qwen-concrete", 65536,
+                                   {"chat_completions"}}));
+    REQUIRE(ts.coordinator.load("qwen-concrete"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto models_response = client.Get("/v1/models");
+    REQUIRE(models_response);
+    REQUIRE(models_response->status == 200);
+    const auto models = nlohmann::json::parse(models_response->body)["data"];
+    const auto alias = std::find_if(models.begin(), models.end(), [](const auto& entry) {
+        return entry.value("id", "") == "assistant-stable";
+    });
+    REQUIRE(alias != models.end());
+    CHECK(alias->value("alias", false));
+    CHECK(alias->value("target", "") == "qwen-concrete");
+    CHECK((*alias)["inferdeck"]["alias_contract"]["required_context_size"] == 65536);
+
+    const auto chat_response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"assistant-stable","messages":[{"role":"user","content":"hi"}]})",
+        "application/json");
+    REQUIRE(chat_response);
+    REQUIRE(chat_response->status == 200);
+    CHECK(nlohmann::json::parse(chat_response->body)["model"] == "assistant-stable");
+    const auto rows = ts.stats_db.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].model == "assistant-stable");
+    CHECK(rows[0].resolved_model == "qwen-concrete");
+    ts.stop();
+}
+
 TEST_CASE("Routes: POST /v1/swap/to/missing returns 404", "[routes][swap]") {
     TestServer ts;
     REQUIRE(ts.start());

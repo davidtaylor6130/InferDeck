@@ -12,6 +12,7 @@ set(GATEWAY_SOURCES
     src/audio_decoder.cpp
     src/media_routes.cpp
     src/profile_benchmark.cpp
+    src/profile_benchmark_scheduler.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})
@@ -31,6 +32,7 @@ target_link_libraries(gateway
         optimize
         nlohmann_json::nlohmann_json
         httplib::httplib
+        yaml-cpp::yaml-cpp
 )
 
 if(WIN32)

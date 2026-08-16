@@ -131,6 +131,7 @@ void ContinuousBatchScheduler::fail_all(std::string error) {
 // Performs KV cache reuse detection and trims the cache for this slot's sequence.
 // Operates only on this slot's sequence ID, never clears the whole context.
 void ContinuousBatchScheduler::init_task(SlotTask* task) {
+    task->started_at = std::chrono::steady_clock::now();
     auto* mem = llama_get_memory(ctx_);
     auto* draft_mem = draft_ctx_ ? llama_get_memory(draft_ctx_) : nullptr;
     const int seq_id = task->slot_id;
@@ -706,6 +707,9 @@ void ContinuousBatchScheduler::run_loop() {
                 t->generation_started = true;
                 t->generation_started_at =
                     std::chrono::steady_clock::now();
+                t->out_prompt_duration_ms =
+                    std::chrono::duration<float, std::milli>(
+                        t->generation_started_at - t->started_at).count();
             }
 
             // Sample the next token for this slot

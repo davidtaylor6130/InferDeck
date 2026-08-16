@@ -176,9 +176,9 @@ fs::path executable_dir() {
 
 fs::path find_dashboard_static_dir() {
     std::vector<fs::path> candidates = {
+        executable_dir() / "static",
         fs::current_path() / "apps" / "inferdeck-gateway" / "static",
         fs::current_path() / "static",
-        executable_dir() / "static",
         executable_dir() / "dashboard"
     };
     for (const auto& candidate : candidates) {
@@ -293,7 +293,9 @@ inferdeck::llama_wrapper::LlamaCppConfig make_llama_config(
     result.mtp_enabled = info.mtp_enabled;
     result.mtp_draft_tokens = info.mtp_draft_tokens;
     result.mtp_p_min = info.mtp_p_min;
-    result.mtp_max_active_requests = info.mtp_max_active_requests;
+    result.mtp_max_active_requests = candidate
+        ? candidate->mtp_max_active_requests
+        : info.mtp_max_active_requests;
     result.swa_full = cfg.swa_full;
     result.truncate_prompt = cfg.truncate_prompt;
     result.reasoning_format =
@@ -331,6 +333,7 @@ run_profile_benchmark_trial(
     model::ModelInfo info = registered;
     info.context_size = candidate.context_per_slot;
     info.n_slots = candidate.slots;
+    info.mtp_max_active_requests = candidate.mtp_max_active_requests;
     auto runtime = std::make_unique<inferdeck::llama_wrapper::LlamaCppModel>(
         info, make_llama_config(cfg, info, &candidate));
     const double baseline_vram = gpu.latest().vram_mb;
@@ -429,7 +432,10 @@ run_profile_benchmark_trial(
         measured.prompt_tokens += result->prompt_tokens;
         measured.completion_tokens += result->completion_tokens;
         ++measured.quality_total;
-        const auto output = normalized_answer(result->text);
+        const auto& answer = result->text.empty()
+            ? result->reasoning_text
+            : result->text;
+        const auto output = normalized_answer(answer);
         const auto reference = normalized_answer(prompts[index].reference);
         double score = 0.0;
         if (output == reference) {
@@ -443,8 +449,8 @@ run_profile_benchmark_trial(
         measured.quality_score += score;
         measured.output_samples.push_back(
             prompts[index].id + ": " +
-            result->text.substr(0, std::min<std::size_t>(
-                result->text.size(), 160)));
+            answer.substr(0, std::min<std::size_t>(
+                answer.size(), 160)));
     }
     if (measured.quality_total > 0) {
         measured.quality_score /=
@@ -489,76 +495,104 @@ run_profile_benchmark_trial(
     }
     measured.prompt_tokens += speed_result->prompt_tokens;
     measured.completion_tokens += speed_result->completion_tokens;
+    measured.prompt_tokens_per_second = speed_result->prompt_duration_ms > 0.0f
+        ? static_cast<double>(speed_result->prompt_tokens) * 1000.0 /
+            static_cast<double>(speed_result->prompt_duration_ms)
+        : 0.0;
     measured.average_tokens_per_second =
         speed_result->tokens_per_second;
 
-    progress("parallelism", "Measuring concurrent-slot aggregate throughput");
-    const int parallel_slots = std::clamp(candidate.slots, 1, 4);
-    const auto parallel_started = std::chrono::steady_clock::now();
-    std::vector<std::future<foundation::Result<model::InferenceResult>>> futures;
-    futures.reserve(static_cast<std::size_t>(parallel_slots));
-    for (int index = 0; index < parallel_slots; ++index) {
-        futures.push_back(std::async(
-            std::launch::async,
-            [&, index] {
-                auto slot = runtime->acquire_slot();
-                if (!slot) {
-                    return foundation::Err<model::InferenceResult>(
-                        slot.error().code, slot.error().message);
-                }
-                model::InferenceRequest request;
-                request.messages = {
-                    {"system",
-                     "Answer directly and concisely. <|think_off|>"},
-                    {"user",
-                     "Output the lowercase word benchmark exactly 96 times, "
-                     "separated by single spaces. Do not add punctuation or "
-                     "any other text. Request " +
-                         std::to_string(index + 1) + "."},
-                };
-                request.max_tokens = 144;
-                request.temperature = 0.0f;
-                request.top_p = 1.0f;
-                request.top_k = 0;
-                request.repeat_penalty = 1.0f;
-                request.seed = 9000 + index;
-                auto result = runtime->predict_stream(
-                    *slot, request,
-                    [&](const model::InferenceDelta&) {
-                        sample_vram();
-                        return !cancel.load();
-                    },
-                    &cancel);
-                (void)runtime->release_slot(*slot);
-                return result;
-            }));
+    std::vector<int> concurrency_levels;
+    if (candidate.slots >= 2) concurrency_levels.push_back(2);
+    if (candidate.slots >= 4) {
+        concurrency_levels.push_back(4);
+    } else if (candidate.slots > 2) {
+        concurrency_levels.push_back(candidate.slots);
     }
-    int parallel_tokens = 0;
-    double longest_generation_ms = 0.0;
-    for (auto& future : futures) {
-        auto result = future.get();
-        if (!result) {
-            unload();
-            return foundation::Err<Metrics>(
-                result.error().code, result.error().message);
+    if (concurrency_levels.empty()) concurrency_levels.push_back(1);
+    for (const int parallel_slots : concurrency_levels) {
+        progress(
+            "parallelism",
+            "Measuring " + std::to_string(parallel_slots) +
+                " concurrent requests and MTP drafting");
+        const auto parallel_started = std::chrono::steady_clock::now();
+        std::vector<std::future<foundation::Result<model::InferenceResult>>> futures;
+        futures.reserve(static_cast<std::size_t>(parallel_slots));
+        for (int index = 0; index < parallel_slots; ++index) {
+            futures.push_back(std::async(
+                std::launch::async,
+                [&, index, parallel_slots] {
+                    auto slot = runtime->acquire_slot();
+                    if (!slot) {
+                        return foundation::Err<model::InferenceResult>(
+                            slot.error().code, slot.error().message);
+                    }
+                    model::InferenceRequest request;
+                    request.messages = {
+                        {"system",
+                         "Answer directly and concisely. <|think_off|>"},
+                        {"user",
+                         "Output the lowercase word benchmark exactly 96 times, "
+                         "separated by single spaces. Do not add punctuation or "
+                         "any other text. Concurrency " +
+                             std::to_string(parallel_slots) + " request " +
+                             std::to_string(index + 1) + "."},
+                    };
+                    request.max_tokens = 144;
+                    request.temperature = 0.0f;
+                    request.top_p = 1.0f;
+                    request.top_k = 0;
+                    request.repeat_penalty = 1.0f;
+                    request.seed = 9000 + parallel_slots * 10 + index;
+                    auto result = runtime->predict_stream(
+                        *slot, request,
+                        [&](const model::InferenceDelta&) {
+                            sample_vram();
+                            return !cancel.load();
+                        },
+                        &cancel);
+                    (void)runtime->release_slot(*slot);
+                    return result;
+                }));
         }
-        measured.prompt_tokens += result->prompt_tokens;
-        measured.completion_tokens += result->completion_tokens;
-        parallel_tokens += result->completion_tokens;
-        longest_generation_ms = std::max(
-            longest_generation_ms,
-            static_cast<double>(result->generation_duration_ms));
-    }
-    const auto parallel_finished = std::chrono::steady_clock::now();
-    const double parallel_wall_seconds = std::chrono::duration<double>(
-        parallel_finished - parallel_started).count();
-    const double parallel_seconds = longest_generation_ms > 0.0
-        ? longest_generation_ms / 1000.0
-        : parallel_wall_seconds;
-    measured.parallel_tokens_per_second =
-        parallel_seconds > 0.0
+        inferdeck::gateway::ProfileBenchmarkConcurrencyMetrics concurrency;
+        concurrency.requests = parallel_slots;
+        int parallel_tokens = 0;
+        double longest_generation_ms = 0.0;
+        double request_tps_total = 0.0;
+        for (auto& future : futures) {
+            auto result = future.get();
+            if (!result) {
+                unload();
+                return foundation::Err<Metrics>(
+                    result.error().code, result.error().message);
+            }
+            measured.prompt_tokens += result->prompt_tokens;
+            measured.completion_tokens += result->completion_tokens;
+            parallel_tokens += result->completion_tokens;
+            longest_generation_ms = std::max(
+                longest_generation_ms,
+                static_cast<double>(result->generation_duration_ms));
+            request_tps_total += result->tokens_per_second;
+            concurrency.mtp_drafted_tokens += result->mtp_drafted_tokens;
+            concurrency.mtp_accepted_tokens += result->mtp_accepted_tokens;
+            if (result->mtp_drafted_tokens > 0) ++concurrency.mtp_requests;
+        }
+        const auto parallel_finished = std::chrono::steady_clock::now();
+        const double parallel_wall_seconds = std::chrono::duration<double>(
+            parallel_finished - parallel_started).count();
+        const double parallel_seconds = longest_generation_ms > 0.0
+            ? longest_generation_ms / 1000.0
+            : parallel_wall_seconds;
+        concurrency.aggregate_tokens_per_second = parallel_seconds > 0.0
             ? static_cast<double>(parallel_tokens) / parallel_seconds
             : 0.0;
+        concurrency.average_request_tokens_per_second =
+            request_tps_total / static_cast<double>(parallel_slots);
+        measured.parallel_tokens_per_second =
+            concurrency.aggregate_tokens_per_second;
+        measured.concurrency.push_back(std::move(concurrency));
+    }
     sample_vram();
     measured.peak_vram_mb = peak_vram.load();
     unload();
@@ -616,6 +650,14 @@ int run_gateway(const fs::path& config_path) {
         LOG_INFO("model_registered", "name={} vram_mb={} n_slots={}",
                  m.name, m.vram_required_mb, m.n_slots);
     }
+    for (const auto& alias : cfg.model_aliases) {
+        const auto registered = registry.set_alias(alias);
+        if (!registered) {
+            throw std::runtime_error("invalid model alias " + alias.name + ": " +
+                                     registered.error().message);
+        }
+        LOG_INFO("model_alias_registered", "alias={} target={}", alias.name, alias.target);
+    }
     LOG_INFO("factory_set", "LlamaCppModel factory installed");
 
     model::BackendCoordinator coordinator(registry);
@@ -623,7 +665,8 @@ int run_gateway(const fs::path& config_path) {
     if (cfg.vram_budget_mb > 0) {
         coordinator.set_vram_budget(cfg.vram_budget_mb, cfg.vram_safety_margin_mb);
     }
-    ModelStore model_store(cfg.model_store_root, cfg.model_store_hf_token, coordinator);
+    ModelStore model_store(cfg.model_store_root, cfg.model_store_archive_root,
+                           cfg.model_store_hf_token, coordinator);
 
     observability::Metrics metrics;
     observability::GpuTelemetry gpu;
@@ -649,16 +692,16 @@ int run_gateway(const fs::path& config_path) {
 
     foundation::EventBus events;
     SwapTracker swap_tracker;
-    std::atomic<bool> maintenance_mode{false};
+    std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     GatewayDeps deps{coordinator, "15", cfg.auto_swap,
                      cfg.default_model, cfg.anthropic_model_aliases,
                      cfg.voice_session_grace_ms,
                      &metrics, &stats_db, &events, &swap_tracker,
-                     &maintenance_mode};
+                     &maintenance_resource};
     ProfileBenchmarkManager profile_benchmark{
         coordinator,
         &swap_tracker,
-        maintenance_mode,
+        maintenance_resource,
         [cfg, &gpu](
             const model::ModelInfo& info,
             const optimize::ProfileCandidate& candidate,
@@ -668,6 +711,8 @@ int run_gateway(const fs::path& config_path) {
             return run_profile_benchmark_trial(
                 cfg, gpu, info, candidate, prompts, cancel, progress);
         }};
+    ProfileBenchmarkScheduler profile_benchmark_scheduler{
+        profile_benchmark, coordinator, gpu};
 
     auto uptime_seconds = [&] {
         const auto now = std::chrono::steady_clock::now();
@@ -862,7 +907,8 @@ int run_gateway(const fs::path& config_path) {
         },
         &model_store,
         uptime_seconds,
-        &profile_benchmark};
+        &profile_benchmark,
+        &profile_benchmark_scheduler};
     register_dashboard_routes(server, dash_deps, wrap);
     if (cors.handles_options()) {
         server.Options(".*", [&](const httplib::Request& req,

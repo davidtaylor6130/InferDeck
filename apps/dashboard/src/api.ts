@@ -1,5 +1,6 @@
 import type {
   JobRecord,
+  HealthPayload,
   ModelInfo,
   PricingEntry,
   StatusPayload,
@@ -83,6 +84,7 @@ export interface ProfileOptimizationInput {
   nUbatch: number;
   cacheTypeK: string;
   cacheTypeV: string;
+  flashAttention?: string;
 }
 
 export interface ProfileOptimizationCandidate {
@@ -93,6 +95,7 @@ export interface ProfileOptimizationCandidate {
   cacheTypeK: string;
   cacheTypeV: string;
   flashAttention: string;
+  mtpMaxActiveRequests: number;
   estimatedVramMb: number;
   reserveVramMb: number;
   qualityScore: number;
@@ -126,14 +129,24 @@ export interface ProfileBenchmarkCandidate extends ProfileOptimizationCandidate 
   completed: boolean;
   error: string;
   loadMs: number;
+  promptTokensPerSecond: number;
   averageTokensPerSecond: number;
   parallelTokensPerSecond: number;
   averageTimeToFirstTokenMs: number;
   peakVramMb: number;
   qualityPasses: number;
   qualityTotal: number;
+  performanceIndex: number;
   promptTokens: number;
   completionTokens: number;
+  concurrency: Array<{
+    requests: number;
+    aggregateTokensPerSecond: number;
+    averageRequestTokensPerSecond: number;
+    mtpRequests: number;
+    mtpDraftedTokens: number;
+    mtpAcceptedTokens: number;
+  }>;
   outputSamples: string[];
 }
 
@@ -152,11 +165,10 @@ export interface ProfileBenchmarkSnapshot {
   cancelRequested: boolean;
   restored: boolean;
   weights: {
-    quality: number;
-    speed: number;
-    parallelism: number;
-    headroom: number;
+    promptProcessing: number;
+    generation: number;
   };
+  baseline: ProfileBenchmarkCandidate | null;
   recommended: ProfileOptimizationCandidate | null;
   candidates: ProfileBenchmarkCandidate[];
 }
@@ -189,6 +201,7 @@ export interface StoreFile {
   compatible: boolean;
   estimatedRamMb: number;
   estimatedVramMb: number;
+  artifactCount?: number;
 }
 
 export interface StoreDownload {
@@ -203,6 +216,7 @@ export interface StoreDownload {
   bytesDownloaded: number;
   bytesTotal: number;
   installedPath: string;
+  artifactCount?: number;
 }
 
 export interface InstalledStoreModel {
@@ -288,6 +302,12 @@ function normalizeModel(value: unknown): ModelInfo | null {
     primary: asBoolean(residency.primary) ?? asBoolean(entry.primary),
     free_slots: asNumber(residency.free_slots) ?? asNumber(entry.free_slots),
     active_requests: asNumber(residency.active_requests) ?? asNumber(entry.active_requests),
+    prompt_price_per_million: asNumber(entry.prompt_price_per_million),
+    completion_price_per_million: asNumber(entry.completion_price_per_million),
+    alias: asBoolean(entry.alias),
+    alias_target: asString(entry.alias_target),
+    required_context_size: asNumber(entry.required_context_size),
+    required_capabilities: asStringArray(entry.required_capabilities),
   };
   const optimizationStatus = asString(optimization.status);
   if (optimizationStatus) {
@@ -298,6 +318,9 @@ function normalizeModel(value: unknown): ModelInfo | null {
       quality_total: asNumber(optimization.quality_total),
       single_tokens_per_second: asNumber(optimization.single_tokens_per_second),
       parallel_tokens_per_second: asNumber(optimization.parallel_tokens_per_second),
+      schedule_enabled: asBoolean(optimization.schedule_enabled),
+      schedule_window_start: asString(optimization.schedule_window_start),
+      schedule_window_end: asString(optimization.schedule_window_end),
     };
   }
   const resizing = asBoolean(residency.resizing) ?? asBoolean(entry.resizing);
@@ -339,6 +362,30 @@ export async function getPricing(): Promise<PricingEntry[]> {
   return Array.isArray(body) ? body : [];
 }
 
+export function getHealth(): Promise<HealthPayload> {
+  return getJson<HealthPayload>('/v1/health');
+}
+
+export interface ModelAliasRecord {
+  name: string;
+  target: string;
+  requiredContextSize: number;
+  requiredCapabilities: string[];
+}
+
+export async function getModelAliases(): Promise<ModelAliasRecord[]> {
+  const body = await getJson<{ aliases?: ModelAliasRecord[] }>('/api/model-aliases');
+  return Array.isArray(body.aliases) ? body.aliases : [];
+}
+
+export function saveModelAlias(name: string, target: string): Promise<ModelAliasRecord> {
+  return putJson<ModelAliasRecord>(`/api/model-aliases/${encodeURIComponent(name)}`, { target });
+}
+
+export function deleteModelAlias(name: string): Promise<{ ok: boolean }> {
+  return deleteJson(`/api/model-aliases/${encodeURIComponent(name)}`);
+}
+
 export function getConfig(): Promise<ConfigDocument> {
   return getJson<ConfigDocument>('/api/config');
 }
@@ -367,6 +414,22 @@ export function getProfileBenchmark(): Promise<ProfileBenchmarkSnapshot> {
 
 export function cancelProfileBenchmark(): Promise<ProfileBenchmarkSnapshot> {
   return postJson<ProfileBenchmarkSnapshot>('/api/optimize/benchmark/cancel', {});
+}
+
+export interface ScheduledOptimizationRecord {
+  model: string;
+  enabled: boolean;
+  windowStart: string;
+  windowEnd: string;
+  nextRunUnixMs: number;
+  lastStartedUnixMs: number;
+  lastFinishedUnixMs: number;
+  lastOutcome: string;
+  lastMessage: string;
+}
+
+export function getOptimizationSchedule(): Promise<{ timezone: string; schedules: ScheduledOptimizationRecord[] }> {
+  return getJson('/api/optimize/schedule');
 }
 
 export function resetActiveConfig(): Promise<{ ok: boolean; removed: boolean; restartRequired: boolean; applyScheduled: boolean }> {
@@ -463,8 +526,16 @@ export function controlStoreDownload(id: number, action: 'cancel' | 'resume'): P
   return postJson<{ ok: boolean }>(`/api/model-store/downloads/${id}/${action}`);
 }
 
-export function removeStoreModel(model: string): Promise<{ ok: boolean }> {
-  return postJson<{ ok: boolean }>('/api/model-store/remove', { model });
+export function removeStoreModel(model: string, action: 'archive' | 'remove'): Promise<{ ok: boolean }> {
+  return postJson<{ ok: boolean }>(`/api/model-store/${action}`, { model });
+}
+
+export function unregisterConfiguredModel(model: string): Promise<{
+  ok: boolean;
+  filesDeleted: boolean;
+  restartRequired: boolean;
+}> {
+  return postJson('/api/model-store/unregister', { model });
 }
 
 export async function getMediaJobs(): Promise<MediaJob[]> {

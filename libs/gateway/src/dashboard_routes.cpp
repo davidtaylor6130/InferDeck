@@ -2,6 +2,7 @@
 
 #include "foundation/logging.hpp"
 #include "optimize/profile_optimizer.hpp"
+#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <array>
@@ -43,6 +44,191 @@ namespace optimize = inferdeck::optimize;
 
 constexpr std::size_t max_dashboard_streams = 64;
 std::atomic<std::size_t> dashboard_streams{0};
+std::mutex config_write_mutex;
+
+foundation::Result<void> write_config_atomic(const std::filesystem::path& path,
+                                             const std::string& text);
+std::string read_text(const std::filesystem::path& path);
+
+nlohmann::json alias_json(const model::ModelAlias& alias) {
+    return {
+        {"name", alias.name},
+        {"target", alias.target},
+        {"requiredContextSize", alias.required_context_size},
+        {"requiredCapabilities", alias.required_capabilities},
+    };
+}
+
+std::string replace_top_level_yaml_section(
+    std::string text, const std::string& key, const std::string& value) {
+    const std::string marker = key + ":";
+    std::size_t start = std::string::npos;
+    std::size_t end = text.size();
+    std::size_t line_start = 0;
+    while (line_start < text.size()) {
+        const auto line_end = text.find('\n', line_start);
+        const auto length = (line_end == std::string::npos ? text.size() : line_end) - line_start;
+        const auto line = text.substr(line_start, length);
+        if (start == std::string::npos && line.starts_with(marker)) {
+            start = line_start;
+        } else if (start != std::string::npos && !line.empty() &&
+                   line.front() != ' ' && line.front() != '\t' &&
+                   line.front() != '\r') {
+            end = line_start;
+            break;
+        }
+        if (line_end == std::string::npos) break;
+        line_start = line_end + 1;
+    }
+    std::string block = marker;
+    if (value == "[]") {
+        block += " []\n";
+    } else {
+        block += "\n";
+        std::size_t value_start = 0;
+        while (value_start <= value.size()) {
+            const auto value_end = value.find('\n', value_start);
+            block += "  " + value.substr(
+                value_start, value_end == std::string::npos
+                    ? std::string::npos : value_end - value_start) + "\n";
+            if (value_end == std::string::npos) break;
+            value_start = value_end + 1;
+        }
+    }
+    if (start == std::string::npos) {
+        if (!text.empty() && text.back() != '\n') text += '\n';
+        if (!text.empty()) text += '\n';
+        text += block;
+        return text;
+    }
+    text.replace(start, end - start, block);
+    return text;
+}
+
+foundation::Result<std::string> remove_model_registry_entry(
+    const std::string& text, const std::string& name) {
+    const auto root = YAML::Load(text);
+    const auto models = root["model_registry"];
+    if (!models || !models.IsSequence()) {
+        return foundation::Err<std::string>(
+            foundation::ErrorCode::NotFound, "model registry is missing");
+    }
+    bool configured = false;
+    for (const auto& entry : models) {
+        if (entry["name"] && entry["name"].as<std::string>() == name) {
+            configured = true;
+            break;
+        }
+    }
+    if (!configured) {
+        return foundation::Err<std::string>(
+            foundation::ErrorCode::NotFound, "configured model not found: " + name);
+    }
+
+    std::size_t section_start = std::string::npos;
+    std::size_t section_end = text.size();
+    std::vector<std::size_t> entries;
+    std::size_t line_start = 0;
+    while (line_start < text.size()) {
+        const auto newline = text.find('\n', line_start);
+        const auto line_end = newline == std::string::npos ? text.size() : newline;
+        const auto line = std::string_view{text}.substr(line_start, line_end - line_start);
+        if (section_start == std::string::npos) {
+            if (line.starts_with("model_registry:")) section_start = line_start;
+        } else {
+            if (!line.empty() && line.front() != ' ' && line.front() != '\t' &&
+                line.front() != '\r' && line.front() != '#') {
+                section_end = line_start;
+                break;
+            }
+            if (line.starts_with("  - ") || line == "  -") entries.push_back(line_start);
+        }
+        if (newline == std::string::npos) break;
+        line_start = newline + 1;
+    }
+    if (section_start == std::string::npos) {
+        return foundation::Err<std::string>(
+            foundation::ErrorCode::NotFound, "model registry is missing");
+    }
+
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        const auto begin = entries[index];
+        const auto end = index + 1 < entries.size() ? entries[index + 1] : section_end;
+        const auto block = text.substr(begin, end - begin);
+        try {
+            const auto parsed = YAML::Load("model_registry:\n" + block);
+            const auto entry = parsed["model_registry"];
+            if (entry && entry.IsSequence() && entry.size() == 1 &&
+                entry[0]["name"] && entry[0]["name"].as<std::string>() == name) {
+                auto removal_end = end;
+                auto comment_start = begin;
+                while (comment_start < end) {
+                    const auto newline = text.find('\n', comment_start);
+                    const auto line_end = newline == std::string::npos ? end : newline;
+                    const auto line = std::string_view{text}.substr(
+                        comment_start, line_end - comment_start);
+                    if (comment_start > begin &&
+                        (line.starts_with("#") || line.starts_with("  #"))) {
+                        removal_end = comment_start;
+                        break;
+                    }
+                    if (newline == std::string::npos || newline >= end) break;
+                    comment_start = newline + 1;
+                }
+                std::string updated = text;
+                updated.erase(begin, removal_end - begin);
+                return foundation::Ok(std::move(updated));
+            }
+        } catch (const std::exception&) {
+        }
+    }
+    return foundation::Err<std::string>(
+        foundation::ErrorCode::ParseError,
+        "could not locate the configured model block without rewriting the configuration");
+}
+
+foundation::Result<void> persist_aliases(
+    const DashboardDeps& deps, const std::vector<model::ModelAlias>& aliases) {
+    const auto source_path = !deps.active_config_file.empty() &&
+            std::filesystem::exists(deps.active_config_file)
+        ? deps.active_config_file : deps.base_config_file;
+    const auto destination_path = deps.active_config_file.empty()
+        ? deps.base_config_file : deps.active_config_file;
+    const auto text = read_text(source_path);
+    if (text.empty()) {
+        return foundation::Err<void>(foundation::ErrorCode::IoError,
+                                     "configuration file is unreadable");
+    }
+    try {
+        YAML::Load(text);
+        YAML::Node entries(YAML::NodeType::Sequence);
+        for (const auto& alias : aliases) {
+            YAML::Node entry;
+            entry["name"] = alias.name;
+            entry["target"] = alias.target;
+            entry["required_context_size"] = alias.required_context_size;
+            for (const auto& capability : alias.required_capabilities) {
+                entry["required_capabilities"].push_back(capability);
+            }
+            entries.push_back(entry);
+        }
+        YAML::Emitter emitter;
+        emitter << entries;
+        if (!emitter.good()) {
+            return foundation::Err<void>(foundation::ErrorCode::ParseError,
+                                         emitter.GetLastError());
+        }
+        const std::string updated = replace_top_level_yaml_section(
+            text, "model_aliases", emitter.c_str());
+        if (deps.validate_config) {
+            const auto valid = deps.validate_config(updated);
+            if (!valid) return valid;
+        }
+        return write_config_atomic(destination_path, updated);
+    } catch (const std::exception& error) {
+        return foundation::Err<void>(foundation::ErrorCode::ParseError, error.what());
+    }
+}
 
 struct DashboardStreamLease {
     std::atomic<bool> held{false};
@@ -271,6 +457,10 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"runtime", info.runtime},
             {"modality", info.modality},
             {"capabilities", info.capabilities},
+            {"prompt_price_per_million", info.prompt_price_per_million
+                ? nlohmann::json(*info.prompt_price_per_million) : nlohmann::json(nullptr)},
+            {"completion_price_per_million", info.completion_price_per_million
+                ? nlohmann::json(*info.completion_price_per_million) : nlohmann::json(nullptr)},
             {"loaded", resident != residency.end()},
             {"primary", resident != residency.end() && resident->second.primary},
             {"context_size", info.context_size},
@@ -322,12 +512,17 @@ nlohmann::json build_dashboard_jobs(const observability::StatsDb& stats_db, int 
             {"type", "chat.completion"},
             {"status", row.status_code >= 200 && row.status_code < 300 ? "succeeded" : "failed"},
             {"model", row.model},
+            {"resolvedModel", row.resolved_model},
             {"createdAt", timestamp},
             {"timestampUnixMs", row.timestamp_unix_ms},
             {"promptTokens", row.prompt_tokens},
+            {"cachedPromptTokens", row.cached_prompt_tokens},
             {"completionTokens", row.completion_tokens},
             {"totalTokens", row.prompt_tokens + row.completion_tokens},
             {"tokensPerSecond", row.tokens_per_second},
+            {"promptTokensPerSecond", row.prompt_tokens_per_second},
+            {"generationDurationMs", row.generation_duration_ms},
+            {"promptDurationMs", row.prompt_duration_ms},
             {"durationMs", row.duration_ms},
             {"httpStatus", row.status_code},
             {"slotId", row.slot_id},
@@ -348,6 +543,7 @@ nlohmann::json profile_candidate_json(
         {"cacheTypeK", candidate.cache_type_k},
         {"cacheTypeV", candidate.cache_type_v},
         {"flashAttention", candidate.flash_attention},
+        {"mtpMaxActiveRequests", candidate.mtp_max_active_requests},
         {"estimatedVramMb", candidate.estimated_vram_mb},
         {"reserveVramMb", candidate.reserve_vram_mb},
         {"qualityScore", candidate.quality_score},
@@ -362,25 +558,40 @@ nlohmann::json profile_candidate_json(
 
 nlohmann::json profile_benchmark_snapshot_json(
     const ProfileBenchmarkSnapshot& snapshot) {
-    nlohmann::json trials = nlohmann::json::array();
-    for (const auto& trial : snapshot.trials) {
+    const auto trial_json = [](const ProfileBenchmarkTrial& trial) {
         auto value = profile_candidate_json(trial.candidate);
         value["completed"] = trial.completed;
         value["error"] = trial.error;
         value["loadMs"] = trial.metrics.load_ms;
-        value["averageTokensPerSecond"] =
-            trial.metrics.average_tokens_per_second;
-        value["parallelTokensPerSecond"] =
-            trial.metrics.parallel_tokens_per_second;
-        value["averageTimeToFirstTokenMs"] =
-            trial.metrics.average_time_to_first_token_ms;
+        value["promptTokensPerSecond"] = trial.metrics.prompt_tokens_per_second;
+        value["averageTokensPerSecond"] = trial.metrics.average_tokens_per_second;
+        value["parallelTokensPerSecond"] = trial.metrics.parallel_tokens_per_second;
+        value["averageTimeToFirstTokenMs"] = trial.metrics.average_time_to_first_token_ms;
         value["peakVramMb"] = trial.metrics.peak_vram_mb;
         value["qualityPasses"] = trial.metrics.quality_passes;
         value["qualityTotal"] = trial.metrics.quality_total;
+        value["performanceIndex"] = trial.metrics.performance_index;
         value["promptTokens"] = trial.metrics.prompt_tokens;
         value["completionTokens"] = trial.metrics.completion_tokens;
+        value["concurrency"] = nlohmann::json::array();
+        for (const auto& measured : trial.metrics.concurrency) {
+            value["concurrency"].push_back({
+                {"requests", measured.requests},
+                {"aggregateTokensPerSecond",
+                 measured.aggregate_tokens_per_second},
+                {"averageRequestTokensPerSecond",
+                 measured.average_request_tokens_per_second},
+                {"mtpRequests", measured.mtp_requests},
+                {"mtpDraftedTokens", measured.mtp_drafted_tokens},
+                {"mtpAcceptedTokens", measured.mtp_accepted_tokens},
+            });
+        }
         value["outputSamples"] = trial.metrics.output_samples;
-        trials.push_back(std::move(value));
+        return value;
+    };
+    nlohmann::json trials = nlohmann::json::array();
+    for (const auto& trial : snapshot.trials) {
+        trials.push_back(trial_json(trial));
     }
     nlohmann::json result = {
         {"id", snapshot.id},
@@ -396,11 +607,11 @@ nlohmann::json profile_benchmark_snapshot_json(
         {"measured", snapshot.measured},
         {"cancelRequested", snapshot.cancel_requested},
         {"restored", snapshot.restored},
+        {"baseline", snapshot.has_baseline
+            ? trial_json(snapshot.baseline) : nlohmann::json(nullptr)},
         {"weights", {
-            {"quality", 0.60},
-            {"speed", 0.15},
-            {"parallelism", 0.15},
-            {"headroom", 0.10},
+            {"promptProcessing", 0.50},
+            {"generation", 0.50},
         }},
         {"candidates", std::move(trials)},
     };
@@ -445,18 +656,25 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
         prompt_tokens += row.prompt_tokens;
         completion_tokens += row.completion_tokens;
         requests += row.requests;
-        const double avg_tps = row.total_duration_ms > 0.0
-            ? static_cast<double>(row.completion_tokens) / (row.total_duration_ms / 1000.0)
+        const double avg_tps = row.total_generation_duration_ms > 0.0
+            ? static_cast<double>(row.completion_tokens) / (row.total_generation_duration_ms / 1000.0)
+            : 0.0;
+        const double avg_prompt_tps = row.total_prompt_duration_ms > 0.0
+            ? static_cast<double>(std::max<std::int64_t>(0, row.prompt_tokens - row.cached_prompt_tokens)) /
+                (row.total_prompt_duration_ms / 1000.0)
             : 0.0;
         usage.push_back({
             {"model", row.model},
             {"requests", row.requests},
             {"successfulRequests", row.successful_requests},
             {"promptTokens", row.prompt_tokens},
+            {"cachedPromptTokens", row.cached_prompt_tokens},
             {"completionTokens", row.completion_tokens},
             {"totalTokens", row.prompt_tokens + row.completion_tokens},
             {"peakTokensPerSecond", row.peak_tokens_per_second},
             {"avgTokensPerSecond", avg_tps},
+            {"peakPromptTokensPerSecond", row.peak_prompt_tokens_per_second},
+            {"avgPromptTokensPerSecond", avg_prompt_tps},
             {"lastTimestampUnixMs", row.last_timestamp_unix_ms},
             {"inputAudioSeconds", row.input_audio_seconds},
             {"inputCharacters", row.input_characters}
@@ -470,10 +688,15 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
                 {"bucket", row.bucket},
                 {"model", row.model},
                 {"promptTokens", row.prompt_tokens},
+                {"cachedPromptTokens", row.cached_prompt_tokens},
                 {"completionTokens", row.completion_tokens},
                 {"totalTokens", row.total_tokens},
                 {"requests", row.requests},
                 {"successfulRequests", row.successful_requests},
+                {"generationDurationMs", row.generation_duration_ms},
+                {"promptDurationMs", row.prompt_duration_ms},
+                {"peakTokensPerSecond", row.peak_tokens_per_second},
+                {"peakPromptTokensPerSecond", row.peak_prompt_tokens_per_second},
                 {"inputAudioSeconds", row.input_audio_seconds},
                 {"inputCharacters", row.input_characters}
             });
@@ -625,6 +848,8 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                 body.value("cacheTypeK", std::string{"q8_0"});
             input.cache_type_v =
                 body.value("cacheTypeV", std::string{"q8_0"});
+            input.flash_attention =
+                body.value("flashAttention", std::string{"auto"});
 
             if (deps.gw.stats_db) {
                 for (const auto& usage : deps.gw.stats_db->model_usage()) {
@@ -754,6 +979,33 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             deps.profile_benchmark->snapshot()));
     }));
 
+    server.Get(R"(^/api/optimize/schedule$)",
+               wrap([deps](const httplib::Request&, httplib::Response& resp) {
+        if (!deps.profile_benchmark_scheduler) {
+            write_error(resp, 503, "optimization_schedule_unavailable",
+                        "scheduled optimization is unavailable");
+            return;
+        }
+        nlohmann::json schedules = nlohmann::json::array();
+        for (const auto& status : deps.profile_benchmark_scheduler->statuses()) {
+            schedules.push_back({
+                {"model", status.model},
+                {"enabled", status.enabled},
+                {"windowStart", status.window_start},
+                {"windowEnd", status.window_end},
+                {"nextRunUnixMs", status.next_run_unix_ms},
+                {"lastStartedUnixMs", status.last_started_unix_ms},
+                {"lastFinishedUnixMs", status.last_finished_unix_ms},
+                {"lastOutcome", status.last_outcome},
+                {"lastMessage", status.last_message},
+            });
+        }
+        write_json(resp, 200, {
+            {"timezone", deps.profile_benchmark_scheduler->timezone_name()},
+            {"schedules", std::move(schedules)},
+        });
+    }));
+
     server.Post(R"(^/api/optimize/benchmark/cancel$)",
                 wrap([deps](const httplib::Request&,
                             httplib::Response& resp) {
@@ -869,7 +1121,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         write_json(resp, 200, {{"ok", true}});
     }));
 
-    server.Post(R"(^/api/model-store/remove$)", wrap([deps](const httplib::Request& req,
+    server.Post(R"(^/api/model-store/(remove|archive)$)", wrap([deps](const httplib::Request& req,
                                                              httplib::Response& resp) {
         if (!deps.model_store) {
             write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
@@ -877,16 +1129,171 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
         try {
             const auto body = nlohmann::json::parse(req.body);
-            auto result = deps.model_store->remove(body.value("model", ""));
+            auto result = req.matches[1].str() == "archive"
+                ? deps.model_store->archive(body.value("model", ""))
+                : deps.model_store->remove(body.value("model", ""));
             if (!result) {
                 const int status = result.error().code == foundation::ErrorCode::NotFound ? 404 : 409;
-                write_error(resp, status, "model_remove_failed", result.error().message);
+                write_error(resp, status, "model_retire_failed", result.error().message);
                 return;
             }
             write_json(resp, 200, {{"ok", true}});
         } catch (const std::exception& error) {
-            write_error(resp, 400, "invalid_model_remove", error.what());
+            write_error(resp, 400, "invalid_model_retire", error.what());
         }
+    }));
+
+    server.Post(R"(^/api/model-store/unregister$)", wrap([deps](const httplib::Request& req,
+                                                                httplib::Response& resp) {
+        std::lock_guard lock(config_write_mutex);
+        try {
+            const auto body = nlohmann::json::parse(req.body);
+            const std::string name = body.value("model", "");
+            if (name.empty()) {
+                write_error(resp, 400, "missing_model", "request body must include model");
+                return;
+            }
+            const auto info = deps.gw.coordinator.registry().get_info_result(name);
+            if (!info) {
+                write_error(resp, 404, "model_not_found", info.error().message);
+                return;
+            }
+            const auto source_path = !deps.active_config_file.empty() &&
+                    std::filesystem::exists(deps.active_config_file)
+                ? deps.active_config_file : deps.base_config_file;
+            const auto destination_path = deps.active_config_file.empty()
+                ? deps.base_config_file : deps.active_config_file;
+            const auto original = read_text(source_path);
+            if (original.empty()) {
+                write_error(resp, 500, "config_read_failed",
+                            "configuration file is empty or unreadable");
+                return;
+            }
+            const auto root = YAML::Load(original);
+            if (root["default_model"] &&
+                root["default_model"].as<std::string>() == name) {
+                write_error(resp, 409, "default_model",
+                            "change the default model before removing " + name);
+                return;
+            }
+            for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
+                if (alias.target == name) {
+                    write_error(resp, 409, "model_has_alias",
+                                "remove or retarget alias " + alias.name + " first");
+                    return;
+                }
+            }
+            const auto updated = remove_model_registry_entry(original, name);
+            if (!updated) {
+                const int status = updated.error().code == foundation::ErrorCode::NotFound
+                    ? 404 : 409;
+                write_error(resp, status, "model_unregister_failed", updated.error().message);
+                return;
+            }
+            if (deps.validate_config) {
+                const auto valid = deps.validate_config(*updated);
+                if (!valid) {
+                    write_error(resp, 400, "invalid_configuration", valid.error().message);
+                    return;
+                }
+            }
+            const auto removed = deps.gw.coordinator.unregister(name);
+            if (!removed) {
+                write_error(resp, 409, "model_unregister_failed", removed.error().message);
+                return;
+            }
+            const auto written = write_config_atomic(destination_path, *updated);
+            if (!written) {
+                deps.gw.coordinator.registry().register_model(*info);
+                write_error(resp, 500, "model_unregister_persist_failed",
+                            written.error().message);
+                return;
+            }
+            write_json(resp, 200, {
+                {"ok", true},
+                {"filesDeleted", false},
+                {"restartRequired", false},
+            });
+        } catch (const std::exception& error) {
+            write_error(resp, 400, "invalid_model_unregister", error.what());
+        }
+    }));
+
+    server.Get(R"(^/api/model-aliases$)", wrap([deps](const httplib::Request&,
+                                                       httplib::Response& resp) {
+        nlohmann::json aliases = nlohmann::json::array();
+        for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
+            aliases.push_back(alias_json(alias));
+        }
+        write_json(resp, 200, {{"aliases", std::move(aliases)}});
+    }));
+
+    server.Put(R"(^/api/model-aliases/([A-Za-z0-9_.-]+)$)",
+               wrap([deps](const httplib::Request& req, httplib::Response& resp) {
+        std::lock_guard lock(config_write_mutex);
+        const std::string name = req.matches[1].str();
+        if (name.empty() || name.size() > 128) {
+            write_error(resp, 400, "invalid_model_alias", "alias name is invalid");
+            return;
+        }
+        try {
+            const auto body = nlohmann::json::parse(req.body);
+            model::ModelAlias requested;
+            requested.name = name;
+            requested.target = body.value("target", "");
+            requested.required_context_size = body.value("requiredContextSize", 0);
+            if (body.contains("requiredCapabilities")) {
+                requested.required_capabilities =
+                    body["requiredCapabilities"].get<std::vector<std::string>>();
+            }
+            std::optional<model::ModelAlias> previous;
+            for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
+                if (alias.name == name) previous = alias;
+            }
+            const auto applied = deps.gw.coordinator.registry().set_alias(std::move(requested));
+            if (!applied) {
+                write_error(resp, 409, "incompatible_model_alias", applied.error().message);
+                return;
+            }
+            const auto persisted = persist_aliases(
+                deps, deps.gw.coordinator.registry().aliases());
+            if (!persisted) {
+                if (previous) (void)deps.gw.coordinator.registry().set_alias(*previous);
+                else (void)deps.gw.coordinator.registry().remove_alias(name);
+                write_error(resp, 500, "model_alias_persist_failed", persisted.error().message);
+                return;
+            }
+            write_json(resp, previous ? 200 : 201, alias_json(*applied));
+        } catch (const std::exception& error) {
+            write_error(resp, 400, "invalid_model_alias", error.what());
+        }
+    }));
+
+    server.Delete(R"(^/api/model-aliases/([A-Za-z0-9_.-]+)$)",
+                  wrap([deps](const httplib::Request& req, httplib::Response& resp) {
+        std::lock_guard lock(config_write_mutex);
+        const std::string name = req.matches[1].str();
+        std::optional<model::ModelAlias> previous;
+        for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
+            if (alias.name == name) previous = alias;
+        }
+        if (!previous) {
+            write_error(resp, 404, "model_alias_not_found", "model alias not found: " + name);
+            return;
+        }
+        const auto removed = deps.gw.coordinator.registry().remove_alias(name);
+        if (!removed) {
+            write_error(resp, 404, "model_alias_not_found", removed.error().message);
+            return;
+        }
+        const auto persisted = persist_aliases(
+            deps, deps.gw.coordinator.registry().aliases());
+        if (!persisted) {
+            (void)deps.gw.coordinator.registry().set_alias(*previous);
+            write_error(resp, 500, "model_alias_persist_failed", persisted.error().message);
+            return;
+        }
+        write_json(resp, 200, {{"ok", true}});
     }));
 
     server.Get(R"(^/api/config$)", wrap([deps](const httplib::Request& req,
@@ -1116,14 +1523,22 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
 
     server.Post(R"(^/api/models/unload$)", wrap([deps](const httplib::Request& req,
                                                        httplib::Response& resp) {
-        if (maintenance_mode_active(deps.gw)) {
-            write_error(resp, 503, "maintenance_mode",
-                        "measured model optimization is running");
-            return;
-        }
         const auto body = req.body.empty() ? nlohmann::json::object() : nlohmann::json::parse(req.body);
         const auto current = deps.gw.coordinator.get_loaded_model();
-        const std::string model_name = body.value("model", current.value_or(""));
+        const std::string requested_model = body.value("model", current.value_or(""));
+        const auto resolved = requested_model.empty()
+            ? foundation::Ok(std::string{})
+            : deps.gw.coordinator.registry().resolve(requested_model);
+        if (!resolved) {
+            write_error(resp, 404, "model_not_found", resolved.error().message);
+            return;
+        }
+        const std::string& model_name = *resolved;
+        if (!model_name.empty() && maintenance_blocks_model(deps.gw, model_name)) {
+            write_error(resp, 503, "maintenance_mode",
+                        "measured model optimization is using the same compute resource");
+            return;
+        }
         auto result = model_name.empty() ? foundation::Ok() : deps.gw.coordinator.unload(model_name);
         if (!result) {
             write_error(resp, 500, "unload_failed", result.error().message);
@@ -1138,7 +1553,9 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                 {"error", ""},
             }.dump());
         }
-        write_json(resp, 200, {{"ok", true}, {"status", "stopped"}});
+        write_json(resp, 200, {{"ok", true}, {"status", "stopped"},
+                               {"model", requested_model},
+                               {"resolvedModel", model_name}});
     }));
 
     server.Get(R"(^/api/pricing$)", wrap([deps](const httplib::Request& req,
@@ -1150,9 +1567,27 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             try {
                 pricing = nlohmann::json::parse(file);
                 if (!pricing.is_array()) pricing = nlohmann::json::array();
-            } catch (...) {
+            } catch (const std::exception& error) {
+                LOG_WARN("pricing_file_invalid", "path={} error={}", deps.pricing_file, error.what());
                 pricing = nlohmann::json::array();
             }
+        } else {
+            LOG_WARN("pricing_file_unreadable", "path={} file_defaults_unavailable=true", deps.pricing_file);
+        }
+        for (const auto& name : deps.gw.coordinator.registry().list()) {
+            const auto info = deps.gw.coordinator.registry().get_info_result(name);
+            if (!info || (!info->prompt_price_per_million && !info->completion_price_per_million)) continue;
+            auto existing = std::find_if(pricing.begin(), pricing.end(), [&](const nlohmann::json& entry) {
+                return entry.value("model_name", "") == name;
+            });
+            nlohmann::json value = existing == pricing.end()
+                ? nlohmann::json{{"model_name", name}, {"currency", "USD"}}
+                : *existing;
+            value["prompt_price_per_million"] = info->prompt_price_per_million.value_or(0.0);
+            value["completion_price_per_million"] = info->completion_price_per_million.value_or(0.0);
+            value["source"] = "model_settings";
+            if (existing == pricing.end()) pricing.push_back(std::move(value));
+            else *existing = std::move(value);
         }
         resp.set_content(pricing.dump(), "application/json");
     }));

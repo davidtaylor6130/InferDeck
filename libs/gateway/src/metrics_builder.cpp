@@ -1,5 +1,8 @@
 #include "gateway/metrics_builder.hpp"
 
+#include <algorithm>
+#include <cstdint>
+
 namespace inferdeck::gateway {
 
 using nlohmann::json;
@@ -47,10 +50,15 @@ json MetricsBuilder::build_history(const observability::StatsDb& db, int limit) 
     requests.push_back({
       {"timestamp_unix_ms", r.timestamp_unix_ms},
       {"model", r.model},
+      {"resolved_model", r.resolved_model},
       {"prompt_tokens", r.prompt_tokens},
+      {"cached_prompt_tokens", r.cached_prompt_tokens},
       {"completion_tokens", r.completion_tokens},
       {"duration_ms", r.duration_ms},
       {"tokens_per_second", r.tokens_per_second},
+      {"prompt_tokens_per_second", r.prompt_tokens_per_second},
+      {"generation_duration_ms", r.generation_duration_ms},
+      {"prompt_duration_ms", r.prompt_duration_ms},
       {"status_code", r.status_code},
       {"slot_id", r.slot_id}
     });
@@ -73,10 +81,17 @@ json MetricsBuilder::build_history(const observability::StatsDb& db, int limit) 
       {"requests", u.requests},
       {"successful_requests", u.successful_requests},
       {"prompt_tokens", u.prompt_tokens},
+      {"cached_prompt_tokens", u.cached_prompt_tokens},
       {"completion_tokens", u.completion_tokens},
       {"total_tokens", u.prompt_tokens + u.completion_tokens},
       {"total_duration_ms", u.total_duration_ms},
       {"peak_tokens_per_second", u.peak_tokens_per_second},
+      {"peak_prompt_tokens_per_second", u.peak_prompt_tokens_per_second},
+      {"avg_tokens_per_second", u.total_generation_duration_ms > 0.0
+          ? static_cast<double>(u.completion_tokens) / (u.total_generation_duration_ms / 1000.0) : 0.0},
+      {"avg_prompt_tokens_per_second", u.total_prompt_duration_ms > 0.0
+          ? static_cast<double>(std::max<std::int64_t>(0, u.prompt_tokens - u.cached_prompt_tokens)) /
+              (u.total_prompt_duration_ms / 1000.0) : 0.0},
       {"last_timestamp_unix_ms", u.last_timestamp_unix_ms}
     });
   }
@@ -86,10 +101,15 @@ json MetricsBuilder::build_history(const observability::StatsDb& db, int limit) 
       {"bucket", b.bucket},
       {"model", b.model},
       {"prompt_tokens", b.prompt_tokens},
+      {"cached_prompt_tokens", b.cached_prompt_tokens},
       {"completion_tokens", b.completion_tokens},
       {"total_tokens", b.total_tokens},
       {"requests", b.requests},
-      {"successful_requests", b.successful_requests}
+      {"successful_requests", b.successful_requests},
+      {"generation_duration_ms", b.generation_duration_ms},
+      {"prompt_duration_ms", b.prompt_duration_ms},
+      {"peak_tokens_per_second", b.peak_tokens_per_second},
+      {"peak_prompt_tokens_per_second", b.peak_prompt_tokens_per_second}
     });
   }
   return {

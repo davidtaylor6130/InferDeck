@@ -68,6 +68,35 @@ export const Button: React.FC<{
   );
 };
 
+export const IconButton: React.FC<{
+  label: string;
+  children: React.ReactNode;
+  onClick?: () => void;
+  tone?: 'blue' | 'green' | 'neutral' | 'danger';
+  disabled?: boolean;
+  className?: string;
+}> = ({ label, children, onClick, tone = 'neutral', disabled, className = '' }) => {
+  const palette = tone === 'blue'
+    ? 'border-queue-blue/40 bg-queue-blue/15 text-queue-blue hover:bg-queue-blue/25'
+    : tone === 'green'
+      ? 'border-success-green/40 bg-success-green/15 text-success-green hover:bg-success-green/25'
+      : tone === 'danger'
+        ? 'border-danger-rose/40 bg-danger-rose/15 text-danger-rose hover:bg-danger-rose/25'
+        : 'border-white/15 bg-white/[0.06] text-text-primary hover:bg-white/[0.12]';
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue disabled:cursor-not-allowed disabled:opacity-40 ${palette} ${className}`}
+    >
+      {children}
+    </button>
+  );
+};
+
 export const ProgressBar: React.FC<{ percent: number; tone?: Tone; indeterminate?: boolean }> = ({ percent, tone = 'good', indeterminate }) => (
   <div className="h-1.5 overflow-hidden bg-white/10">
     {indeterminate ? (

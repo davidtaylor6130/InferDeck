@@ -703,12 +703,12 @@ ErrorClass classify_error(foundation::ErrorCode code) {
 std::string resolve_anthropic_model(const GatewayDeps& deps, const std::string& requested) {
     auto alias = deps.anthropic_model_aliases.find(requested);
     if (alias != deps.anthropic_model_aliases.end()) {
-        return deps.coordinator.registry().has(alias->second)
-            ? alias->second : std::string{};
+        const auto resolved = deps.coordinator.registry().resolve(alias->second);
+        return resolved ? *resolved : std::string{};
     }
     if (!requested.empty()) {
-        return deps.coordinator.registry().has(requested)
-            ? requested : std::string{};
+        const auto resolved = deps.coordinator.registry().resolve(requested);
+        return resolved ? *resolved : std::string{};
     }
     auto loaded = deps.coordinator.get_loaded_model();
     if (!deps.default_model.empty() && deps.coordinator.registry().has(deps.default_model)) {
@@ -912,11 +912,6 @@ void handle_anthropic_count_tokens(const httplib::Request& req, httplib::Respons
 
 void handle_anthropic_messages(const httplib::Request& req, httplib::Response& resp,
                                const GatewayDeps& deps) {
-    if (maintenance_mode_active(deps)) {
-        write_anthropic_error(resp, 503, "overloaded_error",
-                              "measured model optimization is running");
-        return;
-    }
     nlohmann::json body;
     try {
         body = nlohmann::json::parse(req.body);
@@ -936,6 +931,11 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
     if (model_name.empty()) {
         write_anthropic_error(resp, 404, "not_found_error",
                               "no model available for: " + requested_model);
+        return;
+    }
+    if (maintenance_blocks_model(deps, model_name)) {
+        write_anthropic_error(resp, 503, "overloaded_error",
+                              "measured model optimization is using the same compute resource");
         return;
     }
     const auto model_info = deps.coordinator.registry().get_info_result(model_name);
@@ -1009,13 +1009,15 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
                 LOG_ERROR("anthropic_inference_failed", "model={} slot_id={} error={}",
                           model_name, slot_id, pres.error().message);
                 model::InferenceResult failed;
-                record_request(deps, model_name, failed, ec.status, slot_id);
+                record_request(deps, requested_model.empty() ? model_name : requested_model,
+                               failed, ec.status, slot_id, 0.0, 0, model_name);
                 write_anthropic_error(resp, ec.status, ec.type, pres.error().message);
                 return;
             }
             pr = std::move(*pres);
         }
-        record_request(deps, model_name, pr, 200, slot_id);
+        record_request(deps, requested_model.empty() ? model_name : requested_model,
+                       pr, 200, slot_id, 0.0, 0, model_name);
 
         auto content = nlohmann::json::array();
         if (!pr.text.empty()) {
@@ -1060,6 +1062,7 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
         std::thread inference_thread;
         int slot_id{-1};
         std::string model_name;
+        std::string requested_model;
         model::BackendCoordinator* coordinator{nullptr};
         observability::Metrics* metrics{nullptr};
         observability::StatsDb* stats_db{nullptr};
@@ -1092,11 +1095,12 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
                 error = inference_error;
             }
             if (result && !aborted_stream && !error) {
-                record_request(metrics, stats_db, events, model_name, *result, 200, slot_id);
+                record_request(metrics, stats_db, events, requested_model, *result, 200, slot_id,
+                               0.0, 0, model_name);
             } else {
                 model::InferenceResult failed;
-                record_request(metrics, stats_db, events, model_name, failed,
-                               aborted_stream ? 499 : 500, slot_id);
+                record_request(metrics, stats_db, events, requested_model, failed,
+                               aborted_stream ? 499 : 500, slot_id, 0.0, 0, model_name);
             }
             if (coordinator) {
                 (void)coordinator->release_slot(model_name, slot_id);
@@ -1109,6 +1113,7 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
     auto state = std::make_shared<StreamState>();
     state->slot_id = slot_id;
     state->model_name = model_name;
+    state->requested_model = requested_model.empty() ? model_name : requested_model;
     state->coordinator = &deps.coordinator;
     state->metrics = deps.metrics;
     state->stats_db = deps.stats_db;

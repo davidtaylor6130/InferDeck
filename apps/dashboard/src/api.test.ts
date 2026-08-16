@@ -268,7 +268,8 @@ describe('profile optimization', () => {
       measured: true,
       cancelRequested: false,
       restored: false,
-      weights: { quality: 0.6, speed: 0.15, parallelism: 0.15, headroom: 0.1 },
+      weights: { promptProcessing: 0.5, generation: 0.5 },
+      baseline: null,
       recommended: null,
       candidates: [],
     });

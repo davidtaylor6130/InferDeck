@@ -7,12 +7,12 @@ describe('dashboard boundary', () => {
   it('keeps a global home plus complete LLM and dictation administration sections', () => {
     expect(DASHBOARD_PAGES).toEqual([
       { id: 'home', label: 'Home' },
-      { id: 'llm/operate', label: 'Operate', section: 'llm' },
-      { id: 'llm/models', label: 'Models', section: 'llm' },
+      { id: 'llm/settings', label: 'Model Settings', section: 'llm' },
+      { id: 'llm/models', label: 'Model Store', section: 'llm' },
       { id: 'llm/usage', label: 'Usage', section: 'llm' },
       { id: 'llm/diagnostics', label: 'Diagnostics', section: 'llm' },
-      { id: 'dictation/operate', label: 'Operate', section: 'dictation' },
-      { id: 'dictation/models', label: 'Models', section: 'dictation' },
+      { id: 'dictation/settings', label: 'Model Settings', section: 'dictation' },
+      { id: 'dictation/models', label: 'Model Store', section: 'dictation' },
       { id: 'dictation/usage', label: 'Usage', section: 'dictation' },
       { id: 'dictation/diagnostics', label: 'Diagnostics', section: 'dictation' },
     ]);

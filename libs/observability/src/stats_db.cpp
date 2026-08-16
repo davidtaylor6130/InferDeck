@@ -68,6 +68,7 @@ void StatsDb::open() {
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  ts INTEGER NOT NULL,"
     "  model TEXT NOT NULL,"
+    "  resolved_model TEXT NOT NULL DEFAULT '',"
     "  prompt_tokens INTEGER NOT NULL,"
     "  completion_tokens INTEGER NOT NULL,"
     "  duration_ms REAL NOT NULL,"
@@ -75,7 +76,11 @@ void StatsDb::open() {
     "  status_code INTEGER NOT NULL,"
     "  slot_id INTEGER NOT NULL,"
     "  input_audio_seconds REAL NOT NULL DEFAULT 0,"
-    "  input_characters INTEGER NOT NULL DEFAULT 0"
+    "  input_characters INTEGER NOT NULL DEFAULT 0,"
+    "  cached_prompt_tokens INTEGER NOT NULL DEFAULT 0,"
+    "  generation_duration_ms REAL NOT NULL DEFAULT 0,"
+    "  prompt_duration_ms REAL NOT NULL DEFAULT 0,"
+    "  prompt_tps REAL NOT NULL DEFAULT 0"
     ");"
     "CREATE TABLE IF NOT EXISTS swaps ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -101,6 +106,11 @@ void StatsDb::open() {
   for (const char* migration : {
          "ALTER TABLE requests ADD COLUMN input_audio_seconds REAL NOT NULL DEFAULT 0;",
          "ALTER TABLE requests ADD COLUMN input_characters INTEGER NOT NULL DEFAULT 0;",
+         "ALTER TABLE requests ADD COLUMN cached_prompt_tokens INTEGER NOT NULL DEFAULT 0;",
+         "ALTER TABLE requests ADD COLUMN generation_duration_ms REAL NOT NULL DEFAULT 0;",
+         "ALTER TABLE requests ADD COLUMN prompt_duration_ms REAL NOT NULL DEFAULT 0;",
+         "ALTER TABLE requests ADD COLUMN prompt_tps REAL NOT NULL DEFAULT 0;",
+         "ALTER TABLE requests ADD COLUMN resolved_model TEXT NOT NULL DEFAULT '';",
        }) {
     char* migration_error = nullptr;
     if (sqlite3_exec(reinterpret_cast<sqlite3*>(db_), migration, nullptr, nullptr,
@@ -130,18 +140,27 @@ void StatsDb::record_request(const RequestRow& row) {
   std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
   const std::string model = row.model.empty() ? "unknown" : row.model;
+  const std::string resolved_model = row.resolved_model.empty() ? model : row.resolved_model;
   const auto ts = row.timestamp_unix_ms > 0 ? row.timestamp_unix_ms : now_ms();
   const int prompt_tokens = std::max(0, row.prompt_tokens);
+  const int cached_prompt_tokens = std::clamp(row.cached_prompt_tokens, 0, prompt_tokens);
   const int completion_tokens = std::max(0, row.completion_tokens);
   const double duration_ms = std::isfinite(row.duration_ms) ? std::max(0.0, row.duration_ms) : 0.0;
   const double tps = std::isfinite(row.tokens_per_second) ? std::max(0.0, row.tokens_per_second) : 0.0;
+  const double generation_duration_ms = std::isfinite(row.generation_duration_ms)
+      ? std::max(0.0, row.generation_duration_ms) : 0.0;
+  const double prompt_duration_ms = std::isfinite(row.prompt_duration_ms)
+      ? std::max(0.0, row.prompt_duration_ms) : 0.0;
+  const double prompt_tps = std::isfinite(row.prompt_tokens_per_second)
+      ? std::max(0.0, row.prompt_tokens_per_second) : 0.0;
   const double input_audio_seconds = std::isfinite(row.input_audio_seconds)
       ? std::max(0.0, row.input_audio_seconds) : 0.0;
   const auto input_characters = std::max<std::int64_t>(0, row.input_characters);
   const char* sql =
     "INSERT INTO requests (ts, model, prompt_tokens, completion_tokens, "
-    "  duration_ms, tps, status_code, slot_id, input_audio_seconds, input_characters) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?);";
+    "  duration_ms, tps, status_code, slot_id, input_audio_seconds, input_characters, "
+    "  cached_prompt_tokens, generation_duration_ms, prompt_duration_ms, prompt_tps, resolved_model) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return;
   sqlite3_bind_int64(stmt, 1, ts);
   sqlite3_bind_text(stmt, 2, model.c_str(), -1, SQLITE_TRANSIENT);
@@ -153,6 +172,11 @@ void StatsDb::record_request(const RequestRow& row) {
   sqlite3_bind_int(stmt, 8, row.slot_id);
   sqlite3_bind_double(stmt, 9, input_audio_seconds);
   sqlite3_bind_int64(stmt, 10, input_characters);
+  sqlite3_bind_int(stmt, 11, cached_prompt_tokens);
+  sqlite3_bind_double(stmt, 12, generation_duration_ms);
+  sqlite3_bind_double(stmt, 13, prompt_duration_ms);
+  sqlite3_bind_double(stmt, 14, prompt_tps);
+  sqlite3_bind_text(stmt, 15, resolved_model.c_str(), -1, SQLITE_TRANSIENT);
   if (sqlite3_step(stmt) != SQLITE_DONE) healthy_ = false;
   sqlite3_finalize(stmt);
 }
@@ -183,7 +207,8 @@ std::vector<RequestRow> StatsDb::recent_requests(int limit) const {
   sqlite3_stmt* stmt = nullptr;
   const char* sql =
     "SELECT ts, model, prompt_tokens, completion_tokens, duration_ms, tps, status_code, slot_id, "
-    "input_audio_seconds, input_characters "
+    "input_audio_seconds, input_characters, cached_prompt_tokens, generation_duration_ms, "
+    "prompt_duration_ms, prompt_tps, resolved_model "
     "FROM requests ORDER BY id DESC LIMIT ?;";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
   sqlite3_bind_int(stmt, 1, std::clamp(limit, 1, 10'000));
@@ -199,6 +224,11 @@ std::vector<RequestRow> StatsDb::recent_requests(int limit) const {
     r.slot_id              = sqlite3_column_int(stmt, 7);
     r.input_audio_seconds  = sqlite3_column_double(stmt, 8);
     r.input_characters     = sqlite3_column_int64(stmt, 9);
+    r.cached_prompt_tokens = sqlite3_column_int(stmt, 10);
+    r.generation_duration_ms = sqlite3_column_double(stmt, 11);
+    r.prompt_duration_ms = sqlite3_column_double(stmt, 12);
+    r.prompt_tokens_per_second = sqlite3_column_double(stmt, 13);
+    r.resolved_model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 14));
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);
@@ -238,8 +268,9 @@ std::vector<ModelUsageRow> StatsDb::model_usage() const {
     "SELECT model, COUNT(*), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
     "COALESCE(SUM(prompt_tokens),0), "
-    "COALESCE(SUM(completion_tokens),0), COALESCE(SUM(duration_ms),0), "
-    "COALESCE(MAX(tps),0), COALESCE(MAX(ts),0), "
+    "COALESCE(SUM(cached_prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
+    "COALESCE(SUM(duration_ms),0), COALESCE(SUM(generation_duration_ms),0), "
+    "COALESCE(SUM(prompt_duration_ms),0), COALESCE(MAX(tps),0), COALESCE(MAX(prompt_tps),0), COALESCE(MAX(ts),0), "
     "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
     "FROM requests GROUP BY model ORDER BY MAX(ts) DESC;";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
@@ -249,12 +280,16 @@ std::vector<ModelUsageRow> StatsDb::model_usage() const {
     r.requests = sqlite3_column_int64(stmt, 1);
     r.successful_requests = sqlite3_column_int64(stmt, 2);
     r.prompt_tokens = sqlite3_column_int64(stmt, 3);
-    r.completion_tokens = sqlite3_column_int64(stmt, 4);
-    r.total_duration_ms = sqlite3_column_double(stmt, 5);
-    r.peak_tokens_per_second = sqlite3_column_double(stmt, 6);
-    r.last_timestamp_unix_ms = sqlite3_column_int64(stmt, 7);
-    r.input_audio_seconds = sqlite3_column_double(stmt, 8);
-    r.input_characters = sqlite3_column_int64(stmt, 9);
+    r.cached_prompt_tokens = sqlite3_column_int64(stmt, 4);
+    r.completion_tokens = sqlite3_column_int64(stmt, 5);
+    r.total_duration_ms = sqlite3_column_double(stmt, 6);
+    r.total_generation_duration_ms = sqlite3_column_double(stmt, 7);
+    r.total_prompt_duration_ms = sqlite3_column_double(stmt, 8);
+    r.peak_tokens_per_second = sqlite3_column_double(stmt, 9);
+    r.peak_prompt_tokens_per_second = sqlite3_column_double(stmt, 10);
+    r.last_timestamp_unix_ms = sqlite3_column_int64(stmt, 11);
+    r.input_audio_seconds = sqlite3_column_double(stmt, 12);
+    r.input_characters = sqlite3_column_int64(stmt, 13);
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);
@@ -298,18 +333,22 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
   std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
   const char* all_time_sql =
-    "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch') AS bucket, model, "
-    "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
-    "COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
+    "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch', 'localtime') AS bucket, model, "
+    "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(cached_prompt_tokens),0), "
+    "COALESCE(SUM(completion_tokens),0), COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
+    "COALESCE(SUM(generation_duration_ms),0), COALESCE(SUM(prompt_duration_ms),0), "
+    "COALESCE(MAX(tps),0), COALESCE(MAX(prompt_tps),0), "
     "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
     "FROM requests "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
   const char* limited_sql =
-    "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch') AS bucket, model, "
-    "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
-    "COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
+    "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch', 'localtime') AS bucket, model, "
+    "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(cached_prompt_tokens),0), "
+    "COALESCE(SUM(completion_tokens),0), COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
+    "COALESCE(SUM(generation_duration_ms),0), COALESCE(SUM(prompt_duration_ms),0), "
+    "COALESCE(MAX(tps),0), COALESCE(MAX(prompt_tps),0), "
     "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
     "FROM requests "
     "WHERE ts >= ((strftime('%s','now','start of month', ?) * 1000)) "
@@ -326,12 +365,17 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
     r.bucket = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
     r.model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
     r.prompt_tokens = sqlite3_column_int64(stmt, 2);
-    r.completion_tokens = sqlite3_column_int64(stmt, 3);
-    r.total_tokens = sqlite3_column_int64(stmt, 4);
-    r.requests = sqlite3_column_int64(stmt, 5);
-    r.successful_requests = sqlite3_column_int64(stmt, 6);
-    r.input_audio_seconds = sqlite3_column_double(stmt, 7);
-    r.input_characters = sqlite3_column_int64(stmt, 8);
+    r.cached_prompt_tokens = sqlite3_column_int64(stmt, 3);
+    r.completion_tokens = sqlite3_column_int64(stmt, 4);
+    r.total_tokens = sqlite3_column_int64(stmt, 5);
+    r.requests = sqlite3_column_int64(stmt, 6);
+    r.successful_requests = sqlite3_column_int64(stmt, 7);
+    r.generation_duration_ms = sqlite3_column_double(stmt, 8);
+    r.prompt_duration_ms = sqlite3_column_double(stmt, 9);
+    r.peak_tokens_per_second = sqlite3_column_double(stmt, 10);
+    r.peak_prompt_tokens_per_second = sqlite3_column_double(stmt, 11);
+    r.input_audio_seconds = sqlite3_column_double(stmt, 12);
+    r.input_characters = sqlite3_column_int64(stmt, 13);
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);
@@ -355,9 +399,11 @@ std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_
   sqlite3_stmt* stmt = nullptr;
   const char* sql =
     "SELECT strftime(?, ts / 1000, 'unixepoch', 'localtime') AS bucket, model, "
-    "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
-    "COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
+    "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(cached_prompt_tokens),0), "
+    "COALESCE(SUM(completion_tokens),0), COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
+    "COALESCE(SUM(generation_duration_ms),0), COALESCE(SUM(prompt_duration_ms),0), "
+    "COALESCE(MAX(tps),0), COALESCE(MAX(prompt_tps),0), "
     "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
     "FROM requests WHERE ts >= ? "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
@@ -369,12 +415,17 @@ std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_
     r.bucket = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
     r.model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
     r.prompt_tokens = sqlite3_column_int64(stmt, 2);
-    r.completion_tokens = sqlite3_column_int64(stmt, 3);
-    r.total_tokens = sqlite3_column_int64(stmt, 4);
-    r.requests = sqlite3_column_int64(stmt, 5);
-    r.successful_requests = sqlite3_column_int64(stmt, 6);
-    r.input_audio_seconds = sqlite3_column_double(stmt, 7);
-    r.input_characters = sqlite3_column_int64(stmt, 8);
+    r.cached_prompt_tokens = sqlite3_column_int64(stmt, 3);
+    r.completion_tokens = sqlite3_column_int64(stmt, 4);
+    r.total_tokens = sqlite3_column_int64(stmt, 5);
+    r.requests = sqlite3_column_int64(stmt, 6);
+    r.successful_requests = sqlite3_column_int64(stmt, 7);
+    r.generation_duration_ms = sqlite3_column_double(stmt, 8);
+    r.prompt_duration_ms = sqlite3_column_double(stmt, 9);
+    r.peak_tokens_per_second = sqlite3_column_double(stmt, 10);
+    r.peak_prompt_tokens_per_second = sqlite3_column_double(stmt, 11);
+    r.input_audio_seconds = sqlite3_column_double(stmt, 12);
+    r.input_characters = sqlite3_column_int64(stmt, 13);
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);
