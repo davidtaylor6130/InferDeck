@@ -110,6 +110,42 @@ describe('buildTokenSeries', () => {
     expect(tokenUsageFromSeries(ALL_MODELS, all).total).toBe(1950);
   });
 
+  it('keeps measured throughput samples separate from historical token totals', () => {
+    const monthly: MonthlyUsageRow[] = [{
+      bucket: '2026-06', model: 'a', promptTokens: 1_000_000, cachedPromptTokens: 0,
+      completionTokens: 500_000, measuredPromptTokens: 600, measuredCompletionTokens: 80,
+      totalTokens: 1_500_000, requests: 10, successfulRequests: 10,
+      promptDurationMs: 1_000, generationDurationMs: 2_000,
+      peakPromptTokensPerSecond: 600, peakTokensPerSecond: 50,
+    }];
+    const series = buildTokenSeries([], 'a', DEFAULT_COST_CONFIG, monthly, {}, {}, DEFAULT_COST_CONFIG, 'all');
+    expect(series.measuredCompletionTokens).toEqual([80]);
+    expect(series.measuredPromptTokens).toEqual([600]);
+    expect(series.generationDurationMs).toEqual([2_000]);
+    expect(series.peakTokensPerSecond).toEqual([50]);
+  });
+
+  it('excludes failed and unmeasured job history from throughput', () => {
+    const now = Date.now();
+    const base: JobRecord = {
+      id: 'measured', type: 'chat', status: 'succeeded', model: 'a',
+      createdAt: new Date(now).toISOString(), timestampUnixMs: now,
+      promptTokens: 120, cachedPromptTokens: 20, completionTokens: 40, totalTokens: 160,
+      tokensPerSecond: 20, promptTokensPerSecond: 100,
+      generationDurationMs: 2_000, promptDurationMs: 1_000,
+      durationMs: 3_000, httpStatus: 200, slotId: 0,
+    };
+    const jobs: JobRecord[] = [
+      base,
+      { ...base, id: 'legacy', completionTokens: 100_000, generationDurationMs: 0, promptDurationMs: 0 },
+      { ...base, id: 'failed', status: 'failed', tokensPerSecond: 10_000, httpStatus: 500 },
+    ];
+    const series = buildTokenSeries(jobs, 'a', DEFAULT_COST_CONFIG, [], {}, {}, DEFAULT_COST_CONFIG, 'all');
+    expect(series.measuredCompletionTokens.reduce((sum, value) => sum + value, 0)).toBe(40);
+    expect(series.measuredPromptTokens.reduce((sum, value) => sum + value, 0)).toBe(100);
+    expect(Math.max(...series.peakTokensPerSecond)).toBe(20);
+  });
+
   it('uses request history when persisted rows belong only to another model', () => {
     const now = Date.now();
     const jobs: JobRecord[] = [{

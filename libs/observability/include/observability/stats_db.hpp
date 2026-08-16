@@ -45,6 +45,8 @@ struct ModelUsageRow {
   std::int64_t prompt_tokens{};
   std::int64_t cached_prompt_tokens{};
   std::int64_t completion_tokens{};
+  std::int64_t measured_completion_tokens{};
+  std::int64_t measured_prompt_tokens{};
   double total_duration_ms{};
   double total_generation_duration_ms{};
   double total_prompt_duration_ms{};
@@ -64,6 +66,8 @@ struct UsageBucketRow {
   std::int64_t total_tokens{};
   std::int64_t requests{};
   std::int64_t successful_requests{};
+  std::int64_t measured_completion_tokens{};
+  std::int64_t measured_prompt_tokens{};
   double generation_duration_ms{};
   double prompt_duration_ms{};
   double peak_tokens_per_second{};

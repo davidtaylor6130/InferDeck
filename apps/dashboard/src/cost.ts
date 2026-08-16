@@ -33,6 +33,8 @@ export interface TokenSeries {
   characters: number[];
   generationDurationMs: number[];
   promptDurationMs: number[];
+  measuredCompletionTokens: number[];
+  measuredPromptTokens: number[];
   peakTokensPerSecond: number[];
   peakPromptTokensPerSecond: number[];
 }
@@ -269,6 +271,8 @@ export function buildTokenSeries(
     characters: 0,
     generationDurationMs: 0,
     promptDurationMs: 0,
+    measuredCompletionTokens: 0,
+    measuredPromptTokens: 0,
     peakTokensPerSecond: 0,
     peakPromptTokensPerSecond: 0,
   }]));
@@ -294,6 +298,8 @@ export function buildTokenSeries(
       bucket.characters += Number(row.inputCharacters ?? 0);
       bucket.generationDurationMs += Number(row.generationDurationMs ?? 0);
       bucket.promptDurationMs += Number(row.promptDurationMs ?? 0);
+      bucket.measuredCompletionTokens += Number(row.measuredCompletionTokens ?? 0);
+      bucket.measuredPromptTokens += Number(row.measuredPromptTokens ?? 0);
       bucket.peakTokensPerSecond = Math.max(bucket.peakTokensPerSecond, Number(row.peakTokensPerSecond ?? 0));
       bucket.peakPromptTokensPerSecond = Math.max(bucket.peakPromptTokensPerSecond, Number(row.peakPromptTokensPerSecond ?? 0));
       bucket.cost += estimateUsageCost(
@@ -309,6 +315,7 @@ export function buildTokenSeries(
       const bucket = chartBucket ? byBucket.get(chartBucket.key) : undefined;
       if (!bucket) continue;
       const prompt = Number(job.promptTokens ?? 0);
+      const uncachedPrompt = Math.max(0, prompt - Number(job.cachedPromptTokens ?? 0));
       const output = Number(job.completionTokens ?? 0);
       const jobModel = job.model || 'Unknown model';
       bucket.prompt += prompt;
@@ -318,10 +325,18 @@ export function buildTokenSeries(
       bucket.successfulRequests += job.status === 'succeeded' ? 1 : 0;
       bucket.audioSeconds += Number(job.inputAudioSeconds ?? 0);
       bucket.characters += Number(job.inputCharacters ?? 0);
-      bucket.generationDurationMs += Number(job.generationDurationMs ?? 0);
-      bucket.promptDurationMs += Number(job.promptDurationMs ?? Math.max(0, Number(job.durationMs ?? 0) - Number(job.generationDurationMs ?? 0)));
-      bucket.peakTokensPerSecond = Math.max(bucket.peakTokensPerSecond, Number(job.tokensPerSecond ?? 0));
-      bucket.peakPromptTokensPerSecond = Math.max(bucket.peakPromptTokensPerSecond, Number(job.promptTokensPerSecond ?? 0));
+      const generationDurationMs = Number(job.generationDurationMs ?? 0);
+      const promptDurationMs = Number(job.promptDurationMs ?? 0);
+      if (job.status === 'succeeded' && generationDurationMs > 0 && output > 0) {
+        bucket.generationDurationMs += generationDurationMs;
+        bucket.measuredCompletionTokens += output;
+        bucket.peakTokensPerSecond = Math.max(bucket.peakTokensPerSecond, output / (generationDurationMs / 1000));
+      }
+      if (job.status === 'succeeded' && promptDurationMs > 0 && uncachedPrompt > 0) {
+        bucket.promptDurationMs += promptDurationMs;
+        bucket.measuredPromptTokens += uncachedPrompt;
+        bucket.peakPromptTokensPerSecond = Math.max(bucket.peakPromptTokensPerSecond, uncachedPrompt / (promptDurationMs / 1000));
+      }
       bucket.cost += estimateUsageCost(
         {
           promptTokens: prompt,
@@ -345,6 +360,8 @@ export function buildTokenSeries(
     characters: 0,
     generationDurationMs: 0,
     promptDurationMs: 0,
+    measuredCompletionTokens: 0,
+    measuredPromptTokens: 0,
     peakTokensPerSecond: 0,
     peakPromptTokensPerSecond: 0,
   });
@@ -361,6 +378,8 @@ export function buildTokenSeries(
     characters: values.map(value => value.characters),
     generationDurationMs: values.map(value => value.generationDurationMs),
     promptDurationMs: values.map(value => value.promptDurationMs),
+    measuredCompletionTokens: values.map(value => value.measuredCompletionTokens),
+    measuredPromptTokens: values.map(value => value.measuredPromptTokens),
     peakTokensPerSecond: values.map(value => value.peakTokensPerSecond),
     peakPromptTokensPerSecond: values.map(value => value.peakPromptTokensPerSecond),
   };

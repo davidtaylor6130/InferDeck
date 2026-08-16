@@ -101,6 +101,8 @@ export interface UsageRow {
   promptTokens: number;
   cachedPromptTokens?: number;
   completionTokens: number;
+  measuredCompletionTokens?: number;
+  measuredPromptTokens?: number;
   totalTokens: number;
   peakTokensPerSecond: number;
   avgTokensPerSecond: number;
@@ -117,6 +119,8 @@ export interface MonthlyUsageRow {
   promptTokens: number;
   cachedPromptTokens?: number;
   completionTokens: number;
+  measuredCompletionTokens?: number;
+  measuredPromptTokens?: number;
   totalTokens: number;
   requests: number;
   successfulRequests: number;
@@ -182,6 +186,7 @@ export interface JobRecord {
   createdAt: string;
   timestampUnixMs: number;
   promptTokens: number;
+  cachedPromptTokens?: number;
   completionTokens: number;
   totalTokens: number;
   tokensPerSecond: number;

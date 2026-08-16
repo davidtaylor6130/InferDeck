@@ -189,8 +189,9 @@ describe('pages', () => {
     expect(llm).toContain('LLM usage');
     expect(llm).toContain('Estimated API cost');
     expect(llm).toContain('server-side prices configured for each model in Model Settings');
-    expect(llm).toContain('Prompt TPS');
+    expect(llm).toContain('Prompt processing');
     expect(llm).toContain('Peak TPS');
+    expect(llm).toContain('TPS is average generation speed');
     expect(llm).toContain('Usage time range');
     expect(llm).not.toContain('ROI remaining');
     expect(llm).not.toContain('Portfolio break-even $');

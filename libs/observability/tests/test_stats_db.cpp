@@ -63,7 +63,9 @@ TEST_CASE("StatsDb: model usage aggregates survive reopen", "[observability][sta
   REQUIRE(qwen->successful_requests == 2);
   REQUIRE(qwen->prompt_tokens == 40);
   REQUIRE(qwen->completion_tokens == 60);
-  REQUIRE(qwen->peak_tokens_per_second == 50.0);
+  REQUIRE(qwen->measured_completion_tokens == 0);
+  REQUIRE(qwen->measured_prompt_tokens == 0);
+  REQUIRE(qwen->peak_tokens_per_second == 0.0);
 }
 
 TEST_CASE("StatsDb: speech billing units persist and aggregate across restarts",
@@ -112,7 +114,7 @@ TEST_CASE("StatsDb: existing token ledger is migrated without losing history",
       "duration_ms REAL NOT NULL, tps REAL NOT NULL, status_code INTEGER NOT NULL,"
       "slot_id INTEGER NOT NULL);"
       "INSERT INTO requests (ts, model, prompt_tokens, completion_tokens, duration_ms,"
-      "tps, status_code, slot_id) VALUES (1000, 'historic-llm', 100, 25, 500, 50, 200, 0);";
+      "tps, status_code, slot_id) VALUES (1000, 'historic-llm', 100, 25, 500, 500, 200, 0);";
   char* error = nullptr;
   REQUIRE(sqlite3_exec(legacy, legacy_schema, nullptr, nullptr, &error) == SQLITE_OK);
   sqlite3_close(legacy);
@@ -126,6 +128,27 @@ TEST_CASE("StatsDb: existing token ledger is migrated without losing history",
   CHECK(rows[0].completion_tokens == 25);
   CHECK(rows[0].input_audio_seconds == 0.0);
   CHECK(rows[0].input_characters == 0);
+
+  migrated.record_request({2000, "historic-llm", 80, 40, 700.0, 80.0, 200, 0,
+                           0.0, 0, 20, 500.0, 200.0, 300.0});
+  migrated.record_request({2500, "historic-llm", 10, 10, 20.0, 500.0, 500, 0,
+                           0.0, 0, 0, 10.0, 10.0, 1000.0});
+  const auto usage = migrated.model_usage();
+  REQUIRE(usage.size() == 1);
+  CHECK(usage[0].prompt_tokens == 190);
+  CHECK(usage[0].completion_tokens == 75);
+  CHECK(usage[0].measured_completion_tokens == 40);
+  CHECK(usage[0].measured_prompt_tokens == 60);
+  CHECK(usage[0].total_generation_duration_ms == Catch::Approx(500.0));
+  CHECK(usage[0].total_prompt_duration_ms == Catch::Approx(200.0));
+  CHECK(usage[0].peak_tokens_per_second == Catch::Approx(80.0));
+  CHECK(usage[0].peak_prompt_tokens_per_second == Catch::Approx(300.0));
+
+  const auto monthly = migrated.monthly_usage();
+  REQUIRE(monthly.size() == 1);
+  CHECK(monthly[0].measured_completion_tokens == 40);
+  CHECK(monthly[0].measured_prompt_tokens == 60);
+  CHECK(monthly[0].peak_tokens_per_second == Catch::Approx(80.0));
 }
 
 TEST_CASE("StatsDb: lifetime totals survive reopen for metrics restoration",
