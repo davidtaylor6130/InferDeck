@@ -7,8 +7,10 @@
 #include <cctype>
 #include <fstream>
 #include <iomanip>
+#include <numeric>
 #include <stdexcept>
 #include <sstream>
+#include <unordered_set>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -29,6 +31,8 @@ using foundation::Result;
 
 namespace {
 
+constexpr std::string_view sherpa_bundle_name = "__inferdeck_sherpa_bundle__";
+
 std::string encode(const std::string& value) {
     std::ostringstream output;
     output << std::hex << std::uppercase;
@@ -37,6 +41,20 @@ std::string encode(const std::string& value) {
         else output << '%' << std::setw(2) << std::setfill('0') << static_cast<int>(c);
     }
     return output.str();
+}
+
+std::string encode_path(const std::string& value) {
+    std::string output;
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        const auto slash = value.find('/', start);
+        if (!output.empty()) output += '/';
+        output += encode(value.substr(start, slash == std::string::npos
+            ? std::string::npos : slash - start));
+        if (slash == std::string::npos) break;
+        start = slash + 1;
+    }
+    return output;
 }
 
 std::string safe_name(const std::string& value) {
@@ -56,6 +74,29 @@ bool valid_repo(const std::string& repo) {
     return std::all_of(repo.begin(), repo.end(), [](unsigned char c) {
         return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '/';
     });
+}
+
+bool valid_artifact_path(const std::string& name) {
+    const auto path = std::filesystem::path(name).lexically_normal();
+    if (path.empty() || path.is_absolute()) return false;
+    return std::none_of(path.begin(), path.end(), [](const auto& component) {
+        return component == "..";
+    });
+}
+
+std::string artifact_key(const std::string& name) {
+    auto lower_name = std::filesystem::path(name).filename().string();
+    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower_name == "tts.json") return "tts_json";
+    if (lower_name.find("voice_styles") != std::string::npos) return "voice_style";
+    for (const char* key : {"duration_predictor", "text_encoder", "vector_estimator",
+                            "unicode_indexer", "voice_style", "tts_json", "encoder",
+                            "decoder", "joiner", "tokens", "vocab", "voices",
+                            "lexicon", "vocoder", "model"}) {
+        if (lower_name.find(key) != std::string::npos) return key;
+    }
+    return safe_name(std::filesystem::path(name).stem().string());
 }
 
 bool compatible_extension(const std::string& filename, const std::string& runtime) {
@@ -200,18 +241,28 @@ nlohmann::json to_json(const StoreDownload& download) {
         {"modelName", download.model_name}, {"runtime", download.file.runtime},
         {"modality", download.file.modality}, {"state", download.state},
         {"error", download.error}, {"bytesDownloaded", download.bytes_downloaded},
-        {"bytesTotal", download.bytes_total}, {"installedPath", download.installed_path}
+        {"bytesTotal", download.bytes_total}, {"installedPath", download.installed_path},
+        {"artifactCount", download.artifacts.empty() ? 1 : download.artifacts.size()}
     };
+}
+
+ModelStore::ModelStore(std::filesystem::path root, std::filesystem::path archive_root,
+                       std::string token,
+                       model::BackendCoordinator& coordinator,
+                       std::unique_ptr<IModelStoreTransport> transport)
+    : root_(std::move(root)), archive_root_(std::move(archive_root)),
+      token_(std::move(token)), coordinator_(coordinator),
+      transport_(transport ? std::move(transport) : make_native_model_store_transport()) {
+    std::filesystem::create_directories(root_);
+    std::filesystem::create_directories(archive_root_);
+    load_manifest();
 }
 
 ModelStore::ModelStore(std::filesystem::path root, std::string token,
                        model::BackendCoordinator& coordinator,
                        std::unique_ptr<IModelStoreTransport> transport)
-    : root_(std::move(root)), token_(std::move(token)), coordinator_(coordinator),
-      transport_(transport ? std::move(transport) : make_native_model_store_transport()) {
-    std::filesystem::create_directories(root_);
-    load_manifest();
-}
+    : ModelStore(root, root.parent_path() / "archive", std::move(token),
+                 coordinator, std::move(transport)) {}
 
 ModelStore::~ModelStore() {
     std::vector<std::thread> workers;
@@ -284,10 +335,18 @@ Result<nlohmann::json> ModelStore::inspect(const std::string& repo) {
     if (!response) return Err<nlohmann::json>(response.error().code, response.error().message);
     const std::string revision = response->value("sha", "main");
     const std::string pipeline = response->value("pipeline_tag", "");
+    const auto siblings = response->value("siblings", nlohmann::json::array());
+    const bool sherpa_asr_repository =
+        lower(pipeline).find("automatic-speech-recognition") != std::string::npos &&
+        std::any_of(siblings.begin(), siblings.end(), [](const auto& sibling) {
+            const auto name = lower(sibling.value("rfilename", ""));
+            return name.ends_with(".onnx") || name.ends_with(".ort");
+        });
     nlohmann::json files = nlohmann::json::array();
-    for (const auto& sibling : response->value("siblings", nlohmann::json::array())) {
+    for (const auto& sibling : siblings) {
         const std::string filename = sibling.value("rfilename", "");
-        const std::string runtime = infer_runtime(filename, pipeline);
+        const std::string runtime = sherpa_asr_repository
+            ? "sherpa_onnx" : infer_runtime(filename, pipeline);
         if (filename.empty() || !compatible_extension(filename, runtime)) continue;
         const auto lfs = sibling.value("lfs", nlohmann::json::object());
         const std::uint64_t size = lfs.value("size", sibling.value("size", std::uint64_t{0}));
@@ -301,6 +360,51 @@ Result<nlohmann::json> ModelStore::inspect(const std::string& repo) {
             {"quantization", infer_quantization(filename)}, {"compatible", size > 0 && sha.size() == 64},
             {"estimatedRamMb", static_cast<std::uint64_t>((size + 1024 * 1024 - 1) / (1024 * 1024))},
             {"estimatedVramMb", static_cast<std::uint64_t>((size + 1024 * 1024 - 1) / (1024 * 1024))}
+        });
+    }
+    std::uint64_t bundle_size = 0;
+    std::size_t bundle_count = 0;
+    std::unordered_set<std::string> bundle_keys;
+    bool bundle_verified = true;
+    for (const auto& file : files) {
+        if (file.value("runtime", "") != "sherpa_onnx") continue;
+        const std::string name = file.value("name", "");
+        if (!valid_artifact_path(name)) continue;
+        ++bundle_count;
+        bundle_size += file.value("size", std::uint64_t{0});
+        bundle_keys.insert(artifact_key(name));
+        const auto extension = lower(std::filesystem::path(name).extension().string());
+        if (infer_modality("sherpa_onnx", pipeline) == "audio_speech" &&
+            (extension == ".onnx" || extension == ".ort")) {
+            bundle_keys.insert("model");
+        }
+        bundle_verified = bundle_verified && file.value("compatible", false);
+    }
+    if (bundle_count > 0) {
+        const auto modality = infer_modality("sherpa_onnx", pipeline);
+        const auto contains_all = [&bundle_keys](std::initializer_list<const char*> keys) {
+            return std::all_of(keys.begin(), keys.end(), [&bundle_keys](const char* key) {
+                return bundle_keys.contains(key);
+            });
+        };
+        const bool complete_asr = contains_all({"encoder", "decoder", "joiner", "tokens"});
+        const bool supertonic = bundle_keys.contains("duration_predictor") ||
+            bundle_keys.contains("text_encoder") || bundle_keys.contains("vector_estimator");
+        const bool complete_tts = supertonic
+            ? contains_all({"duration_predictor", "text_encoder", "vector_estimator",
+                            "vocoder", "tts_json", "unicode_indexer", "voice_style"})
+            : contains_all({"model", "tokens"});
+        const bool compatible = bundle_verified &&
+            (modality == "audio_transcription" ? complete_asr : complete_tts);
+        files.push_back({
+            {"repo", repo}, {"revision", revision}, {"name", std::string(sherpa_bundle_name)},
+            {"size", bundle_size}, {"sha256", ""}, {"runtime", "sherpa_onnx"},
+            {"modality", modality},
+            {"capabilities", capabilities_for("sherpa_onnx", modality)},
+            {"format", "bundle"}, {"quantization", "multi-file"},
+            {"compatible", compatible}, {"artifactCount", bundle_count},
+            {"estimatedRamMb", static_cast<std::uint64_t>((bundle_size + 1024 * 1024 - 1) / (1024 * 1024))},
+            {"estimatedVramMb", 0}
         });
     }
     return Ok(nlohmann::json{{"id", repo}, {"revision", revision},
@@ -335,6 +439,61 @@ Result<StoreFile> ModelStore::resolve_file(const std::string& repo,
     return Err<StoreFile>(ErrorCode::NotFound, "compatible artifact not found");
 }
 
+Result<std::vector<StoreFile>> ModelStore::resolve_bundle(
+    const std::string& repo, const std::string& runtime,
+    const std::string& modality) {
+    if (runtime != "sherpa_onnx") {
+        return Err<std::vector<StoreFile>>(ErrorCode::InvalidArgument,
+                                           "only sherpa-onnx repositories use bundle installation");
+    }
+    auto details = inspect(repo);
+    if (!details) return Err<std::vector<StoreFile>>(details.error().code, details.error().message);
+    std::vector<StoreFile> artifacts;
+    std::unordered_set<std::string> keys;
+    for (const auto& file : details->at("files")) {
+        const std::string name = file.value("name", "");
+        if (name == sherpa_bundle_name || file.value("runtime", "") != runtime ||
+            file.value("modality", "") != modality || !file.value("compatible", false) ||
+            !valid_artifact_path(name)) {
+            continue;
+        }
+        StoreFile artifact;
+        artifact.repo = repo;
+        artifact.revision = file.value("revision", details->value("revision", "main"));
+        artifact.name = name;
+        artifact.sha256 = file.value("sha256", "");
+        artifact.size = file.value("size", std::uint64_t{0});
+        artifact.runtime = runtime;
+        artifact.modality = modality;
+        artifact.capabilities = file.value("capabilities", capabilities_for(runtime, modality));
+        if (artifact.size == 0 || artifact.sha256.size() != 64) continue;
+        keys.insert(artifact_key(name));
+        const auto extension = lower(std::filesystem::path(name).extension().string());
+        if (modality == "audio_speech" && (extension == ".onnx" || extension == ".ort")) {
+            keys.insert("model");
+        }
+        artifacts.push_back(std::move(artifact));
+    }
+    const auto contains_all = [&keys](std::initializer_list<const char*> required) {
+        return std::all_of(required.begin(), required.end(), [&keys](const char* key) {
+            return keys.contains(key);
+        });
+    };
+    const bool supertonic = keys.contains("duration_predictor") ||
+        keys.contains("text_encoder") || keys.contains("vector_estimator");
+    const bool complete = modality == "audio_transcription"
+        ? contains_all({"encoder", "decoder", "joiner", "tokens"})
+        : supertonic
+            ? contains_all({"duration_predictor", "text_encoder", "vector_estimator",
+                            "vocoder", "tts_json", "unicode_indexer", "voice_style"})
+            : contains_all({"model", "tokens"});
+    if (!complete || artifacts.size() < 2) {
+        return Err<std::vector<StoreFile>>(ErrorCode::InvalidArgument,
+                                           "sherpa-onnx repository does not expose a complete verified runtime bundle");
+    }
+    return Ok(std::move(artifacts));
+}
+
 Result<std::uint64_t> ModelStore::install(const std::string& repo,
                                           const std::string& filename,
                                           const std::string& runtime,
@@ -343,10 +502,25 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
     if (model_name.empty() || model_name.size() > 160 || safe_name(model_name) != model_name) {
         return Err<std::uint64_t>(ErrorCode::InvalidArgument, "invalid model name");
     }
-    auto file = resolve_file(repo, filename, runtime, modality);
-    if (!file) return Err<std::uint64_t>(file.error().code, file.error().message);
+    std::vector<StoreFile> artifacts;
+    if (runtime == "sherpa_onnx") {
+        if (filename != sherpa_bundle_name) {
+            return Err<std::uint64_t>(ErrorCode::InvalidArgument,
+                                      "sherpa-onnx models must be installed as a complete bundle");
+        }
+        auto bundle = resolve_bundle(repo, runtime, modality);
+        if (!bundle) return Err<std::uint64_t>(bundle.error().code, bundle.error().message);
+        artifacts = std::move(*bundle);
+    } else {
+        auto file = resolve_file(repo, filename, runtime, modality);
+        if (!file) return Err<std::uint64_t>(file.error().code, file.error().message);
+        artifacts.push_back(std::move(*file));
+    }
+    const auto total_size = std::accumulate(
+        artifacts.begin(), artifacts.end(), std::uint64_t{0},
+        [](std::uint64_t total, const StoreFile& artifact) { return total + artifact.size; });
     const auto space = std::filesystem::space(root_);
-    if (space.available < file->size + 64 * 1024 * 1024) {
+    if (space.available < total_size + 64 * 1024 * 1024) {
         return Err<std::uint64_t>(ErrorCode::Unavailable, "insufficient disk space for model artifact");
     }
     reap_completed_workers();
@@ -378,9 +552,15 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
         reserved_names_.emplace(model_name, id);
         StoreDownload job;
         job.id = id;
-        job.file = std::move(*file);
+        job.file = artifacts.front();
+        if (artifacts.size() > 1) {
+            job.file.name = filename;
+            job.file.size = total_size;
+            job.file.sha256.clear();
+        }
+        job.artifacts = std::move(artifacts);
         job.model_name = model_name;
-        job.bytes_total = job.file.size;
+        job.bytes_total = total_size;
         downloads_[id] = std::move(job);
         cancellations_[id] = std::make_shared<std::atomic<bool>>(false);
     }
@@ -550,6 +730,10 @@ void ModelStore::run(std::uint64_t id) {
         cancelled = cancellations_.at(id);
         downloads_.at(id).state = "downloading";
     }
+    if (job.artifacts.size() > 1) {
+        run_bundle(id, job, cancelled);
+        return;
+    }
     const std::filesystem::path directory = root_ / safe_name(job.file.runtime) /
                                             safe_name(job.file.repo);
     std::filesystem::create_directories(directory);
@@ -644,7 +828,160 @@ void ModelStore::run(std::uint64_t id) {
         finish_job(id, "failed", saved.error().message);
         return;
     }
-    coordinator_.registry().register_model(info);
+    try {
+        coordinator_.registry().register_model(info);
+    } catch (const std::exception& error) {
+        std::error_code ignored;
+        std::filesystem::remove(final_path, ignored);
+        {
+            std::lock_guard lock(mutex_);
+            installed_.erase(job.model_name);
+        }
+        (void)save_manifest();
+        finish_job(id, "failed", error.what());
+        return;
+    }
+    finish_job(id, "installed");
+}
+
+void ModelStore::run_bundle(
+    std::uint64_t id, const StoreDownload& job,
+    const std::shared_ptr<std::atomic<bool>>& cancelled) {
+    const auto directory = root_ / safe_name(job.file.runtime) / safe_name(job.file.repo);
+    const auto staging = directory / (safe_name(job.model_name) + ".bundle.partial");
+    const auto destination = directory / safe_name(job.model_name);
+    std::error_code error;
+    std::filesystem::create_directories(staging, error);
+    if (error || std::filesystem::exists(destination, error)) {
+        finish_job(id, "failed", error ? error.message() : "model bundle destination already exists");
+        return;
+    }
+    std::uint64_t completed_bytes = 0;
+    for (const auto& artifact : job.artifacts) {
+        if (cancelled->load()) {
+            finish_job(id, "cancelled", "cancelled");
+            return;
+        }
+        const auto relative = std::filesystem::path(artifact.name).lexically_normal();
+        const auto target = (staging / relative).lexically_normal();
+        if (!foundation::is_path_within(staging.lexically_normal(), target)) {
+            std::filesystem::remove_all(staging, error);
+            finish_job(id, "failed", "bundle artifact path escapes the staging directory");
+            return;
+        }
+        std::filesystem::create_directories(target.parent_path(), error);
+        if (error) {
+            finish_job(id, "failed", error.message());
+            return;
+        }
+        auto valid_existing = false;
+        if (local_file_size(target) == artifact.size) {
+            const auto checksum = sha256_file(target);
+            valid_existing = checksum && lower(*checksum) == lower(artifact.sha256);
+        }
+        if (!valid_existing) {
+            std::filesystem::remove(target, error);
+            const auto partial = std::filesystem::path(target.string() + ".partial");
+            auto offset = local_file_size(partial);
+            if (offset > artifact.size) {
+                std::filesystem::remove(partial, error);
+                offset = 0;
+            }
+            const auto url = "https://huggingface.co/" + artifact.repo + "/resolve/" +
+                             encode(artifact.revision) + "/" + encode_path(artifact.name);
+            const auto downloaded = transport_->download(
+                url, token_, partial, offset,
+                [this, id, cancelled, completed_bytes, expected = artifact.size](std::uint64_t bytes) {
+                    if (bytes > expected) return false;
+                    std::lock_guard lock(mutex_);
+                    downloads_.at(id).bytes_downloaded = completed_bytes + bytes;
+                    return !cancelled->load();
+                });
+            if (!downloaded) {
+                finish_job(id, cancelled->load() ? "cancelled" : "failed",
+                           cancelled->load() ? "cancelled" : downloaded.error().message);
+                return;
+            }
+            const auto checksum = sha256_file(partial);
+            if (local_file_size(partial) != artifact.size || !checksum ||
+                lower(*checksum) != lower(artifact.sha256)) {
+                std::filesystem::remove_all(staging, error);
+                finish_job(id, "failed", "bundle artifact failed size or checksum validation");
+                return;
+            }
+            const auto finalized = replace_file(partial, target);
+            if (!finalized) {
+                finish_job(id, "failed", finalized.error().message);
+                return;
+            }
+        }
+        completed_bytes += artifact.size;
+        {
+            std::lock_guard lock(mutex_);
+            downloads_.at(id).bytes_downloaded = completed_bytes;
+        }
+    }
+    std::filesystem::rename(staging, destination, error);
+    if (error) {
+        finish_job(id, "failed", error.message());
+        return;
+    }
+    model::ModelInfo info;
+    info.name = job.model_name;
+    info.family = job.file.repo;
+    info.runtime = job.file.runtime;
+    info.modality = job.file.modality;
+    info.capabilities = job.file.capabilities;
+    nlohmann::json artifact_manifest = nlohmann::json::object();
+    for (const auto& artifact : job.artifacts) {
+        auto key = artifact_key(artifact.name);
+        const auto extension = lower(std::filesystem::path(artifact.name).extension().string());
+        if (job.file.modality == "audio_speech" && !info.artifacts.contains("model") &&
+            (extension == ".onnx" || extension == ".ort") &&
+            key != "duration_predictor" && key != "text_encoder" &&
+            key != "vector_estimator" && key != "vocoder") {
+            key = "model";
+        }
+        for (std::size_t suffix = 2; info.artifacts.contains(key); ++suffix) {
+            key = artifact_key(artifact.name) + "_" + std::to_string(suffix);
+        }
+        const auto path = destination / std::filesystem::path(artifact.name).lexically_normal();
+        info.artifacts[key] = path.string();
+        artifact_manifest[key] = path.string();
+    }
+    {
+        std::lock_guard lock(mutex_);
+        installed_[job.model_name] = {
+            {"name", info.name}, {"family", info.family}, {"runtime", info.runtime},
+            {"modality", info.modality}, {"capabilities", info.capabilities},
+            {"path", destination.string()}, {"size", job.file.size},
+            {"artifacts", artifact_manifest}, {"artifactCount", job.artifacts.size()},
+            {"vramRequiredMb", 0}
+        };
+        downloads_.at(id).installed_path = destination.string();
+    }
+    const auto saved = save_manifest();
+    if (!saved) {
+        std::filesystem::remove_all(destination, error);
+        {
+            std::lock_guard lock(mutex_);
+            installed_.erase(job.model_name);
+        }
+        finish_job(id, "failed", saved.error().message);
+        return;
+    }
+    try {
+        coordinator_.registry().register_model(info);
+    } catch (const std::exception& registration_error) {
+        std::filesystem::remove_all(destination, error);
+        {
+            std::lock_guard lock(mutex_);
+            installed_.erase(job.model_name);
+        }
+        (void)save_manifest();
+        finish_job(id, "failed", registration_error.what());
+        return;
+    }
     finish_job(id, "installed");
 }
 
@@ -670,6 +1007,14 @@ Result<void> ModelStore::resume(std::uint64_t id) {
 }
 
 Result<void> ModelStore::remove(const std::string& model_name) {
+    return retire(model_name, false);
+}
+
+Result<void> ModelStore::archive(const std::string& model_name) {
+    return retire(model_name, true);
+}
+
+Result<void> ModelStore::retire(const std::string& model_name, bool archive_artifact) {
     nlohmann::json entry;
     {
         std::lock_guard lock(mutex_);
@@ -677,24 +1022,68 @@ Result<void> ModelStore::remove(const std::string& model_name) {
         entry = installed_.at(model_name);
     }
     if (coordinator_.is_loaded(model_name) || coordinator_.active_request_count(model_name) > 0) {
-        return Err<void>(ErrorCode::Unavailable, "active or loaded model cannot be removed");
+        return Err<void>(ErrorCode::Unavailable, "active or loaded model cannot be archived or deleted");
     }
-    const auto unregistered = coordinator_.unregister(model_name);
-    if (!unregistered && unregistered.error().code != ErrorCode::NotFound) return unregistered;
+    const auto info = coordinator_.registry().get_info_result(model_name);
     std::error_code error;
     const auto root = std::filesystem::weakly_canonical(root_, error);
     const auto path = std::filesystem::weakly_canonical(entry.value("path", ""), error);
-    if (error || !foundation::is_path_within(root, path)) {
+    if (error || !foundation::is_path_within(root, path) ||
+        foundation::is_path_within(path, root)) {
         return Err<void>(ErrorCode::InvalidArgument, "installed artifact is outside the model store");
     }
-    if (!std::filesystem::remove(path, error) || error) {
-        return Err<void>(ErrorCode::IoError, error ? error.message() : "cannot remove model artifact");
+    std::filesystem::path archived_path;
+    if (archive_artifact) {
+        const auto archive_root = std::filesystem::weakly_canonical(archive_root_, error);
+        if (error || archive_root.empty()) {
+            return Err<void>(ErrorCode::InvalidArgument, "model archive directory is unavailable");
+        }
+        const auto archive_directory = archive_root / safe_name(model_name);
+        std::filesystem::create_directories(archive_directory, error);
+        if (error) return Err<void>(ErrorCode::IoError, error.message());
+        archived_path = archive_directory / path.filename();
+        if (std::filesystem::exists(archived_path, error)) {
+            return Err<void>(ErrorCode::AlreadyExists, "an archived artifact already exists for this model");
+        }
     }
     {
         std::lock_guard lock(mutex_);
         installed_.erase(model_name);
     }
-    return save_manifest();
+    auto saved = save_manifest();
+    if (!saved) {
+        std::lock_guard lock(mutex_);
+        installed_[model_name] = entry;
+        return saved;
+    }
+    const auto unregistered = coordinator_.unregister(model_name);
+    if (!unregistered && unregistered.error().code != ErrorCode::NotFound) {
+        {
+            std::lock_guard lock(mutex_);
+            installed_[model_name] = entry;
+        }
+        (void)save_manifest();
+        return unregistered;
+    }
+    if (archive_artifact) {
+        std::filesystem::rename(path, archived_path, error);
+    } else if (std::filesystem::is_directory(path, error)) {
+        if (std::filesystem::remove_all(path, error) == 0 && !error) {
+            error = std::make_error_code(std::errc::io_error);
+        }
+    } else if (!std::filesystem::remove(path, error) || error) {
+        if (!error) error = std::make_error_code(std::errc::io_error);
+    }
+    if (error) {
+        if (info) coordinator_.registry().register_model(*info);
+        {
+            std::lock_guard lock(mutex_);
+            installed_[model_name] = entry;
+        }
+        (void)save_manifest();
+        return Err<void>(ErrorCode::IoError, error.message());
+    }
+    return Ok();
 }
 
 std::vector<StoreDownload> ModelStore::downloads() const {
@@ -786,6 +1175,8 @@ nlohmann::json ModelStore::library() const {
     const auto library_root = lower(root_.filename().string()) == "store"
         ? root_.parent_path()
         : root_;
+    std::error_code archive_error;
+    const auto normalized_archive_root = std::filesystem::weakly_canonical(archive_root_, archive_error);
     std::error_code scan_error;
     std::size_t visited = 0;
     if (std::filesystem::is_directory(library_root, scan_error)) {
@@ -798,6 +1189,10 @@ nlohmann::json ModelStore::library() const {
              iterator.increment(scan_error), ++visited) {
             if (!iterator->is_regular_file(scan_error)) continue;
             const auto path = iterator->path();
+            if (!archive_error && foundation::is_path_within(normalized_archive_root, path)) {
+                if (iterator->is_directory(scan_error)) iterator.disable_recursion_pending();
+                continue;
+            }
             const auto extension = lower(path.extension().string());
             if (extension != ".gguf" && extension != ".onnx" &&
                 extension != ".ort" && extension != ".bin" &&
@@ -872,15 +1267,28 @@ void ModelStore::load_manifest() {
         const auto root = std::filesystem::weakly_canonical(root_, error);
         for (auto item = manifest.begin(); item != manifest.end(); ++item) {
             const auto path = std::filesystem::weakly_canonical(item.value().value("path", ""), error);
-            if (error || !std::filesystem::is_regular_file(path, error) ||
-                !foundation::is_path_within(root, path)) continue;
+            const bool path_exists = std::filesystem::is_regular_file(path, error) ||
+                                     std::filesystem::is_directory(path, error);
+            if (error || !path_exists || !foundation::is_path_within(root, path)) continue;
             model::ModelInfo info;
             info.name = item.key();
             info.family = item.value().value("family", "");
             info.runtime = item.value().value("runtime", "llama_cpp");
             info.modality = item.value().value("modality", "text");
             info.capabilities = item.value().value("capabilities", capabilities_for(info.runtime, info.modality));
-            info.gguf_path = path.string();
+            if (std::filesystem::is_regular_file(path, error)) info.gguf_path = path.string();
+            if (item.value().contains("artifacts") && item.value()["artifacts"].is_object()) {
+                for (auto artifact = item.value()["artifacts"].begin();
+                     artifact != item.value()["artifacts"].end(); ++artifact) {
+                    const auto artifact_path = std::filesystem::weakly_canonical(
+                        artifact.value().get<std::string>(), error);
+                    if (!error && std::filesystem::is_regular_file(artifact_path, error) &&
+                        foundation::is_path_within(path, artifact_path)) {
+                        info.artifacts[artifact.key()] = artifact_path.string();
+                    }
+                }
+            }
+            if (std::filesystem::is_directory(path, error) && info.artifacts.empty()) continue;
             info.vram_required_mb = item.value().value("vramRequiredMb", 0);
             if (!coordinator_.registry().has(info.name)) coordinator_.registry().register_model(info);
             installed_[item.key()] = item.value();

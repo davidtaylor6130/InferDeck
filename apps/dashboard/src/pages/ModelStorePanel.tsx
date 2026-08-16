@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   controlStoreDownload, getStoreActivity, inspectStoreModel, installStoreModel,
-  removeStoreModel, searchStore, type InstalledStoreModel, type StoreDownload,
+  removeStoreModel, searchStore, unregisterConfiguredModel, type InstalledStoreModel, type StoreDownload,
   type StoreFile, type StoreModel,
 } from '../api';
 import { Badge, Button, EmptyState, Panel, ProgressBar, SectionTitle } from '../components/ui';
@@ -10,6 +10,14 @@ import { useGateway } from '../gateway';
 import { formatBytes, formatDate, formatTokenCount } from '../utils';
 
 const inputClass = 'h-9 rounded border border-white/10 bg-[#07101d] px-2 text-sm text-text-primary';
+type ServerSortKey = 'name' | 'type' | 'configured' | 'runtime' | 'size';
+
+const serverModelType = (entry: InstalledStoreModel) => {
+  if (entry.hasVision) return 'Vision + text';
+  if (entry.modality === 'audio_transcription') return 'Speech to text';
+  if (entry.modality === 'audio_speech') return 'Text to speech';
+  return entry.modality || 'Text';
+};
 const DISCOVERY: Record<DashboardSection, Array<{ label: string; query: string; runtime: string; modality: string }>> = {
   llm: [
     { label: 'Recommended 20–40B', query: 'Qwen3.6 GGUF', runtime: 'llama_cpp', modality: 'text' },
@@ -39,9 +47,12 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
   const [installed, setInstalled] = useState<Record<string, InstalledStoreModel>>({});
   const [library, setLibrary] = useState<InstalledStoreModel[]>([]);
   const [recommendedOnly, setRecommendedOnly] = useState(true);
+  const [vramCapacityGb, setVramCapacityGb] = useState('server');
+  const [catalogSort, setCatalogSort] = useState<'downloads' | 'likes' | 'recent'>('downloads');
   const [searchBusy, setSearchBusy] = useState(false);
   const [inspectBusy, setInspectBusy] = useState(false);
   const [error, setError] = useState('');
+  const [serverSort, setServerSort] = useState<{ key: ServerSortKey; direction: 'asc' | 'desc' }>({ key: 'name', direction: 'asc' });
   const inspectRequest = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -131,11 +142,25 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
     }
   };
 
-  const remove = async (model: string) => {
-    if (!window.confirm(`Remove ${model} and its store-managed artifact?`)) return;
+  const retire = async (model: string, action: 'archive' | 'remove') => {
+    const message = action === 'archive'
+      ? `Archive ${model}? It will be moved to the configured archive directory and unregistered.`
+      : `Permanently delete ${model} and its store-managed artifact? This cannot be undone.`;
+    if (!window.confirm(message)) return;
     setError('');
     try {
-      await removeStoreModel(model);
+      await removeStoreModel(model, action);
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const unregister = async (model: string) => {
+    if (!window.confirm(`Remove ${model} from InferDeck? Its external model files will remain on disk.`)) return;
+    setError('');
+    try {
+      await unregisterConfiguredModel(model);
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -164,18 +189,55 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
         ? entry.modality === 'audio_transcription' || entry.modality === 'audio_speech'
         : entry.modality !== 'audio_transcription' && entry.modality !== 'audio_speech');
   }, [library, scopedInstalled, section]);
+  const sortedLibrary = useMemo(() => {
+    const value = (entry: InstalledStoreModel) => {
+      if (serverSort.key === 'name') return entry.name || entry.path || '';
+      if (serverSort.key === 'type') return serverModelType(entry);
+      if (serverSort.key === 'configured') return entry.configured ? 1 : 0;
+      if (serverSort.key === 'runtime') return entry.runtime || '';
+      return entry.size ?? 0;
+    };
+    return [...scopedLibrary].sort((left, right) => {
+      const leftValue = value(left);
+      const rightValue = value(right);
+      const compared = typeof leftValue === 'number' && typeof rightValue === 'number'
+        ? leftValue - rightValue
+        : String(leftValue).localeCompare(String(rightValue), undefined, { numeric: true, sensitivity: 'base' });
+      return serverSort.direction === 'asc' ? compared : -compared;
+    });
+  }, [scopedLibrary, serverSort]);
+  const changeServerSort = (key: ServerSortKey) => {
+    setServerSort(current => current.key === key
+      ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+      : { key, direction: 'asc' });
+  };
+  const sortHeading = (key: ServerSortKey, label: string) => (
+    <button
+      type="button"
+      className="rounded py-2 text-left font-medium hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
+      onClick={() => { changeServerSort(key); }}
+    >
+      {label}{serverSort.key === key ? ` (${serverSort.direction})` : ''}
+    </button>
+  );
   const scopedDownloads = downloads.filter(download =>
     section === 'dictation'
       ? download.modality === 'audio_transcription' || download.modality === 'audio_speech'
       : download.modality !== 'audio_transcription' && download.modality !== 'audio_speech');
-  const popularityFloor = section === 'llm' ? 1_000 : 100;
-  const visibleResults = useMemo(
-    () => results.filter(model =>
-      !recommendedOnly || model.recommended || model.downloads >= popularityFloor),
-    [results, recommendedOnly, popularityFloor],
-  );
   const gpu = (status?.hardware?.gpu ?? {}) as Record<string, unknown>;
   const vramTotalMb = Number(gpu.vramTotal ?? 0) / (1024 * 1024);
+  const popularityFloor = section === 'llm' ? 1_000 : 100;
+  const selectedCapacityMb = vramCapacityGb === 'server'
+    ? vramTotalMb
+    : Number(vramCapacityGb) * 1024;
+  const visibleResults = useMemo(() => results
+    .filter(model => !recommendedOnly || model.recommended || model.downloads >= popularityFloor)
+    .filter(model => section !== 'llm' || !selectedCapacityMb || estimateRepositoryVramMb(model.id) <= selectedCapacityMb * 0.85)
+    .sort((left, right) => {
+      if (catalogSort === 'likes') return right.likes - left.likes || right.downloads - left.downloads;
+      if (catalogSort === 'recent') return Date.parse(right.lastModified || '') - Date.parse(left.lastModified || '') || right.downloads - left.downloads;
+      return right.downloads - left.downloads || right.likes - left.likes;
+    }), [results, recommendedOnly, popularityFloor, section, selectedCapacityMb, catalogSort]);
   const selectedModel = results.find(model => model.id === selectedRepo);
 
   const chooseDiscovery = (recommendation: typeof DISCOVERY.llm[number]) => {
@@ -189,7 +251,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
     <div className="space-y-4">
       <Panel>
         <SectionTitle
-          title={`${sectionLabel(section)} model catalogue`}
+          title={`${sectionLabel(section)} Model Store`}
           aside={section === 'llm' && vramTotalMb
             ? `Hugging Face · ${Math.round(vramTotalMb / 1024)} GB VRAM profile`
             : 'live Hugging Face discovery'}
@@ -246,6 +308,26 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
             />
             Recommended only
           </label>
+          {section === 'llm' && (
+            <select aria-label="VRAM capacity" className={inputClass} value={vramCapacityGb} onChange={event => setVramCapacityGb(event.target.value)}>
+              <option value="server">Fits this server</option>
+              <option value="8">Up to 8 GB VRAM</option>
+              <option value="16">Up to 16 GB VRAM</option>
+              <option value="24">Up to 24 GB VRAM</option>
+              <option value="32">Up to 32 GB VRAM</option>
+              <option value="48">Up to 48 GB VRAM</option>
+              <option value="0">Any VRAM size</option>
+            </select>
+          )}
+          <select aria-label="Popularity order" className={inputClass} value={catalogSort} onChange={event => setCatalogSort(event.target.value as typeof catalogSort)}>
+            <option value="downloads">Most downloaded</option>
+            <option value="likes">Most liked</option>
+            <option value="recent">Recently updated</option>
+          </select>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-muted">
+          <span>Active filters: {recommendedOnly ? 'recommended' : 'all adoption levels'} · {catalogSort.replace('downloads', 'download popularity').replace('likes', 'like popularity').replace('recent', 'recently updated')}{section === 'llm' ? ` · ${vramCapacityGb === 'server' ? 'this server VRAM' : vramCapacityGb === '0' ? 'any VRAM' : `${vramCapacityGb} GB VRAM`}` : ''}</span>
+          <button type="button" className="rounded text-queue-blue hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue" onClick={() => { setRecommendedOnly(false); setVramCapacityGb('0'); setCatalogSort('downloads'); }}>Clear filters</button>
         </div>
         {error && <p className="mt-2 text-xs text-danger-rose" role="alert">{error}</p>}
 
@@ -253,7 +335,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
           <div className="mt-4">
             <EmptyState
               title={searchBusy ? 'Checking Hugging Face...' : 'No recommended compatible models'}
-              detail={!searchBusy && results.length ? 'Turn off Recommended only to show lower-adoption matches.' : undefined}
+              detail={!searchBusy && results.length ? 'The active adoption or VRAM filters exclude these matches. Clear filters to show every compatible result.' : undefined}
             />
           </div>
         ) : (
@@ -277,6 +359,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
                 </div>
                 <p className="mt-1 text-xs text-text-muted">
                   {model.runtime} · {formatTokenCount(model.downloads)} downloads · {model.likes} likes
+                  {section === 'llm' ? ` · ~${Math.round(estimateRepositoryVramMb(model.id) / 1024)} GB artifact estimate` : ''}
                   {model.lastModified ? ` · updated ${formatDate(model.lastModified)}` : ''}
                 </p>
               </button>
@@ -298,7 +381,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
           )}
           {section === 'dictation' && files.some(file => file.runtime === 'sherpa_onnx') && (
             <p className="mt-2 text-xs text-text-muted">
-              Sherpa-onnx repositories require a verified model bundle, not one ONNX file. InferDeck shows the compatible artifacts for discovery, but disables individual downloads so it cannot create an incomplete STT or TTS installation.
+              Sherpa-onnx repositories install as one verified bundle. InferDeck downloads every required model, token, and vocabulary artifact into staging, then publishes the complete bundle atomically.
             </p>
           )}
           {files.length === 0 ? (
@@ -317,7 +400,8 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
                 </thead>
                 <tbody className="divide-y divide-white/5">
                   {files.map(file => {
-                    const requiresBundle = file.runtime === 'sherpa_onnx';
+                    const requiresBundle = file.runtime === 'sherpa_onnx' && file.artifactCount === undefined;
+                    const isBundle = file.runtime === 'sherpa_onnx' && (file.artifactCount ?? 0) > 1;
                     return (
                     <tr key={file.name}>
                       <td className="max-w-[380px] truncate py-2 pr-3 font-mono text-xs text-text-primary" title={file.name}>{file.name}</td>
@@ -336,7 +420,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
                           disabled={!file.compatible || requiresBundle}
                           onClick={() => { void install(file); }}
                         >
-                          {requiresBundle ? 'Bundle required' : file.compatible ? 'Download' : 'Unverified'}
+                          {requiresBundle ? 'Included in bundle' : file.compatible ? isBundle ? `Install ${file.artifactCount} artifacts` : 'Download' : 'Unverified'}
                         </Button>
                       </td>
                     </tr>
@@ -352,32 +436,51 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
       <Panel>
         <SectionTitle title="Models on this server" aside={`${scopedLibrary.length} detected`} />
         <p className="mt-2 text-xs text-text-muted">
-          This combines the active profile, InferDeck-managed downloads, and compatible artifacts already present in the model library. External files are read-only.
+          Configured external models can be removed from InferDeck without deleting their files. Managed downloads also support archive and permanent deletion.
         </p>
         {scopedLibrary.length === 0 ? (
           <div className="mt-3"><EmptyState title={`No downloaded ${sectionLabel(section)} models`} detail="No compatible artifacts were detected in the model library." /></div>
         ) : (
-          <div className="mt-3 divide-y divide-white/5">
-            {scopedLibrary.map(entry => (
-              <div key={entry.id || `${entry.name}:${entry.path}`} className="grid gap-2 py-3 text-sm md:grid-cols-[1fr_auto_auto] md:items-center">
-                <div className="min-w-0">
-                  <p className="truncate font-mono text-text-primary">{entry.name || 'Unconfigured model artifact'}</p>
-                  <p className="truncate text-xs text-text-muted" title={entry.path}>
-                    {entry.path || 'Managed storage'} · {formatBytes(entry.size ?? 0)}
-                    {entry.artifactCount ? ` · ${entry.artifactCount} artifact${entry.artifactCount === 1 ? '' : 's'}` : ''}
-                    {entry.quantization && entry.quantization !== 'unknown' ? ` · ${entry.quantization}` : ''}
-                  </p>
-                </div>
-                <span className="flex flex-wrap items-center gap-1">
-                  {entry.hasVision && <Badge label="◈ Vision" tone="violet" />}
-                  <Badge label={entry.configured ? 'Configured' : 'On disk'} tone={entry.configured ? 'good' : 'warn'} />
-                  <Badge label={`${entry.runtime || 'runtime'} · ${entry.modality || 'text'}`} tone="idle" />
-                </span>
-                {entry.managed
-                  ? <Button tone="danger" onClick={() => { if (entry.name) void remove(entry.name); }}>Remove</Button>
-                  : <span className="text-right text-xs text-text-muted">Read-only</span>}
-              </div>
-            ))}
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full min-w-[980px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
+                  <th aria-sort={serverSort.key === 'name' ? `${serverSort.direction}ending` : 'none'} className="pr-4">{sortHeading('name', 'Name')}</th>
+                  <th aria-sort={serverSort.key === 'type' ? `${serverSort.direction}ending` : 'none'} className="pr-4">{sortHeading('type', 'Type')}</th>
+                  <th aria-sort={serverSort.key === 'configured' ? `${serverSort.direction}ending` : 'none'} className="pr-4">{sortHeading('configured', 'Configured')}</th>
+                  <th aria-sort={serverSort.key === 'runtime' ? `${serverSort.direction}ending` : 'none'} className="pr-4">{sortHeading('runtime', 'Runtime')}</th>
+                  <th aria-sort={serverSort.key === 'size' ? `${serverSort.direction}ending` : 'none'} className="pr-4">{sortHeading('size', 'Disk size')}</th>
+                  <th className="py-2 pr-4 font-medium">Storage</th>
+                  <th className="py-2 text-right font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {sortedLibrary.map(entry => (
+                  <tr key={entry.id || `${entry.name}:${entry.path}`}>
+                    <td className="max-w-[340px] py-3 pr-4">
+                      <p className="truncate font-mono text-text-primary">{entry.name || 'Unconfigured model artifact'}</p>
+                      <p className="truncate text-xs text-text-muted" title={entry.path}>{entry.path || 'Managed storage'}</p>
+                    </td>
+                    <td className="pr-4"><Badge label={serverModelType(entry)} tone={entry.hasVision ? 'violet' : 'idle'} /></td>
+                    <td className="pr-4"><Badge label={entry.configured ? 'Yes' : 'No'} tone={entry.configured ? 'good' : 'warn'} /></td>
+                    <td className="pr-4 font-mono text-xs text-text-secondary">{entry.runtime || 'Unknown'}</td>
+                    <td className="pr-4 tabular-nums text-text-secondary">{formatBytes(entry.size ?? 0)}</td>
+                    <td className="pr-4 text-xs text-text-secondary">
+                      {entry.managed ? 'InferDeck managed' : 'External'}
+                      {entry.artifactCount ? ` · ${entry.artifactCount} artifact${entry.artifactCount === 1 ? '' : 's'}` : ''}
+                      {entry.quantization && entry.quantization !== 'unknown' ? ` · ${entry.quantization}` : ''}
+                    </td>
+                    <td className="py-3 text-right">
+                      {entry.managed
+                        ? <span className="flex justify-end gap-2"><Button onClick={() => { if (entry.name) void retire(entry.name, 'archive'); }}>Archive</Button><Button tone="danger" onClick={() => { if (entry.name) void retire(entry.name, 'remove'); }}>Delete permanently</Button></span>
+                        : entry.configured && entry.name
+                          ? <Button tone="danger" onClick={() => { void unregister(entry.name!); }}>Remove from InferDeck</Button>
+                          : <span className="text-xs text-text-muted">Detected on disk</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </Panel>
@@ -425,3 +528,17 @@ const ArtifactFit: React.FC<{
   if (share <= 0.85) return <Badge label="Fits · tight at long context" tone="warn" />;
   return <Badge label="Not recommended for this VRAM" tone="critical" />;
 };
+
+function estimateRepositoryVramMb(modelId: string): number {
+  const matches = Array.from(modelId.matchAll(/(?:^|[-_.])(\d+(?:\.\d+)?)b(?:$|[-_.])/gi));
+  const parametersBillions = matches.length ? Math.max(...matches.map(match => Number(match[1]))) : 8;
+  const lower = modelId.toLowerCase();
+  const bytesPerParameter = lower.includes('q2') || lower.includes('iq2') ? 0.38
+    : lower.includes('q3') || lower.includes('iq3') ? 0.5
+      : lower.includes('q5') ? 0.75
+        : lower.includes('q6') ? 0.88
+          : lower.includes('q8') ? 1.1
+            : lower.includes('f16') || lower.includes('bf16') ? 2.1
+              : 0.65;
+  return parametersBillions * 1024 * bytesPerParameter + 1024;
+}

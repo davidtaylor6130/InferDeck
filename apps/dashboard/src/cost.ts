@@ -25,11 +25,16 @@ export interface TokenSeries {
   total: number[];
   prompt: number[];
   output: number[];
+  cachedPrompt: number[];
   cost: number[];
   requests: number[];
   successfulRequests: number[];
   audioSeconds: number[];
   characters: number[];
+  generationDurationMs: number[];
+  promptDurationMs: number[];
+  peakTokensPerSecond: number[];
+  peakPromptTokensPerSecond: number[];
 }
 
 export type TokenRange = 'day' | 'week' | 'month' | 'year' | 'all';
@@ -48,11 +53,11 @@ export const TOKEN_RANGE_LABELS: Record<TokenRange, string> = {
 };
 
 export const DEFAULT_COST_CONFIG: ModelCostConfig = {
-  equivalentModel: 'OpenRouter median tracked chat model',
-  promptPerMillion: 0.55,
-  outputPerMillion: 1.44,
+  equivalentModel: 'Not configured',
+  promptPerMillion: 0,
+  outputPerMillion: 0,
   breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
-  source: 'OpenRouter median chat model pricing',
+  source: 'No server-side model pricing',
   defaultsVersion: MODEL_COST_DEFAULTS_VERSION,
   billingUnit: 'tokens',
   pricePerUnit: 0,
@@ -79,7 +84,7 @@ export function buildCostDefaults(pricing: PricingEntry[]): { defaults: CostDefa
       promptPerMillion: sanitizeMoney(entry.prompt_price_per_million, DEFAULT_COST_CONFIG.promptPerMillion),
       outputPerMillion: sanitizeMoney(entry.completion_price_per_million, DEFAULT_COST_CONFIG.outputPerMillion),
       breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
-      source: 'data/pricing.json',
+      source: entry.source === 'model_settings' ? 'Model Settings' : 'data/pricing.json',
       defaultsVersion: MODEL_COST_DEFAULTS_VERSION,
       billingUnit: entry.billing_unit || 'tokens',
       pricePerUnit: sanitizeMoney(entry.price_per_unit, 0),
@@ -254,6 +259,7 @@ export function buildTokenSeries(
   const buckets = buildTokenBuckets(range, jobs, model, persistedRows);
   const byBucket = new Map(buckets.map(bucket => [bucket.key, {
     prompt: 0,
+    cachedPrompt: 0,
     output: 0,
     total: 0,
     cost: 0,
@@ -261,6 +267,10 @@ export function buildTokenSeries(
     successfulRequests: 0,
     audioSeconds: 0,
     characters: 0,
+    generationDurationMs: 0,
+    promptDurationMs: 0,
+    peakTokensPerSecond: 0,
+    peakPromptTokensPerSecond: 0,
   }]));
   const relevantPersistedRows = persistedRows.filter(row => model === ALL_MODELS || row.model === model);
   const usePersisted = relevantPersistedRows.length > 0;
@@ -275,12 +285,17 @@ export function buildTokenSeries(
       const prompt = Number(row.promptTokens ?? 0);
       const output = Number(row.completionTokens ?? 0);
       bucket.prompt += prompt;
+      bucket.cachedPrompt += Number(row.cachedPromptTokens ?? 0);
       bucket.output += output;
       bucket.total += Number(row.totalTokens ?? prompt + output);
       bucket.requests += Number(row.requests ?? 0);
       bucket.successfulRequests += Number(row.successfulRequests ?? 0);
       bucket.audioSeconds += Number(row.inputAudioSeconds ?? 0);
       bucket.characters += Number(row.inputCharacters ?? 0);
+      bucket.generationDurationMs += Number(row.generationDurationMs ?? 0);
+      bucket.promptDurationMs += Number(row.promptDurationMs ?? 0);
+      bucket.peakTokensPerSecond = Math.max(bucket.peakTokensPerSecond, Number(row.peakTokensPerSecond ?? 0));
+      bucket.peakPromptTokensPerSecond = Math.max(bucket.peakPromptTokensPerSecond, Number(row.peakPromptTokensPerSecond ?? 0));
       bucket.cost += estimateUsageCost(
         row,
         model === ALL_MODELS ? getCostConfigForModel(row.model, saved, defaults, fallback) : cost,
@@ -303,6 +318,10 @@ export function buildTokenSeries(
       bucket.successfulRequests += job.status === 'succeeded' ? 1 : 0;
       bucket.audioSeconds += Number(job.inputAudioSeconds ?? 0);
       bucket.characters += Number(job.inputCharacters ?? 0);
+      bucket.generationDurationMs += Number(job.generationDurationMs ?? 0);
+      bucket.promptDurationMs += Number(job.promptDurationMs ?? Math.max(0, Number(job.durationMs ?? 0) - Number(job.generationDurationMs ?? 0)));
+      bucket.peakTokensPerSecond = Math.max(bucket.peakTokensPerSecond, Number(job.tokensPerSecond ?? 0));
+      bucket.peakPromptTokensPerSecond = Math.max(bucket.peakPromptTokensPerSecond, Number(job.promptTokensPerSecond ?? 0));
       bucket.cost += estimateUsageCost(
         {
           promptTokens: prompt,
@@ -316,6 +335,7 @@ export function buildTokenSeries(
   }
   const values = buckets.map(bucket => byBucket.get(bucket.key) || {
     prompt: 0,
+    cachedPrompt: 0,
     output: 0,
     total: 0,
     cost: 0,
@@ -323,17 +343,26 @@ export function buildTokenSeries(
     successfulRequests: 0,
     audioSeconds: 0,
     characters: 0,
+    generationDurationMs: 0,
+    promptDurationMs: 0,
+    peakTokensPerSecond: 0,
+    peakPromptTokensPerSecond: 0,
   });
   return {
     months: buckets.map(bucket => bucket.label),
     total: values.map(value => value.total),
     prompt: values.map(value => value.prompt),
+    cachedPrompt: values.map(value => value.cachedPrompt),
     output: values.map(value => value.output),
     cost: values.map(value => value.cost),
     requests: values.map(value => value.requests),
     successfulRequests: values.map(value => value.successfulRequests),
     audioSeconds: values.map(value => value.audioSeconds),
     characters: values.map(value => value.characters),
+    generationDurationMs: values.map(value => value.generationDurationMs),
+    promptDurationMs: values.map(value => value.promptDurationMs),
+    peakTokensPerSecond: values.map(value => value.peakTokensPerSecond),
+    peakPromptTokensPerSecond: values.map(value => value.peakPromptTokensPerSecond),
   };
 }
 

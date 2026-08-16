@@ -1013,7 +1013,13 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         write_error(resp, 400, "missing_model", "request body must include 'model'");
         return;
     }
-    const std::string model_name = body["model"].get<std::string>();
+    const std::string requested_model = body["model"].get<std::string>();
+    const auto resolved_model = resolve_model_name(deps, requested_model);
+    if (!resolved_model) {
+        write_error(resp, 404, "model_not_found", resolved_model.error().message);
+        return;
+    }
+    const std::string& model_name = resolved_model->resolved;
     auto info = deps.coordinator.registry().get_info_result(model_name);
     if (!info) {
         write_error(resp, 404, "model_not_found", info.error().message);
@@ -1084,7 +1090,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
     if (!result) {
         const int status = result.error().code == foundation::ErrorCode::InvalidArgument ? 400
             : result.error().code == foundation::ErrorCode::Cancelled ? 499 : 500;
-        record_request(deps, model_name, model::InferenceResult{}, status, *slot);
+        record_request(deps, requested_model, model::InferenceResult{}, status, *slot,
+                       0.0, 0, model_name);
         write_error(resp, status, "embedding_failed", result.error().message);
         return;
     }
@@ -1101,11 +1108,12 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
     model::InferenceResult metrics_result;
     metrics_result.prompt_tokens = result->prompt_tokens;
     metrics_result.duration_ms = result->duration_ms;
-    record_request(deps, model_name, metrics_result, 200, *slot);
+    record_request(deps, requested_model, metrics_result, 200, *slot,
+                   0.0, 0, model_name);
     write_json(resp, 200, {
         {"object", "list"},
         {"data", data},
-        {"model", model_name},
+        {"model", requested_model},
         {"usage", {
             {"prompt_tokens", result->prompt_tokens},
             {"total_tokens", result->prompt_tokens},
@@ -1115,11 +1123,6 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
 
 void handle_responses(const httplib::Request& req, httplib::Response& resp,
                       const GatewayDeps& deps) {
-    if (maintenance_mode_active(deps)) {
-        write_error(resp, 503, "maintenance_mode",
-                    "measured model optimization is running");
-        return;
-    }
     nlohmann::json request;
     try {
         request = nlohmann::json::parse(req.body);
@@ -1136,7 +1139,13 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
         write_error(resp, 400, code, message);
         return;
     }
-    const std::string model_name = (*chat_body)["model"].get<std::string>();
+    const std::string requested_model = (*chat_body)["model"].get<std::string>();
+    const auto resolved_model = resolve_model_name(deps, requested_model);
+    if (!resolved_model) {
+        write_error(resp, 404, "model_not_found", resolved_model.error().message);
+        return;
+    }
+    const std::string& model_name = resolved_model->resolved;
     auto info = deps.coordinator.registry().get_info_result(model_name);
     if (!info) {
         write_error(resp, 404, "model_not_found", info.error().message);

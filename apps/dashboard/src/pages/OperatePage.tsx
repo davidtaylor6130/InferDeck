@@ -1,11 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { Cog6ToothIcon, PlayIcon, StopIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { parseDocument } from 'yaml';
 import {
-  cancelProfileBenchmark, getConfig, getProfileBenchmark, saveActiveConfig,
+  cancelProfileBenchmark, getConfig, getOptimizationSchedule, getProfileBenchmark, saveActiveConfig,
   startProfileBenchmark, waitForActiveConfig,
   type ConfigDocument, type ProfileBenchmarkSnapshot, type ProfileOptimizationCandidate,
+  type ScheduledOptimizationRecord,
 } from '../api';
-import { Badge, Button, EmptyState, Panel, SectionTitle, Stat } from '../components/ui';
+import { Badge, Button, EmptyState, IconButton, Panel, SectionTitle, Stat } from '../components/ui';
 import {
   modalityLabel,
   modelsForSection,
@@ -17,6 +19,7 @@ import { useGateway } from '../gateway';
 import type { ModelInfo } from '../types';
 import { compactModel, formatDuration, formatMb, formatTokenCount, timeAgo } from '../utils';
 import { MediaJobsPanel } from './MediaJobsPanel';
+import { ModelAliasPanel } from './ModelAliasPanel';
 
 const inputClass = 'h-9 w-full rounded border border-white/10 bg-[#07101d] px-2 text-sm text-text-primary';
 type ConfigValue = string | number | boolean | null;
@@ -41,6 +44,7 @@ export function stageProfileOptimization(
   document.setIn(['model_registry', index, 'cache_type_v'], candidate.cacheTypeV);
   document.setIn(['model_registry', index, 'n_batch'], candidate.nBatch);
   document.setIn(['model_registry', index, 'n_ubatch'], candidate.nUbatch);
+  document.setIn(['model_registry', index, 'speculative', 'max_active_requests'], candidate.mtpMaxActiveRequests);
   document.setIn(['gateway', 'flash_attn'], candidate.flashAttention);
   return document.toString();
 }
@@ -88,7 +92,7 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
 
       <Panel>
         <SectionTitle
-          title={`${sectionLabel(section)} operation`}
+          title={`${sectionLabel(section)} Model Settings`}
           aside={section === 'dictation' ? 'runtime control' : `${loaded.length} loaded`}
         />
         <p className="mt-2 max-w-3xl text-sm text-text-secondary">
@@ -108,13 +112,15 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
         </div>
       </Panel>
 
+      <ModelAliasPanel section={section} />
+
       <Panel>
         <SectionTitle title="Runtime models" aside="compact control plane" />
         {scopedModels.length === 0 ? (
           <div className="mt-3">
             <EmptyState
               title={`No ${sectionLabel(section)} models configured`}
-              detail={`Use ${sectionLabel(section)} Models to acquire an artifact, then add it to the active profile.`}
+              detail={`Use the ${sectionLabel(section)} Model Store to acquire an artifact, then add it to the active profile.`}
             />
           </div>
         ) : (
@@ -171,13 +177,13 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
                           {model.runtime_available === false ? (
                             <Button disabled>Unavailable</Button>
                           ) : model.loaded ? (
-                            <Button disabled={pending !== ''} onClick={() => { void unloadModel(model.id); }}>
-                              {pending === `unload:${model.id}` ? 'Unloading...' : 'Unload'}
-                            </Button>
+                            <IconButton label={pending === `unload:${model.id}` ? `Unloading ${model.id}` : `Unload ${model.id}`} disabled={pending !== ''} onClick={() => { void unloadModel(model.id); }}>
+                              <StopIcon className="h-4 w-4" aria-hidden="true" />
+                            </IconButton>
                           ) : (
-                            <Button tone="blue" disabled={swap.swapping || pending !== ''} onClick={() => { void load(model.id); }}>
-                              {pending === `load:${model.id}` ? 'Starting...' : 'Load'}
-                            </Button>
+                            <IconButton label={pending === `load:${model.id}` ? `Loading ${model.id}` : `Load ${model.id}`} tone="blue" disabled={swap.swapping || pending !== ''} onClick={() => { void load(model.id); }}>
+                              <PlayIcon className="h-4 w-4" aria-hidden="true" />
+                            </IconButton>
                           )}
                           {section === 'llm' && (
                             <Button
@@ -187,7 +193,9 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
                               Auto-optimize
                             </Button>
                           )}
-                          <Button onClick={() => setEditing({ model, autoOptimize: false })}>Model details</Button>
+                          <IconButton label={`Model settings for ${model.id}`} onClick={() => setEditing({ model, autoOptimize: false })}>
+                            <Cog6ToothIcon className="h-4 w-4" aria-hidden="true" />
+                          </IconButton>
                         </div>
                       </td>
                     </tr>
@@ -236,10 +244,11 @@ const ModelConfigDialog: React.FC<{
   const [busy, setBusy] = useState(true);
   const [optimizing, setOptimizing] = useState(false);
   const [benchmark, setBenchmark] = useState<ProfileBenchmarkSnapshot | null>(null);
-  const [stagedBenchmarkId, setStagedBenchmarkId] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [message, setMessage] = useState('');
   const [autoStarted, setAutoStarted] = useState(false);
+  const [scheduleStatus, setScheduleStatus] = useState<ScheduledOptimizationRecord | null>(null);
+  const [scheduleTimezone, setScheduleTimezone] = useState('server local time');
 
   useEffect(() => {
     let active = true;
@@ -268,6 +277,16 @@ const ModelConfigDialog: React.FC<{
       if (active && current.model === model.id && current.state !== 'idle') {
         setBenchmark(current);
       }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [model.id]);
+
+  useEffect(() => {
+    let active = true;
+    getOptimizationSchedule().then(result => {
+      if (!active) return;
+      setScheduleTimezone(result.timezone || 'server local time');
+      setScheduleStatus(result.schedules.find(schedule => schedule.model === model.id) ?? null);
     }).catch(() => {});
     return () => { active = false; };
   }, [model.id]);
@@ -360,7 +379,6 @@ const ModelConfigDialog: React.FC<{
   const analyzeProfile = async () => {
     setOptimizing(true);
     setBenchmark(null);
-    setStagedBenchmarkId(0);
     setMessage('');
     try {
       const result = await startProfileBenchmark({
@@ -372,10 +390,11 @@ const ModelConfigDialog: React.FC<{
         nUbatch: Number(read(['n_ubatch']) ?? readRoot(['gateway', 'n_ubatch']) ?? 512),
         cacheTypeK: String(read(['cache_type_k']) ?? readRoot(['gateway', 'cache_type_k']) ?? 'q8_0'),
         cacheTypeV: String(read(['cache_type_v']) ?? readRoot(['gateway', 'cache_type_v']) ?? 'q8_0'),
+        flashAttention: String(readRoot(['gateway', 'flash_attn']) ?? 'auto'),
         candidateLimit: 3,
       });
       setBenchmark(result);
-      setMessage('Measured benchmark started. Normal LLM requests are paused until the previous model residency is restored.');
+      setMessage('Measured benchmark started. GPU model requests are paused while the accelerator is measured; CPU dictation remains available.');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -391,6 +410,11 @@ const ModelConfigDialog: React.FC<{
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const discardOptimization = () => {
+    setBenchmark(null);
+    setMessage('Measured recommendation discarded. The active profile is unchanged.');
   };
 
   const cancelBenchmark = async () => {
@@ -417,18 +441,6 @@ const ModelConfigDialog: React.FC<{
       globalThis.clearTimeout(timer);
     };
   }, [benchmark]);
-
-  useEffect(() => {
-    if (benchmark?.state !== 'completed' || !benchmark.recommended ||
-        benchmark.id === stagedBenchmarkId) return;
-    try {
-      stageCandidate(benchmark.recommended);
-      setStagedBenchmarkId(benchmark.id);
-      setMessage('Measured winner staged in this draft. Review it, then save the active profile to hot apply.');
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    }
-  }, [benchmark?.state, benchmark?.id, benchmark?.recommended, stagedBenchmarkId]);
 
   useEffect(() => {
     if (!autoOptimize || autoStarted || !config || busy || index < 0) return;
@@ -464,8 +476,25 @@ const ModelConfigDialog: React.FC<{
         candidate.slots === benchmark.recommended?.slots &&
         candidate.nBatch === benchmark.recommended?.nBatch &&
         candidate.cacheTypeK === benchmark.recommended?.cacheTypeK &&
-        candidate.cacheTypeV === benchmark.recommended?.cacheTypeV)
+        candidate.cacheTypeV === benchmark.recommended?.cacheTypeV &&
+        candidate.mtpMaxActiveRequests === benchmark.recommended?.mtpMaxActiveRequests)
     : undefined;
+  const baselineTrial = benchmark?.baseline?.completed ? benchmark.baseline : undefined;
+  const relativeChange = (before: number | undefined, after: number | undefined) => {
+    if (before == null || after == null || before === 0) return 'n/a';
+    const change = (after - before) / before * 100;
+    return `${change >= 0 ? '+' : ''}${change.toFixed(1)}%`;
+  };
+  const changeTone = (before: number | undefined, after: number | undefined, lowerIsBetter = false) => {
+    if (before == null || after == null || before === after) return 'text-text-secondary';
+    const improved = lowerIsBetter ? after < before : after > before;
+    return improved ? 'text-success-green' : 'text-danger-rose';
+  };
+  const performanceIndex = winnerTrial?.performanceIndex ?? 100;
+  const performanceTone = performanceIndex > 100 ? 'good' : performanceIndex < 100 ? 'critical' : 'idle';
+  const correctnessChange = baselineTrial && winnerTrial
+    ? winnerTrial.qualityScore >= baselineTrial.qualityScore ? 'Preserved' : 'Regressed'
+    : 'n/a';
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/75 p-4 sm:p-8" role="dialog" aria-modal="true" aria-label={`${model.id} model details`}>
@@ -476,7 +505,9 @@ const ModelConfigDialog: React.FC<{
             <h2 className="mt-1 font-mono text-base font-semibold text-text-primary">{model.id}</h2>
             <p className="mt-1 text-xs text-text-muted">Changes are validated and saved separately from the stable gateway.yml baseline.</p>
           </div>
-          <Button onClick={onClose}>Close</Button>
+          <IconButton label="Close model settings" onClick={onClose}>
+            <XMarkIcon className="h-5 w-5" aria-hidden="true" />
+          </IconButton>
         </header>
 
         <div className="p-4">
@@ -511,6 +542,16 @@ const ModelConfigDialog: React.FC<{
                 <ConfigField label="Repeat penalty">
                   <input className={inputClass} type="number" min="0.01" step="0.01" disabled={section === 'dictation'} value={Number(read(['sampling', 'repeat_penalty']) ?? 1)} onChange={event => update(['sampling', 'repeat_penalty'], Number(event.target.value))} />
                 </ConfigField>
+                {section === 'llm' && (
+                  <>
+                    <ConfigField label="Input cost per 1M tokens (USD)">
+                      <input className={inputClass} type="number" min="0" step="0.001" value={Number(read(['prompt_price_per_million']) ?? 0)} onChange={event => update(['prompt_price_per_million'], Number(event.target.value))} />
+                    </ConfigField>
+                    <ConfigField label="Output cost per 1M tokens (USD)">
+                      <input className={inputClass} type="number" min="0" step="0.001" value={Number(read(['completion_price_per_million']) ?? 0)} onChange={event => update(['completion_price_per_million'], Number(event.target.value))} />
+                    </ConfigField>
+                  </>
+                )}
               </div>
 
               {section === 'llm' && (
@@ -588,7 +629,7 @@ const ModelConfigDialog: React.FC<{
                       <div className="max-w-2xl">
                         <h3 className="text-sm font-medium text-text-primary">Measured mini-benchmark</h3>
                         <p className="mt-1 text-xs text-text-muted">
-                          Loads up to three safe profiles in-process, runs identical fixed-seed quality prompts, measures output speed, first-token latency, concurrent-slot throughput, load time, and actual peak VRAM, then restores the previous model.
+                          Loads up to three safe profiles in-process, checks one-, two-, and four-request throughput, verifies MTP drafting and acceptance per request, runs fixed-seed correctness probes, and restores the previous model.
                         </p>
                       </div>
                       <div className="flex flex-wrap gap-2">
@@ -606,9 +647,27 @@ const ModelConfigDialog: React.FC<{
                         )}
                       </div>
                     </div>
+                    <div className="mt-3 grid gap-3 border-t border-white/10 pt-3 sm:grid-cols-[auto_1fr_1fr] sm:items-end">
+                      <label className="inline-flex min-h-9 items-center gap-2 text-xs text-text-secondary">
+                        <input type="checkbox" checked={Boolean(read(['optimization', 'schedule', 'enabled']) ?? model.optimization?.schedule_enabled ?? false)} onChange={event => update(['optimization', 'schedule', 'enabled'], event.target.checked)} />
+                        Run on schedule
+                      </label>
+                      <ConfigField label={`Window start (${scheduleTimezone})`}>
+                        <input className={inputClass} type="time" value={String(read(['optimization', 'schedule', 'window_start']) ?? model.optimization?.schedule_window_start ?? '03:00')} onChange={event => update(['optimization', 'schedule', 'window_start'], event.target.value)} />
+                      </ConfigField>
+                      <ConfigField label={`Window end (${scheduleTimezone})`}>
+                        <input className={inputClass} type="time" value={String(read(['optimization', 'schedule', 'window_end']) ?? model.optimization?.schedule_window_end ?? '04:00')} onChange={event => update(['optimization', 'schedule', 'window_end'], event.target.value)} />
+                      </ConfigField>
+                    </div>
+                    <p className="mt-2 text-xs text-text-muted">
+                      {scheduleStatus?.enabled && scheduleStatus.nextRunUnixMs
+                        ? `Next scheduled window: ${new Date(scheduleStatus.nextRunUnixMs).toLocaleString()}.`
+                        : 'Scheduling is disabled. The default maintenance window is 03:00-04:00 server local time.'}
+                      {' '}Last scheduled outcome: {scheduleStatus?.lastOutcome ?? 'never'}{scheduleStatus?.lastMessage ? ` — ${scheduleStatus.lastMessage}` : ''}.
+                    </p>
                     {(status?.queue.running ?? 0) > 0 || (status?.queue.queued ?? 0) > 0 ? (
                       <p className="mt-2 text-xs text-warning-amber">
-                        Safety gate: the benchmark can only start when active and queued requests are zero.
+                        Safety gate: the benchmark waits for active and queued work using the same compute resource.
                       </p>
                     ) : null}
                     {benchmarkRunning && benchmark && (
@@ -631,9 +690,9 @@ const ModelConfigDialog: React.FC<{
                     {benchmark?.recommended && (
                       <div className="mt-3 border-t border-white/10 pt-3">
                         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                          <Stat label="Measured quality" value={`${Math.round(benchmark.recommended.qualityScore * 100)}%`} tone="good" />
+                          <Stat label="Performance vs current" value={`${performanceIndex.toFixed(1)}%`} sub="Current profile = 100%" tone={performanceTone} />
+                          <Stat label="Prompt processing" value={`${winnerTrial?.promptTokensPerSecond.toFixed(1) ?? '0.0'} t/s`} />
                           <Stat label="Single generation speed" value={`${winnerTrial?.averageTokensPerSecond.toFixed(1) ?? '0.0'} t/s`} />
-                          <Stat label="Parallel generation throughput" value={`${winnerTrial?.parallelTokensPerSecond.toFixed(1) ?? '0.0'} t/s`} />
                           <Stat label="Peak VRAM" value={formatMb(winnerTrial?.peakVramMb ?? benchmark.recommended.estimatedVramMb)} tone={benchmark.recommended.fits ? 'good' : 'critical'} />
                         </div>
                         <p className="mt-3 text-sm text-text-secondary">
@@ -642,27 +701,129 @@ const ModelConfigDialog: React.FC<{
                           {' '}{benchmark.recommended.cacheTypeK}/{benchmark.recommended.cacheTypeV} KV,
                           {' '}batch {benchmark.recommended.nBatch}/{benchmark.recommended.nUbatch}.
                         </p>
+                        <div className="mt-3 overflow-x-auto">
+                          <table className="w-full min-w-[760px] text-left text-xs">
+                            <thead>
+                              <tr className="border-b border-white/10 uppercase tracking-wide text-text-muted">
+                                <th className="py-2 pr-3 font-medium">Measured outcome</th>
+                                <th className="pr-3 font-medium">Current profile</th>
+                                <th className="pr-3 font-medium">Recommendation</th>
+                                <th className="font-medium">Change</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/5 text-text-secondary">
+                              <tr>
+                                <td className="py-2 pr-3 font-medium text-text-primary">Performance index</td>
+                                <td className="pr-3">100.0%</td>
+                                <td className="pr-3">{winnerTrial ? `${winnerTrial.performanceIndex.toFixed(1)}%` : 'n/a'}</td>
+                                <td className={changeTone(100, winnerTrial?.performanceIndex)}>{winnerTrial ? `${winnerTrial.performanceIndex - 100 >= 0 ? '+' : ''}${(winnerTrial.performanceIndex - 100).toFixed(1)}%` : 'n/a'}</td>
+                              </tr>
+                              <tr>
+                                <td className="py-2 pr-3">Prompt processing</td>
+                                <td className="pr-3">{baselineTrial ? `${baselineTrial.promptTokensPerSecond.toFixed(1)} t/s` : 'n/a'}</td>
+                                <td className="pr-3">{winnerTrial ? `${winnerTrial.promptTokensPerSecond.toFixed(1)} t/s` : 'n/a'}</td>
+                                <td className={changeTone(baselineTrial?.promptTokensPerSecond, winnerTrial?.promptTokensPerSecond)}>{relativeChange(baselineTrial?.promptTokensPerSecond, winnerTrial?.promptTokensPerSecond)}</td>
+                              </tr>
+                              <tr>
+                                <td className="py-2 pr-3">Single generation speed</td>
+                                <td className="pr-3">{baselineTrial ? `${baselineTrial.averageTokensPerSecond.toFixed(1)} t/s` : 'n/a'}</td>
+                                <td className="pr-3">{winnerTrial ? `${winnerTrial.averageTokensPerSecond.toFixed(1)} t/s` : 'n/a'}</td>
+                                <td className={changeTone(baselineTrial?.averageTokensPerSecond, winnerTrial?.averageTokensPerSecond)}>{relativeChange(baselineTrial?.averageTokensPerSecond, winnerTrial?.averageTokensPerSecond)}</td>
+                              </tr>
+                              <tr>
+                                <td className="py-2 pr-3">Parallel throughput</td>
+                                <td className="pr-3">{baselineTrial ? `${baselineTrial.parallelTokensPerSecond.toFixed(1)} t/s` : 'n/a'}</td>
+                                <td className="pr-3">{winnerTrial ? `${winnerTrial.parallelTokensPerSecond.toFixed(1)} t/s` : 'n/a'}</td>
+                                <td className={changeTone(baselineTrial?.parallelTokensPerSecond, winnerTrial?.parallelTokensPerSecond)}>{relativeChange(baselineTrial?.parallelTokensPerSecond, winnerTrial?.parallelTokensPerSecond)}</td>
+                              </tr>
+                              {[2, 4].map(requests => {
+                                const before = baselineTrial?.concurrency.find(value => value.requests === requests);
+                                const after = winnerTrial?.concurrency.find(value => value.requests === requests);
+                                if (!before && !after) return null;
+                                return (
+                                  <React.Fragment key={requests}>
+                                    <tr>
+                                      <td className="py-2 pr-3">{requests}-request aggregate TPS</td>
+                                      <td className="pr-3">{before ? `${before.aggregateTokensPerSecond.toFixed(1)} t/s` : 'n/a'}</td>
+                                      <td className="pr-3">{after ? `${after.aggregateTokensPerSecond.toFixed(1)} t/s` : 'n/a'}</td>
+                                      <td className={changeTone(before?.aggregateTokensPerSecond, after?.aggregateTokensPerSecond)}>{relativeChange(before?.aggregateTokensPerSecond, after?.aggregateTokensPerSecond)}</td>
+                                    </tr>
+                                    <tr>
+                                      <td className="py-2 pr-3">{requests}-request per-request TPS</td>
+                                      <td className="pr-3">{before ? `${before.averageRequestTokensPerSecond.toFixed(1)} t/s` : 'n/a'}</td>
+                                      <td className="pr-3">{after ? `${after.averageRequestTokensPerSecond.toFixed(1)} t/s` : 'n/a'}</td>
+                                      <td className={changeTone(before?.averageRequestTokensPerSecond, after?.averageRequestTokensPerSecond)}>{relativeChange(before?.averageRequestTokensPerSecond, after?.averageRequestTokensPerSecond)}</td>
+                                    </tr>
+                                    <tr>
+                                      <td className="py-2 pr-3">{requests}-request MTP proof</td>
+                                      <td className="pr-3">{before ? `${before.mtpRequests}/${requests} drafted` : 'n/a'}</td>
+                                      <td className="pr-3">{after ? `${after.mtpRequests}/${requests} drafted` : 'n/a'}</td>
+                                      <td className={after?.mtpRequests === requests ? 'text-success-green' : 'text-danger-rose'}>
+                                        {after && after.mtpDraftedTokens > 0
+                                          ? `${(after.mtpAcceptedTokens / after.mtpDraftedTokens * 100).toFixed(1)}% accepted`
+                                          : 'MTP inactive'}
+                                      </td>
+                                    </tr>
+                                  </React.Fragment>
+                                );
+                              })}
+                              <tr>
+                                <td className="py-2 pr-3">Average first token</td>
+                                <td className="pr-3">{baselineTrial ? formatDuration(baselineTrial.averageTimeToFirstTokenMs) : 'n/a'}</td>
+                                <td className="pr-3">{winnerTrial ? formatDuration(winnerTrial.averageTimeToFirstTokenMs) : 'n/a'}</td>
+                                <td className={changeTone(baselineTrial?.averageTimeToFirstTokenMs, winnerTrial?.averageTimeToFirstTokenMs, true)}>{relativeChange(baselineTrial?.averageTimeToFirstTokenMs, winnerTrial?.averageTimeToFirstTokenMs)}</td>
+                              </tr>
+                              <tr>
+                                <td className="py-2 pr-3">Peak VRAM</td>
+                                <td className="pr-3">{baselineTrial ? formatMb(baselineTrial.peakVramMb) : 'n/a'}</td>
+                                <td className="pr-3">{winnerTrial ? formatMb(winnerTrial.peakVramMb) : 'n/a'}</td>
+                                <td className={changeTone(baselineTrial?.peakVramMb, winnerTrial?.peakVramMb, true)}>{relativeChange(baselineTrial?.peakVramMb, winnerTrial?.peakVramMb)}</td>
+                              </tr>
+                              <tr>
+                                <td className="py-2 pr-3">Correctness guard</td>
+                                <td className="pr-3">{baselineTrial ? `${baselineTrial.qualityPasses}/${baselineTrial.qualityTotal} probes` : 'n/a'}</td>
+                                <td className="pr-3">{winnerTrial ? `${winnerTrial.qualityPasses}/${winnerTrial.qualityTotal} probes` : 'n/a'}</td>
+                                <td className={correctnessChange === 'Regressed' ? 'text-danger-rose' : correctnessChange === 'Preserved' ? 'text-success-green' : 'text-text-secondary'}>{correctnessChange}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                        <p className="mt-2 text-xs text-text-muted">
+                          Performance is indexed to the current profile at 100%, weighting prompt-processing throughput and generation TPS equally. Positive changes are green; regressions are red. Fixed prompts are used only to reject a candidate that loses correctness.
+                        </p>
+                        <div className="mt-3 grid gap-2 text-xs text-text-secondary sm:grid-cols-2">
+                          <div className="border-t border-white/10 pt-2">
+                            <span className="block font-medium text-text-primary">Current active values</span>
+                            <span>{formatTokenCount(Number(read(['context_size']) ?? model.context_size))} context · {Number(read(['n_slots']) ?? model.n_slots)} slot(s) · {String(read(['cache_type_k']) ?? readRoot(['gateway', 'cache_type_k']) ?? 'q8_0')}/{String(read(['cache_type_v']) ?? readRoot(['gateway', 'cache_type_v']) ?? 'q8_0')} KV</span>
+                          </div>
+                          <div className="border-t border-white/10 pt-2">
+                            <span className="block font-medium text-text-primary">Measured recommendation</span>
+                            <span>{formatTokenCount(benchmark.recommended.contextPerSlot)} context · {benchmark.recommended.slots} slot(s) · {benchmark.recommended.cacheTypeK}/{benchmark.recommended.cacheTypeV} KV</span>
+                          </div>
+                        </div>
                         <p className="mt-1 text-xs text-text-muted">
-                          Quality carries {Math.round(benchmark.weights.quality * 100)}% of the measured score.
+                          Prompt processing and generation each carry {Math.round(benchmark.weights.promptProcessing * 100)}% of the performance index.
                           {' '}Winner load time: {winnerTrial ? formatDuration(winnerTrial.loadMs) : 'n/a'}.
                           {' '}Average first token: {winnerTrial ? formatDuration(winnerTrial.averageTimeToFirstTokenMs) : 'n/a'}.
                           {' '}Previous residency restored: {benchmark.restored ? 'yes' : 'no'}.
                         </p>
                         <div className="mt-3 grid gap-2">
                           {benchmark.candidates.map((candidate, candidateIndex) => (
-                            <div key={`${candidate.contextPerSlot}-${candidate.slots}-${candidate.cacheTypeK}-${candidateIndex}`} className="grid gap-1 border border-white/10 px-3 py-2 text-xs text-text-secondary sm:grid-cols-5">
+                            <div key={`${candidate.contextPerSlot}-${candidate.slots}-${candidate.cacheTypeK}-${candidate.mtpMaxActiveRequests}-${candidateIndex}`} className="grid gap-1 border border-white/10 px-3 py-2 text-xs text-text-secondary sm:grid-cols-6">
                               <span>{formatTokenCount(candidate.contextPerSlot)} × {candidate.slots} slots</span>
                               <span>{candidate.cacheTypeK}/{candidate.cacheTypeV} KV</span>
+                              <span>MTP up to {candidate.mtpMaxActiveRequests} request(s)</span>
                               <span>{candidate.averageTokensPerSecond.toFixed(1)} generation t/s</span>
                               <span>{candidate.parallelTokensPerSecond.toFixed(1)} parallel generation t/s</span>
-                              <span>{Math.round(candidate.qualityScore * 100)}% quality</span>
+                              <span className={changeTone(100, candidate.performanceIndex)}>{candidate.performanceIndex.toFixed(1)}% vs current · {candidate.qualityPasses}/{candidate.qualityTotal} correctness probes</span>
                             </div>
                           ))}
                         </div>
                         <div className="mt-3 flex flex-wrap items-center gap-2">
-                          <Button onClick={applyOptimization}>Re-stage recommendation</Button>
-                          <Badge label={`${benchmark.candidates.length} profiles measured`} tone="info" />
-                          {dirty && <Badge label="Optimized values staged" tone="good" />}
+                          <Button tone="green" onClick={applyOptimization}>Use these values</Button>
+                          <Button onClick={discardOptimization}>Discard results</Button>
+                          <Button onClick={() => { void analyzeProfile(); }}>Rerun</Button>
+                          {dirty && <Badge label="Values staged" tone="good" />}
                         </div>
                       </div>
                     )}

@@ -9,6 +9,9 @@ export interface ModelOptimizationInfo {
   quality_total?: number;
   single_tokens_per_second?: number;
   parallel_tokens_per_second?: number;
+  schedule_enabled?: boolean;
+  schedule_window_start?: string;
+  schedule_window_end?: string;
 }
 
 export interface ModelInfo {
@@ -27,6 +30,12 @@ export interface ModelInfo {
   free_slots?: number;
   active_requests?: number;
   optimization?: ModelOptimizationInfo;
+  prompt_price_per_million?: number;
+  completion_price_per_million?: number;
+  alias?: boolean;
+  alias_target?: string;
+  required_context_size?: number;
+  required_capabilities?: string[];
 }
 
 export interface GpuSample {
@@ -71,6 +80,7 @@ export interface RequestEvent {
   durationMs: number;
   generationDurationMs?: number;
   tokensPerSecond: number;
+  promptTokensPerSecond?: number;
   status: number;
   inputAudioSeconds?: number;
   inputCharacters?: number;
@@ -89,10 +99,13 @@ export interface UsageRow {
   requests: number;
   successfulRequests: number;
   promptTokens: number;
+  cachedPromptTokens?: number;
   completionTokens: number;
   totalTokens: number;
   peakTokensPerSecond: number;
   avgTokensPerSecond: number;
+  peakPromptTokensPerSecond?: number;
+  avgPromptTokensPerSecond?: number;
   lastTimestampUnixMs: number;
   inputAudioSeconds?: number;
   inputCharacters?: number;
@@ -102,10 +115,15 @@ export interface MonthlyUsageRow {
   bucket: string;
   model: string;
   promptTokens: number;
+  cachedPromptTokens?: number;
   completionTokens: number;
   totalTokens: number;
   requests: number;
   successfulRequests: number;
+  generationDurationMs?: number;
+  promptDurationMs?: number;
+  peakTokensPerSecond?: number;
+  peakPromptTokensPerSecond?: number;
   inputAudioSeconds?: number;
   inputCharacters?: number;
 }
@@ -160,12 +178,16 @@ export interface JobRecord {
   type: string;
   status: 'succeeded' | 'failed';
   model: string;
+  resolvedModel?: string;
   createdAt: string;
   timestampUnixMs: number;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
   tokensPerSecond: number;
+  promptTokensPerSecond?: number;
+  generationDurationMs?: number;
+  promptDurationMs?: number;
   durationMs: number;
   httpStatus: number;
   slotId: number;
@@ -191,6 +213,16 @@ export interface PricingEntry {
   billing_unit?: 'tokens' | 'audio_minute' | 'million_characters';
   price_per_unit?: number;
   source_url?: string;
+  source?: 'model_settings' | string;
+}
+
+export interface HealthPayload {
+  ok: boolean;
+  db_healthy: boolean;
+  db_path?: string;
+  gpu_available?: boolean;
+  gpu_provider?: string;
+  requests?: number;
 }
 
 export interface ActivityItem {

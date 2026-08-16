@@ -21,9 +21,10 @@ state:
 
 model_store:
   root: "models/store"
+  archive_root: "models/archive"
   hf_token: ""
 
-default_model: "gemma-4-31b"
+default_model: "qwen3.8-27b"
 
 observability:
   # Keep lifetime usage independent of the Windows service account and cwd.
@@ -79,6 +80,8 @@ anthropic:
     claude-sonnet-4-5: "qwen3.6-35b-a3b"
     claude-haiku-4-5: "gpt-oss-20b"
     claude-haiku-4-5-20251001: "gpt-oss-20b"
+
+model_aliases: []
 
 model_registry:
   - name: "supertonic-3"
@@ -183,6 +186,10 @@ model_registry:
       quality_total: 3
       single_tokens_per_second: 50.16
       parallel_tokens_per_second: 51.24
+      schedule:
+        enabled: false
+        window_start: "03:00"
+        window_end: "04:00"
     has_vision: false
     # Corrected Qwen3.6 chat template: avoids the "No user query found in messages."
     # crash during multi-step tool calling (e.g. OpenCode). See config/templates/.

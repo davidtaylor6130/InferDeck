@@ -5,13 +5,10 @@ import { Panel, SectionTitle, Stat, linePath, pickTickIndices } from '../compone
 import {
   ALL_MODELS,
   DEFAULT_COST_CONFIG,
-  MODEL_COST_DEFAULTS_VERSION,
   TOKEN_RANGE_LABELS,
   buildCostDefaults,
   buildTokenSeries,
   getCostConfigForModel,
-  loadCostConfig,
-  saveCostConfig,
   tokenUsageFromSeries,
 } from '../cost';
 import type { CostDefaults, ModelCostConfig, TokenRange, TokenSeries } from '../cost';
@@ -23,7 +20,7 @@ import {
   type DashboardSection,
 } from '../dashboardSections';
 import { useGateway } from '../gateway';
-import type { JobRecord } from '../types';
+import type { JobRecord, UsageRow } from '../types';
 import { clamp, compactModel, formatCurrency, formatTokenCount } from '../utils';
 import { DictationUsagePage } from './DictationUsagePage';
 
@@ -31,13 +28,16 @@ export const UsagePage: React.FC<{ section?: DashboardSection }> = ({ section = 
   section === 'dictation' ? <DictationUsagePage /> : <LlmUsagePage />
 );
 
+type UsageSortKey = 'model' | 'requests' | 'promptTokens' | 'completionTokens' | 'avgTokensPerSecond' | 'avgPromptTokensPerSecond' | 'peakTokensPerSecond' | 'cost';
+const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+
 const LlmUsagePage: React.FC = () => {
   const { status, models } = useGateway();
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [defaults, setDefaults] = useState<{ defaults: CostDefaults; fallback: ModelCostConfig }>({ defaults: {}, fallback: DEFAULT_COST_CONFIG });
-  const [saved, setSaved] = useState<Record<string, ModelCostConfig>>({});
   const [selectedModel, setSelectedModel] = useState(ALL_MODELS);
   const [range, setRange] = useState<TokenRange>('all');
+  const [sort, setSort] = useState<{ key: UsageSortKey; direction: 'asc' | 'desc' }>({ key: 'model', direction: 'asc' });
 
   useEffect(() => {
     let active = true;
@@ -46,10 +46,7 @@ const LlmUsagePage: React.FC = () => {
       if (!active) return;
       const built = buildCostDefaults(pricing);
       setDefaults(built);
-      setSaved(loadCostConfig(built.defaults, built.fallback));
-    }).catch(() => {
-      if (active) setSaved(loadCostConfig({}, DEFAULT_COST_CONFIG));
-    });
+    }).catch(() => {});
     return () => { active = false; };
   }, []);
 
@@ -87,21 +84,60 @@ const LlmUsagePage: React.FC = () => {
     if (!modelNames.includes(selectedModel)) setSelectedModel(ALL_MODELS);
   }, [modelNames, selectedModel]);
 
-  const selectedCost = getCostConfigForModel(selectedModel, saved, defaults.defaults, defaults.fallback);
+  const pricingByModel: Record<string, ModelCostConfig> = {};
+  const selectedCost = getCostConfigForModel(selectedModel, pricingByModel, defaults.defaults, defaults.fallback);
   const series = useMemo(
-    () => buildTokenSeries(llmJobs, selectedModel, selectedCost, monthly, saved, defaults.defaults, defaults.fallback, range, daily, hourly, Boolean(status?.dailyTokenUsageAllTime)),
-    [llmJobs, selectedModel, selectedCost, monthly, saved, defaults, range, daily, hourly, status?.dailyTokenUsageAllTime],
+    () => buildTokenSeries(llmJobs, selectedModel, selectedCost, monthly, pricingByModel, defaults.defaults, defaults.fallback, range, daily, hourly, Boolean(status?.dailyTokenUsageAllTime)),
+    [llmJobs, selectedModel, selectedCost, monthly, defaults, range, daily, hourly, status?.dailyTokenUsageAllTime],
   );
   const seriesUsage = useMemo(() => tokenUsageFromSeries(selectedModel, series), [selectedModel, series]);
   const rangeCost = series.cost.reduce((sum, value) => sum + value, 0);
 
-  const persistConfig = (model: string, next: ModelCostConfig) => {
-    const merged = {
-      ...saved,
-      [model]: { ...next, defaultsVersion: MODEL_COST_DEFAULTS_VERSION, userEdited: model !== ALL_MODELS },
-    };
-    setSaved(merged);
-    saveCostConfig(merged);
+  const periodUsage = useMemo(() => {
+    const rows = modelNames.filter(model => model !== ALL_MODELS).map((model, index) => {
+      const cost = getCostConfigForModel(model, pricingByModel, defaults.defaults, defaults.fallback);
+      const modelSeries = buildTokenSeries(
+        llmJobs, model, cost, monthly, pricingByModel, defaults.defaults,
+        defaults.fallback, range, daily, hourly, Boolean(status?.dailyTokenUsageAllTime),
+      );
+      const promptTokens = sum(modelSeries.prompt);
+      const cachedPromptTokens = sum(modelSeries.cachedPrompt);
+      const completionTokens = sum(modelSeries.output);
+      const requests = sum(modelSeries.requests);
+      const generationDurationMs = sum(modelSeries.generationDurationMs);
+      const promptDurationMs = sum(modelSeries.promptDurationMs);
+      return {
+        index,
+        model,
+        requests,
+        successfulRequests: sum(modelSeries.successfulRequests),
+        promptTokens,
+        cachedPromptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+        avgTokensPerSecond: generationDurationMs > 0 ? completionTokens / (generationDurationMs / 1000) : 0,
+        peakTokensPerSecond: Math.max(0, ...modelSeries.peakTokensPerSecond),
+        avgPromptTokensPerSecond: promptDurationMs > 0 ? Math.max(0, promptTokens - cachedPromptTokens) / (promptDurationMs / 1000) : 0,
+        peakPromptTokensPerSecond: Math.max(0, ...modelSeries.peakPromptTokensPerSecond),
+        lastTimestampUnixMs: usage.find(row => row.model === model)?.lastTimestampUnixMs ?? 0,
+        cost: modelSeries.cost.reduce((total, value) => total + value, 0),
+      } satisfies UsageRow & { index: number; cost: number };
+    }).filter(row => row.requests > 0 || row.totalTokens > 0);
+    const direction = sort.direction === 'asc' ? 1 : -1;
+    return rows.sort((left, right) => {
+      const a = left[sort.key];
+      const b = right[sort.key];
+      const compared = typeof a === 'string'
+        ? a.localeCompare(String(b))
+        : Number(a ?? Number.NEGATIVE_INFINITY) - Number(b ?? Number.NEGATIVE_INFINITY);
+      return compared === 0 ? left.index - right.index : compared * direction;
+    });
+  }, [modelNames, defaults, llmJobs, monthly, range, daily, hourly, status?.dailyTokenUsageAllTime, usage, sort]);
+
+  const toggleSort = (key: UsageSortKey) => {
+    setSort(current => current.key === key
+      ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+      : { key, direction: key === 'model' ? 'asc' : 'desc' });
   };
 
   return (
@@ -131,62 +167,32 @@ const LlmUsagePage: React.FC = () => {
           ? <TokenUsageGraph series={series} />
           : <p className="border-y border-dashed border-border-slate py-8 text-center text-sm text-text-muted">No usage recorded for this range.</p>}
 
-        <details className="mt-4 border-t border-border-slate pt-3">
-          <summary className="cursor-pointer text-sm font-medium text-text-secondary hover:text-text-primary">Cost assumptions</summary>
-          <div className="mt-3 grid gap-3 lg:grid-cols-2">
-          <label className={`min-w-0 text-xs text-text-secondary ${selectedModel === ALL_MODELS ? 'opacity-50' : ''}`}>
-            <span className="mb-1 block text-text-muted">Prompt $/1M</span>
-            <input
-              className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
-              type="number" min="0" step="0.01"
-              value={selectedCost.promptPerMillion}
-              disabled={selectedModel === ALL_MODELS}
-              onChange={event => persistConfig(selectedModel, { ...selectedCost, promptPerMillion: Number(event.target.value) || 0 })}
-            />
-          </label>
-          <label className={`min-w-0 text-xs text-text-secondary ${selectedModel === ALL_MODELS ? 'opacity-50' : ''}`}>
-            <span className="mb-1 block text-text-muted">Output $/1M</span>
-            <input
-              className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
-              type="number" min="0" step="0.01"
-              value={selectedCost.outputPerMillion}
-              disabled={selectedModel === ALL_MODELS}
-              onChange={event => persistConfig(selectedModel, { ...selectedCost, outputPerMillion: Number(event.target.value) || 0 })}
-            />
-          </label>
-          <p className="text-xs text-text-muted lg:col-span-2">
-            {selectedModel === ALL_MODELS
-              ? 'Estimated API cost applies saved per-model comparison prices to persisted local token usage for the selected range. It is an estimate, not a measured charge.'
-              : `The headline, graph, and price fields are for ${compactModel(selectedModel)} in the selected range.`}
-            {selectedModel !== ALL_MODELS && selectedCost.source ? ` Default source: ${selectedCost.source}.` : ''}
-          </p>
-          </div>
-        </details>
+        <p className="mt-4 border-t border-border-slate pt-3 text-xs text-text-muted">
+          Cost uses the server-side prices configured for each model in Model Settings. Models without prices contribute no estimated cost.
+        </p>
       </Panel>
 
       <Panel>
-        <SectionTitle title="Per-model usage" aside="lifetime" />
-        {usage.length === 0 ? (
-          <p className="mt-3 text-sm text-text-muted">No persisted usage yet.</p>
+        <SectionTitle title="Per-model usage" aside={TOKEN_RANGE_LABELS[range]} />
+        {periodUsage.length === 0 ? (
+          <p className="mt-3 text-sm text-text-muted">No usage recorded for this range.</p>
         ) : (
           <div className="mt-3 overflow-x-auto">
-            <table className="w-full min-w-[720px] text-left text-sm">
+            <table className="w-full min-w-[880px] text-left text-sm">
               <thead>
                 <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
-                  <th className="py-2 pr-4 font-medium">Model</th>
-                  <th className="py-2 pr-4 font-medium">Requests</th>
-                  <th className="py-2 pr-4 font-medium">Prompt</th>
-                  <th className="py-2 pr-4 font-medium">Output</th>
-                  <th className="py-2 pr-4 font-medium">Avg t/s</th>
-                  <th className="py-2 pr-4 font-medium">Peak t/s</th>
-                  <th className="py-2 font-medium">Est. API cost</th>
+                  <SortableHeader label="Model" sortKey="model" active={sort} onSort={toggleSort} />
+                  <SortableHeader label="Requests" sortKey="requests" active={sort} onSort={toggleSort} />
+                  <SortableHeader label="Prompt" sortKey="promptTokens" active={sort} onSort={toggleSort} />
+                  <SortableHeader label="Output" sortKey="completionTokens" active={sort} onSort={toggleSort} />
+                  <SortableHeader label="TPS" sortKey="avgTokensPerSecond" active={sort} onSort={toggleSort} />
+                  <SortableHeader label="Prompt TPS" sortKey="avgPromptTokensPerSecond" active={sort} onSort={toggleSort} />
+                  <SortableHeader label="Peak TPS" sortKey="peakTokensPerSecond" active={sort} onSort={toggleSort} />
+                  <SortableHeader label="Cost" sortKey="cost" active={sort} onSort={toggleSort} last />
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {usage.map(row => {
-                  const cost = getCostConfigForModel(row.model, saved, defaults.defaults, defaults.fallback);
-                  const avoided = (row.promptTokens / 1_000_000) * cost.promptPerMillion
-                    + (row.completionTokens / 1_000_000) * cost.outputPerMillion;
+                {periodUsage.map(row => {
                   return (
                     <tr key={row.model}>
                       <td className="py-2 pr-4 font-mono text-text-primary">{compactModel(row.model)}</td>
@@ -194,8 +200,9 @@ const LlmUsagePage: React.FC = () => {
                       <td className="py-2 pr-4 text-text-secondary">{formatTokenCount(row.promptTokens)}</td>
                       <td className="py-2 pr-4 text-text-secondary">{formatTokenCount(row.completionTokens)}</td>
                       <td className="py-2 pr-4 text-text-secondary">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : '—'}</td>
+                      <td className="py-2 pr-4 text-text-secondary">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : '—'}</td>
                       <td className="py-2 pr-4 text-text-secondary">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : '—'}</td>
-                      <td className="py-2 text-success-green">{formatCurrency(avoided)}</td>
+                      <td className="py-2 text-success-green">{formatCurrency(row.cost)}</td>
                     </tr>
                   );
                 })}
@@ -325,3 +332,25 @@ const Legend: React.FC<{ color: string; label: string; dashed?: boolean }> = ({ 
     {label}
   </span>
 );
+
+const SortableHeader: React.FC<{
+  label: string;
+  sortKey: UsageSortKey;
+  active: { key: UsageSortKey; direction: 'asc' | 'desc' };
+  onSort: (key: UsageSortKey) => void;
+  last?: boolean;
+}> = ({ label, sortKey, active, onSort, last }) => {
+  const selected = active.key === sortKey;
+  const ariaSort = selected ? (active.direction === 'asc' ? 'ascending' : 'descending') : 'none';
+  return (
+    <th className={`py-2 font-medium ${last ? '' : 'pr-4'}`} aria-sort={ariaSort}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className="rounded text-left hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
+      >
+        {label}{selected ? (active.direction === 'asc' ? ' ↑' : ' ↓') : ''}
+      </button>
+    </th>
+  );
+};

@@ -111,8 +111,9 @@ and the same dashboard. See the [roadmap](#roadmap).
 ### Live dashboard
 
 React 19 + Vite + Tailwind, driven by one SSE connection with a bounded
-30-second status fallback. The task views cover operation, model residency,
-model discovery and downloads, usage assumptions, and diagnostics. Voice
+30-second status fallback. The task views separate Model Settings from model
+catalogue, installed-artifact management, server-owned usage pricing, and
+diagnostics. Voice
 capture and playback belong to API clients such as Open WebUI, not the
 administration dashboard.
 
@@ -120,7 +121,7 @@ administration dashboard.
 
 - Every request and swap is recorded three ways: in-memory metrics, SQLite
   history (`stats.db`), and SSE events. p50/p95 latency, daily/hourly usage
-  buckets, lifetime counters.
+  buckets, generation TPS, prompt TPS, measured peak TPS, and lifetime counters.
 - Catch2 unit/integration suites and a streaming tool-call harness cover API
   shape and runtime behaviour. Real-model parity remains a manually provisioned
   hardware test.

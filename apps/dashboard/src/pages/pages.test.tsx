@@ -105,20 +105,21 @@ describe('pages', () => {
     expect(html).toContain('API-equivalent value');
   });
 
-  it('LLM and dictation operate pages stay administration-only', () => {
+  it('LLM and dictation Model Settings pages stay administration-only', () => {
     const llm = renderWith(<OperatePage section="llm" />);
     const dictation = renderWith(<OperatePage section="dictation" />);
-    expect(llm).toContain('LLM operation');
+    expect(llm).toContain('LLM Model Settings');
     expect(llm).toContain('qwen3.6-35b-a3b');
-    expect(dictation).toContain('Dictation operation');
+    expect(dictation).toContain('Dictation Model Settings');
     expect(dictation).toContain('parakeet-tdt-0.6b-v3');
     expect(dictation).toContain('Recording and playback stay in clients');
     expect(dictation).not.toContain('microphone');
-    expect(llm).toContain('Model details');
+    expect(llm).toContain('Model settings for qwen3.6-35b-a3b');
     expect(llm).toContain('Auto-optimize');
     expect(llm).not.toContain('Auto-optimize with benchmark');
     expect(llm).toContain('text-success-green');
     expect(llm).toContain('Measured optimized');
+    expect(llm).toContain('Stable API aliases');
     expect(llm).toContain('Saving applies the active profile automatically');
     expect(llm).not.toContain('next restart');
   });
@@ -132,6 +133,7 @@ describe('pages', () => {
       cacheTypeK: 'q4_0',
       cacheTypeV: 'q8_0',
       flashAttention: 'auto',
+      mtpMaxActiveRequests: 4,
       estimatedVramMb: 24_000,
       reserveVramMb: 8_000,
       qualityScore: 0.98,
@@ -158,23 +160,25 @@ describe('pages', () => {
       n_ubatch: 1024,
       cache_type_k: 'q4_0',
       cache_type_v: 'q8_0',
+      speculative: { max_active_requests: 4 },
     });
     expect(updated.gateway).toMatchObject({
       flash_attn: 'auto',
     });
   });
 
-  it('Models pages are section-specific catalogues rather than runtime controls', () => {
+  it('Model Store pages are section-specific catalogues rather than runtime controls', () => {
     const llm = renderWith(<ModelsPage section="llm" />);
     const dictation = renderWith(<ModelsPage section="dictation" />);
-    expect(llm).toContain('LLM model catalogue');
+    expect(llm).toContain('LLM Model Store');
     expect(llm).toContain('Recommended 20–40B');
     expect(llm).toContain('Recommended only');
     expect(llm).toContain('Models on this server');
-    expect(dictation).toContain('Dictation model catalogue');
+    expect(dictation).toContain('Dictation Model Store');
     expect(dictation).toContain('Speech to text');
     expect(dictation).toContain('Text to speech');
     expect(dictation).toContain('complete runtime bundles');
+    expect(llm).not.toContain('Stable API aliases');
     expect(llm).not.toContain('Load history');
     expect(dictation).not.toContain('Load history');
   });
@@ -184,7 +188,9 @@ describe('pages', () => {
     const dictation = renderWith(<UsagePage section="dictation" />);
     expect(llm).toContain('LLM usage');
     expect(llm).toContain('Estimated API cost');
-    expect(llm).toContain('Prompt $/1M');
+    expect(llm).toContain('server-side prices configured for each model in Model Settings');
+    expect(llm).toContain('Prompt TPS');
+    expect(llm).toContain('Peak TPS');
     expect(llm).toContain('Usage time range');
     expect(llm).not.toContain('ROI remaining');
     expect(llm).not.toContain('Portfolio break-even $');

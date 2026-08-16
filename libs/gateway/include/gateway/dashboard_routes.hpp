@@ -5,6 +5,7 @@
 #include "gateway/routes.hpp"
 #include "gateway/model_store.hpp"
 #include "gateway/profile_benchmark.hpp"
+#include "gateway/profile_benchmark_scheduler.hpp"
 #include "observability/gpu_telemetry.hpp"
 
 #include <cstdint>
@@ -30,6 +31,7 @@ struct DashboardDeps {
     ModelStore* model_store{nullptr};
     std::function<std::int64_t()> uptime_seconds;
     ProfileBenchmarkManager* profile_benchmark{nullptr};
+    ProfileBenchmarkScheduler* profile_benchmark_scheduler{nullptr};
 };
 
 void register_dashboard_routes(httplib::Server& server, const DashboardDeps& deps,

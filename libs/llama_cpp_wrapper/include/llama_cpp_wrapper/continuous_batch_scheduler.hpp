@@ -137,6 +137,7 @@ struct SlotTask {
     int n_drafted{0};
     int n_draft_accepted{0};
     bool mtp_eligible{false};
+    std::chrono::steady_clock::time_point started_at{};
     bool generation_started{false};
     std::chrono::steady_clock::time_point generation_started_at{};
 
@@ -147,6 +148,7 @@ struct SlotTask {
     std::shared_ptr<const std::vector<uint8_t>> out_recurrent_mtp_checkpoint;
     int out_checkpoint_pos{0};
     bool out_mtp_cache_synced{true};
+    float out_prompt_duration_ms{0.0f};
     float out_generation_duration_ms{0.0f};
 
     // ---- Async token channel ----

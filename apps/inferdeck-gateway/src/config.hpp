@@ -1,5 +1,6 @@
 #include <yaml-cpp/yaml.h>
 
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <cmath>
@@ -49,7 +50,9 @@ struct GatewayConfig {
     int voice_session_grace_ms{15000};
     model::SamplingConfig sampling{};  // global sampler defaults (issue #42)
     std::map<std::string, std::string> anthropic_model_aliases{};
+    std::vector<model::ModelAlias> model_aliases{};
     std::string model_store_root{"models/store"};
+    std::string model_store_archive_root{"models/archive"};
     std::string model_store_hf_token{};
 };
 
@@ -206,6 +209,11 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
             return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                          "model_store.root cannot be empty");
         }
+        if (root["model_store"] && root["model_store"]["archive_root"] &&
+            root["model_store"]["archive_root"].as<std::string>().empty()) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "model_store.archive_root cannot be empty");
+        }
         std::unordered_set<std::string> names;
         if (root["model_registry"]) {
             if (!root["model_registry"].IsSequence()) {
@@ -221,6 +229,15 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 if (!names.insert(name).second) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "duplicate model name: " + name);
+                }
+                for (const char* key : {"prompt_price_per_million", "completion_price_per_million"}) {
+                    if (!entry[key]) continue;
+                    const double value = entry[key].as<double>();
+                    if (!std::isfinite(value) || value < 0.0) {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                     "model " + std::string(key) +
+                                                     " must be a non-negative number: " + name);
+                    }
                 }
                 const std::string runtime = entry["runtime"]
                     ? entry["runtime"].as<std::string>() : "llama_cpp";
@@ -359,6 +376,99 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 auto sampling = validate_sampling_node(
                     entry["sampling"], "model_registry." + name + ".sampling");
                 if (!sampling) return sampling;
+                if (entry["optimization"] && entry["optimization"]["schedule"]) {
+                    const auto schedule = entry["optimization"]["schedule"];
+                    const auto valid_time = [](const std::string& value) {
+                        if (value.size() != 5 || value[2] != ':') return false;
+                        const int hour = std::stoi(value.substr(0, 2));
+                        const int minute = std::stoi(value.substr(3, 2));
+                        return hour >= 0 && hour < 24 && minute >= 0 && minute < 60;
+                    };
+                    const auto start = schedule["window_start"]
+                        ? schedule["window_start"].as<std::string>() : "03:00";
+                    const auto end = schedule["window_end"]
+                        ? schedule["window_end"].as<std::string>() : "04:00";
+                    if (!valid_time(start) || !valid_time(end) || start >= end) {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                     "invalid optimization schedule window for: " + name);
+                    }
+                }
+            }
+        }
+        if (root["model_aliases"]) {
+            if (!root["model_aliases"].IsSequence()) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "model_aliases must be a sequence");
+            }
+            std::unordered_set<std::string> aliases;
+            for (const auto& alias : root["model_aliases"]) {
+                const auto name = alias["name"] ? alias["name"].as<std::string>() : "";
+                const auto target = alias["target"] ? alias["target"].as<std::string>() : "";
+                if (name.empty() || target.empty()) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "every model alias requires a name and target");
+                }
+                if (name.size() > 128 ||
+                    !std::all_of(name.begin(), name.end(), [](unsigned char character) {
+                        return std::isalnum(character) || character == '-' ||
+                               character == '_' || character == '.';
+                    })) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "invalid model alias name: " + name);
+                }
+                if (names.contains(name) || !aliases.insert(name).second) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "duplicate or conflicting model alias: " + name);
+                }
+                if (!names.contains(target)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "model alias target must be concrete: " + name);
+                }
+                const int required_context = alias["required_context_size"]
+                    ? alias["required_context_size"].as<int>() : 0;
+                if (required_context < 0 ||
+                    (alias["required_capabilities"] &&
+                     !alias["required_capabilities"].IsSequence())) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "invalid model alias contract: " + name);
+                }
+                YAML::Node target_entry;
+                for (std::size_t index = 0; index < root["model_registry"].size(); ++index) {
+                    const auto model_entry = root["model_registry"][index];
+                    if (model_entry["name"].as<std::string>() == target) {
+                        target_entry = model_entry;
+                        break;
+                    }
+                }
+                const int target_context = target_entry["context_size"]
+                    ? target_entry["context_size"].as<int>() : 65536;
+                if (required_context > target_context) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "model alias context contract is incompatible: " + name);
+                }
+                std::unordered_set<std::string> target_capabilities;
+                if (target_entry["capabilities"] && target_entry["capabilities"].IsSequence()) {
+                    for (const auto& capability : target_entry["capabilities"]) {
+                        target_capabilities.insert(capability.as<std::string>());
+                    }
+                } else {
+                    const auto modality = target_entry["modality"]
+                        ? target_entry["modality"].as<std::string>() : "text";
+                    if (modality == "embedding") target_capabilities.insert("embeddings");
+                    else if (modality == "image") target_capabilities.insert("image_generation");
+                    else if (modality == "audio_speech") target_capabilities.insert("audio_speech");
+                    else if (modality == "audio_transcription") target_capabilities.insert("audio_transcription");
+                    else target_capabilities = {"chat_completions", "responses"};
+                }
+                if (alias["required_capabilities"]) {
+                    for (const auto& capability : alias["required_capabilities"]) {
+                        const auto value = capability.as<std::string>();
+                        if (value.empty() || !target_capabilities.contains(value)) {
+                            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                         "model alias capability contract is incompatible: " + name);
+                        }
+                    }
+                }
             }
         }
         if (root["default_model"] && !root["default_model"].as<std::string>().empty() &&
@@ -417,6 +527,7 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
     if (root["model_store"]) {
         const auto& store = root["model_store"];
         if (store["root"]) cfg.model_store_root = store["root"].as<std::string>();
+        if (store["archive_root"]) cfg.model_store_archive_root = store["archive_root"].as<std::string>();
         if (store["hf_token"]) cfg.model_store_hf_token = store["hf_token"].as<std::string>();
     }
     if (root["default_model"]) {
@@ -517,6 +628,12 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
             info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";
             info.chat_template_path = m["chat_template_path"] ? m["chat_template_path"].as<std::string>() : "";
+            if (m["prompt_price_per_million"]) {
+                info.prompt_price_per_million = m["prompt_price_per_million"].as<double>();
+            }
+            if (m["completion_price_per_million"]) {
+                info.completion_price_per_million = m["completion_price_per_million"].as<double>();
+            }
             if (m["optimization"] && m["optimization"].IsMap()) {
                 const auto optimization = m["optimization"];
                 info.optimization.status = optimization["status"]
@@ -533,12 +650,36 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
                 info.optimization.parallel_tokens_per_second =
                     optimization["parallel_tokens_per_second"]
                         ? optimization["parallel_tokens_per_second"].as<double>() : 0.0;
+                if (optimization["schedule"] && optimization["schedule"].IsMap()) {
+                    const auto schedule = optimization["schedule"];
+                    info.optimization.schedule_enabled = schedule["enabled"]
+                        ? schedule["enabled"].as<bool>() : false;
+                    info.optimization.schedule_window_start = schedule["window_start"]
+                        ? schedule["window_start"].as<std::string>() : "03:00";
+                    info.optimization.schedule_window_end = schedule["window_end"]
+                        ? schedule["window_end"].as<std::string>() : "04:00";
+                }
             }
             // Per-model sampling overrides inherit the global block, then apply
             // any keys present in this entry (issue #42).
             info.sampling = cfg.sampling;
             if (m["sampling"]) parse_sampling(m["sampling"], info.sampling);
             cfg.models.push_back(std::move(info));
+        }
+    }
+    if (root["model_aliases"] && root["model_aliases"].IsSequence()) {
+        for (const auto& entry : root["model_aliases"]) {
+            model::ModelAlias alias;
+            alias.name = entry["name"].as<std::string>();
+            alias.target = entry["target"].as<std::string>();
+            alias.required_context_size = entry["required_context_size"]
+                ? entry["required_context_size"].as<int>() : 0;
+            if (entry["required_capabilities"] && entry["required_capabilities"].IsSequence()) {
+                for (const auto& capability : entry["required_capabilities"]) {
+                    alias.required_capabilities.push_back(capability.as<std::string>());
+                }
+            }
+            cfg.model_aliases.push_back(std::move(alias));
         }
     }
     return cfg;

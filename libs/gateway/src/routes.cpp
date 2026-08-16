@@ -48,7 +48,8 @@ void record_request(observability::Metrics* metrics,
                     int status_code,
                     int slot_id,
                     double input_audio_seconds,
-                    std::int64_t input_characters) {
+                    std::int64_t input_characters,
+                    const std::string& resolved_model_name) {
     observability::RequestRecord rec;
     rec.timestamp_unix_ms = now_ms();
     rec.model = model_name;
@@ -58,6 +59,12 @@ void record_request(observability::Metrics* metrics,
     rec.tokens_per_second = result.tokens_per_second;
     rec.status_code = status_code;
     rec.slot_id = slot_id;
+    const double prompt_duration_ms = result.prompt_duration_ms > 0.0f
+        ? result.prompt_duration_ms
+        : std::max(0.0, static_cast<double>(
+              result.duration_ms - result.generation_duration_ms));
+    const int evaluated_prompt_tokens =
+        std::max(0, result.prompt_tokens - result.cached_prompt_tokens);
     if (metrics) metrics->record_request(rec);
     LOG_INFO("request_recorded",
              "model={} status={} slot_id={} prompt_tokens={} cached_prompt_tokens={} completion_tokens={} duration_ms={} generation_duration_ms={} tps={}",
@@ -71,28 +78,40 @@ void record_request(observability::Metrics* metrics,
              result.generation_duration_ms,
              result.tokens_per_second);
     if (stats_db) {
-        stats_db->record_request({
-            rec.timestamp_unix_ms,
-            rec.model,
-            rec.prompt_tokens,
-            rec.completion_tokens,
-            rec.duration_ms,
-            rec.tokens_per_second,
-            rec.status_code,
-            rec.slot_id,
-            input_audio_seconds,
-            input_characters
-        });
+        observability::RequestRow row;
+        row.timestamp_unix_ms = rec.timestamp_unix_ms;
+        row.model = rec.model;
+        row.resolved_model = resolved_model_name.empty() ? rec.model : resolved_model_name;
+        row.prompt_tokens = rec.prompt_tokens;
+        row.cached_prompt_tokens = result.cached_prompt_tokens;
+        row.completion_tokens = rec.completion_tokens;
+        row.duration_ms = rec.duration_ms;
+        row.generation_duration_ms = result.generation_duration_ms;
+        row.prompt_duration_ms = prompt_duration_ms;
+        row.tokens_per_second = rec.tokens_per_second;
+        row.prompt_tokens_per_second = row.prompt_duration_ms > 0.0
+            ? static_cast<double>(evaluated_prompt_tokens) / (row.prompt_duration_ms / 1000.0)
+            : 0.0;
+        row.status_code = rec.status_code;
+        row.slot_id = rec.slot_id;
+        row.input_audio_seconds = input_audio_seconds;
+        row.input_characters = input_characters;
+        stats_db->record_request(row);
     }
     if (events) {
         events->publish("request", nlohmann::json{
             {"timestampUnixMs", rec.timestamp_unix_ms},
             {"model", model_name},
+            {"resolvedModel", resolved_model_name.empty() ? model_name : resolved_model_name},
             {"promptTokens", result.prompt_tokens},
             {"completionTokens", result.completion_tokens},
             {"durationMs", result.duration_ms},
             {"generationDurationMs", result.generation_duration_ms},
             {"tokensPerSecond", result.tokens_per_second},
+            {"promptTokensPerSecond", prompt_duration_ms > 0.0
+                ? static_cast<double>(evaluated_prompt_tokens) /
+                    (prompt_duration_ms / 1000.0)
+                : 0.0},
             {"status", status_code},
             {"inputAudioSeconds", input_audio_seconds},
             {"inputCharacters", input_characters},
@@ -106,10 +125,22 @@ void record_request(const GatewayDeps& deps,
                     int status_code,
                     int slot_id,
                     double input_audio_seconds,
-                    std::int64_t input_characters) {
+                    std::int64_t input_characters,
+                    const std::string& resolved_model_name) {
     record_request(deps.metrics, deps.stats_db, deps.events,
                    model_name, result, status_code, slot_id,
-                   input_audio_seconds, input_characters);
+                   input_audio_seconds, input_characters, resolved_model_name);
+}
+
+foundation::Result<ResolvedModelName> resolve_model_name(
+    const GatewayDeps& deps, const std::string& requested) {
+    auto resolved = deps.coordinator.registry().resolve(requested);
+    if (!resolved) {
+        return foundation::Err<ResolvedModelName>(resolved.error().code,
+                                                  resolved.error().message);
+    }
+    return foundation::Ok(ResolvedModelName{
+        requested, *resolved, *resolved != requested});
 }
 
 namespace {
@@ -446,6 +477,8 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
             {"object", "model"},
             {"created", std::time(nullptr)},
             {"owned_by", "inferdeck"},
+            {"alias", false},
+            {"alias_target", nullptr},
             {"vram_required_mb", info.vram_required_mb},
             {"context_size", info.context_size},
             {"context_length", info.context_size},
@@ -457,6 +490,10 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
             {"runtime_available", runtime_available},
             {"modality", info.modality},
             {"capabilities", info.capabilities},
+            {"prompt_price_per_million", info.prompt_price_per_million
+                ? nlohmann::json(*info.prompt_price_per_million) : nlohmann::json(nullptr)},
+            {"completion_price_per_million", info.completion_price_per_million
+                ? nlohmann::json(*info.completion_price_per_million) : nlohmann::json(nullptr)},
             {"optimization", {
                 {"status", info.optimization.status},
                 {"measured_at", info.optimization.measured_at},
@@ -464,6 +501,9 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
                 {"quality_total", info.optimization.quality_total},
                 {"single_tokens_per_second", info.optimization.single_tokens_per_second},
                 {"parallel_tokens_per_second", info.optimization.parallel_tokens_per_second},
+                {"schedule_enabled", info.optimization.schedule_enabled},
+                {"schedule_window_start", info.optimization.schedule_window_start},
+                {"schedule_window_end", info.optimization.schedule_window_end},
             }},
             {"loaded", loaded},
             {"inferdeck", {
@@ -491,6 +531,48 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
         };
         data.push_back(entry);
     }
+    for (const auto& alias : deps.coordinator.registry().aliases()) {
+        const auto info = deps.coordinator.registry().get_info_result(alias.target);
+        if (!info) continue;
+        const auto resident = residency.find(alias.target);
+        data.push_back({
+            {"id", alias.name},
+            {"object", "model"},
+            {"created", std::time(nullptr)},
+            {"owned_by", "inferdeck"},
+            {"alias", true},
+            {"alias_target", alias.target},
+            {"target", alias.target},
+            {"required_context_size", alias.required_context_size},
+            {"required_capabilities", alias.required_capabilities},
+            {"context_size", info->context_size},
+            {"context_length", info->context_size},
+            {"max_context_length", info->context_size},
+            {"limit", {{"context", info->context_size}}},
+            {"n_slots", info->n_slots},
+            {"has_vision", info->has_vision},
+            {"runtime", info->runtime},
+            {"runtime_available", deps.coordinator.registry().has_factory(info->runtime)},
+            {"modality", info->modality},
+            {"capabilities", info->capabilities},
+            {"prompt_price_per_million", info->prompt_price_per_million
+                ? nlohmann::json(*info->prompt_price_per_million) : nlohmann::json(nullptr)},
+            {"completion_price_per_million", info->completion_price_per_million
+                ? nlohmann::json(*info->completion_price_per_million) : nlohmann::json(nullptr)},
+            {"loaded", resident != residency.end()},
+            {"inferdeck", {
+                {"runtime", info->runtime},
+                {"runtime_available", deps.coordinator.registry().has_factory(info->runtime)},
+                {"modality", info->modality},
+                {"capabilities", info->capabilities},
+                {"alias_contract", {
+                    {"target", alias.target},
+                    {"required_context_size", alias.required_context_size},
+                    {"required_capabilities", alias.required_capabilities},
+                }},
+            }},
+        });
+    }
     nlohmann::json body = {
         {"object", "list"},
         {"data", data},
@@ -499,21 +581,39 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
 }
 
 bool maintenance_mode_active(const GatewayDeps& deps) noexcept {
-    return deps.maintenance_mode && deps.maintenance_mode->load();
+    return deps.maintenance_resource &&
+        deps.maintenance_resource->load() != ComputeResource::None;
+}
+
+ComputeResource model_compute_resource(const model::ModelInfo& info) noexcept {
+    return info.modality != "text" && info.vram_required_mb <= 0
+        ? ComputeResource::Cpu
+        : ComputeResource::Gpu;
+}
+
+bool maintenance_blocks_model(const GatewayDeps& deps,
+                              const std::string& model_name) noexcept {
+    if (!deps.maintenance_resource) return false;
+    const auto active = deps.maintenance_resource->load();
+    if (active == ComputeResource::None) return false;
+    const auto info = deps.coordinator.registry().get_info_result(model_name);
+    return info && model_compute_resource(*info) == active;
 }
 
 SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name,
                                  bool defer_resource_busy) {
-    if (maintenance_mode_active(deps)) {
-        return {503, make_error_json(
-            503, "maintenance_mode",
-            "measured model optimization is running; retry after it restores the active profile")};
-    }
-    if (!deps.coordinator.registry().has(model_name)) {
+    const auto resolved = resolve_model_name(deps, model_name);
+    if (!resolved) {
         return {404, make_error_json(404, "model_not_found",
                                      "model not registered: " + model_name)};
     }
-    const auto info = deps.coordinator.registry().get_info_result(model_name);
+    const std::string target_name = resolved->resolved;
+    if (maintenance_blocks_model(deps, target_name)) {
+        return {503, make_error_json(
+            503, "maintenance_mode",
+            "measured model optimization is using the same compute resource; retry after it restores the active profile")};
+    }
+    const auto info = deps.coordinator.registry().get_info_result(target_name);
     if (!info || !deps.coordinator.registry().has_factory(info->runtime)) {
         return {503, make_error_json(
             503, "runtime_unavailable",
@@ -521,9 +621,10 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
                 (info ? info->runtime : std::string("unknown")))};
     }
     auto current = deps.coordinator.get_loaded_model();
-    if (deps.coordinator.is_loaded(model_name)) {
+    if (deps.coordinator.is_loaded(target_name)) {
         return {200, {{"status", "ready"},
                       {"model", model_name},
+                      {"resolved_model", target_name},
                       {"message", "model already loaded"}}};
     }
     if (!deps.swap_tracker) {
@@ -536,10 +637,10 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
     const std::string from = current.value_or("");
     std::string launch_error;
     const auto start_result = deps.swap_tracker->start(
-        from, model_name, now_ms(),
-        [deps_copy, from, model_name, defer_resource_busy]() {
-            publish_model_event(deps_copy, "swapping", from, model_name, 0.0, "");
-            (void)perform_swap(deps_copy, from, model_name, defer_resource_busy);
+        from, target_name, now_ms(),
+        [deps_copy, from, target_name, defer_resource_busy]() {
+            publish_model_event(deps_copy, "swapping", from, target_name, 0.0, "");
+            (void)perform_swap(deps_copy, from, target_name, defer_resource_busy);
         },
         launch_error);
     if (start_result == SwapTracker::StartResult::Busy) {
@@ -555,6 +656,7 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
     }
     return {202, {{"status", "swapping"},
                   {"model", model_name},
+                  {"resolved_model", target_name},
                   {"from", from}}};
 }
 
@@ -569,9 +671,9 @@ EnsureLoadedResult ensure_model_loaded(
     const GatewayDeps& deps, const std::string& model_name,
     std::chrono::steady_clock::time_point deadline,
     const std::function<bool()>& cancelled) {
-    if (maintenance_mode_active(deps)) {
+    if (maintenance_blocks_model(deps, model_name)) {
         return {false, 503, "maintenance_mode",
-                "measured model optimization is running; retry after it restores the active profile",
+                "measured model optimization is using the same compute resource; retry after it restores the active profile",
                 foundation::ErrorCode::Unavailable};
     }
     if (deps.coordinator.is_loaded(model_name)) {
@@ -714,13 +816,151 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
     write_json(resp, 200, body);
 }
 
-void handle_chat_completions(const httplib::Request& req, httplib::Response& resp,
-                             const GatewayDeps& deps) {
-    if (maintenance_mode_active(deps)) {
-        write_error(resp, 503, "maintenance_mode",
-                    "measured model optimization is running");
+namespace {
+
+struct AcquiredChatSlot {
+    int slot_id{-1};
+    std::string reservation_key;
+    std::optional<std::uint64_t> voice_session_token;
+};
+
+std::optional<AcquiredChatSlot> acquire_chat_slot(
+    const httplib::Request& req, httplib::Response& resp,
+    const GatewayDeps& deps, const nlohmann::json& body,
+    const std::string& requested_model, const std::string& model_name) {
+    AcquiredChatSlot acquired;
+    acquired.reservation_key = request_client_key(req);
+    acquired.voice_session_token = deps.coordinator.hold_priority_session(
+        acquired.reservation_key, model_name);
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::minutes{5};
+    const std::function<bool()> cancelled = [&req] {
+        return req.is_connection_closed();
+    };
+    model::AcquireSlotOptions opts;
+    opts.timeout = std::chrono::minutes{5};
+    opts.block = true;
+    opts.priority = body.contains("priority") && body["priority"].is_number_integer()
+        ? std::clamp(body["priority"].get<int>(), -100, 100) : 0;
+    opts.reservation_key = acquired.reservation_key;
+    if (acquired.voice_session_token) opts.priority = 100;
+    opts.cancelled = cancelled;
+    opts.prepare = [&deps, &model_name, deadline, cancelled] {
+        auto loaded = ensure_model_loaded(deps, model_name, deadline, cancelled);
+        if (loaded.ok) return foundation::Ok();
+        return foundation::Err<void>(loaded.error_code, loaded.message);
+    };
+    auto slot = deps.coordinator.acquire_slot(model_name, opts);
+    if (slot) {
+        acquired.slot_id = *slot;
+        return acquired;
+    }
+    if (acquired.voice_session_token) {
+        deps.coordinator.complete_priority_session_hold(
+            acquired.reservation_key, *acquired.voice_session_token,
+            std::chrono::milliseconds{deps.voice_session_grace_ms});
+    }
+    int status = 503;
+    std::string code = "no_slots";
+    if (slot.error().code == foundation::ErrorCode::Timeout) {
+        code = "slot_timeout";
+    } else if (slot.error().code == foundation::ErrorCode::Cancelled) {
+        code = "cancelled";
+    } else if (slot.error().code == foundation::ErrorCode::NotFound) {
+        status = 404;
+        code = "model_not_loaded";
+    } else if (slot.error().code == foundation::ErrorCode::NotLoaded) {
+        code = "model_not_loaded";
+    }
+    resp.set_header("Retry-After",
+        slot.error().code == foundation::ErrorCode::NotLoaded
+            ? deps.default_swap_timeout_s : "1");
+    model::InferenceResult failed;
+    record_request(deps, requested_model, failed, status, -1, 0.0, 0, model_name);
+    write_error(resp, status, code, slot.error().message);
+    return std::nullopt;
+}
+
+void handle_non_stream_chat(
+    httplib::Response& resp, const GatewayDeps& deps,
+    const std::string& requested_model, const std::string& model_name,
+    int slot_id, const std::string& id,
+    const model::InferenceRequest& inference_request) {
+    model::InferenceResult result;
+    try {
+        auto predicted = deps.coordinator.predict(
+            model_name, slot_id, inference_request);
+        if (!predicted) {
+            const auto error = classify_inference_error(predicted.error().code);
+            LOG_ERROR("inference_failed",
+                      "model={} slot_id={} status={} code={} error={}",
+                      model_name, slot_id, error.status, error.code,
+                      predicted.error().message);
+            model::InferenceResult failed;
+            record_request(deps, requested_model, failed, error.status,
+                           slot_id, 0.0, 0, model_name);
+            write_error(resp, error.status, error.code,
+                        predicted.error().message);
+            return;
+        }
+        result = std::move(*predicted);
+    } catch (const std::exception& error) {
+        LOG_ERROR("predict_exception", "what={}", error.what());
+        model::InferenceResult failed;
+        record_request(deps, requested_model, failed, 500, slot_id,
+                       0.0, 0, model_name);
+        write_error(resp, 500, "inference_exception", error.what());
+        return;
+    } catch (...) {
+        LOG_ERROR("predict_unknown_exception", "");
+        model::InferenceResult failed;
+        record_request(deps, requested_model, failed, 500, slot_id,
+                       0.0, 0, model_name);
+        write_error(resp, 500, "inference_exception", "unknown exception");
         return;
     }
+    record_request(deps, requested_model, result, 200, slot_id,
+                   0.0, 0, model_name);
+    nlohmann::json message = {
+        {"role", "assistant"},
+        {"content", result.text},
+    };
+    if (!result.reasoning_text.empty()) {
+        message["reasoning_content"] = result.reasoning_text;
+    }
+    if (!result.tool_calls.empty()) {
+        message["tool_calls"] = nlohmann::json::array();
+        for (const auto& call : result.tool_calls) {
+            message["tool_calls"].push_back(tool_call_json(call));
+        }
+    }
+    const std::string finish_reason = !result.tool_calls.empty()
+        ? "tool_calls" : result.finish_reason;
+    write_json(resp, 200, {
+        {"id", id},
+        {"object", "chat.completion"},
+        {"created", std::time(nullptr)},
+        {"model", requested_model},
+        {"choices", nlohmann::json::array({{
+            {"index", 0},
+            {"message", message},
+            {"finish_reason", finish_reason},
+        }})},
+        {"usage", {
+            {"prompt_tokens", result.prompt_tokens},
+            {"prompt_tokens_details", {
+                {"cached_tokens", result.cached_prompt_tokens},
+            }},
+            {"completion_tokens", result.completion_tokens},
+            {"total_tokens", result.prompt_tokens + result.completion_tokens},
+        }},
+    });
+}
+
+} // namespace
+
+void handle_chat_completions(const httplib::Request& req, httplib::Response& resp,
+                             const GatewayDeps& deps) {
     nlohmann::json body;
     try {
         body = nlohmann::json::parse(req.body);
@@ -732,14 +972,20 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         write_error(resp, 400, "missing_model", "request body must include 'model'");
         return;
     }
-    std::string model_name = body["model"].get<std::string>();
-    if (model_name.size() > 7 && model_name.compare(model_name.size() - 7, 7, ":latest") == 0) {
-        model_name.resize(model_name.size() - 7);
+    std::string requested_model = body["model"].get<std::string>();
+    if (requested_model.size() > 7 && requested_model.compare(requested_model.size() - 7, 7, ":latest") == 0) {
+        requested_model.resize(requested_model.size() - 7);
     }
 
-    if (!deps.coordinator.registry().has(model_name)) {
-        write_error(resp, 404, "model_not_found",
-                    "model not registered: " + model_name);
+    const auto resolved_model = resolve_model_name(deps, requested_model);
+    if (!resolved_model) {
+        write_error(resp, 404, "model_not_found", resolved_model.error().message);
+        return;
+    }
+    const std::string& model_name = resolved_model->resolved;
+    if (maintenance_blocks_model(deps, model_name)) {
+        write_error(resp, 503, "maintenance_mode",
+                    "measured model optimization is using the same compute resource");
         return;
     }
     const auto model_info = deps.coordinator.registry().get_info_result(model_name);
@@ -770,64 +1016,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
 
-    const std::string reservation_key = request_client_key(req);
-    const auto voice_session_token =
-        deps.coordinator.hold_priority_session(reservation_key, model_name);
-    int slot_id = -1;
-    {
-        const auto deadline = std::chrono::steady_clock::now() +
-            std::chrono::minutes{5};
-        const std::function<bool()> cancelled = [&req] {
-            return req.is_connection_closed();
-        };
-        model::AcquireSlotOptions opts;
-        opts.timeout = std::chrono::minutes{5};
-        opts.block = true;
-        opts.priority = body.contains("priority") && body["priority"].is_number_integer()
-            ? std::clamp(body["priority"].get<int>(), -100, 100) : 0;
-        opts.reservation_key = reservation_key;
-        if (voice_session_token) opts.priority = 100;
-        opts.cancelled = cancelled;
-        opts.prepare = [&deps, &model_name, deadline, cancelled] {
-            auto loaded = ensure_model_loaded(
-                deps, model_name, deadline, cancelled);
-            if (loaded.ok) return foundation::Ok();
-            return foundation::Err<void>(loaded.error_code, loaded.message);
-        };
-        auto sr = deps.coordinator.acquire_slot(model_name, opts);
-        if (!sr) {
-            if (voice_session_token) {
-                deps.coordinator.complete_priority_session_hold(
-                    reservation_key, *voice_session_token,
-                    std::chrono::milliseconds{deps.voice_session_grace_ms});
-            }
-            int status = 503;
-            std::string code = "no_slots";
-            if (sr.error().code == foundation::ErrorCode::Timeout) {
-                status = 503;
-                code = "slot_timeout";
-            } else if (sr.error().code == foundation::ErrorCode::Cancelled) {
-                status = 503;
-                code = "cancelled";
-            } else if (sr.error().code == foundation::ErrorCode::NotFound) {
-                status = 404;
-                code = "model_not_loaded";
-            } else if (sr.error().code == foundation::ErrorCode::NotLoaded) {
-                code = "model_not_loaded";
-            }
-            resp.set_header("Retry-After",
-                sr.error().code == foundation::ErrorCode::NotLoaded
-                    ? deps.default_swap_timeout_s : "1");
-            model::InferenceResult failed;
-            record_request(deps, model_name, failed, status, -1);
-            write_error(resp, status, code, sr.error().message);
-            return;
-        }
-        slot_id = *sr;
-    }
+    auto acquired = acquire_chat_slot(
+        req, resp, deps, body, requested_model, model_name);
+    if (!acquired) return;
+    const int slot_id = acquired->slot_id;
+    const auto& reservation_key = acquired->reservation_key;
+    const auto& voice_session_token = acquired->voice_session_token;
 
     const std::string id = make_id();
-    const std::string stream_model = model_name;
+    const std::string stream_model = requested_model;
 
     std::function<void()> release_slot = [slot_id, &deps, model_name,
                                           reservation_key,
@@ -849,72 +1046,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     } guard{&release_slot};
 
     if (!stream) {
-        model::InferenceResult pr;
-        try {
-            auto pres = deps.coordinator.predict(
-                model_name, slot_id, *inference_request);
-            if (!pres) {
-                const auto ec = classify_inference_error(pres.error().code);
-                LOG_ERROR("inference_failed",
-                          "model={} slot_id={} status={} code={} error={}",
-                          model_name, slot_id, ec.status, ec.code, pres.error().message);
-                model::InferenceResult failed;
-                record_request(deps, model_name, failed, ec.status, slot_id);
-                write_error(resp, ec.status, ec.code, pres.error().message);
-                return;
-            }
-            pr = std::move(*pres);
-        } catch (const std::exception& e) {
-            LOG_ERROR("predict_exception", "what={}", e.what());
-            model::InferenceResult failed;
-            record_request(deps, model_name, failed, 500, slot_id);
-            write_error(resp, 500, "inference_exception", e.what());
-            return;
-        } catch (...) {
-            LOG_ERROR("predict_unknown_exception", "");
-            model::InferenceResult failed;
-            record_request(deps, model_name, failed, 500, slot_id);
-            write_error(resp, 500, "inference_exception", "unknown exception");
-            return;
-        }
-        record_request(deps, model_name, pr, 200, slot_id);
-
-        nlohmann::json message = {
-            {"role", "assistant"},
-            {"content", pr.text},
-        };
-        if (!pr.reasoning_text.empty()) {
-            message["reasoning_content"] = pr.reasoning_text;
-        }
-        if (!pr.tool_calls.empty()) {
-            message["tool_calls"] = nlohmann::json::array();
-            for (const auto& tc : pr.tool_calls) {
-                message["tool_calls"].push_back(tool_call_json(tc));
-            }
-        }
-        const std::string finish_reason = !pr.tool_calls.empty() ? "tool_calls" : pr.finish_reason;
-        nlohmann::json resp_body = {
-            {"id", id},
-            {"object", "chat.completion"},
-            {"created", std::time(nullptr)},
-            {"model", stream_model},
-            {"choices", nlohmann::json::array({
-                {
-                    {"index", 0},
-                    {"message", message},
-                    {"finish_reason", finish_reason},
-                }
-            })},
-            {"usage", {
-                {"prompt_tokens", pr.prompt_tokens},
-                {"prompt_tokens_details", {
-                    {"cached_tokens", pr.cached_prompt_tokens},
-                }},
-                {"completion_tokens", pr.completion_tokens},
-                {"total_tokens", pr.prompt_tokens + pr.completion_tokens},
-            }},
-        };
-        write_json(resp, 200, resp_body);
+        handle_non_stream_chat(resp, deps, requested_model, model_name,
+                               slot_id, id, *inference_request);
         return;
     }
 
@@ -936,6 +1069,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         std::thread inference_thread;
         int slot_id{-1};
         std::string model_name;
+        std::string requested_model;
         model::BackendCoordinator* coordinator{nullptr};
         observability::Metrics* metrics{nullptr};
         observability::StatsDb* stats_db{nullptr};
@@ -972,12 +1106,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             int status = fallback_status;
             if (result && !aborted_stream && !error) {
                 status = 200;
-                record_request(metrics, stats_db, events, model_name, *result, status, slot_id);
+                record_request(metrics, stats_db, events, requested_model, *result, status, slot_id,
+                               0.0, 0, model_name);
             } else {
                 model::InferenceResult failed;
                 status = aborted_stream ? 499
                        : (error && fallback_status < 400 ? 500 : fallback_status);
-                record_request(metrics, stats_db, events, model_name, failed, status, slot_id);
+                record_request(metrics, stats_db, events, requested_model, failed, status, slot_id,
+                               0.0, 0, model_name);
             }
 
             LOG_INFO("stream_recorded", "model={} slot_id={} status={} reason={}",
@@ -1002,6 +1138,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     auto state = std::make_shared<StreamState>();
     state->slot_id = slot_id;
     state->model_name = model_name;
+    state->requested_model = requested_model;
     state->coordinator = &deps.coordinator;
     state->metrics = deps.metrics;
     state->stats_db = deps.stats_db;

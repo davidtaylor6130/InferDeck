@@ -31,6 +31,11 @@ public:
     [[nodiscard]] ModelInfo get_info(const std::string& name) const;
     [[nodiscard]] std::vector<std::string> list() const;
     [[nodiscard]] std::size_t size() const;
+    [[nodiscard]] foundation::Result<ModelAlias> set_alias(ModelAlias alias);
+    [[nodiscard]] foundation::Result<void> remove_alias(const std::string& name);
+    [[nodiscard]] foundation::Result<std::string> resolve(const std::string& name) const;
+    [[nodiscard]] std::vector<ModelAlias> aliases() const;
+    [[nodiscard]] bool has_alias(const std::string& name) const;
 
     [[nodiscard]] std::unique_ptr<IBackend> create(const std::string& name) const;
     [[nodiscard]] foundation::Result<std::unique_ptr<IBackend>> create_result(
@@ -42,6 +47,7 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, BackendFactory> factories_;
     std::unordered_map<std::string, ModelInfo> entries_;
+    std::unordered_map<std::string, ModelAlias> aliases_;
 };
 
 } // namespace inferdeck::model

@@ -10,6 +10,7 @@ namespace inferdeck::gateway {
 namespace {
 
 constexpr double minimum_vram_reserve_mb = 2048.0;
+constexpr double baseline_vram_tolerance_mb = 256.0;
 
 std::int64_t unix_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -21,7 +22,8 @@ std::string candidate_key(const optimize::ProfileCandidate& candidate) {
         std::to_string(candidate.slots) + "|" +
         std::to_string(candidate.n_batch) + "|" +
         std::to_string(candidate.n_ubatch) + "|" +
-        candidate.cache_type_k + "|" + candidate.cache_type_v;
+        candidate.cache_type_k + "|" + candidate.cache_type_v + "|" +
+        std::to_string(candidate.mtp_max_active_requests);
 }
 
 }
@@ -29,17 +31,17 @@ std::string candidate_key(const optimize::ProfileCandidate& candidate) {
 ProfileBenchmarkManager::ProfileBenchmarkManager(
     model::BackendCoordinator& coordinator,
     SwapTracker* swap_tracker,
-    std::atomic<bool>& maintenance_mode,
+    std::atomic<ComputeResource>& maintenance_resource,
     ProfileBenchmarkTrialRunner runner)
     : coordinator_(coordinator),
       swap_tracker_(swap_tracker),
-      maintenance_mode_(maintenance_mode),
+      maintenance_resource_(maintenance_resource),
       runner_(std::move(runner)) {}
 
 ProfileBenchmarkManager::~ProfileBenchmarkManager() {
     cancel_requested_.store(true);
     if (worker_.joinable()) worker_.join();
-    maintenance_mode_.store(false);
+    maintenance_resource_.store(ComputeResource::None);
 }
 
 foundation::Result<ProfileBenchmarkSnapshot> ProfileBenchmarkManager::start(
@@ -64,18 +66,40 @@ foundation::Result<ProfileBenchmarkSnapshot> ProfileBenchmarkManager::start(
                 "a measured profile benchmark is already running");
         }
     }
-    if (maintenance_mode_.exchange(true)) {
+    const auto resource = model_compute_resource(model);
+    ComputeResource expected = ComputeResource::None;
+    if (!maintenance_resource_.compare_exchange_strong(expected, resource)) {
         return foundation::Err<ProfileBenchmarkSnapshot>(
             foundation::ErrorCode::AlreadyExists,
             "InferDeck is already in maintenance mode");
     }
-    if (coordinator_.active_request_count() > 0 ||
-        coordinator_.queued_request_count() > 0 ||
-        (swap_tracker_ && swap_tracker_->snapshot().swapping)) {
-        maintenance_mode_.store(false);
+    bool resource_busy = false;
+    for (const auto& name : coordinator_.registry().list()) {
+        const auto info = coordinator_.registry().get_info_result(name);
+        if (info && model_compute_resource(*info) == resource &&
+            coordinator_.active_request_count(name) > 0) {
+            resource_busy = true;
+            break;
+        }
+    }
+    if (!resource_busy) {
+        for (const auto& queued : coordinator_.queue()) {
+            const auto info = coordinator_.registry().get_info_result(queued.model);
+            if (info && model_compute_resource(*info) == resource) {
+                resource_busy = true;
+                break;
+            }
+        }
+    }
+    if (!resource_busy && resource == ComputeResource::Gpu && swap_tracker_ &&
+        swap_tracker_->snapshot().swapping) {
+        resource_busy = true;
+    }
+    if (resource_busy) {
+        maintenance_resource_.store(ComputeResource::None);
         return foundation::Err<ProfileBenchmarkSnapshot>(
             foundation::ErrorCode::Unavailable,
-            "benchmark requires zero active requests, zero queued requests, and no model swap");
+            "benchmark requires no active or queued work on the same compute resource");
     }
     if (worker_.joinable()) worker_.join();
     cancel_requested_.store(false);
@@ -148,7 +172,7 @@ void ProfileBenchmarkManager::finish(
         state_.restored = restored;
         state_.progress_pct = 100.0;
     }
-    maintenance_mode_.store(false);
+    maintenance_resource_.store(ComputeResource::None);
 }
 
 std::vector<ProfileBenchmarkPrompt> ProfileBenchmarkManager::prompts() const {
@@ -175,8 +199,20 @@ void ProfileBenchmarkManager::run(
     model::ModelInfo model,
     optimize::ProfileInput input,
     int candidate_limit) {
-    const auto previous_models = coordinator_.get_loaded_models();
-    const auto previous_primary = coordinator_.get_loaded_model();
+    const auto resource = model_compute_resource(model);
+    std::vector<std::string> previous_models;
+    for (const auto& name : coordinator_.get_loaded_models()) {
+        const auto info = coordinator_.registry().get_info_result(name);
+        if (info && model_compute_resource(*info) == resource) {
+            previous_models.push_back(name);
+        }
+    }
+    auto previous_primary = coordinator_.get_loaded_model();
+    if (previous_primary &&
+        std::find(previous_models.begin(), previous_models.end(),
+                  *previous_primary) == previous_models.end()) {
+        previous_primary.reset();
+    }
     bool restored = false;
     auto restore = [&] {
         update_stage("restoring", "Restoring the previous model residency");
@@ -211,15 +247,48 @@ void ProfileBenchmarkManager::run(
             return;
         }
 
+        optimize::ProfileCandidate active_candidate;
+        active_candidate.context_per_slot = input.context_per_slot;
+        active_candidate.slots = input.slots;
+        active_candidate.n_batch = input.n_batch;
+        active_candidate.n_ubatch = input.n_ubatch;
+        active_candidate.cache_type_k = input.cache_type_k;
+        active_candidate.cache_type_v = input.cache_type_v;
+        active_candidate.flash_attention = input.flash_attention;
+        active_candidate.mtp_max_active_requests =
+            model.mtp_max_active_requests;
+        active_candidate.fits = true;
         auto estimate = optimize::recommend_profile(input);
         std::vector<optimize::ProfileCandidate> selected;
         std::set<std::string> seen;
+        seen.insert(candidate_key(active_candidate));
+        if (model.mtp_enabled) {
+            for (const int window : {2, std::min(4, input.slots)}) {
+                if (window > input.slots || window == model.mtp_max_active_requests) {
+                    continue;
+                }
+                auto candidate = active_candidate;
+                candidate.mtp_max_active_requests = window;
+                candidate.reasons = {
+                    "Measures adaptive MTP with up to " +
+                        std::to_string(window) + " concurrent requests",
+                };
+                if (seen.insert(candidate_key(candidate)).second) {
+                    selected.push_back(std::move(candidate));
+                }
+                if (static_cast<int>(selected.size()) >= candidate_limit) break;
+            }
+        }
         for (const auto& candidate : estimate.candidates) {
-            if (!candidate.fits || !seen.insert(candidate_key(candidate)).second) {
+            if (static_cast<int>(selected.size()) >= candidate_limit) break;
+            auto measured_candidate = candidate;
+            measured_candidate.mtp_max_active_requests =
+                model.mtp_max_active_requests;
+            if (!measured_candidate.fits ||
+                !seen.insert(candidate_key(measured_candidate)).second) {
                 continue;
             }
-            selected.push_back(candidate);
-            if (static_cast<int>(selected.size()) >= candidate_limit) break;
+            selected.push_back(std::move(measured_candidate));
         }
         if (selected.empty()) {
             restore();
@@ -229,10 +298,49 @@ void ProfileBenchmarkManager::run(
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            state_.total_candidates = static_cast<int>(selected.size());
+            state_.total_candidates = static_cast<int>(selected.size()) + 1;
         }
 
         const auto suite = prompts();
+        update_stage("baseline", "Measuring the current active profile");
+        ProfileBenchmarkTrial baseline;
+        baseline.candidate = active_candidate;
+        const auto baseline_progress = [this](
+            const std::string& stage, const std::string& message) {
+            update_stage("baseline_" + stage, "Current profile: " + message);
+        };
+        auto baseline_metrics = runner_(
+            model, baseline.candidate, suite, cancel_requested_, baseline_progress);
+        if (!baseline_metrics) {
+            baseline.error = baseline_metrics.error().message;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                state_.baseline = baseline;
+                state_.has_baseline = true;
+            }
+            restore();
+            finish(cancel_requested_.load() ? "cancelled" : "failed",
+                   cancel_requested_.load()
+                       ? "Benchmark cancelled while measuring the current profile"
+                       : "Could not measure the current profile: " + baseline.error,
+                   restored);
+            return;
+        }
+        baseline.metrics = std::move(*baseline_metrics);
+        baseline.completed = true;
+        baseline.candidate.quality_score = baseline.metrics.quality_score;
+        baseline.candidate.estimated_vram_mb = baseline.metrics.peak_vram_mb;
+        baseline.candidate.reserve_vram_mb =
+            input.total_vram_mb - baseline.metrics.peak_vram_mb;
+        baseline.candidate.fits = true;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            state_.baseline = std::move(baseline);
+            state_.has_baseline = true;
+            state_.completed_candidates = 1;
+            state_.progress_pct = 90.0 /
+                static_cast<double>(state_.total_candidates);
+        }
         for (std::size_t index = 0; index < selected.size(); ++index) {
             if (cancel_requested_.load()) break;
             update_stage(
@@ -240,7 +348,7 @@ void ProfileBenchmarkManager::run(
                 "Running measured candidate " + std::to_string(index + 1) +
                 " of " + std::to_string(selected.size()));
             const auto progress =
-                [this, index, total = selected.size()](
+                [this, index, total = selected.size() + 1](
                     const std::string& stage, const std::string& message) {
                     const double stage_fraction =
                         stage == "loading" ? 0.10 :
@@ -251,7 +359,7 @@ void ProfileBenchmarkManager::run(
                     state_.stage = stage;
                     state_.message = message;
                     state_.progress_pct =
-                        ((static_cast<double>(index) + stage_fraction) /
+                        ((static_cast<double>(index + 1) + stage_fraction) /
                          static_cast<double>(total)) * 90.0;
                 };
             auto measured =
@@ -268,7 +376,10 @@ void ProfileBenchmarkManager::run(
                     input.total_vram_mb - trial.metrics.peak_vram_mb;
                 trial.candidate.fits =
                     trial.candidate.reserve_vram_mb >=
-                        minimum_vram_reserve_mb;
+                        minimum_vram_reserve_mb ||
+                    trial.metrics.peak_vram_mb <=
+                        state_.baseline.metrics.peak_vram_mb +
+                            baseline_vram_tolerance_mb;
                 trial.candidate.quality_score =
                     trial.metrics.quality_score;
                 trial.candidate.reasons = {
@@ -288,7 +399,16 @@ void ProfileBenchmarkManager::run(
                         " of " +
                         std::to_string(trial.metrics.quality_total) +
                         " fixed quality probes",
+                    "Measured adaptive MTP up to " +
+                        std::to_string(
+                            trial.candidate.mtp_max_active_requests) +
+                        " concurrent request(s)",
                 };
+                if (trial.candidate.reserve_vram_mb <
+                    minimum_vram_reserve_mb && trial.candidate.fits) {
+                    trial.candidate.reasons.push_back(
+                        "Peak VRAM remains within 256 MB of the current active profile");
+                }
             } else {
                 trial.error = measured.error().message;
             }
@@ -296,7 +416,7 @@ void ProfileBenchmarkManager::run(
                 std::lock_guard<std::mutex> lock(mutex_);
                 state_.trials.push_back(std::move(trial));
                 state_.completed_candidates =
-                    static_cast<int>(state_.trials.size());
+                    static_cast<int>(state_.trials.size()) + 1;
                 state_.progress_pct =
                     (static_cast<double>(state_.completed_candidates) /
                      static_cast<double>(state_.total_candidates)) * 90.0;
@@ -312,34 +432,76 @@ void ProfileBenchmarkManager::run(
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            double max_speed = 0.0;
-            double max_parallel = 0.0;
-            for (const auto& trial : state_.trials) {
-                if (!trial.completed) continue;
-                max_speed = std::max(
-                    max_speed, trial.metrics.average_tokens_per_second);
-                max_parallel = std::max(
-                    max_parallel, trial.metrics.parallel_tokens_per_second);
-            }
+            state_.baseline.metrics.performance_index = 100.0;
             for (auto& trial : state_.trials) {
                 if (!trial.completed) continue;
-                trial.candidate.speed_score =
-                    max_speed > 0.0
-                        ? trial.metrics.average_tokens_per_second / max_speed
-                        : 0.0;
-                trial.candidate.parallelism_score =
-                    max_parallel > 0.0
-                        ? trial.metrics.parallel_tokens_per_second / max_parallel
-                        : 0.0;
+                const double prompt_ratio =
+                    state_.baseline.metrics.prompt_tokens_per_second > 0.0
+                        ? trial.metrics.prompt_tokens_per_second /
+                            state_.baseline.metrics.prompt_tokens_per_second
+                        : 1.0;
+                const double generation_ratio =
+                    state_.baseline.metrics.average_tokens_per_second > 0.0
+                        ? trial.metrics.average_tokens_per_second /
+                            state_.baseline.metrics.average_tokens_per_second
+                        : 1.0;
+                trial.metrics.performance_index =
+                    (prompt_ratio + generation_ratio) * 50.0;
+                trial.candidate.speed_score = generation_ratio;
+                double concurrency_ratio_total = 0.0;
+                int concurrency_ratio_count = 0;
+                for (const auto& measured : trial.metrics.concurrency) {
+                    const auto baseline_measurement = std::find_if(
+                        state_.baseline.metrics.concurrency.begin(),
+                        state_.baseline.metrics.concurrency.end(),
+                        [&](const auto& value) {
+                            return value.requests == measured.requests;
+                        });
+                    if (baseline_measurement !=
+                            state_.baseline.metrics.concurrency.end() &&
+                        baseline_measurement->aggregate_tokens_per_second > 0.0) {
+                        concurrency_ratio_total +=
+                            measured.aggregate_tokens_per_second /
+                            baseline_measurement->aggregate_tokens_per_second;
+                        ++concurrency_ratio_count;
+                    }
+                }
+                trial.candidate.parallelism_score = concurrency_ratio_count > 0
+                    ? concurrency_ratio_total /
+                        static_cast<double>(concurrency_ratio_count)
+                    : (state_.baseline.metrics.parallel_tokens_per_second > 0.0
+                        ? trial.metrics.parallel_tokens_per_second /
+                            state_.baseline.metrics.parallel_tokens_per_second
+                        : 1.0);
                 trial.candidate.headroom_score = std::clamp(
                     trial.candidate.reserve_vram_mb /
                         (input.total_vram_mb * 0.25),
                     0.0, 1.0);
                 trial.candidate.overall_score =
-                    0.60 * trial.candidate.quality_score +
-                    0.15 * trial.candidate.speed_score +
-                    0.15 * trial.candidate.parallelism_score +
-                    0.10 * trial.candidate.headroom_score;
+                    trial.metrics.performance_index / 200.0 +
+                    trial.candidate.parallelism_score * 0.5;
+                if (model.mtp_enabled &&
+                    trial.candidate.mtp_max_active_requests > 1) {
+                    const auto verification = std::find_if(
+                        trial.metrics.concurrency.begin(),
+                        trial.metrics.concurrency.end(),
+                        [&](const auto& value) {
+                            return value.requests ==
+                                trial.candidate.mtp_max_active_requests;
+                        });
+                    if (verification == trial.metrics.concurrency.end() ||
+                        verification->mtp_requests != verification->requests) {
+                        trial.candidate.fits = false;
+                        trial.candidate.reasons.push_back(
+                            "Rejected because concurrent MTP drafting was not verified for every request");
+                    }
+                }
+                if (trial.metrics.quality_score + 0.0001 <
+                    state_.baseline.metrics.quality_score) {
+                    trial.candidate.fits = false;
+                    trial.candidate.reasons.push_back(
+                        "Rejected because correctness probes regressed from the current profile");
+                }
                 if (!trial.candidate.fits) {
                     trial.candidate.overall_score *= 0.25;
                 }
@@ -355,9 +517,9 @@ void ProfileBenchmarkManager::run(
                         return !left.candidate.fits;
                     }
                     return std::tie(left.candidate.overall_score,
-                                    left.candidate.quality_score) <
+                                    left.candidate.parallelism_score) <
                            std::tie(right.candidate.overall_score,
-                                    right.candidate.quality_score);
+                                    right.candidate.parallelism_score);
                 });
             if (best != state_.trials.end() && best->completed &&
                 best->candidate.fits) {
@@ -367,7 +529,7 @@ void ProfileBenchmarkManager::run(
         }
         if (!snapshot().has_recommendation) {
             finish("failed",
-                   "Measured trials produced no candidate with 2048 MB VRAM reserve",
+                   "Measured trials produced no faster candidate that preserved correctness and VRAM reserve",
                    restored);
             return;
         }

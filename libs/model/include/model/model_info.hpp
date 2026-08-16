@@ -28,6 +28,16 @@ struct ProfileOptimizationInfo {
     int quality_total{0};
     double single_tokens_per_second{0.0};
     double parallel_tokens_per_second{0.0};
+    bool schedule_enabled{false};
+    std::string schedule_window_start{"03:00"};
+    std::string schedule_window_end{"04:00"};
+};
+
+struct ModelAlias {
+    std::string name{};
+    std::string target{};
+    int required_context_size{0};
+    std::vector<std::string> required_capabilities{};
 };
 
 struct ModelInfo {
@@ -56,6 +66,8 @@ struct ModelInfo {
     bool has_vision{false};
     std::string reasoning_format{};
     std::string chat_template_path{};
+    std::optional<double> prompt_price_per_million{};
+    std::optional<double> completion_price_per_million{};
     std::map<std::string, std::string> artifacts{};
     SamplingConfig sampling{};
     ProfileOptimizationInfo optimization{};

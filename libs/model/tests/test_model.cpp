@@ -1782,3 +1782,38 @@ TEST_CASE("BackendCoordinator: register_existing adds to registry", "[model][coo
     REQUIRE(c.register_existing(make_info("a")).has_value());
     REQUIRE(c.load("a").has_value());
 }
+
+TEST_CASE("ModelRegistry: stable aliases enforce their compatibility contract", "[model][alias]") {
+    ModelRegistry registry;
+    auto primary = make_info("primary");
+    primary.context_size = 32768;
+    primary.capabilities = {"chat_completions", "responses"};
+    auto compatible = make_info("compatible");
+    compatible.context_size = 65536;
+    compatible.capabilities = primary.capabilities;
+    auto incompatible = make_info("incompatible");
+    incompatible.context_size = 8192;
+    incompatible.capabilities = {"chat_completions"};
+    registry.register_model(primary);
+    registry.register_model(compatible);
+    registry.register_model(incompatible);
+
+    auto created = registry.set_alias({"production", "primary"});
+    REQUIRE(created);
+    CHECK(created->required_context_size == 32768);
+    REQUIRE(registry.resolve("production"));
+    CHECK(*registry.resolve("production") == "primary");
+
+    auto retargeted = registry.set_alias({"production", "compatible"});
+    REQUIRE(retargeted);
+    REQUIRE(registry.resolve("production"));
+    CHECK(*registry.resolve("production") == "compatible");
+
+    const auto rejected = registry.set_alias({"production", "incompatible"});
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().message.find("context_size") != std::string::npos);
+    REQUIRE(registry.resolve("production"));
+    CHECK(*registry.resolve("production") == "compatible");
+    REQUIRE_FALSE(registry.set_alias({"nested", "production"}));
+    REQUIRE_FALSE(registry.set_alias({"primary", "compatible"}));
+}

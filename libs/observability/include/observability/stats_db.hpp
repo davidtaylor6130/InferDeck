@@ -22,6 +22,11 @@ struct RequestRow {
   int slot_id{-1};
   double input_audio_seconds{};
   std::int64_t input_characters{};
+  int cached_prompt_tokens{};
+  double generation_duration_ms{};
+  double prompt_duration_ms{};
+  double prompt_tokens_per_second{};
+  std::string resolved_model;
 };
 
 struct SwapRow {
@@ -38,9 +43,13 @@ struct ModelUsageRow {
   std::int64_t requests{};
   std::int64_t successful_requests{};
   std::int64_t prompt_tokens{};
+  std::int64_t cached_prompt_tokens{};
   std::int64_t completion_tokens{};
   double total_duration_ms{};
+  double total_generation_duration_ms{};
+  double total_prompt_duration_ms{};
   double peak_tokens_per_second{};
+  double peak_prompt_tokens_per_second{};
   std::int64_t last_timestamp_unix_ms{};
   double input_audio_seconds{};
   std::int64_t input_characters{};
@@ -50,10 +59,15 @@ struct UsageBucketRow {
   std::string bucket;
   std::string model;
   std::int64_t prompt_tokens{};
+  std::int64_t cached_prompt_tokens{};
   std::int64_t completion_tokens{};
   std::int64_t total_tokens{};
   std::int64_t requests{};
   std::int64_t successful_requests{};
+  double generation_duration_ms{};
+  double prompt_duration_ms{};
+  double peak_tokens_per_second{};
+  double peak_prompt_tokens_per_second{};
   double input_audio_seconds{};
   std::int64_t input_characters{};
 };

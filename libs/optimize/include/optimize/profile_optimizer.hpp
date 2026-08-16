@@ -18,6 +18,7 @@ struct ProfileInput {
     int n_ubatch{512};
     std::string cache_type_k{"q8_0"};
     std::string cache_type_v{"q8_0"};
+    std::string flash_attention{"auto"};
 };
 
 struct ProfileCandidate {
@@ -28,6 +29,7 @@ struct ProfileCandidate {
     std::string cache_type_k;
     std::string cache_type_v;
     std::string flash_attention{"auto"};
+    int mtp_max_active_requests{1};
     double estimated_vram_mb{0.0};
     double reserve_vram_mb{0.0};
     double quality_score{0.0};

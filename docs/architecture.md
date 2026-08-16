@@ -91,21 +91,42 @@ OpenAI-compatible routes:
 
 Anthropic compatibility remains at `POST /v1/messages` and `/v1/messages/count_tokens`.
 
-InferDeck control routes cover model load/unload, swap status/cancellation, media job cancellation, metrics, history, configuration, and the model store. Dashboard live state uses one SSE connection; there is no WebSocket layer.
+InferDeck control routes cover model load/unload, swap status/cancellation, media job cancellation, metrics, history, configuration, model aliases, and the model store. Dashboard live state uses one SSE connection; there is no WebSocket layer.
 
 Responses is stateless. Storage/background/conversation parameters are rejected rather than silently retained.
 
 ## Model store
 
-The model store uses Hugging Face metadata and resolver endpoints through native WinHTTP. A background job downloads to a confined `.partial` path, supports HTTP Range resume and cancellation, checks free disk space, validates exact size and SHA-256, atomically finalizes the artifact, then updates `installed.json` and the runtime registry. A partial or corrupt artifact is never registered.
+The model store uses Hugging Face metadata and resolver endpoints through native WinHTTP. A background job downloads to a confined `.partial` path, supports HTTP Range resume and cancellation, checks free disk space, validates exact size and SHA-256, atomically finalizes the artifact, then updates `installed.json` and the runtime registry. Sherpa ONNX repositories are staged and validated as complete multi-file bundles before a single directory rename makes them visible. A partial or corrupt artifact is never registered.
 
-Removal is limited to store-managed paths. Loaded or active models cannot be removed.
+Removal is limited to store-managed paths. Loaded or active models cannot be removed. Archive moves a managed artifact into `model_store.archive_root`; permanent delete removes it after an explicit dashboard confirmation.
 
 ## Configuration
 
-`config/gateway.yml` remains the only active configuration source. The dashboard retrieves a secret-masked document and an optimistic revision. Common controls modify the YAML document while retaining comments and unknown keys; the full editor covers all settings. The server restores unchanged secret sentinels, validates the complete document, and atomically replaces the file. Changes require an operator restart and never restart the production process automatically.
+`config/gateway.yml` remains the only active configuration source. The dashboard retrieves a secret-masked document and an optimistic revision. Common controls modify the YAML document while retaining comments and unknown keys; the full editor covers all settings. The server restores unchanged secret sentinels, validates the complete document, atomically replaces the active file, and applies it through the gateway's graceful in-process reload loop.
 
 Model entries contain runtime-neutral fields plus an optional `artifacts` map for runtime-specific files. Native examples and build pins are in `docs/alpha-v2-native-runtimes.md`.
+
+Per-model `prompt_price_per_million` and `completion_price_per_million` values are the server-owned token-pricing source. The pricing endpoint merges those values over packaged defaults, and the dashboard reports when neither source defines a model price.
+
+Stable aliases are stored in the root `model_aliases` sequence and managed through `/api/model-aliases`. An alias points directly to a concrete registry model and captures its minimum context and required capabilities as a compatibility contract. Retargeting is rejected when the new concrete model cannot satisfy that contract. Discovery and request metrics preserve both the requested alias and resolved concrete model.
+
+Each model can enable `optimization.schedule` with `window_start` and `window_end` in `HH:MM`. The default window is 03:00–04:00 in the gateway host's local timezone. A scheduled benchmark starts at most once per local calendar day and only while the request queue is idle, no swap is active, and GPU utilization is at most 20 percent. The dashboard exposes the server timezone plus next and last run status.
+
+## Dashboard model management
+
+Model Settings owns runtime, capacity, pricing, sampler, and optimization controls. A completed optimization run is only a recommendation until the user selects **Use these values** and saves; **Discard results**, **Rerun**, closing, and cancellation never alter the active profile. Icon-only load, unload, settings, and close actions expose keyboard focus, accessible names, and tooltips.
+
+Models owns stable aliases plus catalogue and installed-artifact operations. Catalogue filters combine name, runtime, modality, selected VRAM capacity, and Hugging Face download/like popularity. The active filter summary includes a one-step reset. Archive and permanent delete remain explicit, confirmed actions and refuse loaded or active models.
+
+## Throughput and usage semantics
+
+- **TPS** is generated tokens divided by scheduler-measured generation time; prompt prefill is excluded.
+- **Prompt TPS** is uncached prompt tokens divided by the scheduler-measured prefill interval.
+- **Peak TPS** and peak Prompt TPS are maxima from actual completed requests, never configured estimates.
+- A missing duration produces an unavailable dashboard value rather than a fabricated zero-speed measurement.
+
+The LLM Usage range selector drives the chart, summary totals, per-model requests and tokens, weighted throughput, peaks, and cost through the same hourly, daily, or monthly buckets. The table headers are keyboard-sortable, expose `aria-sort`, start alphabetically for model names and highest-first for numeric columns, and reverse on a second activation. Lifetime data is only shown where it is labelled lifetime.
 
 ## Persistence boundary
 
