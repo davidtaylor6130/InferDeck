@@ -657,10 +657,10 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
         completion_tokens += row.completion_tokens;
         requests += row.requests;
         const double avg_tps = row.total_generation_duration_ms > 0.0
-            ? static_cast<double>(row.completion_tokens) / (row.total_generation_duration_ms / 1000.0)
+            ? static_cast<double>(row.measured_completion_tokens) / (row.total_generation_duration_ms / 1000.0)
             : 0.0;
         const double avg_prompt_tps = row.total_prompt_duration_ms > 0.0
-            ? static_cast<double>(std::max<std::int64_t>(0, row.prompt_tokens - row.cached_prompt_tokens)) /
+            ? static_cast<double>(row.measured_prompt_tokens) /
                 (row.total_prompt_duration_ms / 1000.0)
             : 0.0;
         usage.push_back({
@@ -670,6 +670,8 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
             {"promptTokens", row.prompt_tokens},
             {"cachedPromptTokens", row.cached_prompt_tokens},
             {"completionTokens", row.completion_tokens},
+            {"measuredCompletionTokens", row.measured_completion_tokens},
+            {"measuredPromptTokens", row.measured_prompt_tokens},
             {"totalTokens", row.prompt_tokens + row.completion_tokens},
             {"peakTokensPerSecond", row.peak_tokens_per_second},
             {"avgTokensPerSecond", avg_tps},
@@ -690,6 +692,8 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
                 {"promptTokens", row.prompt_tokens},
                 {"cachedPromptTokens", row.cached_prompt_tokens},
                 {"completionTokens", row.completion_tokens},
+                {"measuredCompletionTokens", row.measured_completion_tokens},
+                {"measuredPromptTokens", row.measured_prompt_tokens},
                 {"totalTokens", row.total_tokens},
                 {"requests", row.requests},
                 {"successfulRequests", row.successful_requests},

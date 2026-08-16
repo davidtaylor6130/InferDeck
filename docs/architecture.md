@@ -122,8 +122,8 @@ Models owns stable aliases plus catalogue and installed-artifact operations. Cat
 ## Throughput and usage semantics
 
 - **TPS** is generated tokens divided by scheduler-measured generation time; prompt prefill is excluded.
-- **Prompt TPS** is uncached prompt tokens divided by the scheduler-measured prefill interval.
-- **Peak TPS** and peak Prompt TPS are maxima from actual completed requests, never configured estimates.
+- **Prompt processing** is uncached prompt tokens divided by the scheduler-measured prefill interval.
+- **Peak TPS** and peak prompt-processing speed are maxima from comparable successful requests with measured phase timings, never configured estimates.
 - A missing duration produces an unavailable dashboard value rather than a fabricated zero-speed measurement.
 
 The LLM Usage range selector drives the chart, summary totals, per-model requests and tokens, weighted throughput, peaks, and cost through the same hourly, daily, or monthly buckets. The table headers are keyboard-sortable, expose `aria-sort`, start alphabetically for model names and highest-first for numeric columns, and reverse on a second activation. Lifetime data is only shown where it is labelled lifetime.

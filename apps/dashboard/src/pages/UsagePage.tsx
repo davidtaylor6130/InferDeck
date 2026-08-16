@@ -30,6 +30,10 @@ export const UsagePage: React.FC<{ section?: DashboardSection }> = ({ section = 
 
 type UsageSortKey = 'model' | 'requests' | 'promptTokens' | 'completionTokens' | 'avgTokensPerSecond' | 'avgPromptTokensPerSecond' | 'peakTokensPerSecond' | 'cost';
 const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+const measuredRate = (tokens: number, durationMs: number, peak: number) => {
+  if (tokens <= 0 || durationMs <= 0 || peak <= 0) return 0;
+  return Math.min(tokens / (durationMs / 1000), peak);
+};
 
 const LlmUsagePage: React.FC = () => {
   const { status, models } = useGateway();
@@ -106,6 +110,10 @@ const LlmUsagePage: React.FC = () => {
       const requests = sum(modelSeries.requests);
       const generationDurationMs = sum(modelSeries.generationDurationMs);
       const promptDurationMs = sum(modelSeries.promptDurationMs);
+      const measuredCompletionTokens = sum(modelSeries.measuredCompletionTokens);
+      const measuredPromptTokens = sum(modelSeries.measuredPromptTokens);
+      const peakTokensPerSecond = Math.max(0, ...modelSeries.peakTokensPerSecond);
+      const peakPromptTokensPerSecond = Math.max(0, ...modelSeries.peakPromptTokensPerSecond);
       return {
         index,
         model,
@@ -115,10 +123,10 @@ const LlmUsagePage: React.FC = () => {
         cachedPromptTokens,
         completionTokens,
         totalTokens: promptTokens + completionTokens,
-        avgTokensPerSecond: generationDurationMs > 0 ? completionTokens / (generationDurationMs / 1000) : 0,
-        peakTokensPerSecond: Math.max(0, ...modelSeries.peakTokensPerSecond),
-        avgPromptTokensPerSecond: promptDurationMs > 0 ? Math.max(0, promptTokens - cachedPromptTokens) / (promptDurationMs / 1000) : 0,
-        peakPromptTokensPerSecond: Math.max(0, ...modelSeries.peakPromptTokensPerSecond),
+        avgTokensPerSecond: measuredRate(measuredCompletionTokens, generationDurationMs, peakTokensPerSecond),
+        peakTokensPerSecond,
+        avgPromptTokensPerSecond: measuredRate(measuredPromptTokens, promptDurationMs, peakPromptTokensPerSecond),
+        peakPromptTokensPerSecond,
         lastTimestampUnixMs: usage.find(row => row.model === model)?.lastTimestampUnixMs ?? 0,
         cost: modelSeries.cost.reduce((total, value) => total + value, 0),
       } satisfies UsageRow & { index: number; cost: number };
@@ -174,6 +182,9 @@ const LlmUsagePage: React.FC = () => {
 
       <Panel>
         <SectionTitle title="Per-model usage" aside={TOKEN_RANGE_LABELS[range]} />
+        <p className="mt-2 text-xs text-text-muted">
+          TPS is average generation speed. Prompt processing is uncached input processing speed. Peak TPS is the fastest comparable generation request.
+        </p>
         {periodUsage.length === 0 ? (
           <p className="mt-3 text-sm text-text-muted">No usage recorded for this range.</p>
         ) : (
@@ -185,9 +196,9 @@ const LlmUsagePage: React.FC = () => {
                   <SortableHeader label="Requests" sortKey="requests" active={sort} onSort={toggleSort} />
                   <SortableHeader label="Prompt" sortKey="promptTokens" active={sort} onSort={toggleSort} />
                   <SortableHeader label="Output" sortKey="completionTokens" active={sort} onSort={toggleSort} />
-                  <SortableHeader label="TPS" sortKey="avgTokensPerSecond" active={sort} onSort={toggleSort} />
-                  <SortableHeader label="Prompt TPS" sortKey="avgPromptTokensPerSecond" active={sort} onSort={toggleSort} />
-                  <SortableHeader label="Peak TPS" sortKey="peakTokensPerSecond" active={sort} onSort={toggleSort} />
+                  <SortableHeader label="TPS" title="Duration-weighted average generation tokens per second" sortKey="avgTokensPerSecond" active={sort} onSort={toggleSort} />
+                  <SortableHeader label="Prompt processing" title="Duration-weighted uncached prompt-processing tokens per second" sortKey="avgPromptTokensPerSecond" active={sort} onSort={toggleSort} />
+                  <SortableHeader label="Peak TPS" title="Fastest comparable single-request generation speed" sortKey="peakTokensPerSecond" active={sort} onSort={toggleSort} />
                   <SortableHeader label="Cost" sortKey="cost" active={sort} onSort={toggleSort} last />
                 </tr>
               </thead>
@@ -338,14 +349,16 @@ const SortableHeader: React.FC<{
   sortKey: UsageSortKey;
   active: { key: UsageSortKey; direction: 'asc' | 'desc' };
   onSort: (key: UsageSortKey) => void;
+  title?: string;
   last?: boolean;
-}> = ({ label, sortKey, active, onSort, last }) => {
+}> = ({ label, sortKey, active, onSort, title, last }) => {
   const selected = active.key === sortKey;
   const ariaSort = selected ? (active.direction === 'asc' ? 'ascending' : 'descending') : 'none';
   return (
     <th className={`py-2 font-medium ${last ? '' : 'pr-4'}`} aria-sort={ariaSort}>
       <button
         type="button"
+        title={title}
         onClick={() => onSort(sortKey)}
         className="rounded text-left hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
       >

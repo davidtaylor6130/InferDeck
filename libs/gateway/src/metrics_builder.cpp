@@ -1,6 +1,5 @@
 #include "gateway/metrics_builder.hpp"
 
-#include <algorithm>
 #include <cstdint>
 
 namespace inferdeck::gateway {
@@ -83,14 +82,16 @@ json MetricsBuilder::build_history(const observability::StatsDb& db, int limit) 
       {"prompt_tokens", u.prompt_tokens},
       {"cached_prompt_tokens", u.cached_prompt_tokens},
       {"completion_tokens", u.completion_tokens},
+      {"measured_completion_tokens", u.measured_completion_tokens},
+      {"measured_prompt_tokens", u.measured_prompt_tokens},
       {"total_tokens", u.prompt_tokens + u.completion_tokens},
       {"total_duration_ms", u.total_duration_ms},
       {"peak_tokens_per_second", u.peak_tokens_per_second},
       {"peak_prompt_tokens_per_second", u.peak_prompt_tokens_per_second},
       {"avg_tokens_per_second", u.total_generation_duration_ms > 0.0
-          ? static_cast<double>(u.completion_tokens) / (u.total_generation_duration_ms / 1000.0) : 0.0},
+          ? static_cast<double>(u.measured_completion_tokens) / (u.total_generation_duration_ms / 1000.0) : 0.0},
       {"avg_prompt_tokens_per_second", u.total_prompt_duration_ms > 0.0
-          ? static_cast<double>(std::max<std::int64_t>(0, u.prompt_tokens - u.cached_prompt_tokens)) /
+          ? static_cast<double>(u.measured_prompt_tokens) /
               (u.total_prompt_duration_ms / 1000.0) : 0.0},
       {"last_timestamp_unix_ms", u.last_timestamp_unix_ms}
     });
@@ -103,6 +104,8 @@ json MetricsBuilder::build_history(const observability::StatsDb& db, int limit) 
       {"prompt_tokens", b.prompt_tokens},
       {"cached_prompt_tokens", b.cached_prompt_tokens},
       {"completion_tokens", b.completion_tokens},
+      {"measured_completion_tokens", b.measured_completion_tokens},
+      {"measured_prompt_tokens", b.measured_prompt_tokens},
       {"total_tokens", b.total_tokens},
       {"requests", b.requests},
       {"successful_requests", b.successful_requests},
