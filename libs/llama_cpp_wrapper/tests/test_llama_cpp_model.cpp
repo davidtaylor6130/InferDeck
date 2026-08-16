@@ -1,10 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
@@ -478,6 +481,93 @@ TEST_CASE("MTP recurrent checkpoint reuses an identical prompt",
   REQUIRE(second->cached_prompt_tokens > 0);
 
   (void)lm.release_slot(slot_id);
+  (void)lm.unload();
+  LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("MTP cancellation is safe while another slot decodes",
+          "[llama][scheduler][mtp][.][requires_mtp_model]") {
+  const auto gguf = test_mtp_model_path();
+  if (gguf.empty()) SKIP("INFERDECK_TEST_MTP_MODEL not set");
+  ScopedTestLogger logger;
+
+  LlamaCppModel::init_backend();
+  ModelInfo minfo;
+  minfo.name = "test-mtp-cancel-overlap";
+  minfo.gguf_path = gguf;
+  minfo.n_slots = 2;
+  minfo.context_size = 2048;
+  minfo.vram_required_mb = 0;
+  LlamaCppConfig config;
+  config.n_batch = 512;
+  config.n_ubatch = 512;
+  config.cache_type_k = "q4_0";
+  config.cache_type_v = "q4_0";
+  config.mtp_enabled = true;
+  config.mtp_draft_tokens = 2;
+  config.mtp_max_active_requests = 1;
+  LlamaCppModel lm(minfo, config);
+  REQUIRE(lm.load().has_value());
+
+  const auto first_slot = lm.acquire_slot();
+  const auto second_slot = lm.acquire_slot();
+  REQUIRE(first_slot.has_value());
+  REQUIRE(second_slot.has_value());
+
+  std::atomic<bool> cancel_first{false};
+  std::atomic<bool> first_started{false};
+  std::atomic<bool> second_started{false};
+  InferenceRequest first_request;
+  first_request.messages = {
+      ChatMessage{"user", "Write a long numbered list without stopping."}};
+  first_request.max_tokens = 1024;
+  InferenceRequest second_request;
+  second_request.messages = {
+      ChatMessage{"user", "Count from one to twenty, one number per line."}};
+  second_request.max_tokens = 64;
+
+  auto first = std::async(std::launch::async, [&] {
+    return lm.predict_stream(
+        *first_slot,
+        first_request,
+        [&](const InferenceDelta&) {
+          first_started.store(true);
+          return true;
+        },
+        &cancel_first);
+  });
+
+  const auto first_deadline = std::chrono::steady_clock::now() +
+      std::chrono::seconds(60);
+  while (!first_started.load() &&
+         std::chrono::steady_clock::now() < first_deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  REQUIRE(first_started.load());
+
+  auto second = std::async(std::launch::async, [&] {
+    return lm.predict_stream(
+        *second_slot,
+        second_request,
+        [&](const InferenceDelta&) {
+          if (!second_started.exchange(true)) {
+            cancel_first.store(true);
+          }
+          return true;
+        },
+        nullptr);
+  });
+
+  REQUIRE(first.wait_for(std::chrono::seconds(60)) ==
+          std::future_status::ready);
+  REQUIRE(second.wait_for(std::chrono::seconds(60)) ==
+          std::future_status::ready);
+  CHECK(first.get().has_value());
+  CHECK(second.get().has_value());
+  CHECK(second_started.load());
+
+  (void)lm.release_slot(*first_slot);
+  (void)lm.release_slot(*second_slot);
   (void)lm.unload();
   LlamaCppModel::shutdown_backend();
 }

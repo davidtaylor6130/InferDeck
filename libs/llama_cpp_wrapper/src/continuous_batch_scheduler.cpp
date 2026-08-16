@@ -750,6 +750,8 @@ void ContinuousBatchScheduler::run_loop() {
         }
 
         for (auto* t : tasks) {
+            if (std::find(cancelled.begin(), cancelled.end(), t) != cancelled.end()) continue;
+            if (std::find(stopped.begin(), stopped.end(), t) != stopped.end()) continue;
             if (t->spec_i_batch.empty()) continue;
             if (!speculative_ ||
                 t->spec_i_batch.size() != t->spec_draft.size() + 1) {

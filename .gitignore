@@ -105,3 +105,4 @@ session-*.md
 /.agents
 /.claude/
 /.codex-tmp/
+/.codex-write-probe
