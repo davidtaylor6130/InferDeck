@@ -18,6 +18,7 @@ enum class ErrorCode {
     IoError,
     ParseError,
     OutOfMemory,
+    ResourceBusy,
     Timeout,
     Cancelled,
     Unavailable,

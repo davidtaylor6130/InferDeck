@@ -201,6 +201,11 @@ public:
             return foundation::Err<void>(threads.error().code,
                                          threads.error().message);
         }
+        if (provider_ != "cpu" && info_.vram_required_mb <= 0) {
+            return foundation::Err<void>(
+                foundation::ErrorCode::InvalidArgument,
+                "sherpa-onnx GPU providers require positive VRAM accounting");
+        }
         SherpaOnnxOfflineTtsConfig config{};
         if (engine_ == "supertonic") {
             if (duration_predictor_.empty() || text_encoder_.empty() ||

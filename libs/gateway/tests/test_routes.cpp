@@ -19,6 +19,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -42,6 +45,7 @@ public:
     std::atomic<int> vram_mb{4096};
     std::atomic<int> max_slots{2};
     std::atomic<int> load_delay_ms{0};
+    std::atomic<bool> load_started{false};
     std::atomic<bool> load_should_fail{false};
     std::atomic<bool> block_until_cancel{false};
     std::atomic<bool> block_media_until_cancel{false};
@@ -53,6 +57,7 @@ public:
     std::atomic<int> speech_chunk_count{0};
     std::atomic<int> speech_chunks_emitted{0};
     std::atomic<bool> speech_should_fail{false};
+    std::atomic<int> transcription_delay_ms{0};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
     std::string last_request_json;
@@ -66,6 +71,7 @@ public:
     const ChatTemplateMeta& chat_template_meta() const override { return chat_meta_; }
 
     Result<void> load() override {
+        load_started.store(true);
         const int delay = load_delay_ms.load();
         if (delay > 0) std::this_thread::sleep_for(std::chrono::milliseconds{delay});
         if (load_should_fail.load()) {
@@ -308,6 +314,9 @@ public:
     Result<TranscriptionResult> transcribe(
         int, const TranscriptionRequest& request,
         const std::function<bool(int)>& progress = {}) override {
+        if (const int delay = transcription_delay_ms.load(); delay > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{delay});
+        }
         if (progress && !progress(75)) return inferdeck::foundation::Err<TranscriptionResult>(ErrorCode::Cancelled, "cancelled");
         TranscriptionResult result;
         result.text = "test transcript";
@@ -399,6 +408,8 @@ struct TestServer {
     httplib::Server server;
     std::thread th;
     int port{0};
+    std::string voice_default_model;
+    int voice_session_grace_ms{15000};
 
     TestServer() : coordinator(registry) {
         registry.set_factory([](const ModelInfo& info) {
@@ -456,6 +467,8 @@ struct TestServer {
         deps.metrics = &metrics;
         deps.stats_db = &stats_db;
         deps.swap_tracker = &swap_tracker;
+        deps.default_model = voice_default_model;
+        deps.voice_session_grace_ms = voice_session_grace_ms;
         return deps;
     }
 
@@ -1207,15 +1220,15 @@ TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speec
                        {"voice", "default"}, {"response_format", "mp3"},
                        {"speed", 1.0}}.dump(), "application/json");
     REQUIRE(response);
-    CHECK(response->status == 400);
-    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
-          "unsupported_response_format");
+    CHECK(response->status == 200);
+    CHECK(response->get_header_value("Content-Type") == "audio/wav");
+    CHECK(response->body == "RIFF");
     const auto usage = ts.stats_db.model_usage();
     REQUIRE(usage.size() == 1);
     CHECK(usage[0].model == "speech-model");
-    CHECK(usage[0].requests == 2);
-    CHECK(usage[0].successful_requests == 1);
-    CHECK(usage[0].input_characters == 5);
+    CHECK(usage[0].requests == 3);
+    CHECK(usage[0].successful_requests == 2);
+    CHECK(usage[0].input_characters == 10);
     CHECK(usage[0].input_audio_seconds == 0.0);
     ts.stop();
 }
@@ -1279,8 +1292,93 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     ts.stop();
 }
 
+TEST_CASE("Routes: Open WebUI voice reservation spans STT through TTS",
+          "[routes][voice][priority]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("gemma"));
+    auto whisper = make_info("whisper-model");
+    whisper.runtime = "whisper_cpp";
+    whisper.modality = "audio_transcription";
+    whisper.capabilities = {"audio_transcription"};
+    whisper.vram_required_mb = 0;
+    auto speech = make_info("speech-model");
+    speech.runtime = "sherpa_onnx";
+    speech.modality = "audio_speech";
+    speech.capabilities = {"audio_speech"};
+    speech.vram_required_mb = 0;
+    ts.registry.register_model(whisper);
+    ts.registry.register_model(speech);
+    REQUIRE(ts.coordinator.load("whisper-model"));
+    REQUIRE(ts.coordinator.load("speech-model"));
+    auto* whisper_backend = const_cast<IModelMock*>(
+        dynamic_cast<const IModelMock*>(
+            ts.coordinator.get_backend("whisper-model")));
+    REQUIRE(whisper_backend);
+    whisper_backend->transcription_delay_ms.store(20);
+    ts.voice_default_model = "gemma";
+    ts.voice_session_grace_ms = 5;
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto transcription = client.Post(
+        "/v1/audio/transcriptions", httplib::UploadFormDataItems{
+            {"file", test_wav(), "test.wav", "audio/wav"},
+            {"model", "whisper-model", "", ""},
+        });
+    REQUIRE(transcription);
+    REQUIRE(transcription->status == 200);
+    CHECK(ts.coordinator.priority_session_matches("127.0.0.1", "gemma"));
+
+    const auto synthesized = client.Post(
+        "/v1/audio/speech",
+        nlohmann::json{{"model", "speech-model"}, {"input", "hello"},
+                       {"voice", "default"}, {"response_format", "wav"}}.dump(),
+        "application/json");
+    REQUIRE(synthesized);
+    REQUIRE(synthesized->status == 200);
+    CHECK_FALSE(ts.coordinator.priority_session_matches("127.0.0.1", "gemma"));
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/audio/transcriptions accepts Open WebUI MP3", "[routes][transcriptions]") {
+    TestServer ts;
+    auto info = make_info("whisper-model");
+    info.runtime = "whisper_cpp";
+    info.modality = "audio_transcription";
+    info.capabilities = {"audio_transcription"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("whisper-model"));
+    REQUIRE(ts.start());
+
+    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "libs/third_party/llama.cpp/tools/mtmd/test-2.mp3";
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    const std::string audio(std::istreambuf_iterator<char>{input}, {});
+    REQUIRE_FALSE(audio.empty());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto response = client.Post(
+        "/v1/audio/transcriptions", httplib::UploadFormDataItems{
+            {"file", audio, "voice-mode.mp3", "audio/mpeg"},
+            {"model", "whisper-model", "", ""},
+            {"language", "en", "", ""},
+        });
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body)["text"] == "test transcript");
+    ts.stop();
+}
+
 TEST_CASE("Media routes reject unsupported request shapes", "[routes][media]") {
     TestServer ts;
+    auto transcription_info = make_info("transcription-validation");
+    transcription_info.runtime = "whisper_cpp";
+    transcription_info.modality = "audio_transcription";
+    transcription_info.capabilities = {"audio_transcription"};
+    transcription_info.vram_required_mb = 0;
+    ts.registry.register_model(transcription_info);
+    REQUIRE(ts.coordinator.load("transcription-validation"));
     REQUIRE(ts.start());
     httplib::Client client("127.0.0.1", ts.port);
     auto image = client.Post("/v1/images/generations",
@@ -1308,7 +1406,7 @@ TEST_CASE("Media routes reject unsupported request shapes", "[routes][media]") {
     CHECK(transcription->status == 400);
     transcription = client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
         {"file", test_wav(), "test.wav", "audio/wav"},
-        {"model", "x", "", ""},
+        {"model", "transcription-validation", "", ""},
         {"temperature", "nan", "", ""},
     });
     REQUIRE(transcription);
@@ -1318,7 +1416,7 @@ TEST_CASE("Media routes reject unsupported request shapes", "[routes][media]") {
     transcription = client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
         {"file", test_float_wav(std::numeric_limits<float>::quiet_NaN()),
          "test.wav", "audio/wav"},
-        {"model", "x", "", ""},
+        {"model", "transcription-validation", "", ""},
     });
     REQUIRE(transcription);
     CHECK(transcription->status == 400);
@@ -1701,6 +1799,157 @@ TEST_CASE("ensure_model_loaded: load failure is returned after completion",
     REQUIRE(result.status == 503);
     REQUIRE(result.code == "swap_failed");
     REQUIRE(result.message == "model load failed: mock load failed");
+}
+
+TEST_CASE("ensure_model_loaded: active GPU capacity is reported as transient",
+          "[routes][swap][residency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto model = std::make_unique<IModelMock>(info);
+        model->vram_mb.store(info.vram_required_mb);
+        return model;
+    });
+    auto active = make_info("gemma");
+    active.vram_required_mb = 5000;
+    auto waiting = make_info("qwen");
+    waiting.vram_required_mb = 5000;
+    registry.register_model(active);
+    registry.register_model(waiting);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.load("gemma"));
+    auto slot = coordinator.acquire_slot("gemma");
+    REQUIRE(slot);
+    SwapTracker tracker;
+    observability::Metrics metrics;
+    foundation::EventBus events;
+    auto subscription = events.subscribe();
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+    deps.metrics = &metrics;
+    deps.events = &events;
+
+    const auto result = ensure_model_loaded(deps, "qwen");
+
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.status == 503);
+    REQUIRE(result.code == "capacity_busy");
+    REQUIRE(result.error_code == ErrorCode::ResourceBusy);
+    CHECK(tracker.snapshot().last_deferred);
+    CHECK(metrics.total_swaps() == 0);
+    const auto swapping = subscription->wait_for(std::chrono::milliseconds{100});
+    const auto waiting_event = subscription->wait_for(std::chrono::milliseconds{100});
+    REQUIRE(swapping);
+    REQUIRE(waiting_event);
+    CHECK(nlohmann::json::parse(swapping->data)["state"] == "swapping");
+    CHECK(nlohmann::json::parse(waiting_event->data)["state"] == "waiting");
+    REQUIRE(coordinator.release_slot("gemma", *slot));
+}
+
+TEST_CASE("ensure_model_loaded: caller deadline bounds a slow swap wait",
+          "[routes][swap][deadline]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto model = std::make_unique<IModelMock>(info);
+        model->load_delay_ms.store(500);
+        return model;
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+    const auto started = std::chrono::steady_clock::now();
+
+    const auto result = ensure_model_loaded(
+        deps, "a", started + std::chrono::milliseconds{40}, {});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    REQUIRE_FALSE(result.ok);
+    CHECK(result.error_code == ErrorCode::Timeout);
+    CHECK(elapsed < std::chrono::milliseconds{200});
+    tracker.join();
+}
+
+TEST_CASE("ensure_model_loaded: caller cancellation interrupts a slow swap wait",
+          "[routes][swap][deadline]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto model = std::make_unique<IModelMock>(info);
+        model->load_delay_ms.store(500);
+        return model;
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+    std::atomic<bool> cancelled{false};
+    std::jthread cancel([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+        cancelled.store(true);
+    });
+    const auto started = std::chrono::steady_clock::now();
+
+    const auto result = ensure_model_loaded(
+        deps, "a", started + std::chrono::seconds{1},
+        [&] { return cancelled.load(); });
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    REQUIRE_FALSE(result.ok);
+    CHECK(result.error_code == ErrorCode::Cancelled);
+    CHECK(elapsed < std::chrono::milliseconds{200});
+    tracker.join();
+}
+
+TEST_CASE("ensure_model_loaded: cold voice sidecar bypasses an active GPU swap",
+          "[routes][swap][voice]") {
+    ModelRegistry registry;
+    const auto factory = [](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto model = std::make_unique<IModelMock>(info);
+        if (info.name == "qwen") model->load_delay_ms.store(300);
+        return model;
+    };
+    registry.set_factory(factory);
+    registry.register_factory("sherpa_onnx", factory);
+    auto qwen = make_info("qwen");
+    auto voice = make_info("voice");
+    voice.runtime = "sherpa_onnx";
+    voice.modality = "audio_speech";
+    voice.vram_required_mb = 0;
+    registry.register_model(qwen);
+    registry.register_model(voice);
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+    REQUIRE(start_swap_async(deps, "qwen").status == 202);
+    IModelMock* qwen_backend = nullptr;
+    for (int attempt = 0; attempt < 500; ++attempt) {
+        qwen_backend = const_cast<IModelMock*>(
+            dynamic_cast<const IModelMock*>(coordinator.get_backend("qwen")));
+        if (qwen_backend && qwen_backend->load_started.load() &&
+            !qwen_backend->loaded.load()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    REQUIRE(qwen_backend);
+    REQUIRE(qwen_backend->load_started.load());
+    REQUIRE_FALSE(qwen_backend->loaded.load());
+    const auto started = std::chrono::steady_clock::now();
+
+    const auto result = ensure_model_loaded(
+        deps, "voice", started + std::chrono::milliseconds{100}, {});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    REQUIRE(result.ok);
+    CHECK(elapsed < std::chrono::milliseconds{100});
+    CHECK(coordinator.is_loaded("voice"));
+    tracker.join();
+    CHECK(coordinator.is_loaded("qwen"));
 }
 
 TEST_CASE("SwapTracker owns the worker and joins it at destruction",

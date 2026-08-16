@@ -20,6 +20,27 @@ std::uint32_t u32(const std::vector<std::byte>& data, std::size_t offset) {
 
 }
 
+TEST_CASE("Supertonic GPU providers require VRAM accounting",
+          "[native-runtimes][sherpa-onnx][supertonic]") {
+    inferdeck::model::ModelRegistry registry;
+    inferdeck::native_runtimes::register_factories(registry);
+    inferdeck::model::ModelInfo info;
+    info.name = "supertonic-gpu-unaccounted";
+    info.runtime = "sherpa_onnx";
+    info.modality = "audio_speech";
+    info.artifacts["engine"] = "supertonic";
+    info.artifacts["provider"] = "cuda";
+    info.vram_required_mb = 0;
+    registry.register_model(info);
+
+    auto created = registry.create_result(info.name);
+    REQUIRE(created);
+    const auto loaded = created.value()->load();
+    REQUIRE_FALSE(loaded);
+    CHECK(loaded.error().code == inferdeck::foundation::ErrorCode::InvalidArgument);
+    CHECK(loaded.error().message.find("VRAM accounting") != std::string::npos);
+}
+
 TEST_CASE("Supertonic synthesizes a real WAV in-process",
           "[native-runtimes][sherpa-onnx][supertonic][integration]") {
     const char* model_dir = std::getenv("INFERDECK_SUPERTONIC_TEST_MODEL_DIR");

@@ -1,0 +1,41 @@
+server:
+  host: "127.0.0.1"
+  port: 11435
+
+logging:
+  level: "info"
+  file: "logs/gateway.test-openwebui-voice.log"
+
+auth:
+  required: false
+  token: ""
+
+cors:
+  origins:
+    - "*"
+
+state:
+  file: "data/state.test-openwebui-voice.json"
+
+default_model: "whisper-base-en"
+
+observability:
+  stats_db: ""
+  adlx_helper: ""
+  telemetry_poll_ms: 1000
+
+gateway:
+  auto_swap: true
+
+model_registry:
+  - name: "whisper-base-en"
+    family: "whisper"
+    runtime: "whisper_cpp"
+    modality: "audio_transcription"
+    capabilities:
+      - "audio_transcription"
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 0
+    artifacts:
+      model: "E:/InferDeck/models/stt/whisper/ggml-base.en.bin"

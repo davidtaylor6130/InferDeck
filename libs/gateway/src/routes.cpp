@@ -156,7 +156,8 @@ void publish_model_event(const GatewayDeps& deps, const std::string& state,
 
 foundation::Result<void> perform_swap(const GatewayDeps& deps,
                                       const std::string& from,
-                                      const std::string& target) {
+                                      const std::string& target,
+                                      bool defer_resource_busy) {
     LOG_INFO("swap_start", "from={} to={}", from, target);
     const auto start = std::chrono::steady_clock::now();
     foundation::Result<void> result;
@@ -171,24 +172,39 @@ foundation::Result<void> perform_swap(const GatewayDeps& deps,
         std::chrono::steady_clock::now() - start).count();
     const std::string error = result ? std::string{} : result.error().message;
     const bool cancelled = !result && result.error().code == foundation::ErrorCode::Cancelled;
+    const bool deferred = !result && defer_resource_busy &&
+        result.error().code == foundation::ErrorCode::ResourceBusy;
     LOG_INFO("swap_complete", "to={} success={} duration_ms={} error={}",
              target, result.has_value(), elapsed, error);
-    record_swap(deps, from, target, elapsed, result.has_value(), error);
-    publish_model_event(deps, result ? "ready" : (cancelled ? "cancelled" : "failed"),
+    if (!deferred) {
+        record_swap(deps, from, target, elapsed, result.has_value(), error);
+    }
+    publish_model_event(deps, result ? "ready" :
+        (cancelled ? "cancelled" : deferred ? "waiting" : "failed"),
                         from, target, elapsed, error);
     if (deps.swap_tracker) {
-        deps.swap_tracker->end(result.has_value(), error, cancelled);
+        deps.swap_tracker->end(
+            result.has_value(), error, cancelled,
+            result ? foundation::ErrorCode::Ok : result.error().code,
+            deferred);
     }
     return result;
 }
 
 EnsureLoadedResult swap_start_error(const SwapStartResult& started) {
     const auto error = started.body.value("error", nlohmann::json::object());
+    const auto code = error.value("code", "swap_start_failed");
+    const auto error_code = started.status == 404
+        ? foundation::ErrorCode::NotFound
+        : started.status >= 500 && code == "swap_start_failed"
+            ? foundation::ErrorCode::Internal
+            : foundation::ErrorCode::Unavailable;
     return {
         false,
         started.status,
-        error.value("code", "swap_start_failed"),
+        code,
         error.value("message", "model swap could not be started"),
+        error_code,
     };
 }
 
@@ -389,6 +405,12 @@ std::string header_value(const httplib::Request& req, const std::string& name) {
     return it->second;
 }
 
+std::string request_client_key(const httplib::Request& req) {
+    const auto explicit_key = header_value(req, "X-InferDeck-Voice-Session");
+    if (!explicit_key.empty()) return explicit_key;
+    return req.remote_addr.empty() ? "local" : req.remote_addr;
+}
+
 void handle_models(const httplib::Request& req, httplib::Response& resp,
                    const GatewayDeps& deps) {
     (void)req;
@@ -480,7 +502,8 @@ bool maintenance_mode_active(const GatewayDeps& deps) noexcept {
     return deps.maintenance_mode && deps.maintenance_mode->load();
 }
 
-SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name) {
+SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name,
+                                 bool defer_resource_busy) {
     if (maintenance_mode_active(deps)) {
         return {503, make_error_json(
             503, "maintenance_mode",
@@ -498,7 +521,7 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
                 (info ? info->runtime : std::string("unknown")))};
     }
     auto current = deps.coordinator.get_loaded_model();
-    if (current && *current == model_name) {
+    if (deps.coordinator.is_loaded(model_name)) {
         return {200, {{"status", "ready"},
                       {"model", model_name},
                       {"message", "model already loaded"}}};
@@ -514,9 +537,9 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
     std::string launch_error;
     const auto start_result = deps.swap_tracker->start(
         from, model_name, now_ms(),
-        [deps_copy, from, model_name]() {
+        [deps_copy, from, model_name, defer_resource_busy]() {
             publish_model_event(deps_copy, "swapping", from, model_name, 0.0, "");
-            (void)perform_swap(deps_copy, from, model_name);
+            (void)perform_swap(deps_copy, from, model_name, defer_resource_busy);
         },
         launch_error);
     if (start_result == SwapTracker::StartResult::Busy) {
@@ -537,59 +560,100 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
 
 EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
                                        const std::string& model_name) {
+    return ensure_model_loaded(
+        deps, model_name,
+        std::chrono::steady_clock::now() + std::chrono::minutes{5}, {});
+}
+
+EnsureLoadedResult ensure_model_loaded(
+    const GatewayDeps& deps, const std::string& model_name,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& cancelled) {
     if (maintenance_mode_active(deps)) {
         return {false, 503, "maintenance_mode",
-                "measured model optimization is running; retry after it restores the active profile"};
+                "measured model optimization is running; retry after it restores the active profile",
+                foundation::ErrorCode::Unavailable};
     }
     if (deps.coordinator.is_loaded(model_name)) {
-        return {true, 200, "", ""};
+        return {true, 200, "", "", foundation::ErrorCode::Ok};
     }
     if (!deps.auto_swap) {
         return {false, 503, "model_not_loaded",
-                "model not loaded; POST /v1/swap/to/" + model_name + " then retry"};
+                "model not loaded; POST /v1/swap/to/" + model_name + " then retry",
+                foundation::ErrorCode::NotLoaded};
+    }
+
+    const auto info = deps.coordinator.registry().get_info_result(model_name);
+    if (info && info->modality != "text" && info->vram_required_mb <= 0) {
+        if (!deps.coordinator.registry().has_factory(info->runtime)) {
+            return {false, 503, "runtime_unavailable",
+                    "runtime is not linked: " + info->runtime,
+                    foundation::ErrorCode::Unavailable};
+        }
+        auto loaded = deps.coordinator.load_with_lock_deadline(
+            model_name, deadline, cancelled);
+        if (loaded) return {true, 200, "", "", foundation::ErrorCode::Ok};
+        return {false,
+                loaded.error().code == foundation::ErrorCode::NotFound ? 404 : 503,
+                "sidecar_load_failed", loaded.error().message,
+                loaded.error().code};
     }
 
     if (!deps.swap_tracker) {
         return {false, 503, "swap_executor_unavailable",
-                "model swap executor is unavailable"};
+                "model swap executor is unavailable",
+                foundation::ErrorCode::Unavailable};
     }
 
     LOG_INFO("auto_swap_begin", "requested={}", model_name);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes{5};
     while (std::chrono::steady_clock::now() < deadline) {
+        if (cancelled && cancelled()) {
+            return {false, 499, "request_cancelled",
+                    "request cancelled while loading model: " + model_name,
+                    foundation::ErrorCode::Cancelled};
+        }
         if (deps.coordinator.is_loaded(model_name)) {
-            return {true, 200, "", ""};
+            return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
 
-        auto started = start_swap_async(deps, model_name);
+        auto started = start_swap_async(deps, model_name, true);
         if (started.status != 200 && started.status != 202 &&
             started.status != 409) {
             return swap_start_error(started);
         }
 
         if (deps.coordinator.is_loaded(model_name)) {
-            return {true, 200, "", ""};
+            return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
-        if (!deps.swap_tracker->wait_until_idle(deadline)) {
-            break;
+        const auto wait_deadline = std::min(
+            deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds{100});
+        if (!deps.swap_tracker->wait_until_idle(wait_deadline)) {
+            continue;
         }
 
         if (deps.coordinator.is_loaded(model_name)) {
-            return {true, 200, "", ""};
+            return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
         const auto snap = deps.swap_tracker->snapshot();
         if (snap.target == model_name) {
             if (snap.last_cancelled) {
                 return {false, 503, "swap_cancelled",
-                        "model load was cancelled: " + model_name};
+                        "model load was cancelled: " + model_name,
+                        foundation::ErrorCode::Cancelled};
             }
             if (!snap.last_error.empty()) {
-                return {false, 503, "swap_failed",
-                        "model load failed: " + snap.last_error};
+                const bool capacity_busy =
+                    snap.last_error_code == foundation::ErrorCode::ResourceBusy;
+                return {false, 503,
+                        capacity_busy ? "capacity_busy" : "swap_failed",
+                        (capacity_busy ? "model load deferred: " :
+                                         "model load failed: ") + snap.last_error,
+                        snap.last_error_code};
             }
         }
     }
-    return {false, 503, "swap_timeout", "model load timed out: " + model_name};
+    return {false, 503, "swap_timeout", "model load timed out: " + model_name,
+            foundation::ErrorCode::Timeout};
 }
 
 void handle_swap_to(const httplib::Request& req, httplib::Response& resp,
@@ -631,6 +695,7 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
         {"from", snap.from},
         {"started_unix_ms", snap.started_unix_ms},
         {"last_error", snap.last_error},
+        {"last_deferred", snap.last_deferred},
         {"last_cancelled", snap.last_cancelled},
     };
     for (const auto& resident : deps.coordinator.residency()) {
@@ -705,24 +770,37 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
 
+    const std::string reservation_key = request_client_key(req);
+    const auto voice_session_token =
+        deps.coordinator.hold_priority_session(reservation_key, model_name);
     int slot_id = -1;
     {
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::minutes{5};
+        const std::function<bool()> cancelled = [&req] {
+            return req.is_connection_closed();
+        };
         model::AcquireSlotOptions opts;
         opts.timeout = std::chrono::minutes{5};
         opts.block = true;
         opts.priority = body.contains("priority") && body["priority"].is_number_integer()
             ? std::clamp(body["priority"].get<int>(), -100, 100) : 0;
-        opts.cancelled = [&req] { return req.is_connection_closed(); };
-        opts.prepare = [&deps, &model_name] {
-            auto loaded = ensure_model_loaded(deps, model_name);
+        opts.reservation_key = reservation_key;
+        if (voice_session_token) opts.priority = 100;
+        opts.cancelled = cancelled;
+        opts.prepare = [&deps, &model_name, deadline, cancelled] {
+            auto loaded = ensure_model_loaded(
+                deps, model_name, deadline, cancelled);
             if (loaded.ok) return foundation::Ok();
-            const auto code = loaded.status == 404 ? foundation::ErrorCode::NotFound
-                : loaded.code == "model_not_loaded" ? foundation::ErrorCode::NotLoaded
-                : foundation::ErrorCode::Unavailable;
-            return foundation::Err<void>(code, loaded.message);
+            return foundation::Err<void>(loaded.error_code, loaded.message);
         };
         auto sr = deps.coordinator.acquire_slot(model_name, opts);
         if (!sr) {
+            if (voice_session_token) {
+                deps.coordinator.complete_priority_session_hold(
+                    reservation_key, *voice_session_token,
+                    std::chrono::milliseconds{deps.voice_session_grace_ms});
+            }
             int status = 503;
             std::string code = "no_slots";
             if (sr.error().code == foundation::ErrorCode::Timeout) {
@@ -751,9 +829,16 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     const std::string id = make_id();
     const std::string stream_model = model_name;
 
-    std::function<void()> release_slot = [slot_id, &deps, model_name]() noexcept {
+    std::function<void()> release_slot = [slot_id, &deps, model_name,
+                                          reservation_key,
+                                          voice_session_token]() noexcept {
         if (slot_id >= 0) {
             (void)deps.coordinator.release_slot(model_name, slot_id);
+        }
+        if (voice_session_token) {
+            deps.coordinator.complete_priority_session_hold(
+                reservation_key, *voice_session_token,
+                std::chrono::milliseconds{deps.voice_session_grace_ms});
         }
     };
     struct ReleaseGuard {
@@ -856,6 +941,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         observability::StatsDb* stats_db{nullptr};
         foundation::EventBus* events{nullptr};
         std::atomic<bool> cleanup_done{false};
+        std::string reservation_key;
+        std::uint64_t voice_session_token{0};
+        int voice_session_grace_ms{0};
         InferenceDeltaUtf8Buffer utf8;
 
         void finish_once(bool aborted_stream, int fallback_status, const std::string& reason) {
@@ -900,6 +988,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     LOG_WARN("stream_cleanup_release_failed", "model={} slot_id={} reason={}",
                              model_name, slot_id, released.error().message);
                 }
+                if (voice_session_token != 0) {
+                    coordinator->complete_priority_session_hold(
+                        reservation_key, voice_session_token,
+                        std::chrono::milliseconds{voice_session_grace_ms});
+                }
             }
             LOG_INFO("stream_cleanup", "model={} slot_id={} aborted={} reason={}",
                      model_name, slot_id, aborted_stream, reason);
@@ -913,6 +1006,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     state->metrics = deps.metrics;
     state->stats_db = deps.stats_db;
     state->events = deps.events;
+    state->reservation_key = reservation_key;
+    state->voice_session_token = voice_session_token.value_or(0);
+    state->voice_session_grace_ms = deps.voice_session_grace_ms;
 
     state->inference_thread = std::thread(
         [state, ir = std::move(*inference_request)]() {

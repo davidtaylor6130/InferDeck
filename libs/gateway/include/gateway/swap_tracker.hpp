@@ -10,6 +10,8 @@
 #include <thread>
 #include <utility>
 
+#include "foundation/result.hpp"
+
 namespace inferdeck::gateway {
 
 struct SwapSnapshot {
@@ -17,7 +19,9 @@ struct SwapSnapshot {
     std::string target;
     std::string from;
     std::string last_error;
+    foundation::ErrorCode last_error_code{foundation::ErrorCode::Ok};
     bool last_cancelled{false};
+    bool last_deferred{false};
     std::int64_t started_unix_ms{0};
 };
 
@@ -52,7 +56,9 @@ public:
             state_.target = target;
             state_.started_unix_ms = now_unix_ms;
             state_.last_error.clear();
+            state_.last_error_code = foundation::ErrorCode::Ok;
             state_.last_cancelled = false;
+            state_.last_deferred = false;
         }
         if (completed.joinable()) completed.join();
 
@@ -63,29 +69,35 @@ public:
                     try {
                         task();
                     } catch (const std::exception& exception) {
-                        end(false, exception.what());
+                        end(false, exception.what(), false,
+                            foundation::ErrorCode::Internal);
                     } catch (...) {
-                        end(false, "swap task threw unknown exception");
+                        end(false, "swap task threw unknown exception", false,
+                            foundation::ErrorCode::Internal);
                     }
                 });
         } catch (const std::exception& exception) {
             error = exception.what();
-            end(false, error);
+            end(false, error, false, foundation::ErrorCode::Internal);
             return StartResult::Failed;
         } catch (...) {
             error = "unknown thread launch failure";
-            end(false, error);
+            end(false, error, false, foundation::ErrorCode::Internal);
             return StartResult::Failed;
         }
         return StartResult::Started;
     }
 
-    void end(bool success, const std::string& error, bool cancelled = false) {
+    void end(bool success, const std::string& error, bool cancelled = false,
+             foundation::ErrorCode error_code = foundation::ErrorCode::Unavailable,
+             bool deferred = false) {
         {
             std::lock_guard<std::mutex> lock(mtx_);
             state_.swapping = false;
             state_.last_error = success ? std::string{} : error;
+            state_.last_error_code = success ? foundation::ErrorCode::Ok : error_code;
             state_.last_cancelled = !success && cancelled;
+            state_.last_deferred = !success && deferred;
         }
         cv_.notify_all();
     }

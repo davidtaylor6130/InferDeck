@@ -124,7 +124,7 @@ struct ConfigRouteServer {
 
     explicit ConfigRouteServer(const TempConfig& config) {
         GatewayDeps gateway_deps{
-            coordinator, "15", true, {}, {}, nullptr, nullptr, nullptr,
+            coordinator, "15", true, {}, {}, 15000, nullptr, nullptr, nullptr,
             &swap_tracker, &maintenance_mode};
         DashboardDeps deps{
             gateway_deps,
