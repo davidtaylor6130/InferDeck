@@ -50,6 +50,43 @@ opencode run "Read arch-findings.md.
 Create optimization-plan.md with actionable recommendations."
 ```
 
+## Reasoning Effort
+
+InferDeck accepts `reasoning_effort` on Chat Completions and
+`reasoning.effort` on Responses. Supported values are advertised per model by
+`GET /v1/models`; unsupported values return HTTP 400.
+
+The bundled `qwen3.8-27b` profile supports `low`, `medium`, `xhigh`, and `none`.
+Its embedded template treats `high` as an alias for `xhigh`, uses `xhigh` by
+default, and uses `none` to disable reasoning.
+
+Add the model to the InferDeck provider in `opencode.json` with explicit
+variants so OpenCode exposes them through `/variants` and `variant_cycle`:
+
+```json
+{
+  "qwen3.8-27b": {
+    "name": "qwen3.8-27b",
+    "reasoning": true,
+    "limit": { "context": 100000, "output": 16384 },
+    "modalities": {
+      "input": ["text", "image"],
+      "output": ["text"]
+    },
+    "variants": {
+      "low": { "reasoningEffort": "low" },
+      "medium": { "reasoningEffort": "medium" },
+      "xhigh": { "reasoningEffort": "xhigh" },
+      "off": { "reasoningEffort": "none" }
+    }
+  }
+}
+```
+
+`chat_template_kwargs.reasoning_effort` remains supported and takes precedence
+over the protocol-level field. If neither is supplied, the model profile's
+default is used.
+
 ## Troubleshooting
 
 | Symptom | Fix |

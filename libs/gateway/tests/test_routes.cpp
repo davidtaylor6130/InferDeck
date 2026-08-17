@@ -154,8 +154,12 @@ public:
     }
 
     Result<InferenceResult> predict_stream(
-        int, const InferenceRequest&, const TokenCallback& callback,
+        int, const InferenceRequest& request, const TokenCallback& callback,
         const std::atomic<bool>* cancel = nullptr) override {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            last_request_json = request.openai_body_json;
+        }
         if (context_error.load()) {
             return inferdeck::foundation::Err<InferenceResult>(
                 ErrorCode::ContextLengthExceeded, "prompt is too long");
@@ -501,7 +505,12 @@ bool wait_for_count(const std::atomic<int>& count, int minimum) {
 
 TEST_CASE("Routes: GET /v1/models lists registered models", "[routes][models]") {
     TestServer ts;
-    ts.registry.register_model(make_info("qwen3.6-27b"));
+    auto reasoning_model = make_info("qwen3.6-27b");
+    reasoning_model.reasoning.supported = true;
+    reasoning_model.reasoning.efforts = {"low", "medium", "high"};
+    reasoning_model.reasoning.default_effort = "medium";
+    reasoning_model.reasoning.none_disables = true;
+    ts.registry.register_model(reasoning_model);
     ts.registry.register_model(make_info("qwen3-coder-next"));
     REQUIRE(ts.start());
 
@@ -523,6 +532,16 @@ TEST_CASE("Routes: GET /v1/models lists registered models", "[routes][models]") 
     REQUIRE(body["data"][0]["modality"] == "text");
     REQUIRE(body["data"][0]["inferdeck"]["capabilities"].is_array());
     REQUIRE(body["data"][0]["inferdeck"]["resources"]["configured_slots"] == 2);
+    const auto reasoning_entry = std::find_if(
+        body["data"].begin(), body["data"].end(), [](const auto& entry) {
+            return entry.value("id", "") == "qwen3.6-27b";
+        });
+    REQUIRE(reasoning_entry != body["data"].end());
+    REQUIRE((*reasoning_entry)["reasoning"] == true);
+    REQUIRE((*reasoning_entry)["reasoning_efforts"] ==
+            nlohmann::json::array({"low", "medium", "high"}));
+    REQUIRE((*reasoning_entry)["reasoning_default_effort"] == "medium");
+    REQUIRE((*reasoning_entry)["inferdeck"]["reasoning"]["none_disables"] == true);
     ts.stop();
 }
 
@@ -887,6 +906,107 @@ TEST_CASE("Routes: POST /v1/responses translates string input and output", "[rou
     REQUIRE(body["output"][0]["content"][0]["text"] == "Hello from model");
     REQUIRE(body["usage"]["input_tokens"] == 3);
     REQUIRE(body["usage"]["output_tokens"] == 4);
+    ts.stop();
+}
+
+TEST_CASE("Routes: reasoning effort precedence and defaults reach inference",
+          "[routes][chat][reasoning]") {
+    TestServer ts;
+    auto info = make_info("reasoning-model");
+    info.reasoning.supported = true;
+    info.reasoning.efforts = {"low", "medium", "xhigh"};
+    info.reasoning.default_effort = "xhigh";
+    info.reasoning.none_disables = true;
+    info.reasoning.aliases = {{"high", "xhigh"}};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/chat/completions", nlohmann::json{
+        {"model", info.name},
+        {"messages", nlohmann::json::array({{{"role", "user"}, {"content", "Hello"}}})},
+        {"reasoning_effort", "medium"},
+        {"chat_template_kwargs", {{"reasoning_effort", "low"}}},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    auto* model = dynamic_cast<const IModelMock*>(ts.coordinator.get_model(info.name));
+    REQUIRE(model != nullptr);
+    auto request = nlohmann::json::parse(model->last_request_json);
+    CHECK(request["reasoning_effort"] == "low");
+    CHECK(request["chat_template_kwargs"]["reasoning_effort"] == "low");
+
+    response = client.Post("/v1/chat/completions", nlohmann::json{
+        {"model", info.name},
+        {"messages", nlohmann::json::array({{{"role", "user"}, {"content", "Hello"}}})},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    request = nlohmann::json::parse(model->last_request_json);
+    CHECK(request["reasoning_effort"] == "xhigh");
+    ts.stop();
+}
+
+TEST_CASE("Routes: reasoning effort validation occurs before acquisition",
+          "[routes][chat][reasoning][validation]") {
+    TestServer ts;
+    auto info = make_info("reasoning-model");
+    info.reasoning.supported = true;
+    info.reasoning.efforts = {"low", "medium", "xhigh"};
+    info.reasoning.default_effort = "xhigh";
+    ts.registry.register_model(info);
+    ts.registry.register_model(make_info("plain-model"));
+
+    for (const auto& body : std::vector<nlohmann::json>{
+             {{"model", info.name}, {"messages", nlohmann::json::array()},
+              {"reasoning_effort", "maximum"}},
+             {{"model", info.name}, {"messages", nlohmann::json::array()},
+              {"reasoning_effort", "none"}},
+             {{"model", "plain-model"}, {"messages", nlohmann::json::array()},
+              {"reasoning_effort", "medium"}},
+         }) {
+        httplib::Request request;
+        request.body = body.dump();
+        httplib::Response response;
+        handle_chat_completions(request, response, ts.make_deps());
+        CHECK(response.status == 400);
+    }
+    CHECK(ts.metrics.total_requests() == 0);
+}
+
+TEST_CASE("Routes: Responses reasoning effort translates for streaming and non-streaming",
+          "[routes][responses][reasoning]") {
+    TestServer ts;
+    auto info = make_info("reasoning-model");
+    info.reasoning.supported = true;
+    info.reasoning.efforts = {"low", "medium", "xhigh"};
+    info.reasoning.default_effort = "xhigh";
+    info.reasoning.none_disables = true;
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/responses", nlohmann::json{
+        {"model", info.name}, {"input", "Hello"},
+        {"reasoning", {{"effort", "medium"}}},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    auto* model = dynamic_cast<const IModelMock*>(ts.coordinator.get_model(info.name));
+    REQUIRE(model != nullptr);
+    CHECK(nlohmann::json::parse(model->last_request_json)["reasoning_effort"] ==
+          "medium");
+
+    response = client.Post("/v1/responses", nlohmann::json{
+        {"model", info.name}, {"input", "Hello"}, {"stream", true},
+        {"reasoning", {{"effort", "none"}}},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(nlohmann::json::parse(model->last_request_json)["reasoning_effort"] ==
+          "none");
     ts.stop();
 }
 

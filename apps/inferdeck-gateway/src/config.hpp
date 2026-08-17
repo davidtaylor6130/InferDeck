@@ -331,6 +331,67 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                         foundation::ErrorCode::InvalidArgument,
                         "vision model requires llama_cpp and mmproj_path: " + name);
                 }
+                if (entry["reasoning"]) {
+                    const auto reasoning = entry["reasoning"];
+                    if (!reasoning.IsMap()) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "model reasoning settings must be a map: " + name);
+                    }
+                    const bool supported = reasoning["supported"]
+                        ? reasoning["supported"].as<bool>() : true;
+                    if (!supported && reasoning.size() > 1) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "unsupported reasoning model cannot define effort settings: " + name);
+                    }
+                    if (supported && (runtime != "llama_cpp" || modality != "text")) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "reasoning requires a llama_cpp text model: " + name);
+                    }
+                    std::unordered_set<std::string> efforts;
+                    if (supported &&
+                        (!reasoning["efforts"] || !reasoning["efforts"].IsSequence() ||
+                         reasoning["efforts"].size() == 0)) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "reasoning efforts must be a non-empty sequence: " + name);
+                    }
+                    if (reasoning["efforts"]) {
+                        for (const auto& effort : reasoning["efforts"]) {
+                            const auto value = effort.as<std::string>();
+                            if (value.empty() || value == "none" || !efforts.insert(value).second) {
+                                return foundation::Err<void>(
+                                    foundation::ErrorCode::InvalidArgument,
+                                    "reasoning efforts must be unique non-empty tiers: " + name);
+                            }
+                        }
+                    }
+                    const auto default_effort = reasoning["default"]
+                        ? reasoning["default"].as<std::string>() : std::string{};
+                    if (supported && !efforts.contains(default_effort)) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "reasoning default must be a supported effort: " + name);
+                    }
+                    if (reasoning["aliases"] && !reasoning["aliases"].IsMap()) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "reasoning aliases must be a map: " + name);
+                    }
+                    if (reasoning["aliases"]) {
+                        for (const auto& alias : reasoning["aliases"]) {
+                            const auto source = alias.first.as<std::string>();
+                            const auto target = alias.second.as<std::string>();
+                            if (source.empty() || source == "none" || !efforts.contains(target)) {
+                                return foundation::Err<void>(
+                                    foundation::ErrorCode::InvalidArgument,
+                                    "reasoning alias must map to a supported effort: " + name);
+                            }
+                        }
+                    }
+                }
                 if (entry["speculative"]) {
                     const auto speculative = entry["speculative"];
                     if (!speculative.IsMap()) {
@@ -628,6 +689,26 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
             info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";
             info.chat_template_path = m["chat_template_path"] ? m["chat_template_path"].as<std::string>() : "";
+            if (m["reasoning"] && m["reasoning"].IsMap()) {
+                const auto reasoning = m["reasoning"];
+                info.reasoning.supported = reasoning["supported"]
+                    ? reasoning["supported"].as<bool>() : true;
+                if (reasoning["efforts"] && reasoning["efforts"].IsSequence()) {
+                    for (const auto& effort : reasoning["efforts"]) {
+                        info.reasoning.efforts.push_back(effort.as<std::string>());
+                    }
+                }
+                info.reasoning.default_effort = reasoning["default"]
+                    ? reasoning["default"].as<std::string>() : "";
+                info.reasoning.none_disables = reasoning["none_disables"]
+                    ? reasoning["none_disables"].as<bool>() : false;
+                if (reasoning["aliases"] && reasoning["aliases"].IsMap()) {
+                    for (const auto& alias : reasoning["aliases"]) {
+                        info.reasoning.aliases[alias.first.as<std::string>()] =
+                            alias.second.as<std::string>();
+                    }
+                }
+            }
             if (m["prompt_price_per_million"]) {
                 info.prompt_price_per_million = m["prompt_price_per_million"].as<double>();
             }

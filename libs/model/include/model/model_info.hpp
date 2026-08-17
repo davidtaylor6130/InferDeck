@@ -33,6 +33,14 @@ struct ProfileOptimizationInfo {
     std::string schedule_window_end{"04:00"};
 };
 
+struct ReasoningConfig {
+    bool supported{false};
+    std::vector<std::string> efforts{};
+    std::string default_effort{};
+    bool none_disables{false};
+    std::map<std::string, std::string> aliases{};
+};
+
 struct ModelAlias {
     std::string name{};
     std::string target{};
@@ -70,6 +78,7 @@ struct ModelInfo {
     std::optional<double> completion_price_per_million{};
     std::map<std::string, std::string> artifacts{};
     SamplingConfig sampling{};
+    ReasoningConfig reasoning{};
     ProfileOptimizationInfo optimization{};
 
     [[nodiscard]] bool supports(const std::string& capability) const;

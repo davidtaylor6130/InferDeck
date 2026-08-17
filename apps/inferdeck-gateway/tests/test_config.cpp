@@ -114,6 +114,12 @@ TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
     CHECK(*qwen->n_ubatch == 2048);
     CHECK(qwen->cache_type_k == "q4_0");
     CHECK(qwen->cache_type_v == "q4_0");
+    CHECK(qwen->reasoning.supported);
+    CHECK(qwen->reasoning.efforts ==
+          std::vector<std::string>{"low", "medium", "xhigh"});
+    CHECK(qwen->reasoning.default_effort == "xhigh");
+    CHECK(qwen->reasoning.none_disables);
+    CHECK(qwen->reasoning.aliases.at("high") == "xhigh");
     CHECK(qwen->mtp_enabled);
     CHECK(qwen->mtp_draft_tokens == 2);
     CHECK(qwen->mtp_p_min == 0.0f);
@@ -264,6 +270,24 @@ model_registry:
     gguf_path: model.gguf
     sampling:
       top_p: 1.5
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: bad-reasoning-default
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [low, high]
+      default: medium
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: bad-reasoning-alias
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [low, high]
+      default: high
+      aliases:
+        xhigh: unsupported
 )"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:

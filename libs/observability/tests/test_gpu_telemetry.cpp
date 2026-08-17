@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <chrono>
 #include <thread>
@@ -8,6 +9,7 @@
 
 using namespace inferdeck::observability;
 using namespace std::chrono_literals;
+using Catch::Approx;
 
 namespace {
 
@@ -139,4 +141,39 @@ TEST_CASE("GpuTelemetry: blocking fetch wakes for a fresh external sample",
   REQUIRE(sample->provider == "test");
   REQUIRE(elapsed >= 10ms);
   REQUIRE(elapsed < 500ms);
+}
+
+TEST_CASE("GpuTelemetry: delayed engine accounting preserves utilization area",
+          "[observability][gpu]") {
+  detail::GpuUtilizationWindow window;
+  const std::string engine =
+      "pid_1_luid_0x00000000_0x00000001_phys_0_eng_0_engtype_compute";
+  REQUIRE(window.add(1000, {{engine, 0.0}}) == 0.0);
+  REQUIRE(window.add(2000, {{engine, 0.0}}) == 0.0);
+  REQUIRE(window.add(3000, {{engine, 0.0}}) == 0.0);
+  REQUIRE(window.add(4000, {{engine, 0.0}}) == 0.0);
+  REQUIRE(window.add(5000, {{engine, 400.0}}) == Approx(100.0));
+}
+
+TEST_CASE("GpuTelemetry: process contributions are grouped by physical engine",
+          "[observability][gpu]") {
+  detail::GpuUtilizationWindow window;
+  window.add(1000, {});
+  const double utilization = window.add(2000, {
+      {"pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_compute", 40.0},
+      {"pid_2_luid_0x0_0x1_phys_0_eng_0_engtype_compute", 35.0},
+      {"pid_2_luid_0x0_0x1_phys_0_eng_1_engtype_copy", 60.0},
+  });
+  REQUIRE(utilization == Approx(75.0));
+}
+
+TEST_CASE("GpuTelemetry: final busiest-engine utilization is clamped",
+          "[observability][gpu]") {
+  detail::GpuUtilizationWindow window;
+  window.add(1000, {});
+  REQUIRE(window.add(2000, {
+      {"pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_compute", 90.0},
+      {"pid_2_luid_0x0_0x1_phys_0_eng_0_engtype_compute", 80.0},
+      {"pid_2_luid_0x0_0x1_phys_0_eng_1_engtype_copy", 40.0},
+  }) == Approx(100.0));
 }

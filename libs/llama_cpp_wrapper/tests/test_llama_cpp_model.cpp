@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -33,6 +34,54 @@ std::filesystem::path write_fake_gguf(const std::filesystem::path& dir) {
 
 TEST_CASE("LlamaCppModel: version string non-empty", "[llama][meta]") {
   REQUIRE_FALSE(LlamaCppModel::version().empty());
+}
+
+TEST_CASE("LlamaCppModel: reasoning effort reaches chat template inputs",
+          "[llama][reasoning]") {
+  ModelInfo info;
+  info.name = "reasoning-model";
+  info.reasoning.supported = true;
+  info.reasoning.efforts = {"low", "medium", "xhigh"};
+  info.reasoning.default_effort = "xhigh";
+  info.reasoning.none_disables = true;
+  info.reasoning.aliases = {{"high", "xhigh"}};
+
+  common_chat_templates_inputs inputs;
+  nlohmann::ordered_json body = {
+      {"reasoning_effort", "medium"},
+      {"chat_template_kwargs", {{"reasoning_effort", "low"}}},
+  };
+  auto effort = apply_reasoning_effort(inputs, body, info);
+  REQUIRE(effort);
+  CHECK(*effort == "low");
+  CHECK(inputs.chat_template_kwargs.at("reasoning_effort") == "\"low\"");
+
+  common_chat_templates_inputs alias_inputs;
+  effort = apply_reasoning_effort(
+      alias_inputs, nlohmann::ordered_json{{"reasoning_effort", "high"}}, info);
+  REQUIRE(effort);
+  CHECK(*effort == "xhigh");
+  CHECK(alias_inputs.chat_template_kwargs.at("reasoning_effort") == "\"xhigh\"");
+
+  common_chat_templates_inputs disabled_inputs;
+  disabled_inputs.enable_thinking = true;
+  effort = apply_reasoning_effort(
+      disabled_inputs, nlohmann::ordered_json{{"reasoning_effort", "none"}}, info);
+  REQUIRE(effort);
+  CHECK(*effort == "none");
+  CHECK_FALSE(disabled_inputs.enable_thinking);
+  CHECK_FALSE(disabled_inputs.chat_template_kwargs.contains("reasoning_effort"));
+}
+
+TEST_CASE("LlamaCppModel: unsupported reasoning effort is rejected",
+          "[llama][reasoning]") {
+  ModelInfo info;
+  info.name = "plain-model";
+  common_chat_templates_inputs inputs;
+  auto effort = apply_reasoning_effort(
+      inputs, nlohmann::ordered_json{{"reasoning_effort", "medium"}}, info);
+  REQUIRE_FALSE(effort);
+  CHECK(effort.error().code == ErrorCode::InvalidArgument);
 }
 
 TEST_CASE("LlamaCppModel: backend init/shutdown do not throw", "[llama][backend]") {

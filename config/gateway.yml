@@ -149,6 +149,13 @@ model_registry:
     n_ubatch: 2048
     cache_type_k: "q4_0"
     cache_type_v: "q4_0"
+    reasoning:
+      supported: true
+      efforts: [low, medium, xhigh]
+      default: xhigh
+      none_disables: true
+      aliases:
+        high: xhigh
     speculative:
       type: "mtp"
       draft_tokens: 2

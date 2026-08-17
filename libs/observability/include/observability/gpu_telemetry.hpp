@@ -4,12 +4,43 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 namespace inferdeck::observability {
+
+namespace detail {
+
+struct GpuEngineCounterSample {
+  std::string instance;
+  double utilization_pct{};
+};
+
+class GpuUtilizationWindow {
+public:
+  explicit GpuUtilizationWindow(std::int64_t window_ms = 4000);
+  double add(std::int64_t timestamp_ms,
+             const std::vector<GpuEngineCounterSample>& samples);
+
+private:
+  struct Entry {
+    double duration_ms{};
+    std::unordered_map<std::string, double> engines;
+  };
+
+  std::int64_t window_ms_;
+  std::int64_t last_timestamp_ms_{};
+  double duration_ms_{};
+  bool initialized_{false};
+  std::deque<Entry> entries_;
+};
+
+}
 
 struct GpuStats {
   bool available{false};
