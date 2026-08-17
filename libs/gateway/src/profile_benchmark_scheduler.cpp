@@ -107,6 +107,8 @@ std::vector<ScheduledOptimizationStatus> ProfileBenchmarkScheduler::statuses() c
 }
 
 void ProfileBenchmarkScheduler::evaluate() {
+    std::lock_guard evaluate_lock(evaluate_mutex_);
+
     {
         std::lock_guard lock(mutex_);
         if (!in_flight_model_.empty()) {

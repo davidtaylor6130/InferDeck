@@ -45,6 +45,7 @@ private:
     ProfileBenchmarkManager& manager_;
     model::BackendCoordinator& coordinator_;
     observability::GpuTelemetry& gpu_;
+    std::mutex evaluate_mutex_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, ScheduledOptimizationStatus> state_;
     std::unordered_map<std::string, std::string> attempted_date_;
