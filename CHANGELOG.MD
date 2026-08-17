@@ -1,5 +1,20 @@
 # InferDeck - Changelog
 
+## [0.7.2] - 2026-08-17
+
+### Added
+- **Configurable reasoning effort** for Chat Completions and Responses, with
+  validated per-model defaults, model-discovery metadata, and llama.cpp
+  chat-template forwarding. Qwen3.8 supports `low`, `medium`, and `xhigh`,
+  with `high` retained as an alias for `xhigh`.
+
+### Fixed
+- **GPU utilization telemetry** now uses a rolling busiest-engine window that
+  preserves delayed Windows PDH accounting, reducing misleading dashboard
+  spikes during sustained multi-slot inference.
+
+---
+
 ## [0.6.1] - 2026-07-26
 
 ### Fixed

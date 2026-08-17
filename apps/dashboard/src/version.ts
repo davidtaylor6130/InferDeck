@@ -1,1 +1,1 @@
-export const INFERDECK_VERSION = '0.6.1';
+export const INFERDECK_VERSION = '0.7.2';

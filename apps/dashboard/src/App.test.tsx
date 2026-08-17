@@ -22,7 +22,7 @@ describe('dashboard boundary', () => {
 
   it('renders the product version in the bottom sidebar footer', () => {
     const html = renderToStaticMarkup(<App />);
-    expect(html).toContain('InferDeck v0.6.1');
-    expect(html.indexOf('InferDeck v0.6.1')).toBeLessThan(html.indexOf('<main'));
+    expect(html).toContain('InferDeck v0.7.2');
+    expect(html.indexOf('InferDeck v0.7.2')).toBeLessThan(html.indexOf('<main'));
   });
 });
