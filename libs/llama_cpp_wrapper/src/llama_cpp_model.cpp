@@ -763,6 +763,66 @@ bool fallback_tool_call_complete(const std::string& generated) {
 
 } // namespace
 
+foundation::Result<std::string> apply_reasoning_effort(
+    common_chat_templates_inputs& inputs,
+    const nlohmann::ordered_json& body,
+    const model::ModelInfo& info) {
+  std::optional<std::string> requested;
+  if (body.contains("chat_template_kwargs") &&
+      body["chat_template_kwargs"].is_object() &&
+      body["chat_template_kwargs"].contains("reasoning_effort")) {
+    if (!body["chat_template_kwargs"]["reasoning_effort"].is_string()) {
+      return foundation::Err<std::string>(
+          foundation::ErrorCode::InvalidArgument,
+          "chat_template_kwargs.reasoning_effort must be a string");
+    }
+    requested =
+        body["chat_template_kwargs"]["reasoning_effort"].get<std::string>();
+  } else if (body.contains("reasoning_effort")) {
+    if (!body["reasoning_effort"].is_string()) {
+      return foundation::Err<std::string>(
+          foundation::ErrorCode::InvalidArgument,
+          "reasoning_effort must be a string");
+    }
+    requested = body["reasoning_effort"].get<std::string>();
+  } else if (info.reasoning.supported &&
+             !info.reasoning.default_effort.empty()) {
+    requested = info.reasoning.default_effort;
+  }
+  if (!requested) return foundation::Ok(std::string{});
+  if (!info.reasoning.supported) {
+    return foundation::Err<std::string>(
+        foundation::ErrorCode::InvalidArgument,
+        "model does not support reasoning effort: " + info.name);
+  }
+
+  std::string resolved = *requested;
+  if (const auto alias = info.reasoning.aliases.find(resolved);
+      alias != info.reasoning.aliases.end()) {
+    resolved = alias->second;
+  }
+  if (resolved == "none") {
+    if (!info.reasoning.none_disables) {
+      return foundation::Err<std::string>(
+          foundation::ErrorCode::InvalidArgument,
+          "reasoning effort 'none' is not supported by model: " + info.name);
+    }
+    inputs.enable_thinking = false;
+    inputs.chat_template_kwargs.erase("reasoning_effort");
+  } else {
+    if (std::find(info.reasoning.efforts.begin(), info.reasoning.efforts.end(),
+                  resolved) == info.reasoning.efforts.end()) {
+      return foundation::Err<std::string>(
+          foundation::ErrorCode::InvalidArgument,
+          "unsupported reasoning effort '" + *requested + "' for model: " +
+              info.name);
+    }
+    inputs.chat_template_kwargs["reasoning_effort"] =
+        nlohmann::json(resolved).dump();
+  }
+  return foundation::Ok(std::move(resolved));
+}
+
 std::string LlamaCppModel::version() {
   const char* info = llama_print_system_info();
   return info ? std::string(info) : std::string("unknown");
@@ -1429,6 +1489,15 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
       if (it->second == "true") inputs.enable_thinking = true;
       if (it->second == "false") inputs.enable_thinking = false;
     }
+  }
+  auto reasoning_effort = apply_reasoning_effort(inputs, body, info_);
+  if (!reasoning_effort) {
+    return Result<ChatTemplateResult>(std::unexpect,
+        make_error(reasoning_effort.error().code, reasoning_effort.error().message));
+  }
+  if (!reasoning_effort->empty()) {
+    LOG_INFO("reasoning_effort_applied", "model={} effort={}",
+             info_.name, *reasoning_effort);
   }
   if (body.contains("grammar") && body["grammar"].is_string()) {
     inputs.grammar = body["grammar"].get<std::string>();

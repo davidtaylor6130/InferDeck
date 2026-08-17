@@ -340,6 +340,80 @@ foundation::Result<model::InferenceRequest> make_inference_request(
     }
 }
 
+foundation::Result<std::optional<std::string>> normalize_reasoning_request(
+    nlohmann::json& body, const model::ModelInfo& info) {
+    std::optional<std::string> requested;
+    bool supplied = false;
+    bool explicit_kwarg = false;
+    if (body.contains("reasoning_effort")) {
+        supplied = true;
+        if (!body["reasoning_effort"].is_string()) {
+            return foundation::Err<std::optional<std::string>>(
+                foundation::ErrorCode::InvalidArgument,
+                "reasoning_effort must be a string");
+        }
+        requested = body["reasoning_effort"].get<std::string>();
+    }
+    if (body.contains("chat_template_kwargs")) {
+        if (!body["chat_template_kwargs"].is_object()) {
+            return foundation::Err<std::optional<std::string>>(
+                foundation::ErrorCode::InvalidArgument,
+                "chat_template_kwargs must be an object");
+        }
+        auto& kwargs = body["chat_template_kwargs"];
+        if (kwargs.contains("reasoning_effort")) {
+            supplied = true;
+            explicit_kwarg = true;
+            if (!kwargs["reasoning_effort"].is_string()) {
+                return foundation::Err<std::optional<std::string>>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "chat_template_kwargs.reasoning_effort must be a string");
+            }
+            requested = kwargs["reasoning_effort"].get<std::string>();
+        }
+    }
+    if (!requested && info.reasoning.supported &&
+        !info.reasoning.default_effort.empty()) {
+        requested = info.reasoning.default_effort;
+    }
+    if (!requested) return foundation::Ok(std::optional<std::string>{});
+    if (!info.reasoning.supported) {
+        return foundation::Err<std::optional<std::string>>(
+            foundation::ErrorCode::InvalidArgument,
+            "model does not support reasoning effort: " + info.name);
+    }
+
+    std::string resolved = *requested;
+    if (const auto alias = info.reasoning.aliases.find(resolved);
+        alias != info.reasoning.aliases.end()) {
+        resolved = alias->second;
+    }
+    if (resolved == "none") {
+        if (!info.reasoning.none_disables) {
+            return foundation::Err<std::optional<std::string>>(
+                foundation::ErrorCode::InvalidArgument,
+                "reasoning effort 'none' is not supported by model: " + info.name);
+        }
+    } else if (std::find(info.reasoning.efforts.begin(),
+                         info.reasoning.efforts.end(), resolved) ==
+               info.reasoning.efforts.end()) {
+        return foundation::Err<std::optional<std::string>>(
+            foundation::ErrorCode::InvalidArgument,
+            "unsupported reasoning effort '" + *requested + "' for model: " +
+                info.name);
+    }
+
+    body["reasoning_effort"] = resolved;
+    if (explicit_kwarg) {
+        body["chat_template_kwargs"]["reasoning_effort"] = resolved;
+    }
+    LOG_INFO("reasoning_effort_resolved", "model={} effort={} source={}",
+             info.name, resolved,
+             explicit_kwarg ? "chat_template_kwargs"
+                            : (supplied ? "protocol" : "model_default"));
+    return foundation::Ok(std::optional<std::string>{std::move(resolved)});
+}
+
 struct ErrorClass {
     int status;
     std::string type;
@@ -472,6 +546,13 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
             {"estimated_vram_mb", 0},
             {"resizing", false},
         };
+        const nlohmann::json reasoning = {
+            {"supported", info.reasoning.supported},
+            {"efforts", info.reasoning.efforts},
+            {"default_effort", info.reasoning.default_effort},
+            {"none_disables", info.reasoning.none_disables},
+            {"aliases", info.reasoning.aliases},
+        };
         nlohmann::json entry = {
             {"id", name},
             {"object", "model"},
@@ -486,6 +567,9 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
             {"limit", {{"context", info.context_size}}},
             {"n_slots", info.n_slots},
             {"has_vision", info.has_vision},
+            {"reasoning", info.reasoning.supported},
+            {"reasoning_efforts", info.reasoning.efforts},
+            {"reasoning_default_effort", info.reasoning.default_effort},
             {"runtime", info.runtime},
             {"runtime_available", runtime_available},
             {"modality", info.modality},
@@ -511,6 +595,7 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
                 {"runtime_available", runtime_available},
                 {"modality", info.modality},
                 {"capabilities", info.capabilities},
+                {"reasoning", reasoning},
                 {"optimization", {
                     {"status", info.optimization.status},
                     {"measured_at", info.optimization.measured_at},
@@ -535,6 +620,13 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
         const auto info = deps.coordinator.registry().get_info_result(alias.target);
         if (!info) continue;
         const auto resident = residency.find(alias.target);
+        const nlohmann::json reasoning = {
+            {"supported", info->reasoning.supported},
+            {"efforts", info->reasoning.efforts},
+            {"default_effort", info->reasoning.default_effort},
+            {"none_disables", info->reasoning.none_disables},
+            {"aliases", info->reasoning.aliases},
+        };
         data.push_back({
             {"id", alias.name},
             {"object", "model"},
@@ -551,6 +643,9 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
             {"limit", {{"context", info->context_size}}},
             {"n_slots", info->n_slots},
             {"has_vision", info->has_vision},
+            {"reasoning", info->reasoning.supported},
+            {"reasoning_efforts", info->reasoning.efforts},
+            {"reasoning_default_effort", info->reasoning.default_effort},
             {"runtime", info->runtime},
             {"runtime_available", deps.coordinator.registry().has_factory(info->runtime)},
             {"modality", info->modality},
@@ -565,6 +660,7 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
                 {"runtime_available", deps.coordinator.registry().has_factory(info->runtime)},
                 {"modality", info->modality},
                 {"capabilities", info->capabilities},
+                {"reasoning", reasoning},
                 {"alias_contract", {
                     {"target", alias.target},
                     {"required_context_size", alias.required_context_size},
@@ -989,9 +1085,19 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
     const auto model_info = deps.coordinator.registry().get_info_result(model_name);
-    if (model_info && !model_info->has_vision && chat_uses_vision(body)) {
+    if (!model_info) {
+        write_error(resp, 404, "model_not_found", model_info.error().message);
+        return;
+    }
+    if (!model_info->has_vision && chat_uses_vision(body)) {
         write_error(resp, 400, "unsupported_capability",
                     "model does not support image input: " + model_name);
+        return;
+    }
+    auto reasoning_effort = normalize_reasoning_request(body, *model_info);
+    if (!reasoning_effort) {
+        write_error(resp, 400, "invalid_request_error",
+                    reasoning_effort.error().message);
         return;
     }
     if (body.contains("stream") && !body["stream"].is_boolean()) {

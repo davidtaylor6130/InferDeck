@@ -208,7 +208,7 @@ foundation::Result<nlohmann::json> responses_to_chat(const nlohmann::json& body)
     static const std::unordered_set<std::string> supported = {
         "model", "input", "instructions", "max_output_tokens", "temperature", "top_p",
         "tools", "tool_choice", "text", "stream", "priority", "metadata",
-        "parallel_tool_calls",
+        "parallel_tool_calls", "reasoning",
     };
     if (!body.is_object()) {
         return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
@@ -289,6 +289,28 @@ foundation::Result<nlohmann::json> responses_to_chat(const nlohmann::json& body)
         return foundation::Err<nlohmann::json>(
             foundation::ErrorCode::InvalidArgument,
             "parallel_tool_calls must be a boolean");
+    }
+    if (body.contains("reasoning")) {
+        if (!body["reasoning"].is_object()) {
+            return foundation::Err<nlohmann::json>(
+                foundation::ErrorCode::InvalidArgument,
+                "reasoning must be an object");
+        }
+        static const std::unordered_set<std::string> reasoning_fields = {
+            "effort",
+        };
+        auto fields = require_fields(body["reasoning"], reasoning_fields,
+                                     "reasoning");
+        if (!fields) {
+            return foundation::Err<nlohmann::json>(
+                fields.error().code, fields.error().message);
+        }
+        if (!body["reasoning"].contains("effort") ||
+            !body["reasoning"]["effort"].is_string()) {
+            return foundation::Err<nlohmann::json>(
+                foundation::ErrorCode::InvalidArgument,
+                "reasoning.effort must be a string");
+        }
     }
     if (body.contains("metadata") && !body["metadata"].is_object()) {
         return foundation::Err<nlohmann::json>(
@@ -459,6 +481,7 @@ foundation::Result<nlohmann::json> responses_to_chat(const nlohmann::json& body)
     if (body.contains("top_p")) chat["top_p"] = body["top_p"];
     if (body.contains("priority")) chat["priority"] = body["priority"];
     if (body.contains("parallel_tool_calls")) chat["parallel_tool_calls"] = body["parallel_tool_calls"];
+    if (body.contains("reasoning")) chat["reasoning_effort"] = body["reasoning"]["effort"];
     chat["stream"] = body.value("stream", false);
     if (chat["stream"].get<bool>()) chat["stream_options"] = {{"include_usage", true}};
 

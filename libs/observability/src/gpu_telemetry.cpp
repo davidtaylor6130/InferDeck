@@ -1,10 +1,12 @@
 #include "observability/gpu_telemetry.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstddef>
 #include <cwchar>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -27,6 +29,16 @@ std::int64_t now_ms() {
   return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
+std::int64_t steady_ms() {
+  using namespace std::chrono;
+  return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+std::string gpu_engine_key(const std::string& instance) {
+  const auto luid = instance.find("luid_");
+  return luid == std::string::npos ? instance : instance.substr(luid);
+}
+
 #ifdef _WIN32
 std::string narrow(const wchar_t* value) {
   if (!value) return {};
@@ -43,14 +55,14 @@ std::string narrow(const wchar_t* value) {
   return out;
 }
 
-class PdhDoubleSumCounter {
+class PdhGpuEngineCounter {
 public:
-  explicit PdhDoubleSumCounter(const wchar_t* path) : path_(path) {}
-  ~PdhDoubleSumCounter() {
+  explicit PdhGpuEngineCounter(const wchar_t* path) : path_(path) {}
+  ~PdhGpuEngineCounter() {
     if (query_) PdhCloseQuery(query_);
   }
 
-  std::optional<double> read() {
+  std::optional<std::vector<detail::GpuEngineCounterSample>> read() {
     if (!ensure()) return std::nullopt;
     if (PdhCollectQueryData(query_) != ERROR_SUCCESS) return std::nullopt;
     DWORD buffer_size = 0;
@@ -61,11 +73,14 @@ public:
     auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
     status = PdhGetFormattedCounterArrayW(counter_, PDH_FMT_DOUBLE, &buffer_size, &item_count, items);
     if (status != ERROR_SUCCESS) return std::nullopt;
-    double total = 0.0;
+    std::vector<detail::GpuEngineCounterSample> samples;
+    samples.reserve(item_count);
     for (DWORD i = 0; i < item_count; ++i) {
-      if (items[i].FmtValue.CStatus == ERROR_SUCCESS) total += items[i].FmtValue.doubleValue;
+      if (items[i].FmtValue.CStatus == ERROR_SUCCESS) {
+        samples.push_back({narrow(items[i].szName), items[i].FmtValue.doubleValue});
+      }
     }
-    return std::clamp(total, 0.0, 100.0);
+    return samples;
   }
 
 private:
@@ -162,6 +177,54 @@ std::optional<std::pair<std::string, std::uint64_t>> read_dxgi_adapter() {
 
 } // namespace
 
+detail::GpuUtilizationWindow::GpuUtilizationWindow(std::int64_t window_ms)
+    : window_ms_(std::max<std::int64_t>(1, window_ms)) {}
+
+double detail::GpuUtilizationWindow::add(
+    std::int64_t timestamp_ms,
+    const std::vector<GpuEngineCounterSample>& samples) {
+  std::unordered_map<std::string, double> engines;
+  for (const auto& sample : samples) {
+    if (!std::isfinite(sample.utilization_pct) || sample.utilization_pct <= 0.0) continue;
+    engines[gpu_engine_key(sample.instance)] += sample.utilization_pct;
+  }
+  if (!initialized_) {
+    initialized_ = true;
+    last_timestamp_ms_ = timestamp_ms;
+    return 0.0;
+  }
+  if (timestamp_ms <= last_timestamp_ms_) return 0.0;
+
+  const double elapsed_ms = static_cast<double>(timestamp_ms - last_timestamp_ms_);
+  last_timestamp_ms_ = timestamp_ms;
+  entries_.push_back({elapsed_ms, std::move(engines)});
+  duration_ms_ += elapsed_ms;
+
+  while (!entries_.empty() && duration_ms_ > static_cast<double>(window_ms_)) {
+    const double excess = duration_ms_ - static_cast<double>(window_ms_);
+    if (entries_.front().duration_ms <= excess) {
+      duration_ms_ -= entries_.front().duration_ms;
+      entries_.pop_front();
+    } else {
+      entries_.front().duration_ms -= excess;
+      duration_ms_ -= excess;
+    }
+  }
+
+  if (duration_ms_ <= 0.0) return 0.0;
+  std::unordered_map<std::string, double> weighted;
+  for (const auto& entry : entries_) {
+    for (const auto& [engine, utilization] : entry.engines) {
+      weighted[engine] += utilization * entry.duration_ms;
+    }
+  }
+  double busiest = 0.0;
+  for (const auto& [_, total] : weighted) {
+    busiest = std::max(busiest, total / duration_ms_);
+  }
+  return std::clamp(busiest, 0.0, 100.0);
+}
+
 GpuTelemetry::GpuTelemetry() {
   latest_.available = false;
   latest_.reason = "no_helper_path";
@@ -240,8 +303,9 @@ void GpuTelemetry::record_external_sample(const GpuStats& s) {
 void GpuTelemetry::run_loop() {
   using namespace std::chrono;
 #ifdef _WIN32
-  PdhDoubleSumCounter gpu_util(L"\\GPU Engine(*)\\Utilization Percentage");
+  PdhGpuEngineCounter gpu_util(L"\\GPU Engine(*)\\Utilization Percentage");
   PdhLargeSumCounter dedicated_usage(L"\\GPU Adapter Memory(*)\\Dedicated Usage");
+  detail::GpuUtilizationWindow gpu_utilization;
   std::optional<std::pair<std::string, std::uint64_t>> adapter;
   auto next_adapter_refresh = steady_clock::time_point::min();
 #endif
@@ -259,7 +323,9 @@ void GpuTelemetry::run_loop() {
       s.available = true;
       s.provider = "windows_pdh_dxgi";
       s.gpu_name = adapter ? adapter->first : "Windows GPU";
-      s.utilization_pct = util.value_or(0.0);
+      s.utilization_pct = util
+          ? gpu_utilization.add(steady_ms(), *util)
+          : 0.0;
       s.vram_mb = used_bytes ? static_cast<double>(*used_bytes) / (1024.0 * 1024.0) : 0.0;
       if (adapter && adapter->second > 0) {
         const double total_mb = static_cast<double>(adapter->second) / (1024.0 * 1024.0);
