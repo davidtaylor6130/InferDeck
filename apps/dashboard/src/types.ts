@@ -215,6 +215,8 @@ export interface PricingEntry {
   prompt_price_per_million: number;
   cached_prompt_price_per_million?: number;
   completion_price_per_million: number;
+  legacy_cached_prompt_ratio?: number;
+  legacy_cached_prompt_before?: string;
   equivalent_api_model?: string | null;
   currency?: string;
   billing_unit?: 'tokens' | 'audio_minute' | 'million_characters';
