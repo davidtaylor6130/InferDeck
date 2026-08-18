@@ -24,15 +24,15 @@ $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $launcherSource = Join-Path $repoRoot 'scripts\windows\Start-ForcedAligner.ps1'
 $launcherDestination = Join-Path $RuntimeRoot 'Start-ForcedAligner.ps1'
 $python = Join-Path $RuntimeRoot '.venv\Scripts\python.exe'
+$watcher = Join-Path $RuntimeRoot 'Watch-ForcedAligner.ps1'
 if (-not (Test-Path -LiteralPath $launcherSource -PathType Leaf)) { throw "Missing launcher source: $launcherSource" }
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Missing aligner Python: $python" }
-& $python -m pip install --disable-pip-version-check --force-reinstall --no-deps (Join-Path $repoRoot 'apps\forced-aligner')
-if ($LASTEXITCODE -ne 0) { throw 'Aligner package installation failed' }
-Copy-Item -LiteralPath $launcherSource -Destination $launcherDestination -Force
+if (-not (Test-Path -LiteralPath $watcher -PathType Leaf)) { throw "Missing aligner watchdog: $watcher" }
 
-$existingRule = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
-if ($existingRule) { throw "Firewall rule already exists and was not modified: $RuleName" }
-New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Allow -Enabled True -Profile Any -Protocol TCP -LocalPort $Port -LocalAddress $ListenAddress -RemoteAddress $EditorAddress | Out-Null
+function Start-AlignerProcesses {
+    & $launcherDestination -ListenAddress $ListenAddress -TokenFile $TokenFile
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $watcher) -WindowStyle Hidden | Out-Null
+}
 
 $targets = @()
 $watchdogLock = Join-Path $RuntimeRoot 'watchdog.pid'
@@ -45,17 +45,59 @@ foreach ($lock in @($watchdogLock, $alignerLock)) {
 }
 $listener = netstat.exe -ano | Where-Object { $_ -match ":${Port}\s+.*LISTENING\s+(\d+)\s*$" } | Select-Object -First 1
 if ($listener) { $targets += [int]([regex]::Match($listener, '(\d+)\s*$').Groups[1].Value) }
-$targets = $targets | Select-Object -Unique
+$targets = @($targets | Select-Object -Unique)
+$runningTargets = @()
 foreach ($targetPid in $targets) {
     $process = Get-Process -Id $targetPid -ErrorAction SilentlyContinue
     if ($process -and $process.ProcessName -notin @('powershell', 'python', 'inferdeck-forced-aligner')) {
         throw "Unexpected process in aligner PID file: $targetPid $($process.ProcessName)"
     }
+    if ($process) { $runningTargets += $targetPid }
 }
-if ($targets) { Stop-Process -Id $targets -ErrorAction SilentlyContinue }
-& $launcherDestination -ListenAddress $ListenAddress -TokenFile $TokenFile
-$watcher = Join-Path $RuntimeRoot 'Watch-ForcedAligner.ps1'
-Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $watcher) -WindowStyle Hidden | Out-Null
+if ($runningTargets) {
+    Stop-Process -Id $runningTargets -ErrorAction Stop
+    $stopDeadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $remaining = @($runningTargets | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if (-not $remaining) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $stopDeadline)
+    if ($remaining) { throw "Aligner processes did not stop: $($remaining -join ', ')" }
+}
+
+try {
+    & $python -m pip install --disable-pip-version-check --force-reinstall --no-deps (Join-Path $repoRoot 'apps\forced-aligner')
+    if ($LASTEXITCODE -ne 0) { throw 'Aligner package installation failed' }
+    Copy-Item -LiteralPath $launcherSource -Destination $launcherDestination -Force
+} catch {
+    if (Test-Path -LiteralPath $launcherDestination -PathType Leaf) {
+        try { Start-AlignerProcesses } catch { }
+    }
+    throw
+}
+
+try {
+    $existingRule = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+    if ($existingRule) {
+        $portFilter = $existingRule | Get-NetFirewallPortFilter
+        $addressFilter = $existingRule | Get-NetFirewallAddressFilter
+        $validRule = $existingRule.Direction -eq 'Inbound' -and
+            $existingRule.Action -eq 'Allow' -and
+            $existingRule.Enabled -eq 'True' -and
+            $portFilter.Protocol -eq 'TCP' -and
+            $portFilter.LocalPort -eq [string]$Port -and
+            $addressFilter.LocalAddress -contains $ListenAddress -and
+            $addressFilter.RemoteAddress -contains $EditorAddress
+        if (-not $validRule) { throw "Existing firewall rule does not match the required restrictions: $RuleName" }
+    } else {
+        New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Allow -Enabled True -Profile Any -Protocol TCP -LocalPort $Port -LocalAddress $ListenAddress -RemoteAddress $EditorAddress | Out-Null
+    }
+} catch {
+    Start-AlignerProcesses
+    throw
+}
+
+Start-AlignerProcesses
 
 $healthUrl = "http://${ListenAddress}:${Port}/health"
 $alignmentUrl = "http://${ListenAddress}:${Port}/v1/audio/alignments"
