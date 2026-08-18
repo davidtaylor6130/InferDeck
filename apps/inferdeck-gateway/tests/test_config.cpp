@@ -98,6 +98,12 @@ TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
         [](const auto& model) { return model.name == "qwen3.8-27b"; });
     REQUIRE(qwen != config.models.end());
     CHECK(qwen->family == "qwen3.8");
+    REQUIRE(qwen->prompt_price_per_million);
+    REQUIRE(qwen->cached_prompt_price_per_million);
+    REQUIRE(qwen->completion_price_per_million);
+    CHECK(*qwen->prompt_price_per_million == 0.45);
+    CHECK(*qwen->cached_prompt_price_per_million == 0.05);
+    CHECK(*qwen->completion_price_per_million == 3.20);
     CHECK(qwen->gguf_path ==
           "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/"
           "Qwen3.8-27B-Q4_K_M.gguf");
@@ -234,6 +240,12 @@ model_registry:
 )"));
     CHECK_FALSE(validate_config_text("gateway:\n  cache_type_k: made_up\n"));
     CHECK_FALSE(validate_config_text("gateway:\n  sampling:\n    temperature: .nan\n"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: bad-cached-price
+    gguf_path: model.gguf
+    cached_prompt_price_per_million: -0.01
+)"));
     CHECK_FALSE(validate_config_text("gateway:\n  n_batch: 128\n  n_ubatch: 256\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\nauth:\n  required: true\n  token: secret\n"));

@@ -28,22 +28,32 @@ const usageRow = (model: string, prompt: number, output: number): UsageRow => ({
 describe('buildCostDefaults', () => {
   it('maps pricing.json entries and treats "default" as the fallback', () => {
     const { defaults, fallback } = buildCostDefaults([
-      { model_name: 'default', prompt_price_per_million: 0.5, completion_price_per_million: 1.0 },
-      { model_name: 'qwen3.6-35b-a3b', prompt_price_per_million: 0.118, completion_price_per_million: 1.05, equivalent_api_model: 'Equivalent API model' },
+      { model_name: 'default', prompt_price_per_million: 0.5, cached_prompt_price_per_million: 0.05, completion_price_per_million: 1.0 },
+      { model_name: 'qwen3.6-35b-a3b', prompt_price_per_million: 0.118, cached_prompt_price_per_million: 0.02, completion_price_per_million: 1.05, equivalent_api_model: 'Equivalent API model' },
     ]);
     expect(fallback.promptPerMillion).toBe(0.5);
+    expect(fallback.cachedPromptPerMillion).toBe(0.05);
+    expect(defaults['qwen3.6-35b-a3b'].cachedPromptPerMillion).toBe(0.02);
     expect(defaults['qwen3.6-35b-a3b'].outputPerMillion).toBe(1.05);
     expect(defaults['qwen3.6-35b-a3b'].equivalentModel).toBe('Equivalent API model');
   });
 });
 
 describe('estimateCostAvoided', () => {
-  it('prices prompt and output tokens per million', () => {
+  it('prices uncached input, cached input, and output tokens separately', () => {
     const cost = estimateCostAvoided(
-      { model: 'm', prompt: 2_000_000, output: 1_000_000, total: 3_000_000 },
-      { ...DEFAULT_COST_CONFIG, promptPerMillion: 0.1, outputPerMillion: 0.4 },
+      { model: 'm', prompt: 2_000_000, cachedPrompt: 500_000, output: 1_000_000, total: 3_000_000 },
+      { ...DEFAULT_COST_CONFIG, promptPerMillion: 0.1, cachedPromptPerMillion: 0.02, outputPerMillion: 0.4 },
     );
-    expect(cost).toBeCloseTo(0.6);
+    expect(cost).toBeCloseTo(0.56);
+  });
+
+  it('clamps cached input to the total prompt token count', () => {
+    const cost = estimateUsageCost(
+      { promptTokens: 1_000_000, cachedPromptTokens: 2_000_000, completionTokens: 0 },
+      { ...DEFAULT_COST_CONFIG, promptPerMillion: 1, cachedPromptPerMillion: 0.1 },
+    );
+    expect(cost).toBeCloseTo(0.1);
   });
 
   it('prices speech-to-text by audio minute and TTS by million characters', () => {
@@ -62,11 +72,13 @@ describe('normalizeCostConfig', () => {
   it('preserves user-edited prices over new defaults', () => {
     const next = normalizeCostConfig('m', {
       promptPerMillion: 9.99,
+      cachedPromptPerMillion: 7.77,
       outputPerMillion: 8.88,
       userEdited: true,
       defaultsVersion: 1,
-    }, { ...DEFAULT_COST_CONFIG, promptPerMillion: 0.1, outputPerMillion: 0.2 });
+    }, { ...DEFAULT_COST_CONFIG, promptPerMillion: 0.1, cachedPromptPerMillion: 0.01, outputPerMillion: 0.2 });
     expect(next.promptPerMillion).toBe(9.99);
+    expect(next.cachedPromptPerMillion).toBe(7.77);
     expect(next.outputPerMillion).toBe(8.88);
     expect(next.userEdited).toBe(true);
   });
@@ -108,6 +120,34 @@ describe('buildTokenSeries', () => {
     const all = buildTokenSeries([], ALL_MODELS, DEFAULT_COST_CONFIG, monthly, {}, {}, DEFAULT_COST_CONFIG, 'all');
     expect(all.total).toEqual([150, 1800]);
     expect(tokenUsageFromSeries(ALL_MODELS, all).total).toBe(1950);
+  });
+
+  it('uses cached input pricing for persisted usage and request history', () => {
+    const pricing = {
+      ...DEFAULT_COST_CONFIG,
+      promptPerMillion: 1,
+      cachedPromptPerMillion: 0.1,
+      outputPerMillion: 2,
+    };
+    const monthly: MonthlyUsageRow[] = [{
+      bucket: '2026-06', model: 'a', promptTokens: 1_000_000,
+      cachedPromptTokens: 250_000, completionTokens: 500_000,
+      totalTokens: 1_500_000, requests: 1, successfulRequests: 1,
+    }];
+    const persisted = buildTokenSeries([], 'a', pricing, monthly, {}, {}, DEFAULT_COST_CONFIG, 'all');
+    expect(persisted.cost.reduce((sum, value) => sum + value, 0)).toBeCloseTo(1.775);
+
+    const now = Date.now();
+    const jobs: JobRecord[] = [{
+      id: 'cached', type: 'chat', status: 'succeeded', model: 'a',
+      createdAt: new Date(now).toISOString(), timestampUnixMs: now,
+      promptTokens: 1_000_000, cachedPromptTokens: 250_000,
+      completionTokens: 500_000, totalTokens: 1_500_000,
+      tokensPerSecond: 1, durationMs: 1000, httpStatus: 200, slotId: 0,
+    }];
+    const recent = buildTokenSeries(jobs, 'a', pricing, [], {}, {}, DEFAULT_COST_CONFIG, 'all');
+    expect(recent.cachedPrompt.reduce((sum, value) => sum + value, 0)).toBe(250_000);
+    expect(recent.cost.reduce((sum, value) => sum + value, 0)).toBeCloseTo(1.775);
   });
 
   it('keeps measured throughput samples separate from historical token totals', () => {

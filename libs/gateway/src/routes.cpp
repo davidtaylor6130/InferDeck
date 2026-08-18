@@ -576,6 +576,8 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
             {"capabilities", info.capabilities},
             {"prompt_price_per_million", info.prompt_price_per_million
                 ? nlohmann::json(*info.prompt_price_per_million) : nlohmann::json(nullptr)},
+            {"cached_prompt_price_per_million", info.cached_prompt_price_per_million
+                ? nlohmann::json(*info.cached_prompt_price_per_million) : nlohmann::json(nullptr)},
             {"completion_price_per_million", info.completion_price_per_million
                 ? nlohmann::json(*info.completion_price_per_million) : nlohmann::json(nullptr)},
             {"optimization", {
@@ -652,6 +654,8 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
             {"capabilities", info->capabilities},
             {"prompt_price_per_million", info->prompt_price_per_million
                 ? nlohmann::json(*info->prompt_price_per_million) : nlohmann::json(nullptr)},
+            {"cached_prompt_price_per_million", info->cached_prompt_price_per_million
+                ? nlohmann::json(*info->cached_prompt_price_per_million) : nlohmann::json(nullptr)},
             {"completion_price_per_million", info->completion_price_per_million
                 ? nlohmann::json(*info->completion_price_per_million) : nlohmann::json(nullptr)},
             {"loaded", resident != residency.end()},
