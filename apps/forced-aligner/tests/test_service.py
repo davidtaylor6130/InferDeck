@@ -11,7 +11,7 @@ from inferdeck_forced_aligner.audio import AudioPreparer, PreparedAudio
 from inferdeck_forced_aligner.backend import QwenBackend
 from inferdeck_forced_aligner.config import Settings
 from inferdeck_forced_aligner.errors import AlignmentError
-from inferdeck_forced_aligner.words import AlignedUnit, aggregate_units_to_words, transcript_words
+from inferdeck_forced_aligner.words import AlignedUnit, aggregate_units_to_words, transcript_words, validate_words
 
 
 class FakePreparer:
@@ -27,6 +27,7 @@ class FakePreparer:
 class FakeBackend:
     loaded = True
     backend_name = "cpu"
+    timestamp_grid_seconds = 0.08
 
     def load(self):
         self.loaded = True
@@ -164,6 +165,176 @@ def test_invalid_or_source_unbounded_timestamps_are_rejected(tmp_path, units):
     assert response.json()["error"]["code"] == "ALIGNMENT_FAILED"
 
 
+def test_one_timestamp_grid_boundary_overrun_is_clamped():
+    words = [AlignedUnit("one", 3.2, 4.08, 0.9, 40, 51)]
+    validated = validate_words(words, 4.0, 0.01, 0.08)
+    assert validated == [AlignedUnit("one", 3.2, 4.0, 0.9, 40, 51)]
+
+
+def test_more_than_one_timestamp_grid_boundary_overrun_is_rejected(caplog):
+    words = [AlignedUnit("one", 3.2, 4.081, 0.9, 40, 52)]
+    with pytest.raises(AlignmentError, match="source-unbounded"):
+        validate_words(words, 4.0, 0.01, 0.08, "request-123")
+    assert "request_id=request-123" in caplog.text
+    assert "word_index=0" in caplog.text
+    assert "raw_timestamp_token=52" in caplog.text
+    assert "converted_seconds=4.081000" in caplog.text
+
+
+def test_development_diagnostic_identifies_rejected_timestamp():
+    words = [AlignedUnit("one", 3.2, 4.16, 0.9, 40, 52)]
+    with pytest.raises(AlignmentError) as raised:
+        validate_words(words, 4.0, 0.01, 0.08, "request-123", True)
+    assert "word_index=0 field=end raw_timestamp_token=52" in raised.value.message
+
+
+def test_qwen_timestamp_token_units_are_milliseconds():
+    assert QwenBackend.timestamp_token_to_seconds(1, 80) == 0.08
+    assert QwenBackend.timestamp_token_to_seconds(375, 80) == 30.0
+    assert QwenBackend.timestamp_token_to_seconds(3750, 80) == 300.0
+
+
+def test_window_partition_preserves_repeated_units_without_duplicates():
+    units = [
+        AlignedUnit("go", 0.2, 0.4, 0.9),
+        AlignedUnit("go", 1.2, 1.4, 0.9),
+        AlignedUnit("go", 4.2, 4.4, 0.9),
+        AlignedUnit("now", 7.2, 7.4, 0.9),
+    ]
+    partitions = QwenBackend._partition_units(units, [0.0, 4.0, 8.0])
+    assert partitions == [(0.0, 4.0, 0, 2), (4.0, 8.0, 2, 4)]
+    indexes = [index for _, _, first, last in partitions for index in range(first, last)]
+    assert indexes == [0, 1, 2, 3]
+
+
+def test_window_partition_rebalances_impossible_terminal_density():
+    units = [AlignedUnit(str(index), 10.0, 10.1, 0.9) for index in range(18)]
+    partitions = QwenBackend._partition_units(units, [0.0, 4.0, 8.0, 12.0], 2.0)
+    assert partitions == [(0.0, 4.0, 0, 2), (4.0, 8.0, 2, 10), (8.0, 12.0, 10, 18)]
+    indexes = [index for _, _, first, last in partitions for index in range(first, last)]
+    assert indexes == list(range(18))
+
+
+def test_saturated_tail_is_rebased_before_empty_terminal_window():
+    groups = [list(range(0, 4)), list(range(4, 12)), list(range(12, 14)), []]
+    boundaries = [0.0, 4.0, 8.0, 12.0, 16.0]
+    assert QwenBackend._saturated_tail_index(groups, boundaries, 2.0) == 1
+
+
+def test_full_nonterminal_window_without_remaining_units_is_not_rebased():
+    groups = [list(range(0, 4)), list(range(4, 12)), [], []]
+    boundaries = [0.0, 4.0, 8.0, 12.0, 16.0]
+    assert QwenBackend._saturated_tail_index(groups, boundaries, 2.0) is None
+
+
+def test_saturated_tail_is_reinferred_and_offset_without_lost_units(monkeypatch, tmp_path):
+    backend = QwenBackend("model", "revision", "cpu", True)
+    backend.timestamp_grid_seconds = 0.08
+    words = [str(index) for index in range(14)]
+    coarse = [AlignedUnit(words[index], index + 0.1, index + 0.2, 1.0) for index in range(14)]
+    coarse[4:12] = [AlignedUnit(words[index], 4.1 + (index - 4) * 0.1, 4.15 + (index - 4) * 0.1, 1.0) for index in range(4, 12)]
+    coarse[12:] = [AlignedUnit(words[index], 8.1 + (index - 12) * 0.1, 8.15 + (index - 12) * 0.1, 1.0) for index in range(12, 14)]
+    tail_coarse = [
+        AlignedUnit(words[index + 4], (index // 3) * 4 + 0.1, (index // 3) * 4 + 0.2, 1.0)
+        for index in range(10)
+    ]
+
+    monkeypatch.setattr(backend, "_silence_boundaries", lambda audio, maximum: [0.0, 4.0, 8.0, 12.0, 16.0] if audio.name == "audio.wav" else [0.0, 4.0, 8.0, 12.0])
+    monkeypatch.setattr(backend, "_write_window", lambda audio, output, start, end: end - start)
+    monkeypatch.setattr(backend, "_infer", lambda audio, selected_words, input_text, duration, repair: tail_coarse)
+
+    def align_partitions(audio, selected_words, partitions, depth, maximum_units_per_second):
+        aligned = []
+        for start, end, first, last in partitions:
+            step = (end - start) / (last - first + 1)
+            for offset, index in enumerate(range(first, last)):
+                aligned.append(AlignedUnit(selected_words[index], start + (offset + 0.25) * step, start + (offset + 0.75) * step, 1.0))
+        return aligned
+
+    monkeypatch.setattr(backend, "_align_partitions", align_partitions)
+    aligned = backend._align_windows(tmp_path / "audio.wav", words, coarse, 16.0, 2.0)
+    assert [unit.text for unit in aligned] == words
+    assert aligned[4].start >= 4.0
+    assert aligned[-1].end <= 16.0
+
+
+def test_low_confidence_shared_cut_is_refined_by_model_score(monkeypatch, tmp_path):
+    backend = QwenBackend("model", "revision", "cpu", True)
+    words = [str(index) for index in range(10)]
+
+    def align_partition(audio, selected_words, partition, depth, window_index):
+        start, end, first, last = partition
+        confidence = 1.0 if partition in {(0.0, 4.0, 0, 3), (4.0, 8.0, 3, 10)} else 0.001
+        return [
+            AlignedUnit(selected_words[index], start + 0.1, start + 0.2, confidence)
+            for index in range(first, last)
+        ]
+
+    monkeypatch.setattr(backend, "_align_partition", align_partition)
+    aligned = backend._align_partitions(
+        tmp_path / "audio.wav",
+        words,
+        [(0.0, 4.0, 0, 5), (4.0, 8.0, 5, 10)],
+        0,
+        4.0,
+    )
+    assert [unit.text for unit in aligned] == words
+    assert min(unit.confidence for unit in aligned) == 1.0
+
+
+def test_invalid_direct_alignment_requires_windowing():
+    valid = [AlignedUnit("one", 0.2, 0.4, 0.9), AlignedUnit("two", 0.4, 0.8, 0.9)]
+    zero = [AlignedUnit("one", 0.2, 0.2, 0.9)]
+    assert QwenBackend._requires_windowing(valid, 1.0, 0.08) is False
+    assert QwenBackend._requires_windowing(zero, 1.0, 0.08) is True
+
+
+def test_constrained_timestamp_decode_eliminates_zero_width_words():
+    import torch
+
+    logits = torch.full((4, 6), -10.0)
+    logits[0, 1] = 10.0
+    logits[1, 1] = 10.0
+    logits[1, 2] = 9.0
+    logits[2, 2] = 10.0
+    logits[3, 2] = 10.0
+    logits[3, 3] = 9.0
+    decoded = QwenBackend._constrained_timestamp_ids(logits, 5).tolist()
+    assert decoded[0] < decoded[1] <= decoded[2] < decoded[3]
+
+
+def test_constrained_timestamp_decode_respects_media_bound():
+    import torch
+
+    logits = torch.full((2, 8), -10.0)
+    logits[0, 6] = 10.0
+    logits[1, 7] = 10.0
+    decoded = QwenBackend._constrained_timestamp_ids(logits, 4, 3).tolist()
+    assert decoded[0] <= 3
+    assert decoded[0] < decoded[1] <= 4
+
+
+def test_relative_timestamp_confidence_does_not_penalize_diffuse_logits():
+    import torch
+
+    logits = torch.zeros((2, 5000))
+    selected = torch.tensor([10, 11])
+    chosen = logits.gather(1, selected.unsqueeze(1)).squeeze(1)
+    relative = torch.exp(chosen - logits.amax(dim=-1))
+    absolute = torch.exp(chosen - torch.logsumexp(logits, dim=-1))
+    assert relative.tolist() == [1.0, 1.0]
+    assert max(absolute.tolist()) < 0.01
+
+
+def test_low_confidence_log_identifies_word_without_text(caplog):
+    words = [AlignedUnit("secret", 0.1, 0.2, 0.001)]
+    with pytest.raises(AlignmentError, match="sufficient confidence"):
+        validate_words(words, 1.0, 0.01, request_id="request-456")
+    assert "request_id=request-456" in caplog.text
+    assert "word_index=0" in caplog.text
+    assert "secret" not in caplog.text
+
+
 def test_character_timestamps_aggregate_deterministically_to_words():
     units = [
         AlignedUnit("d", 0.1, 0.2, 0.99),
@@ -201,12 +372,14 @@ def test_rocm_load_failure_falls_back_to_cpu(monkeypatch):
     )
 
     class FakeAligner:
+        timestamp_segment_time = 80
+
         @classmethod
         def from_pretrained(cls, model, **kwargs):
             calls.append(kwargs["device_map"])
             if kwargs["device_map"] == "cuda:0":
                 raise RuntimeError("ROCm allocation failed")
-            return object()
+            return cls()
 
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "qwen_asr", types.SimpleNamespace(Qwen3ForcedAligner=FakeAligner))

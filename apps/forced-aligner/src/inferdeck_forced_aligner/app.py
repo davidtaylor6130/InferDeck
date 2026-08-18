@@ -35,6 +35,7 @@ def create_app(settings: Settings | None = None, backend: Backend | None = None)
         config.cpu_fallback,
         config.min_gpu_free_mb,
         hub_cache,
+        config.min_word_confidence,
     )
 
     @asynccontextmanager
@@ -47,7 +48,7 @@ def create_app(settings: Settings | None = None, backend: Backend | None = None)
                 logger.exception("forced aligner startup failed model=%s error=%s", config.model, type(exc).__name__)
         yield
 
-    app = FastAPI(title="InferDeck Forced Aligner", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="InferDeck Forced Aligner", version="1.0.11", lifespan=lifespan)
     app.state.backend = selected_backend
     app.state.inference_lock = asyncio.Semaphore(1)
     app.state.audio_preparer = AudioPreparer(config.max_audio_seconds, config.max_upload_bytes)
@@ -126,7 +127,14 @@ def create_app(settings: Settings | None = None, backend: Backend | None = None)
                 async with app.state.inference_lock:
                     units = await asyncio.to_thread(selected_backend.align, prepared.path, text, language)
                 words = aggregate_units_to_words(units, text)
-                validate_words(words, duration, config.min_word_confidence)
+                words = validate_words(
+                    words,
+                    duration,
+                    config.min_word_confidence,
+                    getattr(selected_backend, "timestamp_grid_seconds", 0.0),
+                    request_id,
+                    config.development_diagnostics,
+                )
                 success = True
                 response = {
                     "model": config.model,

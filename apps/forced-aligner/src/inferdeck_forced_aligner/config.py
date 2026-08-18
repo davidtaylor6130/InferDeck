@@ -33,3 +33,4 @@ class Settings:
     min_word_confidence: float = float(os.getenv("ALIGNER_MIN_WORD_CONFIDENCE", "0.01"))
     min_gpu_free_mb: int = int(os.getenv("ALIGNER_MIN_GPU_FREE_MB", "3072"))
     max_upload_bytes: int = int(os.getenv("ALIGNER_MAX_UPLOAD_BYTES", str(1024 * 1024 * 1024)))
+    development_diagnostics: bool = _bool("ALIGNER_DEVELOPMENT_DIAGNOSTICS", False)
