@@ -29,13 +29,15 @@ describe('buildCostDefaults', () => {
   it('maps pricing.json entries and treats "default" as the fallback', () => {
     const { defaults, fallback } = buildCostDefaults([
       { model_name: 'default', prompt_price_per_million: 0.5, cached_prompt_price_per_million: 0.05, completion_price_per_million: 1.0 },
-      { model_name: 'qwen3.6-35b-a3b', prompt_price_per_million: 0.118, cached_prompt_price_per_million: 0.02, completion_price_per_million: 1.05, equivalent_api_model: 'Equivalent API model' },
+      { model_name: 'qwen3.6-35b-a3b', prompt_price_per_million: 0.118, cached_prompt_price_per_million: 0.02, completion_price_per_million: 1.05, legacy_cached_prompt_ratio: 0.95, legacy_cached_prompt_before: '2026-08-18', equivalent_api_model: 'Equivalent API model' },
     ]);
     expect(fallback.promptPerMillion).toBe(0.5);
     expect(fallback.cachedPromptPerMillion).toBe(0.05);
     expect(defaults['qwen3.6-35b-a3b'].cachedPromptPerMillion).toBe(0.02);
     expect(defaults['qwen3.6-35b-a3b'].outputPerMillion).toBe(1.05);
     expect(defaults['qwen3.6-35b-a3b'].equivalentModel).toBe('Equivalent API model');
+    expect(defaults['qwen3.6-35b-a3b'].legacyCachedPromptRatio).toBe(0.95);
+    expect(defaults['qwen3.6-35b-a3b'].legacyCachedPromptBefore).toBe('2026-08-18');
   });
 });
 
@@ -65,6 +67,29 @@ describe('estimateCostAvoided', () => {
       { promptTokens: 0, completionTokens: 0, inputAudioSeconds: 0, inputCharacters: 2_000_000 },
       { ...DEFAULT_COST_CONFIG, billingUnit: 'million_characters', pricePerUnit: 15 },
     )).toBeCloseTo(30);
+  });
+
+  it('estimates legacy zero-cache usage without overriding recorded or newer values', () => {
+    const pricing = {
+      ...DEFAULT_COST_CONFIG,
+      promptPerMillion: 0.14,
+      cachedPromptPerMillion: 0.05,
+      outputPerMillion: 1,
+      legacyCachedPromptRatio: 0.95,
+      legacyCachedPromptBefore: '2026-08-18',
+    };
+    expect(estimateUsageCost(
+      { model: 'qwen3.6-35b-a3b', bucket: '2026-08-17', promptTokens: 1_000_000, cachedPromptTokens: 0, completionTokens: 0 },
+      pricing,
+    )).toBeCloseTo(0.0545);
+    expect(estimateUsageCost(
+      { model: 'qwen3.6-35b-a3b', bucket: '2026-08-17', promptTokens: 1_000_000, cachedPromptTokens: 400_000, completionTokens: 0 },
+      pricing,
+    )).toBeCloseTo(0.104);
+    expect(estimateUsageCost(
+      { model: 'qwen3.6-35b-a3b', bucket: '2026-08-18', promptTokens: 1_000_000, cachedPromptTokens: 0, completionTokens: 0 },
+      pricing,
+    )).toBeCloseTo(0.14);
   });
 });
 
@@ -148,6 +173,28 @@ describe('buildTokenSeries', () => {
     const recent = buildTokenSeries(jobs, 'a', pricing, [], {}, {}, DEFAULT_COST_CONFIG, 'all');
     expect(recent.cachedPrompt.reduce((sum, value) => sum + value, 0)).toBe(250_000);
     expect(recent.cost.reduce((sum, value) => sum + value, 0)).toBeCloseTo(1.775);
+  });
+
+  it('uses daily rows to apply legacy cache estimates precisely in the yearly range', () => {
+    const pricing = {
+      ...DEFAULT_COST_CONFIG,
+      promptPerMillion: 0.14,
+      cachedPromptPerMillion: 0.05,
+      legacyCachedPromptRatio: 0.95,
+      legacyCachedPromptBefore: '2026-08-18',
+    };
+    const monthly: MonthlyUsageRow[] = [{
+      bucket: '2026-08', model: 'qwen3.6-35b-a3b', promptTokens: 2_000_000,
+      cachedPromptTokens: 0, completionTokens: 0, totalTokens: 2_000_000,
+      requests: 2, successfulRequests: 2,
+    }];
+    const daily: MonthlyUsageRow[] = [
+      { bucket: '2026-08-17', model: 'qwen3.6-35b-a3b', promptTokens: 1_000_000, cachedPromptTokens: 0, completionTokens: 0, totalTokens: 1_000_000, requests: 1, successfulRequests: 1 },
+      { bucket: '2026-08-18', model: 'qwen3.6-35b-a3b', promptTokens: 1_000_000, cachedPromptTokens: 0, completionTokens: 0, totalTokens: 1_000_000, requests: 1, successfulRequests: 1 },
+    ];
+    const series = buildTokenSeries([], 'qwen3.6-35b-a3b', pricing, monthly, {}, {}, DEFAULT_COST_CONFIG, 'year', daily, [], true);
+    expect(series.cachedPrompt.reduce((sum, value) => sum + value, 0)).toBe(950_000);
+    expect(series.cost.reduce((sum, value) => sum + value, 0)).toBeCloseTo(0.1945);
   });
 
   it('keeps measured throughput samples separate from historical token totals', () => {
