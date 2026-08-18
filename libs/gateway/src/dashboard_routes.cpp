@@ -540,6 +540,8 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"capabilities", info.capabilities},
             {"prompt_price_per_million", info.prompt_price_per_million
                 ? nlohmann::json(*info.prompt_price_per_million) : nlohmann::json(nullptr)},
+            {"cached_prompt_price_per_million", info.cached_prompt_price_per_million
+                ? nlohmann::json(*info.cached_prompt_price_per_million) : nlohmann::json(nullptr)},
             {"completion_price_per_million", info.completion_price_per_million
                 ? nlohmann::json(*info.completion_price_per_million) : nlohmann::json(nullptr)},
             {"loaded", resident != residency.end()},
@@ -1661,7 +1663,9 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
         for (const auto& name : deps.gw.coordinator.registry().list()) {
             const auto info = deps.gw.coordinator.registry().get_info_result(name);
-            if (!info || (!info->prompt_price_per_million && !info->completion_price_per_million)) continue;
+            if (!info || (!info->prompt_price_per_million &&
+                          !info->cached_prompt_price_per_million &&
+                          !info->completion_price_per_million)) continue;
             auto existing = std::find_if(pricing.begin(), pricing.end(), [&](const nlohmann::json& entry) {
                 return entry.value("model_name", "") == name;
             });
@@ -1669,8 +1673,29 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                 ? nlohmann::json{{"model_name", name}, {"currency", "USD"}}
                 : *existing;
             value["prompt_price_per_million"] = info->prompt_price_per_million.value_or(0.0);
+            if (info->cached_prompt_price_per_million) {
+                value["cached_prompt_price_per_million"] =
+                    *info->cached_prompt_price_per_million;
+            } else if (!value.contains("cached_prompt_price_per_million")) {
+                value["cached_prompt_price_per_million"] =
+                    info->prompt_price_per_million.value_or(0.0);
+            }
             value["completion_price_per_million"] = info->completion_price_per_million.value_or(0.0);
             value["source"] = "model_settings";
+            if (existing == pricing.end()) pricing.push_back(std::move(value));
+            else *existing = std::move(value);
+        }
+        for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
+            auto target = std::find_if(pricing.begin(), pricing.end(), [&](const nlohmann::json& entry) {
+                return entry.value("model_name", "") == alias.target;
+            });
+            if (target == pricing.end()) continue;
+            nlohmann::json value = *target;
+            value["model_name"] = alias.name;
+            value["source"] = "model_alias";
+            auto existing = std::find_if(pricing.begin(), pricing.end(), [&](const nlohmann::json& entry) {
+                return entry.value("model_name", "") == alias.name;
+            });
             if (existing == pricing.end()) pricing.push_back(std::move(value));
             else *existing = std::move(value);
         }

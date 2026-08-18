@@ -3,6 +3,7 @@ import type { JobRecord, MonthlyUsageRow, PricingEntry, UsageRow } from './types
 export interface ModelCostConfig {
   equivalentModel: string;
   promptPerMillion: number;
+  cachedPromptPerMillion: number;
   outputPerMillion: number;
   breakEvenTarget: number;
   source?: string;
@@ -16,6 +17,7 @@ export interface ModelCostConfig {
 export interface ModelTokenUsage {
   model: string;
   prompt: number;
+  cachedPrompt?: number;
   output: number;
   total: number;
 }
@@ -44,7 +46,7 @@ export type TokenRange = 'day' | 'week' | 'month' | 'year' | 'all';
 export const ALL_MODELS = 'All tracked models';
 export const COST_STORAGE_KEY = 'inferdeck:model-token-costs';
 export const DEFAULT_BREAK_EVEN_TARGET = 1739;
-export const MODEL_COST_DEFAULTS_VERSION = 5;
+export const MODEL_COST_DEFAULTS_VERSION = 6;
 
 export const TOKEN_RANGE_LABELS: Record<TokenRange, string> = {
   day: '24h',
@@ -57,6 +59,7 @@ export const TOKEN_RANGE_LABELS: Record<TokenRange, string> = {
 export const DEFAULT_COST_CONFIG: ModelCostConfig = {
   equivalentModel: 'Not configured',
   promptPerMillion: 0,
+  cachedPromptPerMillion: 0,
   outputPerMillion: 0,
   breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
   source: 'No server-side model pricing',
@@ -84,6 +87,7 @@ export function buildCostDefaults(pricing: PricingEntry[]): { defaults: CostDefa
     const config: ModelCostConfig = {
       equivalentModel: entry.equivalent_api_model || DEFAULT_COST_CONFIG.equivalentModel,
       promptPerMillion: sanitizeMoney(entry.prompt_price_per_million, DEFAULT_COST_CONFIG.promptPerMillion),
+      cachedPromptPerMillion: sanitizeMoney(entry.cached_prompt_price_per_million, entry.prompt_price_per_million),
       outputPerMillion: sanitizeMoney(entry.completion_price_per_million, DEFAULT_COST_CONFIG.outputPerMillion),
       breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
       source: entry.source === 'model_settings' ? 'Model Settings' : 'data/pricing.json',
@@ -139,6 +143,7 @@ export function normalizeCostConfig(
       ? source.equivalentModel
       : defaultConfig.equivalentModel,
     promptPerMillion: sanitizeMoney(source?.promptPerMillion, defaultConfig.promptPerMillion),
+    cachedPromptPerMillion: sanitizeMoney(source?.cachedPromptPerMillion, defaultConfig.cachedPromptPerMillion),
     outputPerMillion: sanitizeMoney(source?.outputPerMillion, defaultConfig.outputPerMillion),
     breakEvenTarget,
     source: typeof source?.source === 'string' && source.source.trim() ? source.source : defaultConfig.source,
@@ -167,6 +172,7 @@ export function inferredSpeechCostDefault(model: string): ModelCostConfig | unde
     return {
       equivalentModel: 'OpenAI whisper-1',
       promptPerMillion: 0,
+      cachedPromptPerMillion: 0,
       outputPerMillion: 0,
       breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
       source: 'OpenAI model pricing',
@@ -180,6 +186,7 @@ export function inferredSpeechCostDefault(model: string): ModelCostConfig | unde
     return {
       equivalentModel: 'OpenAI tts-1',
       promptPerMillion: 0,
+      cachedPromptPerMillion: 0,
       outputPerMillion: 0,
       breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
       source: 'OpenAI model pricing',
@@ -207,11 +214,16 @@ function isLegacyDefaultConfig(model: string, config: Partial<ModelCostConfig>):
 }
 
 export function estimateCostAvoided(usage: ModelTokenUsage, cost: ModelCostConfig): number {
-  return (usage.prompt / 1_000_000) * cost.promptPerMillion + (usage.output / 1_000_000) * cost.outputPerMillion;
+  const prompt = Math.max(0, Number(usage.prompt));
+  const cachedPrompt = Math.min(prompt, Math.max(0, Number(usage.cachedPrompt ?? 0)));
+  const uncachedPrompt = prompt - cachedPrompt;
+  return (uncachedPrompt / 1_000_000) * cost.promptPerMillion +
+    (cachedPrompt / 1_000_000) * cost.cachedPromptPerMillion +
+    (usage.output / 1_000_000) * cost.outputPerMillion;
 }
 
 export function estimateUsageCost(
-  usage: Pick<UsageRow | MonthlyUsageRow, 'promptTokens' | 'completionTokens' | 'inputAudioSeconds' | 'inputCharacters'>,
+  usage: Pick<UsageRow | MonthlyUsageRow, 'promptTokens' | 'cachedPromptTokens' | 'completionTokens' | 'inputAudioSeconds' | 'inputCharacters'>,
   cost: ModelCostConfig,
 ): number {
   if (cost.billingUnit === 'audio_minute') {
@@ -223,7 +235,7 @@ export function estimateUsageCost(
   const prompt = Number(usage.promptTokens ?? 0);
   const output = Number(usage.completionTokens ?? 0);
   return estimateCostAvoided(
-    { model: '', prompt, output, total: prompt + output },
+    { model: '', prompt, cachedPrompt: Number(usage.cachedPromptTokens ?? 0), output, total: prompt + output },
     cost,
   );
 }
@@ -315,10 +327,12 @@ export function buildTokenSeries(
       const bucket = chartBucket ? byBucket.get(chartBucket.key) : undefined;
       if (!bucket) continue;
       const prompt = Number(job.promptTokens ?? 0);
-      const uncachedPrompt = Math.max(0, prompt - Number(job.cachedPromptTokens ?? 0));
+      const cachedPrompt = Math.min(prompt, Math.max(0, Number(job.cachedPromptTokens ?? 0)));
+      const uncachedPrompt = prompt - cachedPrompt;
       const output = Number(job.completionTokens ?? 0);
       const jobModel = job.model || 'Unknown model';
       bucket.prompt += prompt;
+      bucket.cachedPrompt += cachedPrompt;
       bucket.output += output;
       bucket.total += Number(job.totalTokens ?? prompt + output);
       bucket.requests += 1;
@@ -340,6 +354,7 @@ export function buildTokenSeries(
       bucket.cost += estimateUsageCost(
         {
           promptTokens: prompt,
+          cachedPromptTokens: cachedPrompt,
           completionTokens: output,
           inputAudioSeconds: job.inputAudioSeconds,
           inputCharacters: job.inputCharacters,
@@ -389,6 +404,7 @@ export function tokenUsageFromSeries(model: string, series: TokenSeries): ModelT
   return {
     model,
     prompt: series.prompt.reduce((sum, value) => sum + value, 0),
+    cachedPrompt: series.cachedPrompt.reduce((sum, value) => sum + value, 0),
     output: series.output.reduce((sum, value) => sum + value, 0),
     total: series.total.reduce((sum, value) => sum + value, 0),
   };

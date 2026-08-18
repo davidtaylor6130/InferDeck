@@ -75,6 +75,7 @@ struct ModelInfo {
     std::string reasoning_format{};
     std::string chat_template_path{};
     std::optional<double> prompt_price_per_million{};
+    std::optional<double> cached_prompt_price_per_million{};
     std::optional<double> completion_price_per_million{};
     std::map<std::string, std::string> artifacts{};
     SamplingConfig sampling{};

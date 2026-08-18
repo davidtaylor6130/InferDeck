@@ -284,7 +284,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "duplicate model name: " + name);
                 }
-                for (const char* key : {"prompt_price_per_million", "completion_price_per_million"}) {
+                for (const char* key : {"prompt_price_per_million", "cached_prompt_price_per_million", "completion_price_per_million"}) {
                     if (!entry[key]) continue;
                     const double value = entry[key].as<double>();
                     if (!std::isfinite(value) || value < 0.0) {
@@ -781,6 +781,9 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             }
             if (m["prompt_price_per_million"]) {
                 info.prompt_price_per_million = m["prompt_price_per_million"].as<double>();
+            }
+            if (m["cached_prompt_price_per_million"]) {
+                info.cached_prompt_price_per_million = m["cached_prompt_price_per_million"].as<double>();
             }
             if (m["completion_price_per_million"]) {
                 info.completion_price_per_million = m["completion_price_per_million"].as<double>();
