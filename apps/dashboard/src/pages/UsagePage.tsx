@@ -176,7 +176,7 @@ const LlmUsagePage: React.FC = () => {
           : <p className="border-y border-dashed border-border-slate py-8 text-center text-sm text-text-muted">No usage recorded for this range.</p>}
 
         <p className="mt-4 border-t border-border-slate pt-3 text-xs text-text-muted">
-          Cost uses the server-side prices configured for each model in Model Settings. Models without prices contribute no estimated cost.
+          Cost uses the server-side prices configured for each model in Model Settings. Legacy ranges may use a server-provided cache estimate where early versions did not record cache hits. Models without prices contribute no estimated cost.
         </p>
       </Panel>
 
