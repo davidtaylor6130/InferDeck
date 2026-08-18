@@ -31,6 +31,7 @@ export interface ModelInfo {
   active_requests?: number;
   optimization?: ModelOptimizationInfo;
   prompt_price_per_million?: number;
+  cached_prompt_price_per_million?: number;
   completion_price_per_million?: number;
   alias?: boolean;
   alias_target?: string;
@@ -212,6 +213,7 @@ export interface SwapHistoryRow {
 export interface PricingEntry {
   model_name: string;
   prompt_price_per_million: number;
+  cached_prompt_price_per_million?: number;
   completion_price_per_million: number;
   equivalent_api_model?: string | null;
   currency?: string;

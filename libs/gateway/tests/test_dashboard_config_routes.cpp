@@ -147,7 +147,8 @@ struct ConfigRouteServer {
     std::function<inferdeck::foundation::Result<void>(const std::string&)> validate =
         [](const std::string&) { return Ok(); };
 
-    explicit ConfigRouteServer(const TempConfig& config) {
+    explicit ConfigRouteServer(const TempConfig& config,
+                               std::string pricing_file = {}) {
         GatewayDeps gateway_deps{
             coordinator, "15", true, {}, {}, 15000, nullptr, nullptr, nullptr,
             &swap_tracker, &maintenance_resource};
@@ -155,7 +156,7 @@ struct ConfigRouteServer {
             gateway_deps,
             gpu,
             {},
-            {},
+            std::move(pricing_file),
             config.base.string(),
             config.active.string(),
             "running-before-save",
@@ -271,6 +272,50 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     CHECK(routes.registry.aliases().empty());
     const auto after_delete = YAML::Load(TempConfig::read(config.active));
     CHECK(after_delete["model_aliases"].size() == 0);
+}
+
+TEST_CASE("Pricing API exposes cached input rates for models and aliases",
+          "[gateway][dashboard][pricing]") {
+    TempConfig config;
+    const auto pricing_path = config.root / "pricing.json";
+    TempConfig::write(pricing_path, R"([
+      {
+        "model_name": "priced-model",
+        "prompt_price_per_million": 0.45,
+        "cached_prompt_price_per_million": 0.05,
+        "completion_price_per_million": 3.2
+      }
+    ])");
+    ConfigRouteServer routes(config, pricing_path.string());
+    inferdeck::model::ModelInfo model;
+    model.name = "priced-model";
+    model.prompt_price_per_million = 0.45;
+    model.cached_prompt_price_per_million = 0.04;
+    model.completion_price_per_million = 3.2;
+    routes.registry.register_model(model);
+    inferdeck::model::ModelAlias alias;
+    alias.name = "stable-priced-model";
+    alias.target = model.name;
+    REQUIRE(routes.registry.set_alias(alias));
+
+    auto client = routes.client();
+    const auto response = client.Get("/api/pricing");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    const auto priced = std::find_if(body.begin(), body.end(), [](const auto& entry) {
+        return entry.value("model_name", "") == "priced-model";
+    });
+    const auto aliased = std::find_if(body.begin(), body.end(), [](const auto& entry) {
+        return entry.value("model_name", "") == "stable-priced-model";
+    });
+    REQUIRE(priced != body.end());
+    REQUIRE(aliased != body.end());
+    CHECK((*priced)["prompt_price_per_million"] == 0.45);
+    CHECK((*priced)["cached_prompt_price_per_million"] == 0.04);
+    CHECK((*priced)["completion_price_per_million"] == 3.2);
+    CHECK((*aliased)["cached_prompt_price_per_million"] == 0.04);
+    CHECK((*aliased)["source"] == "model_alias");
 }
 
 TEST_CASE("Configured external models can be unregistered without rewriting unrelated config",

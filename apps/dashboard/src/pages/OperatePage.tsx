@@ -544,10 +544,13 @@ const ModelConfigDialog: React.FC<{
                 </ConfigField>
                 {section === 'llm' && (
                   <>
-                    <ConfigField label="Input cost per 1M tokens (USD)">
+                    <ConfigField label="Input / 1M tokens (USD)">
                       <input className={inputClass} type="number" min="0" step="0.001" value={Number(read(['prompt_price_per_million']) ?? 0)} onChange={event => update(['prompt_price_per_million'], Number(event.target.value))} />
                     </ConfigField>
-                    <ConfigField label="Output cost per 1M tokens (USD)">
+                    <ConfigField label="Cached input / 1M tokens (USD)">
+                      <input className={inputClass} type="number" min="0" step="0.001" value={Number(read(['cached_prompt_price_per_million']) ?? read(['prompt_price_per_million']) ?? 0)} onChange={event => update(['cached_prompt_price_per_million'], Number(event.target.value))} />
+                    </ConfigField>
+                    <ConfigField label="Output / 1M tokens (USD)">
                       <input className={inputClass} type="number" min="0" step="0.001" value={Number(read(['completion_price_per_million']) ?? 0)} onChange={event => update(['completion_price_per_million'], Number(event.target.value))} />
                     </ConfigField>
                   </>

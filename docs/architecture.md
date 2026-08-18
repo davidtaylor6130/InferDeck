@@ -107,7 +107,7 @@ Removal is limited to store-managed paths. Loaded or active models cannot be rem
 
 Model entries contain runtime-neutral fields plus an optional `artifacts` map for runtime-specific files. Native examples and build pins are in `docs/alpha-v2-native-runtimes.md`.
 
-Per-model `prompt_price_per_million` and `completion_price_per_million` values are the server-owned token-pricing source. The pricing endpoint merges those values over packaged defaults, and the dashboard reports when neither source defines a model price.
+Per-model `prompt_price_per_million`, `cached_prompt_price_per_million`, and `completion_price_per_million` values are the server-owned token-pricing source. The pricing endpoint merges those values over packaged defaults, applies target pricing to model aliases, and the dashboard reports when neither source defines a model price.
 
 Stable aliases are stored in the root `model_aliases` sequence and managed through `/api/model-aliases`. An alias points directly to a concrete registry model and captures its minimum context and required capabilities as a compatibility contract. Retargeting is rejected when the new concrete model cannot satisfy that contract. Discovery and request metrics preserve both the requested alias and resolved concrete model.
 

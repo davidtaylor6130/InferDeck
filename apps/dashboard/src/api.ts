@@ -303,6 +303,7 @@ function normalizeModel(value: unknown): ModelInfo | null {
     free_slots: asNumber(residency.free_slots) ?? asNumber(entry.free_slots),
     active_requests: asNumber(residency.active_requests) ?? asNumber(entry.active_requests),
     prompt_price_per_million: asNumber(entry.prompt_price_per_million),
+    cached_prompt_price_per_million: asNumber(entry.cached_prompt_price_per_million),
     completion_price_per_million: asNumber(entry.completion_price_per_million),
     alias: asBoolean(entry.alias),
     alias_target: asString(entry.alias_target),
