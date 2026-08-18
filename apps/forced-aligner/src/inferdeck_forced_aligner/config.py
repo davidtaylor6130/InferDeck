@@ -1,11 +1,21 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
 def _bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _auth_token() -> str:
+    token = os.getenv("ALIGNER_AUTH_TOKEN", "").strip()
+    if token:
+        return token
+    token_file = os.getenv("ALIGNER_AUTH_TOKEN_FILE", "").strip()
+    if not token_file:
+        return ""
+    return Path(token_file).read_text(encoding="utf-8").strip()
 
 
 @dataclass(frozen=True)
@@ -15,7 +25,7 @@ class Settings:
     device: str = os.getenv("ALIGNER_DEVICE", "rocm").lower()
     cpu_fallback: bool = _bool("ALIGNER_CPU_FALLBACK", True)
     max_audio_seconds: float = float(os.getenv("ALIGNER_MAX_AUDIO_SECONDS", "300"))
-    auth_token: str = os.getenv("ALIGNER_AUTH_TOKEN", "")
+    auth_token: str = field(default_factory=_auth_token)
     hf_home: Path = Path(os.getenv("HF_HOME", "/models/cache"))
     host: str = os.getenv("ALIGNER_HOST", "127.0.0.1")
     port: int = int(os.getenv("ALIGNER_PORT", "11436"))

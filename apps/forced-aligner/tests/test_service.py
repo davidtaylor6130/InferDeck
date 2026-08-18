@@ -239,6 +239,19 @@ def test_non_loopback_bind_requires_authentication(tmp_path):
         create_app(settings(tmp_path, host="0.0.0.0"), FakeBackend())
 
 
+def test_non_loopback_bind_accepts_authentication(tmp_path):
+    app = create_app(settings(tmp_path, host="192.168.0.168", auth_token="x" * 43), FakeBackend())
+    assert app is not None
+
+
+def test_bearer_token_loads_from_protected_file(tmp_path, monkeypatch):
+    token_file = tmp_path / "token.txt"
+    token_file.write_text("t" * 43, encoding="utf-8")
+    monkeypatch.delenv("ALIGNER_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ALIGNER_AUTH_TOKEN_FILE", str(token_file))
+    assert Settings().auth_token == "t" * 43
+
+
 def test_unsupported_language_rejected(tmp_path):
     with client_for(tmp_path) as client:
         response = client.post(

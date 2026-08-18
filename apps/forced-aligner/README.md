@@ -20,6 +20,8 @@ $env:TRANSFORMERS_OFFLINE = '1'
 $env:ALIGNER_DEVICE = 'rocm'
 $env:ALIGNER_CPU_FALLBACK = 'true'
 $env:ALIGNER_MIN_GPU_FREE_MB = '3072'
+$env:ALIGNER_AUTH_TOKEN_FILE = 'C:\InferDeck\config\forced-aligner-token.txt'
+$env:ALIGNER_HOST = '192.168.0.168'
 $env:ALIGNER_PORT = '11436'
 inferdeck-forced-aligner
 ```
@@ -27,7 +29,7 @@ inferdeck-forced-aligner
 Editor configuration:
 
 ```text
-AI_FORCED_ALIGNER_URL=http://localhost:11436/v1/audio/alignments
+AI_FORCED_ALIGNER_URL=http://ai.homelab.com:11436/v1/audio/alignments
 AI_FORCED_ALIGNER_MODEL=Qwen/Qwen3-ForcedAligner-0.6B
 ```
 
@@ -43,8 +45,10 @@ curl -X POST \
 
 Set `ALIGNER_AUTH_TOKEN` to require `Authorization: Bearer <token>`. The service only loads a local cached model snapshot and can run with outbound networking disabled after installation.
 
-The native service binds to loopback by default. For an editor on another machine, set `ALIGNER_HOST=0.0.0.0` and a non-empty `ALIGNER_AUTH_TOKEN`, then use `http://<inferdeck-host>:11436/v1/audio/alignments` with the Bearer token. Startup is rejected if a non-loopback bind has no token.
+The deployed native service binds only to `192.168.0.168`. Its firewall rule permits TCP 11436 only from the editor at `192.168.0.172`. The Bearer token is loaded from `C:\InferDeck\config\forced-aligner-token.txt`, which is not stored in Git. Startup is rejected if a non-loopback bind has no token.
 
 The Docker image binds its container port on all interfaces and therefore requires `ALIGNER_AUTH_TOKEN` to be supplied at runtime. Mount the persistent cache at `/models/cache`.
 
 The live Windows deployment uses `Start-ForcedAligner.ps1` plus a hidden per-user startup watchdog. `Install-ForcedAlignerService.ps1` is the administrator-only NSSM alternative.
+
+Run `scripts/windows/Enable-ForcedAlignerRemote.ps1` from an elevated PowerShell window to install the host-specific listener and the firewall rule restricted to `192.168.0.172`.
