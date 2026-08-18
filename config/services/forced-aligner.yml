@@ -1,0 +1,29 @@
+name: inferdeck-forced-aligner
+display_name: InferDeck Qwen Forced Aligner
+type: local_sidecar
+listen: 127.0.0.1:11436
+health_url: http://127.0.0.1:11436/health
+alignment_url: http://127.0.0.1:11436/v1/audio/alignments
+working_directory: C:\InferDeck\runtime\forced-aligner
+command: C:\InferDeck\runtime\forced-aligner\.venv\Scripts\inferdeck-forced-aligner.exe
+environment:
+  ALIGNER_MODEL: Qwen/Qwen3-ForcedAligner-0.6B
+  ALIGNER_MODEL_REVISION: c7cbfc2048c462b0d63a45797104fc9db3ad62b7
+  ALIGNER_DEVICE: rocm
+  ALIGNER_CPU_FALLBACK: "true"
+  ALIGNER_MAX_AUDIO_SECONDS: "300"
+  ALIGNER_MIN_GPU_FREE_MB: "3072"
+  ALIGNER_AUTH_TOKEN: ""
+  ALIGNER_HOST: 127.0.0.1
+  HF_HOME: C:\InferDeck\models\cache
+  HF_HUB_CACHE: C:\InferDeck\models\cache
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+restart: on_failure
+inference_concurrency: 1
+supervision:
+  launcher: C:\InferDeck\runtime\forced-aligner\Start-ForcedAligner.ps1
+  watchdog: C:\InferDeck\runtime\forced-aligner\Watch-ForcedAligner.ps1
+  triggers:
+    - user_logon
+    - every_60_seconds
