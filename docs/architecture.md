@@ -5,7 +5,7 @@ InferDeck is one native gateway process that admits, loads, executes, observes, 
 ## System shape
 
 ```text
-OpenAI/Anthropic clients                 React dashboard
+OpenAI clients                           React dashboard
           │                                    │
           └──────── HTTP + SSE ────────────────┘
                                │
@@ -73,7 +73,7 @@ When no VRAM budget is known, the coordinator retains the conservative single-re
 
 ## Runtime registration
 
-The registry maps a YAML runtime id to a factory. `llama_cpp` is always registered. Optional media factories are registered only when their native libraries were linked at build time. `/v1/models` reports `runtime_available`; attempting to load an unlinked runtime returns `runtime_unavailable` instead of starting a fake backend.
+The registry maps a YAML runtime id to a factory. `llama_cpp` is always registered. Optional media factories are registered only when their native libraries were linked at build time. `/api/inferdeck/v1/models` reports `runtime_available`; attempting to load an unlinked runtime returns `runtime_unavailable` instead of starting a fake backend.
 
 This boundary supports additional in-process providers. vLLM is intentionally excluded because it requires a Python/CUDA service and conflicts with the no-subprocess/no-proxy requirement. A future provider must expose a native C/C++ library, implement `IBackend` plus the relevant modality interface, and use the same coordinator.
 
@@ -89,7 +89,10 @@ OpenAI-compatible routes:
 - `POST /v1/audio/transcriptions`
 - `GET /v1/models`
 
-Anthropic compatibility remains at `POST /v1/messages` and `/v1/messages/count_tokens`.
+`strict_openai` is the default profile. Optional OpenAI-derivative routes live
+under `/compat/openai-derivative/v1`; optional Anthropic compatibility lives
+under `/compat/anthropic/v1`. Both are disabled by default and never add routes
+or fields to strict `/v1`.
 
 InferDeck control routes cover model load/unload, swap status/cancellation, media job cancellation, metrics, history, configuration, model aliases, and the model store. Dashboard live state uses one SSE connection; there is no WebSocket layer.
 
@@ -110,7 +113,7 @@ Model entries contain runtime-neutral fields plus an optional `artifacts` map fo
 Per-model `prompt_price_per_million`, `cached_prompt_price_per_million`, and `completion_price_per_million` values are the server-owned token-pricing source. The pricing endpoint merges those values over packaged defaults, applies target pricing to model aliases, and the dashboard reports when neither source defines a model price.
 Packaged pricing may define `legacy_cached_prompt_ratio` and `legacy_cached_prompt_before` for model history created before cache-hit accounting was available. Recorded cache counts always take precedence, and the estimate applies only to zero-cache usage before the configured date.
 
-Stable aliases are stored in the root `model_aliases` sequence and managed through `/api/model-aliases`. An alias points directly to a concrete registry model and captures its minimum context and required capabilities as a compatibility contract. Retargeting is rejected when the new concrete model cannot satisfy that contract. Discovery and request metrics preserve both the requested alias and resolved concrete model.
+Stable aliases are stored in the root `model_aliases` sequence and managed through `/api/inferdeck/v1/model-aliases`. An alias points directly to a concrete registry model and captures its minimum context and required capabilities as a compatibility contract. Retargeting is rejected when the new concrete model cannot satisfy that contract. Discovery and request metrics preserve both the requested alias and resolved concrete model.
 
 Each model can enable `optimization.schedule` with `window_start` and `window_end` in `HH:MM`. The default window is 03:00–04:00 in the gateway host's local timezone. A scheduled benchmark starts at most once per local calendar day and only while the request queue is idle, no swap is active, and GPU utilization is at most 20 percent. The dashboard exposes the server timezone plus next and last run status.
 

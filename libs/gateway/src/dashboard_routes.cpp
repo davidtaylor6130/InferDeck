@@ -535,6 +535,7 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"name", name},
             {"family", info.family},
             {"runtime", info.runtime},
+            {"runtime_available", coordinator.registry().has_factory(info.runtime)},
             {"modality", info.modality},
             {"capabilities", info.capabilities},
             {"prompt_price_per_million", info.prompt_price_per_million
@@ -550,6 +551,7 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"n_slots", resident == residency.end() ? info.n_slots : resident->second.slots},
             {"free_slots", resident == residency.end() ? 0 : resident->second.free_slots},
             {"active_requests", resident == residency.end() ? 0 : resident->second.active_requests},
+            {"resizing", resident != residency.end() && resident->second.resizing},
             {"has_vision", info.has_vision},
             {"optimization", {
                 {"status", info.optimization.status},
@@ -559,6 +561,32 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
                 {"single_tokens_per_second", info.optimization.single_tokens_per_second},
                 {"parallel_tokens_per_second", info.optimization.parallel_tokens_per_second},
             }},
+        });
+    }
+    for (const auto& alias : coordinator.registry().aliases()) {
+        const auto info = coordinator.registry().get_info_result(alias.target);
+        if (!info) continue;
+        const auto resident = residency.find(alias.target);
+        models.push_back({
+            {"id", alias.name},
+            {"name", alias.name},
+            {"family", info->family},
+            {"runtime", info->runtime},
+            {"runtime_available", coordinator.registry().has_factory(info->runtime)},
+            {"modality", info->modality},
+            {"capabilities", info->capabilities},
+            {"loaded", resident != residency.end()},
+            {"primary", resident != residency.end() && resident->second.primary},
+            {"context_size", info->context_size},
+            {"vram_required_mb", info->vram_required_mb},
+            {"n_slots", resident == residency.end() ? info->n_slots : resident->second.slots},
+            {"free_slots", resident == residency.end() ? 0 : resident->second.free_slots},
+            {"active_requests", resident == residency.end() ? 0 : resident->second.active_requests},
+            {"has_vision", info->has_vision},
+            {"alias", true},
+            {"alias_target", alias.target},
+            {"required_context_size", alias.required_context_size},
+            {"required_capabilities", alias.required_capabilities},
         });
     }
     nlohmann::json running = nlohmann::json::array();
@@ -874,7 +902,7 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
 
 void register_dashboard_routes(httplib::Server& server, const DashboardDeps& deps,
                                const RouteWrapper& wrap) {
-    server.Post(R"(^/api/optimize/profile$)",
+    server.Post(R"(^/api/inferdeck/v1/optimize/profile$)",
                 wrap([deps](const httplib::Request& req,
                             httplib::Response& resp) {
         if (deps.gw.coordinator.active_request_count() > 0 ||
@@ -981,7 +1009,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
     }));
 
-    server.Post(R"(^/api/optimize/benchmark$)",
+    server.Post(R"(^/api/inferdeck/v1/optimize/benchmark$)",
                 wrap([deps](const httplib::Request& req,
                             httplib::Response& resp) {
         if (!deps.profile_benchmark) {
@@ -1052,7 +1080,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
     }));
 
-    server.Get(R"(^/api/optimize/benchmark$)",
+    server.Get(R"(^/api/inferdeck/v1/optimize/benchmark$)",
                wrap([deps](const httplib::Request&,
                            httplib::Response& resp) {
         if (!deps.profile_benchmark) {
@@ -1064,7 +1092,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             deps.profile_benchmark->snapshot()));
     }));
 
-    server.Get(R"(^/api/optimize/schedule$)",
+    server.Get(R"(^/api/inferdeck/v1/optimize/schedule$)",
                wrap([deps](const httplib::Request&, httplib::Response& resp) {
         if (!deps.profile_benchmark_scheduler) {
             write_error(resp, 503, "optimization_schedule_unavailable",
@@ -1091,7 +1119,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         });
     }));
 
-    server.Post(R"(^/api/optimize/benchmark/cancel$)",
+    server.Post(R"(^/api/inferdeck/v1/optimize/benchmark/cancel$)",
                 wrap([deps](const httplib::Request&,
                             httplib::Response& resp) {
         if (!deps.profile_benchmark) {
@@ -1109,7 +1137,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             deps.profile_benchmark->snapshot()));
     }));
 
-    server.Get(R"(^/api/model-store/search$)", wrap([deps](const httplib::Request& req,
+    server.Get(R"(^/api/inferdeck/v1/model-store/search$)", wrap([deps](const httplib::Request& req,
                                                             httplib::Response& resp) {
         if (!deps.model_store) {
             write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
@@ -1136,7 +1164,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         write_json(resp, 200, {{"models", std::move(*result)}});
     }));
 
-    server.Get(R"(^/api/model-store/inspect$)", wrap([deps](const httplib::Request& req,
+    server.Get(R"(^/api/inferdeck/v1/model-store/inspect$)", wrap([deps](const httplib::Request& req,
                                                              httplib::Response& resp) {
         if (!deps.model_store) {
             write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
@@ -1153,7 +1181,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         write_json(resp, 200, std::move(*result));
     }));
 
-    server.Get(R"(^/api/model-store/downloads$)", wrap([deps](const httplib::Request&,
+    server.Get(R"(^/api/inferdeck/v1/model-store/downloads$)", wrap([deps](const httplib::Request&,
                                                                httplib::Response& resp) {
         if (!deps.model_store) {
             write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
@@ -1166,7 +1194,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                                {"library", deps.model_store->library()}});
     }));
 
-    server.Post(R"(^/api/model-store/downloads$)", wrap([deps](const httplib::Request& req,
+    server.Post(R"(^/api/inferdeck/v1/model-store/downloads$)", wrap([deps](const httplib::Request& req,
                                                                 httplib::Response& resp) {
         if (!deps.model_store) {
             write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
@@ -1189,7 +1217,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
     }));
 
-    server.Post(R"(^/api/model-store/downloads/([0-9]+)/(cancel|resume)$)",
+    server.Post(R"(^/api/inferdeck/v1/model-store/downloads/([0-9]+)/(cancel|resume)$)",
                 wrap([deps](const httplib::Request& req, httplib::Response& resp) {
         if (!deps.model_store) {
             write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
@@ -1206,7 +1234,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         write_json(resp, 200, {{"ok", true}});
     }));
 
-    server.Post(R"(^/api/model-store/(remove|archive)$)", wrap([deps](const httplib::Request& req,
+    server.Post(R"(^/api/inferdeck/v1/model-store/(remove|archive)$)", wrap([deps](const httplib::Request& req,
                                                              httplib::Response& resp) {
         if (!deps.model_store) {
             write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
@@ -1228,7 +1256,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
     }));
 
-    server.Post(R"(^/api/model-store/unregister$)", wrap([deps](const httplib::Request& req,
+    server.Post(R"(^/api/inferdeck/v1/model-store/unregister$)", wrap([deps](const httplib::Request& req,
                                                                 httplib::Response& resp) {
         std::lock_guard lock(config_write_mutex);
         try {
@@ -1304,7 +1332,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
     }));
 
-    server.Get(R"(^/api/model-aliases$)", wrap([deps](const httplib::Request&,
+    server.Get(R"(^/api/inferdeck/v1/model-aliases$)", wrap([deps](const httplib::Request&,
                                                        httplib::Response& resp) {
         nlohmann::json aliases = nlohmann::json::array();
         for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
@@ -1313,7 +1341,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         write_json(resp, 200, {{"aliases", std::move(aliases)}});
     }));
 
-    server.Put(R"(^/api/model-aliases/([A-Za-z0-9_.-]+)$)",
+    server.Put(R"(^/api/inferdeck/v1/model-aliases/([A-Za-z0-9_.-]+)$)",
                wrap([deps](const httplib::Request& req, httplib::Response& resp) {
         std::lock_guard lock(config_write_mutex);
         const std::string name = req.matches[1].str();
@@ -1354,7 +1382,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
     }));
 
-    server.Delete(R"(^/api/model-aliases/([A-Za-z0-9_.-]+)$)",
+    server.Delete(R"(^/api/inferdeck/v1/model-aliases/([A-Za-z0-9_.-]+)$)",
                   wrap([deps](const httplib::Request& req, httplib::Response& resp) {
         std::lock_guard lock(config_write_mutex);
         const std::string name = req.matches[1].str();
@@ -1381,7 +1409,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         write_json(resp, 200, {{"ok", true}});
     }));
 
-    server.Get(R"(^/api/config$)", wrap([deps](const httplib::Request& req,
+    server.Get(R"(^/api/inferdeck/v1/config$)", wrap([deps](const httplib::Request& req,
                                                httplib::Response& resp) {
         (void)req;
         if (deps.base_config_file.empty()) {
@@ -1411,7 +1439,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         });
     }));
 
-    server.Put(R"(^/api/config$)", wrap([deps](const httplib::Request& req,
+    server.Put(R"(^/api/inferdeck/v1/config$)", wrap([deps](const httplib::Request& req,
                                                httplib::Response& resp) {
         if (maintenance_mode_active(deps.gw)) {
             write_error(resp, 503, "maintenance_mode",
@@ -1472,7 +1500,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         });
     }));
 
-    server.Put(R"(^/api/config/active$)", wrap([deps](const httplib::Request& req,
+    server.Put(R"(^/api/inferdeck/v1/config/active$)", wrap([deps](const httplib::Request& req,
                                                       httplib::Response& resp) {
         if (maintenance_mode_active(deps.gw)) {
             write_error(resp, 503, "maintenance_mode",
@@ -1542,7 +1570,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         });
     }));
 
-    server.Delete(R"(^/api/config/active$)", wrap([deps](const httplib::Request&,
+    server.Delete(R"(^/api/inferdeck/v1/config/active$)", wrap([deps](const httplib::Request&,
                                                          httplib::Response& resp) {
         if (maintenance_mode_active(deps.gw)) {
             write_error(resp, 503, "maintenance_mode",
@@ -1579,10 +1607,16 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         });
     }));
 
-    server.Get(R"(^/api/status$)", wrap([deps](const httplib::Request& req,
+    server.Get(R"(^/api/inferdeck/v1/status$)", wrap([deps](const httplib::Request& req,
                                                httplib::Response& resp) {
         (void)req;
         resp.set_content(build_dashboard_status(deps).dump(), "application/json");
+    }));
+
+    server.Get(R"(^/api/inferdeck/v1/models$)", wrap([deps](const httplib::Request& req,
+                                               httplib::Response& resp) {
+        (void)req;
+        write_json(resp, 200, build_dashboard_models(deps.gw.coordinator));
     }));
 
     server.Get(R"(^/api/inferdeck/v1/usage/daily$)",
@@ -1596,7 +1630,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         });
     }));
 
-    server.Get(R"(^/api/jobs$)", wrap([deps](const httplib::Request& req,
+    server.Get(R"(^/api/inferdeck/v1/jobs$)", wrap([deps](const httplib::Request& req,
                                              httplib::Response& resp) {
         int limit = 100;
         if (req.has_param("limit")) {
@@ -1605,7 +1639,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         resp.set_content(build_dashboard_jobs(*deps.gw.stats_db, limit).dump(), "application/json");
     }));
 
-    server.Post(R"(^/api/models/load$)", wrap([deps](const httplib::Request& req,
+    server.Post(R"(^/api/inferdeck/v1/models/load$)", wrap([deps](const httplib::Request& req,
                                                      httplib::Response& resp) {
         auto body = req.body.empty() ? nlohmann::json::object() : nlohmann::json::parse(req.body);
         const std::string model_name = body.value("model", body.value("name", ""));
@@ -1617,7 +1651,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         write_json(resp, started.status, started.body);
     }));
 
-    server.Post(R"(^/api/models/unload$)", wrap([deps](const httplib::Request& req,
+    server.Post(R"(^/api/inferdeck/v1/models/unload$)", wrap([deps](const httplib::Request& req,
                                                        httplib::Response& resp) {
         const auto body = req.body.empty() ? nlohmann::json::object() : nlohmann::json::parse(req.body);
         const auto current = deps.gw.coordinator.get_loaded_model();
@@ -1654,7 +1688,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                                {"resolvedModel", model_name}});
     }));
 
-    server.Get(R"(^/api/pricing$)", wrap([deps](const httplib::Request& req,
+    server.Get(R"(^/api/inferdeck/v1/pricing$)", wrap([deps](const httplib::Request& req,
                                                 httplib::Response& resp) {
         (void)req;
         nlohmann::json pricing = nlohmann::json::array();
@@ -1723,7 +1757,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         resp.set_content(pricing.dump(), "application/json");
     }));
 
-    server.Get(R"(^/api/logs$)", wrap([deps](const httplib::Request& req,
+    server.Get(R"(^/api/inferdeck/v1/logs$)", wrap([deps](const httplib::Request& req,
                                              httplib::Response& resp) {
         std::size_t limit = 250;
         if (req.has_param("limit")) {
@@ -1743,7 +1777,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         resp.set_content(nlohmann::json{{"logs", logs}}.dump(), "application/json");
     }));
 
-    server.Get(R"(^/api/events/stream$)", wrap([deps](const httplib::Request& req,
+    server.Get(R"(^/api/inferdeck/v1/events/stream$)", wrap([deps](const httplib::Request& req,
                                                  httplib::Response& resp) {
         (void)req;
         if (!deps.gw.events) {

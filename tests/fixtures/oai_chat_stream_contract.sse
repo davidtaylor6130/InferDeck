@@ -1,7 +1,5 @@
 data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null,"index":0}],"created":1787171200,"id":"chatcmpl-contract","model":"contract-model","object":"chat.completion.chunk","usage":null}
 
-data: {"choices":[{"delta":{"reasoning_content":"thinking"},"finish_reason":null,"index":0}],"created":1787171200,"id":"chatcmpl-contract","model":"contract-model","object":"chat.completion.chunk","usage":null}
-
 data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"","name":"lookup"},"id":"call_1","index":0,"type":"function"}]},"finish_reason":null,"index":0}],"created":1787171200,"id":"chatcmpl-contract","model":"contract-model","object":"chat.completion.chunk","usage":null}
 
 data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{}"},"index":0}]},"finish_reason":null,"index":0}],"created":1787171200,"id":"chatcmpl-contract","model":"contract-model","object":"chat.completion.chunk","usage":null}
@@ -11,4 +9,3 @@ data: {"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"created"
 data: {"choices":[],"created":1787171200,"id":"chatcmpl-contract","model":"contract-model","object":"chat.completion.chunk","usage":{"completion_tokens":12,"prompt_tokens":8,"prompt_tokens_details":{"cached_tokens":3},"total_tokens":20}}
 
 data: [DONE]
-

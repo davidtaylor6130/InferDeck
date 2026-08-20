@@ -7,12 +7,12 @@
 [![C++23](https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/23)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D6?logo=windows&logoColor=white)](#build-from-source)
 [![Backend](https://img.shields.io/badge/backend-llama.cpp%20%C2%B7%20Vulkan-A41E22)](https://github.com/ggml-org/llama.cpp)
-[![API](https://img.shields.io/badge/API-OpenAI%20%2B%20Anthropic%20compatible-412991?logo=openai&logoColor=white)](#api-surface)
+[![API](https://img.shields.io/badge/API-OpenAI%20compatible-412991?logo=openai&logoColor=white)](#api-surface)
 [![Dashboard](https://img.shields.io/badge/dashboard-React%2019%20%2B%20SSE-61DAFB?logo=react&logoColor=black)](#live-dashboard)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **A single C++23 executable that runs LLMs in-process via [llama.cpp](https://github.com/ggml-org/llama.cpp),
-exposes OpenAI- and Anthropic-compatible APIs on `:11434`, and serves a live React dashboard on the same port.**
+exposes an OpenAI-compatible API on `:11434`, and serves a live React dashboard on the same port.**
 
 [Features](#features) · [Architecture](#architecture) · [Quick start](#quick-start) · [API](#api-surface) · [Roadmap](#roadmap) · [Docs](#documentation)
 
@@ -76,7 +76,7 @@ and the same dashboard. See the [roadmap](#roadmap).
 - **Multi-model residency with async hot swap.** Models register in
   `config/gateway.yml`; the coordinator admits resident models within the
   configured single-GPU VRAM budget.
-  `POST /v1/swap/to/:name` drains active requests, unloads, loads the new
+  `POST /api/inferdeck/v1/swap/to/:name` drains active requests, unloads, loads the new
   GGUF, and streams progress to the dashboard over SSE, with cancellation.
 - **KV-cache reuse.** Longest-common-prefix prompt matching, so multi-turn
   agent sessions reuse full-attention KV state and hybrid recurrent
@@ -87,17 +87,15 @@ and the same dashboard. See the [roadmap](#roadmap).
 ### API
 
 - **OpenAI-compatible** `POST /v1/chat/completions`: SSE streaming,
-  tool calls, `reasoning_content`, llama-server-style prompt truncation on
+  tool calls, and llama-server-style prompt truncation on
   context overflow instead of a hard error.
 - **OpenAI Responses and embeddings APIs** at `POST /v1/responses` and
   `POST /v1/embeddings`. Responses is stateless; unsupported storage,
   background, and conversation fields are rejected explicitly.
-- **Anthropic Messages API** at `POST /v1/messages`, with token counting at
-  `POST /v1/messages/count_tokens`.
-- **Anthropic model aliases.** Map requested Claude model names (`claude-*`) to
-  local models via `anthropic.model_aliases` in `config/gateway.yml`, so
-  Anthropic-API clients (e.g. Claude Code) route to the intended local model.
-  Unknown non-empty model IDs are rejected instead of silently rerouted.
+- **Isolated compatibility profiles.** OpenAI-derivative fields such as
+  `reasoning_content`, sampler extensions, and queue priority are available only
+  under `/compat/openai-derivative/v1` when explicitly enabled. The separately
+  named Anthropic compatibility profile is also disabled by default.
 - **Experimental native audio APIs.** Code paths exist for CPU-only Parakeet
   TDT 0.6B v3 transcription at `POST /v1/audio/transcriptions` and in-process
   Supertonic 3 speech synthesis at `POST /v1/audio/speech`. These paths have
@@ -105,8 +103,8 @@ and the same dashboard. See the [roadmap](#roadmap).
 - **Experimental image generation API.** A compile-gated
   stable-diffusion.cpp path exists at `POST /v1/images/generations`, but it has
   not yet been thoroughly tested end to end.
-- Discovery and operations endpoints: `GET /v1/models`, `GET /v1/health`,
-  `GET /v1/metrics`, and `GET /v1/stats/history`.
+- Discovery and operations endpoints: `GET /v1/models`, `GET /api/inferdeck/v1/health`,
+  `GET /api/inferdeck/v1/metrics`, and `GET /api/inferdeck/v1/stats/history`.
 
 ### Live dashboard
 
@@ -248,7 +246,7 @@ it does not set up the active Parakeet or Supertonic models.
 
 # 3. Verify
 curl http://localhost:11434/v1/models
-curl http://localhost:11434/v1/health
+curl http://localhost:11434/api/inferdeck/v1/health
 # Dashboard: http://localhost:11434/
 ```
 
@@ -283,21 +281,22 @@ pwsh -File tests/parity/run.ps1 `
 
 | Endpoint | Notes |
 | --- | --- |
-| `POST /v1/chat/completions` | OpenAI-compatible; SSE streaming, tool calls, reasoning content |
+| `POST /v1/chat/completions` | OpenAI-compatible; SSE streaming and tool calls |
 | `POST /v1/responses` | Stateless OpenAI Responses compatibility; streaming, tools, reasoning, and structured output translation |
 | `POST /v1/embeddings` | OpenAI-compatible float or base64 embeddings for registered embedding models |
-| `POST /v1/messages` · `POST /v1/messages/count_tokens` | Anthropic Messages compatibility and token counting |
+| `POST /compat/openai-derivative/v1/chat/completions` · `POST /compat/openai-derivative/v1/responses` · `POST /compat/openai-derivative/v1/embeddings` · `POST /compat/openai-derivative/v1/images/generations` | default-off profile for explicitly enabled derivative fields |
+| `POST /compat/anthropic/v1/messages` · `POST /compat/anthropic/v1/messages/count_tokens` | default-off, separately named compatibility profile |
 | `POST /v1/audio/transcriptions` | Experimental, not yet fully tested; intended to provide request-scoped WAV-to-text via Parakeet TDT when sherpa-onnx is linked |
 | `POST /v1/audio/speech` | Experimental, not yet fully tested; intended to provide request-scoped WAV or PCM output via Supertonic 3 when sherpa-onnx is linked |
 | `POST /v1/images/generations` | Experimental, not yet fully tested; intended to provide base64 PNG generation when stable-diffusion.cpp is linked and an image model is registered |
-| `GET /v1/models` · `GET /v1/health` · `GET /v1/metrics` · `GET /v1/stats/history` | model discovery, health, live metrics, and usage history |
-| `POST /v1/swap/to/:name` | async swap, `202` + SSE progress; `POST /v1/swap/cancel`; `GET /v1/swap/status` |
-| `GET /api/status` · `GET /api/jobs` · `GET /api/logs` · `GET /api/pricing` | dashboard data |
-| `GET /api/events/stream` | SSE: `stats` (~1 Hz), `model`, `request` events |
-| `GET /api/model-store/search` · `GET /api/model-store/inspect` | dashboard model discovery and artefact inspection |
-| `GET /api/model-store/downloads` · `POST /api/model-store/downloads` | list or start downloads |
-| `POST /api/model-store/downloads/:id/cancel` · `POST /api/model-store/downloads/:id/resume` | cancel or resume a download |
-| `POST /api/model-store/remove` | remove an inactive model-store entry and its managed artefact |
+| `GET /v1/models` · `GET /api/inferdeck/v1/health` · `GET /api/inferdeck/v1/metrics` · `GET /api/inferdeck/v1/stats/history` | model discovery, health, live metrics, and usage history |
+| `POST /api/inferdeck/v1/swap/to/:name` | async swap, `202` + SSE progress; `POST /api/inferdeck/v1/swap/cancel`; `GET /api/inferdeck/v1/swap/status` |
+| `GET /api/inferdeck/v1/status` · `GET /api/inferdeck/v1/jobs` · `GET /api/inferdeck/v1/logs` · `GET /api/inferdeck/v1/pricing` | dashboard data |
+| `GET /api/inferdeck/v1/events/stream` | SSE: `stats` (~1 Hz), `model`, `request` events |
+| `GET /api/inferdeck/v1/model-store/search` · `GET /api/inferdeck/v1/model-store/inspect` | dashboard model discovery and artefact inspection |
+| `GET /api/inferdeck/v1/model-store/downloads` · `POST /api/inferdeck/v1/model-store/downloads` | list or start downloads |
+| `POST /api/inferdeck/v1/model-store/downloads/:id/cancel` · `POST /api/inferdeck/v1/model-store/downloads/:id/resume` | cancel or resume a download |
+| `POST /api/inferdeck/v1/model-store/remove` | remove an inactive model-store entry and its managed artefact |
 
 ## Roadmap
 

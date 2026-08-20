@@ -28,7 +28,7 @@ The install script:
 2. Registers the **"InferDeck Gateway Logon"** scheduled task (at-logon
    trigger, no execution time limit, auto-restart ×3).
 3. Disables any competing Ollama startup task.
-4. Starts the task and verifies `/api/health` before reporting success.
+4. Starts the task and verifies `/api/inferdeck/v1/health` before reporting success.
 
 > **Note:** the `ops\` scripts are written for this machine — they hardcode
 > the repo path and user profile. Adjust `$root`/`$repo` at the top of each
@@ -39,7 +39,7 @@ The install script:
 `Start-InferDeck.ps1` is idempotent and safe to fire from multiple triggers
 (logon task plus a periodic watchdog task):
 
-- Exits immediately if the gateway already answers `/api/health` healthy.
+- Exits immediately if the gateway already answers `/api/inferdeck/v1/health` healthy.
 - Uses a PID lock file (`run\inferdeck-startup.lock`) so concurrent triggers
   don't double-start.
 - Stops competing inference servers (`ollama`, `llama-server`) before
@@ -57,7 +57,7 @@ re-registers the tasks if they're lost.
 ## Verify
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:11434/v1/health   # { ok: true, ... }
+Invoke-RestMethod http://127.0.0.1:11434/api/inferdeck/v1/health   # { ok: true, ... }
 Invoke-RestMethod http://127.0.0.1:11434/v1/models
 # Dashboard: http://<host>:11434/
 ```

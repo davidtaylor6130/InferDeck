@@ -331,7 +331,7 @@ nlohmann::json tool_call_delta_json(const model::ToolCallDelta& tc) {
 }
 
 foundation::Result<model::InferenceRequest> make_inference_request(
-    const nlohmann::json& body) {
+    const nlohmann::json& body, bool allow_extensions) {
     try {
         model::InferenceRequest ir;
         ir.openai_body_json = body.dump();
@@ -341,11 +341,11 @@ foundation::Result<model::InferenceRequest> make_inference_request(
             ir.temperature = body["temperature"].get<float>();
         if (body.contains("top_p") && !body["top_p"].is_null())
             ir.top_p = body["top_p"].get<float>();
-        if (body.contains("top_k") && !body["top_k"].is_null())
+        if (allow_extensions && body.contains("top_k") && !body["top_k"].is_null())
             ir.top_k = body["top_k"].get<int>();
-        if (body.contains("repeat_penalty") && !body["repeat_penalty"].is_null())
+        if (allow_extensions && body.contains("repeat_penalty") && !body["repeat_penalty"].is_null())
             ir.repeat_penalty = body["repeat_penalty"].get<float>();
-        if (body.contains("repeat_last_n") && !body["repeat_last_n"].is_null())
+        if (allow_extensions && body.contains("repeat_last_n") && !body["repeat_last_n"].is_null())
             ir.repeat_last_n = body["repeat_last_n"].get<int>();
         ir.seed = body.value("seed", -1);
         return foundation::Ok(std::move(ir));
@@ -445,9 +445,12 @@ ErrorClass classify_inference_error(foundation::ErrorCode code) {
     return {400, "invalid_request_error", "invalid_request_error"};
 }
 
-nlohmann::json delta_json(const model::InferenceDelta& delta) {
+nlohmann::json delta_json(const model::InferenceDelta& delta,
+                          bool include_reasoning_content) {
     nlohmann::json out = nlohmann::json::object();
-    if (!delta.reasoning_text.empty()) out["reasoning_content"] = delta.reasoning_text;
+    if (include_reasoning_content && !delta.reasoning_text.empty()) {
+        out["reasoning_content"] = delta.reasoning_text;
+    }
     if (!delta.content.empty()) out["content"] = delta.content;
     if (!delta.tool_calls.empty()) {
         out["tool_calls"] = nlohmann::json::array();
@@ -494,8 +497,11 @@ std::string serialize_chat_stream_delta(const std::string& id,
                                         const std::string& model,
                                         std::int64_t created,
                                         const nlohmann::json& delta,
-                                        bool include_usage) {
-    return sse_chunk_json(id, model, created, delta, include_usage);
+                                        bool include_usage,
+                                        bool include_reasoning_content) {
+    auto filtered = delta;
+    if (!include_reasoning_content) filtered.erase("reasoning_content");
+    return sse_chunk_json(id, model, created, filtered, include_usage);
 }
 
 std::string serialize_chat_stream_terminal(const std::string& id,
@@ -552,157 +558,20 @@ void handle_models(const httplib::Request& req, httplib::Response& resp,
                    const GatewayDeps& deps) {
     (void)req;
     nlohmann::json data = nlohmann::json::array();
-    std::unordered_map<std::string, model::ResidencyInfo> residency;
-    for (const auto& resident : deps.coordinator.residency()) {
-        residency.emplace(resident.name, resident);
-    }
     for (const auto& name : deps.coordinator.registry().list()) {
-        const auto& info = deps.coordinator.registry().get_info(name);
-        const bool runtime_available = deps.coordinator.registry().has_factory(info.runtime);
-        const auto resident = residency.find(name);
-        const bool loaded = resident != residency.end();
-        const auto residency_json = loaded ? nlohmann::json{
-            {"loaded", true},
-            {"primary", resident->second.primary},
-            {"slots", resident->second.slots},
-            {"free_slots", resident->second.free_slots},
-            {"active_requests", resident->second.active_requests},
-            {"estimated_vram_mb", resident->second.estimated_vram_mb},
-            {"resizing", resident->second.resizing},
-        } : nlohmann::json{
-            {"loaded", false},
-            {"primary", false},
-            {"slots", 0},
-            {"free_slots", 0},
-            {"active_requests", 0},
-            {"estimated_vram_mb", 0},
-            {"resizing", false},
-        };
-        const nlohmann::json reasoning = {
-            {"supported", info.reasoning.supported},
-            {"efforts", info.reasoning.efforts},
-            {"default_effort", info.reasoning.default_effort},
-            {"none_disables", info.reasoning.none_disables},
-            {"aliases", info.reasoning.aliases},
-        };
-        nlohmann::json entry = {
+        data.push_back({
             {"id", name},
             {"object", "model"},
             {"created", std::time(nullptr)},
             {"owned_by", "inferdeck"},
-            {"alias", false},
-            {"alias_target", nullptr},
-            {"vram_required_mb", info.vram_required_mb},
-            {"context_size", info.context_size},
-            {"context_length", info.context_size},
-            {"max_context_length", info.context_size},
-            {"limit", {{"context", info.context_size}}},
-            {"n_slots", info.n_slots},
-            {"has_vision", info.has_vision},
-            {"reasoning", info.reasoning.supported},
-            {"reasoning_efforts", info.reasoning.efforts},
-            {"reasoning_default_effort", info.reasoning.default_effort},
-            {"runtime", info.runtime},
-            {"runtime_available", runtime_available},
-            {"modality", info.modality},
-            {"capabilities", info.capabilities},
-            {"prompt_price_per_million", info.prompt_price_per_million
-                ? nlohmann::json(*info.prompt_price_per_million) : nlohmann::json(nullptr)},
-            {"cached_prompt_price_per_million", info.cached_prompt_price_per_million
-                ? nlohmann::json(*info.cached_prompt_price_per_million) : nlohmann::json(nullptr)},
-            {"completion_price_per_million", info.completion_price_per_million
-                ? nlohmann::json(*info.completion_price_per_million) : nlohmann::json(nullptr)},
-            {"optimization", {
-                {"status", info.optimization.status},
-                {"measured_at", info.optimization.measured_at},
-                {"quality_passes", info.optimization.quality_passes},
-                {"quality_total", info.optimization.quality_total},
-                {"single_tokens_per_second", info.optimization.single_tokens_per_second},
-                {"parallel_tokens_per_second", info.optimization.parallel_tokens_per_second},
-                {"schedule_enabled", info.optimization.schedule_enabled},
-                {"schedule_window_start", info.optimization.schedule_window_start},
-                {"schedule_window_end", info.optimization.schedule_window_end},
-            }},
-            {"loaded", loaded},
-            {"inferdeck", {
-                {"runtime", info.runtime},
-                {"runtime_available", runtime_available},
-                {"modality", info.modality},
-                {"capabilities", info.capabilities},
-                {"reasoning", reasoning},
-                {"optimization", {
-                    {"status", info.optimization.status},
-                    {"measured_at", info.optimization.measured_at},
-                    {"quality_passes", info.optimization.quality_passes},
-                    {"quality_total", info.optimization.quality_total},
-                    {"single_tokens_per_second", info.optimization.single_tokens_per_second},
-                    {"parallel_tokens_per_second", info.optimization.parallel_tokens_per_second},
-                }},
-                {"resources", {
-                    {"vram_required_mb", info.vram_required_mb},
-                    {"vram_fixed_mb", info.vram_fixed_mb},
-                    {"vram_per_slot_mb", info.vram_per_slot_mb},
-                    {"configured_slots", info.n_slots},
-                    {"minimum_slots", info.min_slots},
-                }},
-                {"residency", residency_json},
-            }},
-        };
-        data.push_back(entry);
+        });
     }
     for (const auto& alias : deps.coordinator.registry().aliases()) {
-        const auto info = deps.coordinator.registry().get_info_result(alias.target);
-        if (!info) continue;
-        const auto resident = residency.find(alias.target);
-        const nlohmann::json reasoning = {
-            {"supported", info->reasoning.supported},
-            {"efforts", info->reasoning.efforts},
-            {"default_effort", info->reasoning.default_effort},
-            {"none_disables", info->reasoning.none_disables},
-            {"aliases", info->reasoning.aliases},
-        };
         data.push_back({
             {"id", alias.name},
             {"object", "model"},
             {"created", std::time(nullptr)},
             {"owned_by", "inferdeck"},
-            {"alias", true},
-            {"alias_target", alias.target},
-            {"target", alias.target},
-            {"required_context_size", alias.required_context_size},
-            {"required_capabilities", alias.required_capabilities},
-            {"context_size", info->context_size},
-            {"context_length", info->context_size},
-            {"max_context_length", info->context_size},
-            {"limit", {{"context", info->context_size}}},
-            {"n_slots", info->n_slots},
-            {"has_vision", info->has_vision},
-            {"reasoning", info->reasoning.supported},
-            {"reasoning_efforts", info->reasoning.efforts},
-            {"reasoning_default_effort", info->reasoning.default_effort},
-            {"runtime", info->runtime},
-            {"runtime_available", deps.coordinator.registry().has_factory(info->runtime)},
-            {"modality", info->modality},
-            {"capabilities", info->capabilities},
-            {"prompt_price_per_million", info->prompt_price_per_million
-                ? nlohmann::json(*info->prompt_price_per_million) : nlohmann::json(nullptr)},
-            {"cached_prompt_price_per_million", info->cached_prompt_price_per_million
-                ? nlohmann::json(*info->cached_prompt_price_per_million) : nlohmann::json(nullptr)},
-            {"completion_price_per_million", info->completion_price_per_million
-                ? nlohmann::json(*info->completion_price_per_million) : nlohmann::json(nullptr)},
-            {"loaded", resident != residency.end()},
-            {"inferdeck", {
-                {"runtime", info->runtime},
-                {"runtime_available", deps.coordinator.registry().has_factory(info->runtime)},
-                {"modality", info->modality},
-                {"capabilities", info->capabilities},
-                {"reasoning", reasoning},
-                {"alias_contract", {
-                    {"target", alias.target},
-                    {"required_context_size", alias.required_context_size},
-                    {"required_capabilities", alias.required_capabilities},
-                }},
-            }},
         });
     }
     nlohmann::json body = {
@@ -813,7 +682,8 @@ EnsureLoadedResult ensure_model_loaded(
     }
     if (!deps.auto_swap) {
         return {false, 503, "model_not_loaded",
-                "model not loaded; POST /v1/swap/to/" + model_name + " then retry",
+                "model not loaded; POST /api/inferdeck/v1/swap/to/" +
+                    model_name + " then retry",
                 foundation::ErrorCode::NotLoaded};
     }
 
@@ -1057,7 +927,8 @@ void handle_non_stream_chat(
         {"role", "assistant"},
         {"content", result.text},
     };
-    if (!result.reasoning_text.empty()) {
+    if (deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative &&
+        !result.reasoning_text.empty()) {
         message["reasoning_content"] = result.reasoning_text;
     }
     if (!result.tool_calls.empty()) {
@@ -1103,6 +974,34 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     if (!body.contains("model") || !body["model"].is_string()) {
         write_error(resp, 400, "missing_model", "request body must include 'model'");
         return;
+    }
+    const bool derivative =
+        deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative;
+    if (!derivative) {
+        static constexpr std::array<std::string_view, 15> supported_fields{
+            "model", "messages", "max_tokens", "max_completion_tokens",
+            "temperature", "top_p", "seed", "stream", "stream_options",
+            "tools", "tool_choice", "parallel_tool_calls", "reasoning_effort",
+            "response_format", "stop",
+        };
+        for (const auto& field : body.items()) {
+            if (std::find(supported_fields.begin(), supported_fields.end(),
+                          field.key()) == supported_fields.end()) {
+                write_error(resp, 400, "unsupported_parameter",
+                            "unsupported Chat Completions parameter: " +
+                                field.key());
+                return;
+            }
+        }
+        if (body.contains("messages") && body["messages"].is_array()) {
+            for (const auto& message : body["messages"]) {
+                if (message.is_object() && message.contains("reasoning_content")) {
+                    write_error(resp, 400, "unsupported_parameter",
+                                "unsupported Chat Completions message parameter: reasoning_content");
+                    return;
+                }
+            }
+        }
     }
     std::string requested_model = body["model"].get<std::string>();
     if (requested_model.size() > 7 && requested_model.compare(requested_model.size() - 7, 7, ":latest") == 0) {
@@ -1161,7 +1060,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     const bool include_stream_usage = body.contains("stream_options") &&
         body["stream_options"].is_object() &&
         body["stream_options"].value("include_usage", false);
-    auto inference_request = make_inference_request(body);
+    auto inference_request = make_inference_request(body, derivative);
     if (!inference_request) {
         write_error(resp, 400, "invalid_request_error",
                     inference_request.error().message);
@@ -1363,7 +1262,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
     resp.set_chunked_content_provider(
         "text/event-stream",
-        [id, stream_model, stream_created, state, include_stream_usage](
+        [id, stream_model, stream_created, state, include_stream_usage,
+         derivative](
             std::size_t, httplib::DataSink& sink) mutable {
             try {
             std::unique_lock<std::mutex> lk(state->mtx);
@@ -1407,11 +1307,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 }
 
                 for (const auto& delta : deltas) {
-                    auto json_delta = delta_json(state->utf8.on_delta(delta));
+                    auto json_delta = delta_json(state->utf8.on_delta(delta), derivative);
                     if (json_delta.empty()) continue;
                     std::string out = serialize_chat_stream_delta(
                         id, stream_model, stream_created, json_delta,
-                        include_stream_usage);
+                        include_stream_usage, derivative);
                     if (!sink.write(out.data(), out.size())) {
                         LOG_WARN("stream_abort", "model={} slot_id={} reason=chunk_write_failed",
                                  state->model_name, state->slot_id);
@@ -1428,11 +1328,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             const auto final_result = state->final_result;
             lk.unlock();
 
-            auto trailing_delta = delta_json(state->utf8.finish());
+            auto trailing_delta = delta_json(state->utf8.finish(), derivative);
             if (!trailing_delta.empty()) {
                 std::string out = serialize_chat_stream_delta(
                     id, stream_model, stream_created, trailing_delta,
-                    include_stream_usage);
+                    include_stream_usage, derivative);
                 if (!sink.write(out.data(), out.size())) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=trailing_chunk_write_failed",
                              state->model_name, state->slot_id);

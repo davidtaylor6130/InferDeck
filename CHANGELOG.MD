@@ -1,5 +1,24 @@
 # InferDeck - Changelog
 
+## Unreleased
+
+### Changed
+- Pinned the strict OpenAI `/v1` surface to seven supported endpoints and moved
+  all InferDeck operations and enriched model metadata to
+  `/api/inferdeck/v1`.
+- Made `strict_openai` the default compatibility profile. OpenAI-derivative and
+  Anthropic compatibility routes now use separate `/compat` bases and remain
+  disabled unless explicitly configured.
+- Removed InferDeck-only model fields, queue priority, sampler extensions, and
+  `reasoning_content` from strict OpenAI responses and requests.
+
+### Verified
+- Exact route-manifest snapshot, official OpenAI JavaScript SDK stream
+  contract, dashboard tests/build, and the complete 124-test native
+  unit/integration suite.
+
+---
+
 ## [0.7.2] - 2026-08-17
 
 ### Added

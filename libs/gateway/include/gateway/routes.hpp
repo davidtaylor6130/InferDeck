@@ -25,6 +25,12 @@ enum class ComputeResource : std::uint8_t {
     Gpu,
 };
 
+enum class CompatibilityProfile : std::uint8_t {
+    StrictOpenAI,
+    OpenAIDerivative,
+    Anthropic,
+};
+
 struct GatewayDeps {
     model::BackendCoordinator& coordinator;
     std::string default_swap_timeout_s{"15"};
@@ -37,6 +43,7 @@ struct GatewayDeps {
     foundation::EventBus* events{nullptr};
     SwapTracker* swap_tracker{nullptr};
     std::atomic<ComputeResource>* maintenance_resource{nullptr};
+    CompatibilityProfile compatibility_profile{CompatibilityProfile::StrictOpenAI};
 };
 
 bool maintenance_mode_active(const GatewayDeps& deps) noexcept;
@@ -82,7 +89,8 @@ std::string serialize_chat_stream_delta(const std::string& id,
                                         const std::string& model,
                                         std::int64_t created,
                                         const nlohmann::json& delta,
-                                        bool include_usage);
+                                        bool include_usage,
+                                        bool include_reasoning_content = false);
 std::string serialize_chat_stream_terminal(const std::string& id,
                                            const std::string& model,
                                            std::int64_t created,

@@ -54,6 +54,8 @@ struct GatewayConfig {
     int voice_session_grace_ms{15000};
     model::SamplingConfig sampling{};  // global sampler defaults (issue #42)
     std::map<std::string, std::string> anthropic_model_aliases{};
+    bool anthropic_compatibility_enabled{false};
+    bool openai_derivative_compatibility_enabled{false};
     std::vector<model::ModelAlias> model_aliases{};
     std::string model_store_root{"models/store"};
     std::string model_store_archive_root{"models/archive"};
@@ -212,6 +214,35 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     root["auth"]["token"].as<std::string>() == control_token) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "control.token must differ from auth.token unless explicitly shared");
+                }
+            }
+        }
+        if (root["compatibility"]) {
+            const auto& compatibility = root["compatibility"];
+            if (!compatibility.IsMap()) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "compatibility must be a mapping");
+            }
+            for (const auto& profile : compatibility) {
+                const auto name = profile.first.as<std::string>();
+                if (name != "openai_derivative" && name != "anthropic") {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "unsupported compatibility profile: " + name);
+                }
+                if (!profile.second.IsMap()) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "compatibility." + name + " must be a mapping");
+                }
+                for (const auto& setting : profile.second) {
+                    if (setting.first.as<std::string>() != "enabled") {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                     "unsupported compatibility setting: " +
+                                                         name + "." +
+                                                         setting.first.as<std::string>());
+                    }
+                }
+                if (profile.second["enabled"]) {
+                    (void)profile.second["enabled"].as<bool>();
                 }
             }
         }
@@ -698,6 +729,19 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         for (const auto& kv : root["anthropic"]["model_aliases"]) {
             cfg.anthropic_model_aliases[kv.first.as<std::string>()] =
                 kv.second.as<std::string>();
+        }
+    }
+    if (root["compatibility"]) {
+        const auto& compatibility = root["compatibility"];
+        if (compatibility["anthropic"] &&
+            compatibility["anthropic"]["enabled"]) {
+            cfg.anthropic_compatibility_enabled =
+                compatibility["anthropic"]["enabled"].as<bool>();
+        }
+        if (compatibility["openai_derivative"] &&
+            compatibility["openai_derivative"]["enabled"]) {
+            cfg.openai_derivative_compatibility_enabled =
+                compatibility["openai_derivative"]["enabled"].as<bool>();
         }
     }
     if (root["model_registry"] && root["model_registry"].IsSequence()) {

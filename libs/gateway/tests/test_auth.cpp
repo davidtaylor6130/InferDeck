@@ -154,40 +154,48 @@ TEST_CASE("RouteAuthorizer: remote control requires its own credential",
 
 TEST_CASE("Route classification separates data and control principals",
           "[auth][principal]") {
-    CHECK(classify_route("GET", "/v1/health") == RoutePrincipal::PublicStatus);
+    CHECK(classify_route("GET", "/v1/health") ==
+          RoutePrincipal::OpenAIDataPlane);
     CHECK(classify_route("POST", "/v1/chat/completions") ==
           RoutePrincipal::OpenAIDataPlane);
-    CHECK(classify_route("GET", "/v1/swap/status") == RoutePrincipal::ControlRead);
-    CHECK(classify_route("POST", "/v1/swap/cancel") == RoutePrincipal::ControlWrite);
-    CHECK(classify_route("GET", "/api/status") == RoutePrincipal::DashboardSession);
-    CHECK(classify_route("GET", "/api/inferdeck/v1/usage/daily") ==
+    CHECK(classify_route("GET", "/api/inferdeck/v1/health") ==
+          RoutePrincipal::ControlRead);
+    CHECK(classify_route("GET", "/api/inferdeck/v1/swap/status") ==
+          RoutePrincipal::ControlRead);
+    CHECK(classify_route("POST", "/api/inferdeck/v1/swap/cancel") ==
+          RoutePrincipal::ControlWrite);
+    CHECK(classify_route("GET", "/api/inferdeck/v1/status") ==
           RoutePrincipal::DashboardSession);
-    CHECK(classify_route("GET", "/api/config") == RoutePrincipal::ControlRead);
-    CHECK(classify_route("PUT", "/api/config") == RoutePrincipal::ControlWrite);
+    CHECK(classify_route("GET", "/api/inferdeck/v1/usage/daily") ==
+          RoutePrincipal::ControlRead);
+    CHECK(classify_route("GET", "/api/inferdeck/v1/config") ==
+          RoutePrincipal::ControlRead);
+    CHECK(classify_route("PUT", "/api/inferdeck/v1/config") ==
+          RoutePrincipal::ControlWrite);
 }
 
 TEST_CASE("Every mutating administrative route requires the control principal",
           "[auth][principal][matrix]") {
     const std::pair<std::string_view, std::string_view> routes[] = {
-        {"POST", "/v1/swap/to/model"},
-        {"POST", "/v1/swap/cancel"},
-        {"POST", "/api/media/jobs/1/cancel"},
-        {"POST", "/api/optimize/profile"},
-        {"POST", "/api/optimize/benchmark"},
-        {"POST", "/api/optimize/benchmark/cancel"},
-        {"POST", "/api/model-store/downloads"},
-        {"POST", "/api/model-store/downloads/1/cancel"},
-        {"POST", "/api/model-store/downloads/1/resume"},
-        {"POST", "/api/model-store/remove"},
-        {"POST", "/api/model-store/archive"},
-        {"POST", "/api/model-store/unregister"},
-        {"PUT", "/api/model-aliases/stable-chat"},
-        {"DELETE", "/api/model-aliases/stable-chat"},
-        {"PUT", "/api/config"},
-        {"PUT", "/api/config/active"},
-        {"DELETE", "/api/config/active"},
-        {"POST", "/api/models/load"},
-        {"POST", "/api/models/unload"},
+        {"POST", "/api/inferdeck/v1/swap/to/model"},
+        {"POST", "/api/inferdeck/v1/swap/cancel"},
+        {"POST", "/api/inferdeck/v1/media/jobs/1/cancel"},
+        {"POST", "/api/inferdeck/v1/optimize/profile"},
+        {"POST", "/api/inferdeck/v1/optimize/benchmark"},
+        {"POST", "/api/inferdeck/v1/optimize/benchmark/cancel"},
+        {"POST", "/api/inferdeck/v1/model-store/downloads"},
+        {"POST", "/api/inferdeck/v1/model-store/downloads/1/cancel"},
+        {"POST", "/api/inferdeck/v1/model-store/downloads/1/resume"},
+        {"POST", "/api/inferdeck/v1/model-store/remove"},
+        {"POST", "/api/inferdeck/v1/model-store/archive"},
+        {"POST", "/api/inferdeck/v1/model-store/unregister"},
+        {"PUT", "/api/inferdeck/v1/model-aliases/stable-chat"},
+        {"DELETE", "/api/inferdeck/v1/model-aliases/stable-chat"},
+        {"PUT", "/api/inferdeck/v1/config"},
+        {"PUT", "/api/inferdeck/v1/config/active"},
+        {"DELETE", "/api/inferdeck/v1/config/active"},
+        {"POST", "/api/inferdeck/v1/models/load"},
+        {"POST", "/api/inferdeck/v1/models/unload"},
     };
 
     RouteAuthConfig cfg;
@@ -239,7 +247,8 @@ TEST_CASE("Request policies enforce endpoint body and media constraints",
 
     request.headers.clear();
     request.headers.emplace("Content-Type", "text/plain");
-    CHECK(validate_request(request, request_policy("POST", "/api/config")) ==
+    CHECK(validate_request(request, request_policy(
+              "POST", "/api/inferdeck/v1/config")) ==
           RequestValidationStatus::UnsupportedMediaType);
 
     request.body = "four";
@@ -278,11 +287,11 @@ TEST_CASE("Request headers reject oversized and streaming bodies before bufferin
 
     request.headers.clear();
     CHECK(validate_request_headers(
-              request, request_policy("POST", "/v1/swap/cancel", true)) ==
+              request, request_policy("POST", "/api/inferdeck/v1/swap/cancel", true)) ==
           RequestValidationStatus::UnsupportedMediaType);
     request.headers.emplace("Content-Type", "application/json");
     CHECK(validate_request_headers(
-              request, request_policy("POST", "/v1/swap/cancel", true)) ==
+              request, request_policy("POST", "/api/inferdeck/v1/swap/cancel", true)) ==
           RequestValidationStatus::Allowed);
 
     request.headers.clear();

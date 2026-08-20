@@ -204,7 +204,7 @@ TEST_CASE("Active configuration save schedules an automatic runtime reload",
     ConfigRouteServer routes(config);
     auto client = routes.client();
 
-    const auto current_response = client.Get("/api/config");
+    const auto current_response = client.Get("/api/inferdeck/v1/config");
     REQUIRE(current_response);
     REQUIRE(current_response->status == 200);
     const auto current = nlohmann::json::parse(current_response->body);
@@ -216,7 +216,7 @@ TEST_CASE("Active configuration save schedules an automatic runtime reload",
         {"revision", current["activeRevision"]},
     };
     const auto response =
-        client.Put("/api/config/active", request.dump(), "application/json");
+        client.Put("/api/inferdeck/v1/config/active", request.dump(), "application/json");
 
     REQUIRE(response);
     REQUIRE(response->status == 200);
@@ -227,7 +227,7 @@ TEST_CASE("Active configuration save schedules an automatic runtime reload",
     CHECK(routes.reloads.load() == 1);
     CHECK(TempConfig::read(config.active) == updated);
 
-    const auto pending_response = client.Get("/api/config");
+    const auto pending_response = client.Get("/api/inferdeck/v1/config");
     REQUIRE(pending_response);
     const auto pending = nlohmann::json::parse(pending_response->body);
     CHECK(pending["restartRequired"] == true);
@@ -252,7 +252,7 @@ TEST_CASE("Configuration API masks and restores every credential",
     ConfigRouteServer routes(config);
     auto client = routes.client();
 
-    const auto current_response = client.Get("/api/config");
+    const auto current_response = client.Get("/api/inferdeck/v1/config");
     REQUIRE(current_response);
     REQUIRE(current_response->status == 200);
     const auto current = nlohmann::json::parse(current_response->body);
@@ -274,7 +274,7 @@ TEST_CASE("Configuration API masks and restores every credential",
         {"revision", current["revision"]},
     };
     const auto response = client.Put(
-        "/api/config", request.dump(), "application/json");
+        "/api/inferdeck/v1/config", request.dump(), "application/json");
     REQUIRE(response);
     REQUIRE(response->status == 200);
     CHECK(TempConfig::read(config.base) == original);
@@ -295,7 +295,7 @@ TEST_CASE("Configuration API redacts noncanonical YAML secret forms",
     ConfigRouteServer routes(config);
     auto client = routes.client();
 
-    const auto current_response = client.Get("/api/config");
+    const auto current_response = client.Get("/api/inferdeck/v1/config");
     REQUIRE(current_response);
     REQUIRE(current_response->status == 200);
     const auto current = nlohmann::json::parse(current_response->body);
@@ -314,7 +314,7 @@ TEST_CASE("Configuration API redacts noncanonical YAML secret forms",
         {"revision", current["revision"]},
     };
     const auto response = client.Put(
-        "/api/config", request.dump(), "application/json");
+        "/api/inferdeck/v1/config", request.dump(), "application/json");
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto restored = YAML::Load(TempConfig::read(config.base));
@@ -332,7 +332,7 @@ TEST_CASE("Configuration API masks duplicate secret keys without disclosure",
     ConfigRouteServer routes(config);
     auto client = routes.client();
 
-    const auto response = client.Get("/api/config");
+    const auto response = client.Get("/api/inferdeck/v1/config");
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto masked = nlohmann::json::parse(response->body)["yaml"].get<std::string>();
@@ -360,7 +360,7 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
         {"requiredCapabilities", nlohmann::json::array({"chat_completions"})},
     };
     const auto created = client.Put(
-        "/api/model-aliases/stable-chat", create.dump(), "application/json");
+        "/api/inferdeck/v1/model-aliases/stable-chat", create.dump(), "application/json");
     REQUIRE(created);
     REQUIRE(created->status == 201);
     const auto created_body = nlohmann::json::parse(created->body);
@@ -368,7 +368,7 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     CHECK(created_body["target"] == "concrete-model");
     CHECK(created_body["requiredContextSize"] == 16384);
 
-    const auto listed = client.Get("/api/model-aliases");
+    const auto listed = client.Get("/api/inferdeck/v1/model-aliases");
     REQUIRE(listed);
     REQUIRE(listed->status == 200);
     CHECK(nlohmann::json::parse(listed->body)["aliases"].size() == 1);
@@ -378,7 +378,7 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     REQUIRE(persisted["model_aliases"]);
     CHECK(persisted["model_aliases"][0]["name"].as<std::string>() == "stable-chat");
 
-    const auto removed = client.Delete("/api/model-aliases/stable-chat");
+    const auto removed = client.Delete("/api/inferdeck/v1/model-aliases/stable-chat");
     REQUIRE(removed);
     REQUIRE(removed->status == 200);
     CHECK(routes.registry.aliases().empty());
@@ -453,7 +453,7 @@ TEST_CASE("Pricing API exposes cached input rates for models and aliases",
     REQUIRE(routes.registry.set_alias(alias));
 
     auto client = routes.client();
-    const auto response = client.Get("/api/pricing");
+    const auto response = client.Get("/api/inferdeck/v1/pricing");
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto body = nlohmann::json::parse(response->body);
@@ -512,7 +512,7 @@ TEST_CASE("Usage API exposes daily usage for the complete retained history",
     routes.stats_db.record_request({
         1787011200000LL, "new-model", 10, 5, 0.0, 0.0, 200, -1});
     auto client = routes.client();
-    const auto status_response = client.Get("/api/status");
+    const auto status_response = client.Get("/api/inferdeck/v1/status");
     REQUIRE(status_response);
     REQUIRE(status_response->status == 200);
     CHECK(nlohmann::json::parse(status_response->body)
@@ -528,6 +528,34 @@ TEST_CASE("Usage API exposes daily usage for the complete retained history",
             return row.value("model", "") == "old-model" &&
                    row.value("bucket", "") == "2024-01-01";
         }));
+}
+
+TEST_CASE("Control model inventory retains InferDeck runtime fields",
+          "[gateway][dashboard][models]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    inferdeck::model::ModelInfo info;
+    info.name = "dashboard-model";
+    info.family = "dashboard-family";
+    info.runtime = "llama_cpp";
+    info.modality = "text";
+    info.capabilities = {"chat_completions"};
+    info.context_size = 65536;
+    info.vram_required_mb = 8192;
+    info.n_slots = 2;
+    routes.registry.register_model(info);
+
+    auto client = routes.client();
+    const auto response = client.Get("/api/inferdeck/v1/models");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body["models"].size() == 1);
+    CHECK(body["models"][0]["id"] == "dashboard-model");
+    CHECK(body["models"][0]["runtime"] == "llama_cpp");
+    CHECK(body["models"][0]["context_size"] == 65536);
+    CHECK(body["models"][0]["vram_required_mb"] == 8192);
+    CHECK(body["models"][0]["loaded"] == false);
 }
 
 TEST_CASE("Configured external models can be unregistered without rewriting unrelated config",
@@ -555,7 +583,7 @@ TEST_CASE("Configured external models can be unregistered without rewriting unre
 
     auto client = routes.client();
     const auto removed = client.Post(
-        "/api/model-store/unregister", R"({"model":"external-model"})",
+        "/api/inferdeck/v1/model-store/unregister", R"({"model":"external-model"})",
         "application/json");
     REQUIRE(removed);
     CHECK(removed->status == 200);
@@ -626,7 +654,7 @@ TEST_CASE("Invalid active configuration is neither saved nor applied",
     };
     auto client = routes.client();
 
-    const auto current_response = client.Get("/api/config");
+    const auto current_response = client.Get("/api/inferdeck/v1/config");
     REQUIRE(current_response);
     const auto current = nlohmann::json::parse(current_response->body);
     const nlohmann::json request{
@@ -634,7 +662,7 @@ TEST_CASE("Invalid active configuration is neither saved nor applied",
         {"revision", current["activeRevision"]},
     };
     const auto response =
-        client.Put("/api/config/active", request.dump(), "application/json");
+        client.Put("/api/inferdeck/v1/config/active", request.dump(), "application/json");
 
     REQUIRE(response);
     CHECK(response->status == 400);
@@ -649,7 +677,7 @@ TEST_CASE("Resetting an active configuration applies the stable baseline",
     ConfigRouteServer routes(config);
     auto client = routes.client();
 
-    const auto response = client.Delete("/api/config/active");
+    const auto response = client.Delete("/api/inferdeck/v1/config/active");
 
     REQUIRE(response);
     REQUIRE(response->status == 200);
@@ -693,7 +721,7 @@ TEST_CASE("Profile analysis returns a quality-first fitting candidate",
         {"cacheTypeV", "q8_0"},
     };
     const auto response = client.Post(
-        "/api/optimize/profile", request.dump(), "application/json");
+        "/api/inferdeck/v1/optimize/profile", request.dump(), "application/json");
 
     REQUIRE(response);
     REQUIRE(response->status == 200);
@@ -718,7 +746,7 @@ TEST_CASE("Profile analysis refuses to compete with GPU work",
     auto client = routes.client();
 
     const auto response = client.Post(
-        "/api/optimize/profile", R"({"model":"anything"})",
+        "/api/inferdeck/v1/optimize/profile", R"({"model":"anything"})",
         "application/json");
 
     REQUIRE(response);
@@ -758,13 +786,13 @@ TEST_CASE("Measured profile benchmark runs candidates and returns real metrics",
     };
 
     const auto started = client.Post(
-        "/api/optimize/benchmark", request.dump(), "application/json");
+        "/api/inferdeck/v1/optimize/benchmark", request.dump(), "application/json");
     REQUIRE(started);
     CHECK(started->status == 202);
     REQUIRE(routes.profile_benchmark.wait_for_completion(
         std::chrono::seconds{2}));
 
-    const auto response = client.Get("/api/optimize/benchmark");
+    const auto response = client.Get("/api/inferdeck/v1/optimize/benchmark");
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto body = nlohmann::json::parse(response->body);
@@ -822,12 +850,12 @@ TEST_CASE("Measured profile benchmark proves multi-request MTP before recommendi
     };
 
     const auto started = client.Post(
-        "/api/optimize/benchmark", request.dump(), "application/json");
+        "/api/inferdeck/v1/optimize/benchmark", request.dump(), "application/json");
     REQUIRE(started);
     REQUIRE(started->status == 202);
     REQUIRE(routes.profile_benchmark.wait_for_completion(
         std::chrono::seconds{2}));
-    const auto response = client.Get("/api/optimize/benchmark");
+    const auto response = client.Get("/api/inferdeck/v1/optimize/benchmark");
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto body = nlohmann::json::parse(response->body);
@@ -880,7 +908,7 @@ TEST_CASE("Measured benchmark blocks model changes and can be cancelled",
         {"candidateLimit", 2},
     };
     const auto started = client.Post(
-        "/api/optimize/benchmark", request.dump(), "application/json");
+        "/api/inferdeck/v1/optimize/benchmark", request.dump(), "application/json");
     REQUIRE(started);
     REQUIRE(started->status == 202);
 
@@ -897,7 +925,7 @@ TEST_CASE("Measured benchmark blocks model changes and can be cancelled",
     CHECK_FALSE(inferdeck::gateway::maintenance_blocks_model(resource_deps, "whisper-test"));
 
     const auto load = client.Post(
-        "/api/models/load", R"({"model":"test-27b"})",
+        "/api/inferdeck/v1/models/load", R"({"model":"test-27b"})",
         "application/json");
     REQUIRE(load);
     CHECK(load->status == 503);
@@ -905,12 +933,12 @@ TEST_CASE("Measured benchmark blocks model changes and can be cancelled",
           "maintenance_mode");
 
     const auto cancelled = client.Post(
-        "/api/optimize/benchmark/cancel", "{}", "application/json");
+        "/api/inferdeck/v1/optimize/benchmark/cancel", "{}", "application/json");
     REQUIRE(cancelled);
     CHECK(cancelled->status == 202);
     REQUIRE(routes.profile_benchmark.wait_for_completion(
         std::chrono::seconds{2}));
-    const auto final = client.Get("/api/optimize/benchmark");
+    const auto final = client.Get("/api/inferdeck/v1/optimize/benchmark");
     REQUIRE(final);
     const auto body = nlohmann::json::parse(final->body);
     CHECK(body["state"] == "cancelled");

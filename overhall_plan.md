@@ -301,41 +301,41 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Strict `/v1` surface
 
-- [ ] Create a route manifest for the pinned OpenAI compatibility baseline.
-- [ ] Limit `/v1` to supported OpenAI endpoints:
-  - [ ] `GET /v1/models`
-  - [ ] `POST /v1/chat/completions`
-  - [ ] `POST /v1/responses`
-  - [ ] `POST /v1/embeddings`
-  - [ ] `POST /v1/images/generations`
-  - [ ] `POST /v1/audio/speech`
-  - [ ] `POST /v1/audio/transcriptions`
-- [ ] Move health, metrics, history and swap operations to
+- [x] Create a route manifest for the pinned OpenAI compatibility baseline.
+- [x] Limit `/v1` to supported OpenAI endpoints:
+  - [x] `GET /v1/models`
+  - [x] `POST /v1/chat/completions`
+  - [x] `POST /v1/responses`
+  - [x] `POST /v1/embeddings`
+  - [x] `POST /v1/images/generations`
+  - [x] `POST /v1/audio/speech`
+  - [x] `POST /v1/audio/transcriptions`
+- [x] Move health, metrics, history and swap operations to
       `/api/inferdeck/v1/*`.
-- [ ] Update dashboard calls, documentation, fixtures and operational scripts.
-- [ ] Remove `/v1/swap/*`, `/v1/metrics`, `/v1/stats/history`, and `/v1/health`
+- [x] Update dashboard calls, documentation, fixtures and operational scripts.
+- [x] Remove `/v1/swap/*`, `/v1/metrics`, `/v1/stats/history`, and `/v1/health`
       after the migration window.
-- [ ] Remove `/v1/messages` and `/v1/messages/count_tokens` from Core.
+- [x] Remove `/v1/messages` and `/v1/messages/count_tokens` from Core.
 - [ ] Remove Anthropic aliases and `x-api-key` behavior from Core configuration.
 - [ ] Preserve Anthropic source history before deletion and obtain explicit owner
       approval for destructive removal.
 
 ### Derivative OpenAI profiles
 
-- [ ] Define `strict_openai` as the default and production-supported profile.
-- [ ] If a derivative profile is still required, give it a separate base path or
+- [x] Define `strict_openai` as the default and production-supported profile.
+- [x] If a derivative profile is still required, give it a separate base path or
       listener and a named compatibility manifest.
-- [ ] Move `reasoning_content`, sampler extensions, and other derivative fields out
+- [x] Move `reasoning_content`, sampler extensions, and other derivative fields out
       of strict mode.
-- [ ] Prohibit derivative profiles from changing shared auth, scheduling, errors,
+- [x] Prohibit derivative profiles from changing shared auth, scheduling, errors,
       model identity, or strict serializers.
 
 ### Exit gate
 
-- [ ] A route-snapshot test proves every `/v1` route belongs to the pinned OpenAI
+- [x] A route-snapshot test proves every `/v1` route belongs to the pinned OpenAI
       manifest.
-- [ ] The strict profile contains no InferDeck or Anthropic top-level fields.
-- [ ] Dashboard and operational workflows use the new control paths.
+- [x] The strict profile contains no InferDeck or Anthropic top-level fields.
+- [x] Dashboard and operational workflows use the new control paths.
 
 ## Phase 5 - Typed canonical inference domain
 

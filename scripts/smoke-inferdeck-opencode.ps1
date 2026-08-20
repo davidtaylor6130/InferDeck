@@ -54,8 +54,8 @@ if ($ExpectedExecutablePath) {
     Assert-True ($actual -ieq $expected) "InferDeck is running from $actual, expected $expected."
 }
 
-$health = Invoke-Json -Method Get -Uri "$BaseUrl/v1/health"
-Assert-True ($health.ok -eq $true) "/v1/health did not report ok=true."
+$health = Invoke-Json -Method Get -Uri "$BaseUrl/api/inferdeck/v1/health"
+Assert-True ($health.ok -eq $true) "/api/inferdeck/v1/health did not report ok=true."
 
 $models = Invoke-Json -Method Get -Uri "$BaseUrl/v1/models"
 Assert-True ($models.object -eq "list") "/v1/models did not return an OpenAI-compatible list."
@@ -112,15 +112,15 @@ if (-not $SkipGeneration) {
         $deadline = [DateTime]::UtcNow.AddSeconds(30)
         do {
             Start-Sleep -Milliseconds 250
-            $swap = Invoke-Json -Method Get -Uri "$BaseUrl/v1/swap/status"
+            $swap = Invoke-Json -Method Get -Uri "$BaseUrl/api/inferdeck/v1/swap/status"
         } while ([int]$swap.active_requests -gt 0 -and [DateTime]::UtcNow -lt $deadline)
         Assert-True ([int]$swap.active_requests -eq 0) `
             "Disconnected stream retained an active request."
     }
 }
 
-$status = Invoke-Json -Method Get -Uri "$BaseUrl/api/status"
-Assert-True ($null -ne $status.queue) "/api/status did not return queue state."
+$status = Invoke-Json -Method Get -Uri "$BaseUrl/api/inferdeck/v1/status"
+Assert-True ($null -ne $status.queue) "/api/inferdeck/v1/status did not return queue state."
 
 $ownerAfter = Get-NetTCPConnection -LocalPort $uri.Port -State Listen -ErrorAction SilentlyContinue |
     Select-Object -First 1 -ExpandProperty OwningProcess

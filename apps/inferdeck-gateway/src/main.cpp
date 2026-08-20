@@ -43,6 +43,7 @@
 #include "gateway/openai_routes.hpp"
 #include "gateway/request_id.hpp"
 #include "gateway/request_security.hpp"
+#include "gateway/route_manifest.hpp"
 #include "gateway/routes.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "httplib.h"
@@ -701,6 +702,11 @@ int run_gateway(const fs::path& config_path) {
                      cfg.voice_session_grace_ms,
                      &metrics, &stats_db, &events, &swap_tracker,
                      &maintenance_resource};
+    auto derivative_deps = deps;
+    derivative_deps.compatibility_profile =
+        CompatibilityProfile::OpenAIDerivative;
+    auto anthropic_deps = deps;
+    anthropic_deps.compatibility_profile = CompatibilityProfile::Anthropic;
     ProfileBenchmarkManager profile_benchmark{
         coordinator,
         &swap_tracker,
@@ -853,6 +859,17 @@ int run_gateway(const fs::path& config_path) {
                         "gateway shutdown or reload is in progress");
             return httplib::Server::HandlerResponse::Handled;
         }
+        const bool disabled_derivative =
+            req.path.starts_with(kOpenAIDerivativeBase) &&
+            !cfg.openai_derivative_compatibility_enabled;
+        const bool disabled_anthropic =
+            req.path.starts_with(kAnthropicCompatibilityBase) &&
+            !cfg.anthropic_compatibility_enabled;
+        if (disabled_derivative || disabled_anthropic) {
+            write_error(resp, 404, "not_found",
+                        "compatibility profile is disabled");
+            return httplib::Server::HandlerResponse::Handled;
+        }
         const bool proxied = proxy_indicated(req);
         const bool direct_loopback = RouteAuthorizer::is_direct_loopback(
             req.remote_addr, header_value(req, "Host"), proxied);
@@ -943,52 +960,97 @@ int run_gateway(const fs::path& config_path) {
         };
     };
 
-    server.Get(R"(^/v1/models$)", wrap([&](const httplib::Request& req,
+    server.Get(std::string(strict_openai_route(
+                   StrictOpenAIRoute::Models).pattern),
+               wrap([&](const httplib::Request& req,
                                       httplib::Response& resp) {
         handle_models(req, resp, deps);
     }));
-    server.Post("/v1/swap/to/:name", wrap([&](const httplib::Request& req,
-                                              httplib::Response& resp) {
+    server.Post(control_api_path("/swap/to/:name"),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
         handle_swap_to(req, resp, deps, req.path_params.at("name"));
     }));
-    server.Get(R"(^/v1/swap/status$)", wrap([&](const httplib::Request& req,
-                                           httplib::Response& resp) {
+    server.Get(control_api_pattern("/swap/status"),
+               wrap([&](const httplib::Request& req,
+                        httplib::Response& resp) {
         handle_swap_status(req, resp, deps);
     }));
-    server.Post(R"(^/v1/swap/cancel$)", wrap([&](const httplib::Request& req,
-                                            httplib::Response& resp) {
+    server.Post(control_api_pattern("/swap/cancel"),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
         handle_swap_cancel(req, resp, deps);
     }));
-    server.Post(R"(^/v1/chat/completions$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::ChatCompletions).pattern),
+                wrap([&](const httplib::Request& req,
                                                  httplib::Response& resp) {
         handle_chat_completions(req, resp, deps);
     }));
-    server.Post(R"(^/v1/embeddings$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::Embeddings).pattern),
+                wrap([&](const httplib::Request& req,
                                            httplib::Response& resp) {
         handle_embeddings(req, resp, deps);
     }));
-    server.Post(R"(^/v1/responses$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::Responses).pattern),
+                wrap([&](const httplib::Request& req,
                                           httplib::Response& resp) {
         handle_responses(req, resp, deps);
     }));
-    server.Post(R"(^/v1/images/generations$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::ImageGenerations).pattern),
+                wrap([&](const httplib::Request& req,
                                                         httplib::Response& resp) {
         handle_image_generations(req, resp, deps);
     }));
-    server.Post(R"(^/v1/audio/speech$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::AudioSpeech).pattern),
+                wrap([&](const httplib::Request& req,
                                                    httplib::Response& resp) {
         handle_audio_speech(req, resp, deps);
     }));
-    server.Post(R"(^/v1/audio/transcriptions$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::AudioTranscriptions).pattern),
+                wrap([&](const httplib::Request& req,
                                                            httplib::Response& resp) {
         handle_audio_transcriptions(req, resp, deps);
     }));
-    server.Get(R"(^/api/media/jobs$)", wrap([&](const httplib::Request&,
-                                                httplib::Response& resp) {
+    if (cfg.openai_derivative_compatibility_enabled) {
+        server.Post(std::string(openai_derivative_route(
+                        OpenAIDerivativeRoute::ChatCompletions).pattern),
+                    wrap([&](const httplib::Request& req,
+                             httplib::Response& resp) {
+            handle_chat_completions(req, resp, derivative_deps);
+        }));
+        server.Post(std::string(openai_derivative_route(
+                        OpenAIDerivativeRoute::Responses).pattern),
+                    wrap([&](const httplib::Request& req,
+                             httplib::Response& resp) {
+            handle_responses(req, resp, derivative_deps);
+        }));
+        server.Post(std::string(openai_derivative_route(
+                        OpenAIDerivativeRoute::Embeddings).pattern),
+                    wrap([&](const httplib::Request& req,
+                             httplib::Response& resp) {
+            handle_embeddings(req, resp, derivative_deps);
+        }));
+        server.Post(std::string(openai_derivative_route(
+                        OpenAIDerivativeRoute::ImageGenerations).pattern),
+                    wrap([&](const httplib::Request& req,
+                             httplib::Response& resp) {
+            handle_image_generations(req, resp, derivative_deps);
+        }));
+    }
+    server.Get(control_api_pattern("/media/jobs"),
+               wrap([&](const httplib::Request&,
+                        httplib::Response& resp) {
         write_json(resp, 200, {{"jobs", media_jobs()}});
     }));
-    server.Post(R"(^/api/media/jobs/([0-9]+)/cancel$)", wrap([&](const httplib::Request& req,
-                                                                 httplib::Response& resp) {
+    server.Post(control_api_pattern("/media/jobs/([0-9]+)/cancel"),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
         auto result = cancel_media_job(static_cast<std::uint64_t>(std::stoull(req.matches[1].str())));
         if (!result) {
             write_error(resp, result.error().code == foundation::ErrorCode::NotFound ? 404 : 409,
@@ -997,27 +1059,36 @@ int run_gateway(const fs::path& config_path) {
         }
         write_json(resp, 200, {{"ok", true}});
     }));
-    server.Post(R"(^/v1/messages$)", wrap([&](const httplib::Request& req,
-                                         httplib::Response& resp) {
-        handle_anthropic_messages(req, resp, deps);
-    }));
-    server.Post(R"(^/v1/messages/count_tokens$)", wrap([&](const httplib::Request& req,
-                                                      httplib::Response& resp) {
-        handle_anthropic_count_tokens(req, resp, deps);
-    }));
-    server.Get(R"(^/v1/metrics$)", wrap([&](const httplib::Request&,
-                                       httplib::Response& resp) {
+    if (cfg.anthropic_compatibility_enabled) {
+        server.Post(std::string("^") + std::string(kAnthropicCompatibilityBase) +
+                        R"(/messages$)",
+                    wrap([&](const httplib::Request& req,
+                             httplib::Response& resp) {
+            handle_anthropic_messages(req, resp, anthropic_deps);
+        }));
+        server.Post(std::string("^") + std::string(kAnthropicCompatibilityBase) +
+                        R"(/messages/count_tokens$)",
+                    wrap([&](const httplib::Request& req,
+                             httplib::Response& resp) {
+            handle_anthropic_count_tokens(req, resp, anthropic_deps);
+        }));
+    }
+    server.Get(control_api_pattern("/metrics"),
+               wrap([&](const httplib::Request&,
+                        httplib::Response& resp) {
         resp.set_content(
             MetricsBuilder::build_live(metrics, gpu, uptime_seconds()).dump(),
             "application/json");
     }));
-    server.Get(R"(^/v1/stats/history$)", wrap([&](const httplib::Request&,
-                                             httplib::Response& resp) {
+    server.Get(control_api_pattern("/stats/history"),
+               wrap([&](const httplib::Request&,
+                        httplib::Response& resp) {
         resp.set_content(MetricsBuilder::build_history(stats_db, 100).dump(),
                          "application/json");
     }));
-    server.Get(R"(^/v1/health$)", wrap([&](const httplib::Request&,
-                                            httplib::Response& resp) {
+    server.Get(control_api_pattern("/health"),
+               wrap([&](const httplib::Request&,
+                        httplib::Response& resp) {
         resp.set_content(nlohmann::json{{"ok", true},
                                         {"db_healthy", stats_db.healthy()}}.dump(),
                          "application/json");
@@ -1047,7 +1118,7 @@ int run_gateway(const fs::path& config_path) {
     server.Get(R"(^/$)", [&](const httplib::Request& req, httplib::Response& resp) {
         write_dashboard_file(resp, dashboard_static_dir, req.path);
     });
-    server.Get(R"(^/(?!api(?:/|$)|v1(?:/|$)).*)", [&](const httplib::Request& req, httplib::Response& resp) {
+    server.Get(R"(^/(?!api(?:/|$)|v1(?:/|$)|compat(?:/|$)).*)", [&](const httplib::Request& req, httplib::Response& resp) {
         write_dashboard_file(resp, dashboard_static_dir, req.path);
     });
 

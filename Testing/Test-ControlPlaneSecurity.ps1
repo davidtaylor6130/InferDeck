@@ -209,19 +209,28 @@ try {
     $results = [ordered]@{
         data_without_token = Invoke-Status "$loopback/v1/models"
         data_with_token = Invoke-Status "$loopback/v1/models" -Headers $dataHeader
-        public_health_lan = Invoke-Status "$lan/v1/health"
-        control_loopback = Invoke-Status "$loopback/api/config"
-        control_lan_without_token = Invoke-Status "$lan/api/config"
-        control_lan_data_token = Invoke-Status "$lan/api/config" -Headers $dataHeader
-        control_lan_control_token = Invoke-Status "$lan/api/config" -Headers $controlHeader
-        dashboard_lan_control_token = Invoke-Status "$lan/api/status" -Headers $controlHeader
-        control_preflight_lan = Invoke-Status "$lan/api/config" `
+        legacy_health = Invoke-Status "$loopback/v1/health" -Headers $dataHeader
+        legacy_swap = Invoke-Status "$loopback/v1/swap/status" -Headers $dataHeader
+        legacy_messages = Invoke-Status "$loopback/v1/messages" `
+            -Method POST -Headers $dataHeader -ContentType 'application/json' `
+            -Body '{"model":"legacy","messages":[],"max_tokens":1}'
+        disabled_derivative = Invoke-Status `
+            "$loopback/compat/openai-derivative/v1/chat/completions"
+        disabled_anthropic = Invoke-Status `
+            "$loopback/compat/anthropic/v1/messages"
+        control_health_lan = Invoke-Status "$lan/api/inferdeck/v1/health"
+        control_loopback = Invoke-Status "$loopback/api/inferdeck/v1/config"
+        control_lan_without_token = Invoke-Status "$lan/api/inferdeck/v1/config"
+        control_lan_data_token = Invoke-Status "$lan/api/inferdeck/v1/config" -Headers $dataHeader
+        control_lan_control_token = Invoke-Status "$lan/api/inferdeck/v1/config" -Headers $controlHeader
+        dashboard_lan_control_token = Invoke-Status "$lan/api/inferdeck/v1/status" -Headers $controlHeader
+        control_preflight_lan = Invoke-Status "$lan/api/inferdeck/v1/config" `
             -Method OPTIONS `
             -Headers @{
                 Origin = $preflightOrigin
                 'Access-Control-Request-Method' = 'PUT'
             }
-        control_loopback_cross_origin = Invoke-Status "$loopback/v1/swap/cancel" `
+        control_loopback_cross_origin = Invoke-Status "$loopback/api/inferdeck/v1/swap/cancel" `
             -Method POST `
             -Headers @{
                 Origin = 'https://evil.example'
@@ -229,7 +238,7 @@ try {
             } `
             -ContentType 'application/json'
         control_loopback_missing_content_type = Invoke-Status `
-            "$loopback/v1/swap/cancel" -Method POST
+            "$loopback/api/inferdeck/v1/swap/cancel" -Method POST
         wrong_content_type = Invoke-Status "$loopback/v1/chat/completions" `
             -Method POST `
             -Headers $dataHeader `
@@ -249,12 +258,12 @@ try {
         duplicate_expect = $duplicateExpectResponse.Status
         eager_body_rejection = $eagerRejectedResponse.Status
         loopback_proxy_bypass = Invoke-RawStatus $Port `
-            "GET /api/config HTTP/1.1`r`nHost: admin.example`r`nForwarded: for=192.0.2.10`r`nConnection: close`r`n`r`n"
+            "GET /api/inferdeck/v1/config HTTP/1.1`r`nHost: admin.example`r`nForwarded: for=192.0.2.10`r`nConnection: close`r`n`r`n"
     }
 
-    $echo = Invoke-WebRequest -UseBasicParsing -Uri "$loopback/v1/health" `
+    $echo = Invoke-WebRequest -UseBasicParsing -Uri "$loopback/api/inferdeck/v1/health" `
         -Headers @{'X-Request-Id' = 'client.probe_1'} -TimeoutSec 10
-    $generated = Invoke-WebRequest -UseBasicParsing -Uri "$loopback/v1/health" `
+    $generated = Invoke-WebRequest -UseBasicParsing -Uri "$loopback/api/inferdeck/v1/health" `
         -Headers @{'X-Request-Id' = 'invalid request id'} -TimeoutSec 10
     $results.request_id_echo = $echo.Headers['X-Request-Id']
     $results.request_id_generated = $generated.Headers['X-Request-Id']
@@ -262,7 +271,12 @@ try {
     $expected = @{
         data_without_token = 401
         data_with_token = 200
-        public_health_lan = 200
+        legacy_health = 404
+        legacy_swap = 404
+        legacy_messages = 404
+        disabled_derivative = 404
+        disabled_anthropic = 404
+        control_health_lan = if ($RemoteControl) { 401 } else { 403 }
         control_loopback = 200
         control_loopback_cross_origin = 403
         control_loopback_missing_content_type = 415
@@ -317,7 +331,7 @@ try {
         throw 'Eager-body rejection did not return the complete structured error body'
     }
     if ($RemoteControl) {
-        $allowed = Invoke-WebRequest -UseBasicParsing -Uri "$lan/api/config" `
+        $allowed = Invoke-WebRequest -UseBasicParsing -Uri "$lan/api/inferdeck/v1/config" `
             -Method OPTIONS `
             -Headers @{
                 Origin = 'http://admin.example'
@@ -327,7 +341,7 @@ try {
         if ($allowed.Headers['Access-Control-Allow-Origin'] -ne 'http://admin.example') {
             throw 'Allowlisted control origin was not returned'
         }
-        $rejected = Invoke-Status "$lan/api/config" `
+        $rejected = Invoke-Status "$lan/api/inferdeck/v1/config" `
             -Method OPTIONS `
             -Headers @{
                 Origin = 'http://untrusted.example'

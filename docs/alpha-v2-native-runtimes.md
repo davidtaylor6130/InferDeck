@@ -87,7 +87,7 @@ including WAVE_FORMAT_EXTENSIBLE, and returns `json`, `text`, `verbose_json`,
 the Open WebUI default. Parakeet remains available with automatic language
 detection across 25 European languages, punctuation, and capitalization. Image
 and transcription callbacks publish progress; active media jobs can be
-cancelled through the dashboard or `POST /api/media/jobs/:id/cancel`.
+cancelled through the dashboard or `POST /api/inferdeck/v1/media/jobs/:id/cancel`.
 
 The dashboard is an administration surface only. It does not capture a
 microphone, transcribe recordings, synthesize speech, or play audio. Voice

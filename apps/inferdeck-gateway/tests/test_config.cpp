@@ -47,6 +47,27 @@ model_registry:
     REQUIRE(result);
 }
 
+TEST_CASE("Compatibility profiles are explicit and default off", "[config]") {
+    const auto valid = validate_config_text(R"(
+compatibility:
+  openai_derivative:
+    enabled: true
+  anthropic:
+    enabled: false
+)");
+    REQUIRE(valid);
+    CHECK_FALSE(validate_config_text(R"(
+compatibility:
+  unknown:
+    enabled: true
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+compatibility:
+  openai_derivative:
+    mode: permissive
+)"));
+}
+
 TEST_CASE("Repository gateway configuration keeps remote control disabled", "[config][lan]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "config" / "gateway.yml";
@@ -61,6 +82,8 @@ TEST_CASE("Repository gateway configuration keeps remote control disabled", "[co
     CHECK(config.cors_origins.front() == "*");
     CHECK_FALSE(config.control_allow_remote);
     CHECK_FALSE(config.control_allow_data_plane_token);
+    CHECK_FALSE(config.anthropic_compatibility_enabled);
+    CHECK_FALSE(config.openai_derivative_compatibility_enabled);
     CHECK(config.control_token.empty());
     REQUIRE(config.control_origins.size() == 3);
     CHECK(std::find(config.control_origins.begin(), config.control_origins.end(), "*") ==

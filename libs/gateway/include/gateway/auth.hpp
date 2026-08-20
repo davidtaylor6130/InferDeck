@@ -6,6 +6,8 @@
 #include <string>
 #include <string_view>
 
+#include "gateway/route_manifest.hpp"
+
 namespace inferdeck::gateway {
 
 struct AuthConfig {
@@ -168,22 +170,19 @@ private:
 
 inline RoutePrincipal classify_route(std::string_view method,
                                      std::string_view path) {
-    if (path == "/v1/health") {
-        return RoutePrincipal::PublicStatus;
-    }
-    if (path == "/v1/swap/status" || path == "/v1/metrics" ||
-        path == "/v1/stats/history") {
-        return RoutePrincipal::ControlRead;
-    }
-    if (path.starts_with("/v1/swap/")) {
-        return RoutePrincipal::ControlWrite;
+    if (is_strict_openai_route(method, path)) {
+        return RoutePrincipal::OpenAIDataPlane;
     }
     if (path.starts_with("/v1/")) {
         return RoutePrincipal::OpenAIDataPlane;
     }
-    if (path == "/api/status" || path == "/api/pricing" ||
-        path == "/api/inferdeck/v1/usage/daily" ||
-        path == "/api/events/stream") {
+    if (path.starts_with("/compat/anthropic/v1/") ||
+        path.starts_with("/compat/openai-derivative/v1/")) {
+        return RoutePrincipal::OpenAIDataPlane;
+    }
+    if (path == "/api/inferdeck/v1/status" ||
+        path == "/api/inferdeck/v1/pricing" ||
+        path == "/api/inferdeck/v1/events/stream") {
         return RoutePrincipal::DashboardSession;
     }
     if (path.starts_with("/api/")) {

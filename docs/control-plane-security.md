@@ -11,7 +11,7 @@ InferDeck assigns one principal to every API request before its handler runs.
 
 | Principal | Default authority | Authentication |
 |---|---|---|
-| Public status | health only | none |
+| Public status | reserved for a future minimal liveness route | none |
 | OpenAI data plane | OpenAI inference and model discovery | independently configured `auth` bearer token |
 | Dashboard session | live status, pricing, and event stream | direct loopback only |
 | Control read | configuration, logs, jobs, metrics, model-store state | loopback, or remote control principal |
@@ -28,20 +28,12 @@ control token must still be non-empty and the configuration must explicitly
 acknowledge the shared principal.
 
 The global `x-api-key` promotion has been removed. It cannot authenticate either
-plane. Legacy Anthropic routes remain temporarily classified as data-plane routes
-until Phase 3 removes them from Core.
+plane. Optional compatibility profiles use separate `/compat/*` paths and the
+same data-plane bearer authentication; they are disabled by default.
 
 ## Route inventory
 
-The paths below are the current transitional routes. Phase 3 moves InferDeck
-operations to `/api/inferdeck/v1` without changing their principals.
-
-### Public status
-
-- `GET /v1/health`
-
-The public body is limited to `ok` and the database health boolean. Filesystem
-paths, GPU provider details, and request counters remain behind control routes.
+The paths below are the canonical Phase 4 routes.
 
 ### OpenAI data plane
 
@@ -52,52 +44,53 @@ paths, GPU provider details, and request counters remain behind control routes.
 - `POST /v1/images/generations`
 - `POST /v1/audio/speech`
 - `POST /v1/audio/transcriptions`
-- transitional `POST /v1/messages`
-- transitional `POST /v1/messages/count_tokens`
 
 ### Dashboard session
 
-- `GET /api/status`
-- `GET /api/pricing`
-- `GET /api/events/stream`
+- `GET /api/inferdeck/v1/status`
+- `GET /api/inferdeck/v1/pricing`
+- `GET /api/inferdeck/v1/events/stream`
 
 ### Control read
 
-- `GET /v1/swap/status`
-- `GET /v1/metrics`
-- `GET /v1/stats/history`
-- `GET /api/media/jobs`
-- `GET /api/optimize/benchmark`
-- `GET /api/optimize/schedule`
-- `GET /api/model-store/search`
-- `GET /api/model-store/inspect`
-- `GET /api/model-store/downloads`
-- `GET /api/model-aliases`
-- `GET /api/config`
-- `GET /api/jobs`
-- `GET /api/logs`
+- `GET /api/inferdeck/v1/swap/status`
+- `GET /api/inferdeck/v1/health`
+- `GET /api/inferdeck/v1/metrics`
+- `GET /api/inferdeck/v1/stats/history`
+- `GET /api/inferdeck/v1/media/jobs`
+- `GET /api/inferdeck/v1/models`
+- `GET /api/inferdeck/v1/usage/daily`
+- `GET /api/inferdeck/v1/optimize/benchmark`
+- `GET /api/inferdeck/v1/optimize/schedule`
+- `GET /api/inferdeck/v1/model-store/search`
+- `GET /api/inferdeck/v1/model-store/inspect`
+- `GET /api/inferdeck/v1/model-store/downloads`
+- `GET /api/inferdeck/v1/model-aliases`
+- `GET /api/inferdeck/v1/config`
+- `GET /api/inferdeck/v1/jobs`
+- `GET /api/inferdeck/v1/logs`
 
 ### Control write
 
-- `POST /v1/swap/to/:name`
-- `POST /v1/swap/cancel`
-- `POST /api/media/jobs/:id/cancel`
-- `POST /api/optimize/profile`
-- `POST /api/optimize/benchmark`
-- `POST /api/optimize/benchmark/cancel`
-- `POST /api/model-store/downloads`
-- `POST /api/model-store/downloads/:id/cancel`
-- `POST /api/model-store/downloads/:id/resume`
-- `POST /api/model-store/remove`
-- `POST /api/model-store/archive`
-- `POST /api/model-store/unregister`
-- `PUT /api/model-aliases/:name`
-- `DELETE /api/model-aliases/:name`
-- `PUT /api/config`
-- `PUT /api/config/active`
-- `DELETE /api/config/active`
-- `POST /api/models/load`
-- `POST /api/models/unload`
+- `POST /api/inferdeck/v1/swap/to/:name`
+- `POST /api/inferdeck/v1/swap/cancel`
+- `POST /api/inferdeck/v1/media/jobs/:id/cancel`
+- `POST /api/inferdeck/v1/optimize/profile`
+- `POST /api/inferdeck/v1/optimize/benchmark`
+- `POST /api/inferdeck/v1/optimize/benchmark/cancel`
+- `POST /api/inferdeck/v1/model-store/downloads`
+- `POST /api/inferdeck/v1/model-store/downloads/:id/cancel`
+- `POST /api/inferdeck/v1/model-store/downloads/:id/resume`
+- `POST /api/inferdeck/v1/model-store/remove`
+- `POST /api/inferdeck/v1/model-store/archive`
+- `POST /api/inferdeck/v1/model-store/unregister`
+- `PUT /api/inferdeck/v1/model-aliases/:name`
+- `DELETE /api/inferdeck/v1/model-aliases/:name`
+- `PUT /api/inferdeck/v1/config`
+- `PUT /api/inferdeck/v1/config/active`
+- `DELETE /api/inferdeck/v1/config/active`
+- `POST /api/inferdeck/v1/models/load`
+- `POST /api/inferdeck/v1/models/unload`
 
 All future `/api` mutations default to the control-write principal through the
 central classifier, even before they are added to this human-readable inventory.
@@ -121,6 +114,12 @@ control:
     - "http://127.0.0.1:11434"
     - "http://localhost:11434"
     - "http://[::1]:11434"
+
+compatibility:
+  openai_derivative:
+    enabled: false
+  anthropic:
+    enabled: false
 ```
 
 When `allow_remote` is false, non-loopback control requests and preflights return

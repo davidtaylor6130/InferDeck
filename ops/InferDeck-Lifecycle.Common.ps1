@@ -114,7 +114,7 @@ function Wait-InferDeckHealth {
         [int]$Port = 11434
     )
 
-    $healthUri = "http://127.0.0.1:$Port/v1/health"
+    $healthUri = "http://127.0.0.1:$Port/api/inferdeck/v1/health"
     $lastFailure = "No response."
     for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
         try {

@@ -1032,6 +1032,12 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         write_error(resp, 400, "invalid_json", error.what());
         return;
     }
+    if (deps.compatibility_profile == CompatibilityProfile::StrictOpenAI &&
+        body.contains("priority")) {
+        write_error(resp, 400, "unsupported_parameter",
+                    "unsupported Embeddings parameter: priority");
+        return;
+    }
     if (!body.contains("model") || !body["model"].is_string()) {
         write_error(resp, 400, "missing_model", "request body must include 'model'");
         return;
@@ -1153,6 +1159,12 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
         write_error(resp, 400, "invalid_json", "invalid JSON");
         return;
     }
+    if (deps.compatibility_profile == CompatibilityProfile::StrictOpenAI &&
+        request.contains("priority")) {
+        write_error(resp, 400, "unsupported_parameter",
+                    "unsupported Responses parameter: priority");
+        return;
+    }
     auto chat_body = responses_to_chat(request);
     if (!chat_body) {
         const std::string& message = chat_body.error().message;
@@ -1187,7 +1199,9 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
     httplib::Request chat_request = req;
     chat_request.body = chat_body->dump();
     httplib::Response chat_response;
-    handle_chat_completions(chat_request, chat_response, deps);
+    auto chat_deps = deps;
+    chat_deps.compatibility_profile = CompatibilityProfile::OpenAIDerivative;
+    handle_chat_completions(chat_request, chat_response, chat_deps);
     if (chat_response.status >= 400 ||
         (!request.value("stream", false) && chat_response.body.empty())) {
         resp = std::move(chat_response);

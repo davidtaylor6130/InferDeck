@@ -492,6 +492,22 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     nlohmann::json body;
     try { body = nlohmann::json::parse(req.body); }
     catch (const std::exception& error) { write_error(resp, 400, "invalid_json", error.what()); return; }
+    const bool derivative =
+        deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative;
+    if (!derivative) {
+        static constexpr std::array<std::string_view, 4> supported_fields{
+            "model", "prompt", "n", "size",
+        };
+        for (const auto& field : body.items()) {
+            if (std::find(supported_fields.begin(), supported_fields.end(),
+                          field.key()) == supported_fields.end()) {
+                write_error(resp, 400, "unsupported_parameter",
+                            "unsupported Images parameter: " +
+                                field.key());
+                return;
+            }
+        }
+    }
     const std::string model_name = body.value("model", deps.default_model);
     const auto resolved_model = resolve_model_name(deps, model_name);
     model::ImageGenerationRequest request;
@@ -513,7 +529,9 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         return;
     }
     auto job = begin_job(model_name, "image");
-    resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
+    if (derivative) {
+        resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
+    }
     const std::string& runtime_model = resolved_model->resolved;
     auto slot = acquire_media_slot(req, deps, runtime_model, job);
     if (!slot) { const int status = status_for(slot.error().code); write_error(resp, status, "image_admission_failed", slot.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
@@ -672,7 +690,9 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     }
     VoiceSessionGuard voice_session(req, deps);
     auto job = begin_job(model_name, "audio_speech");
-    resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
+    if (deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative) {
+        resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
+    }
     auto slot = acquire_media_slot(req, deps, runtime_model, job);
     if (!slot) { const int status = status_for(slot.error().code); write_error(resp, status, "speech_admission_failed", slot.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
     SlotGuard guard{&deps.coordinator, runtime_model, *slot};
@@ -871,7 +891,9 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
     const std::string& runtime_model = resolved_model->resolved;
     VoiceSessionGuard voice_session(req, deps);
     auto job = begin_job(model_name, "audio_transcription");
-    resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
+    if (deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative) {
+        resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
+    }
     auto decode_permit = acquire_decode_permit(req, job);
     if (!decode_permit) { const int status = status_for(decode_permit.error().code); write_error(resp, status, "transcription_admission_failed", decode_permit.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
     auto slot = acquire_media_slot(req, deps, runtime_model, job);

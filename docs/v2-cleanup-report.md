@@ -1,5 +1,9 @@
 # InferDeck v2 — Cleanup, Hardening & Dashboard Redesign Report
 
+> Historical audit: route names in this report describe the pre-overhaul
+> implementation. Current control routes use `/api/inferdeck/v1`; the strict
+> OpenAI surface is pinned separately.
+
 ## Context
 
 InferDeck is a Windows-only local AI gateway: one `.exe` that runs LLMs in-process via llama.cpp (Vulkan), exposes an OpenAI-compatible API on `:11434/v1/`, and serves a React dashboard at `:11434/`. The long-term goal is one GPU shared across multiple backends (LLM, TTS, STT, image gen) with InferDeck owning queuing and arbitration; the current focus is stability of the llama.cpp backend.

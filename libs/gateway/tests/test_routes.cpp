@@ -7,6 +7,7 @@
 #include "gateway/cors.hpp"
 #include "gateway/openai_routes.hpp"
 #include "gateway/media_routes.hpp"
+#include "gateway/route_manifest.hpp"
 #include "gateway/routes.hpp"
 #include "httplib.h"
 #include "model/backend_coordinator.hpp"
@@ -423,6 +424,8 @@ struct TestServer {
     int port{0};
     std::string voice_default_model;
     int voice_session_grace_ms{15000};
+    CompatibilityProfile compatibility_profile{
+        CompatibilityProfile::StrictOpenAI};
 
     TestServer() : coordinator(registry) {
         registry.set_factory([](const ModelInfo& info) {
@@ -437,11 +440,11 @@ struct TestServer {
         server.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& resp) {
             handle_models(req, resp, make_deps());
         });
-        server.Post("/v1/swap/to/:name",
+        server.Post("/api/inferdeck/v1/swap/to/:name",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_swap_to(req, resp, make_deps(), req.path_params.at("name"));
                     });
-        server.Get("/v1/swap/status", [this](const httplib::Request& req, httplib::Response& resp) {
+        server.Get("/api/inferdeck/v1/swap/status", [this](const httplib::Request& req, httplib::Response& resp) {
             handle_swap_status(req, resp, make_deps());
         });
         server.Post("/v1/chat/completions",
@@ -482,6 +485,7 @@ struct TestServer {
         deps.swap_tracker = &swap_tracker;
         deps.default_model = voice_default_model;
         deps.voice_session_grace_ms = voice_session_grace_ms;
+        deps.compatibility_profile = compatibility_profile;
         return deps;
     }
 
@@ -512,6 +516,90 @@ bool wait_for_count(const std::atomic<int>& count, int minimum) {
 
 } // namespace
 
+TEST_CASE("Route manifest matches the pinned strict OpenAI snapshot",
+          "[routes][manifest]") {
+    const auto fixture_path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "tests/fixtures/openai_route_manifest.json";
+    std::ifstream fixture_stream(fixture_path, std::ios::binary);
+    REQUIRE(fixture_stream.good());
+    const auto fixture = nlohmann::json::parse(fixture_stream);
+    REQUIRE(fixture["baseline"].get<std::string>() ==
+            std::string(kOpenAICompatibilityBaseline));
+    REQUIRE(fixture["profile"].get<std::string>() ==
+            std::string(kDefaultCompatibilityProfile));
+    REQUIRE(fixture["routes"].size() == kStrictOpenAIRoutes.size());
+    for (std::size_t index = 0; index < kStrictOpenAIRoutes.size(); ++index) {
+        CHECK(fixture["routes"][index]["method"].get<std::string>() ==
+              std::string(kStrictOpenAIRoutes[index].method));
+        CHECK(fixture["routes"][index]["path"].get<std::string>() ==
+              std::string(kStrictOpenAIRoutes[index].path));
+        CHECK(is_strict_openai_route(kStrictOpenAIRoutes[index].method,
+                                     kStrictOpenAIRoutes[index].path));
+    }
+    REQUIRE(fixture["derivative_routes"].size() ==
+            kOpenAIDerivativeRoutes.size());
+    for (std::size_t index = 0; index < kOpenAIDerivativeRoutes.size(); ++index) {
+        CHECK(fixture["derivative_routes"][index]["method"].get<std::string>() ==
+              std::string(kOpenAIDerivativeRoutes[index].method));
+        CHECK(fixture["derivative_routes"][index]["path"].get<std::string>() ==
+              std::string(kOpenAIDerivativeRoutes[index].path));
+    }
+
+    const auto main_path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "apps/inferdeck-gateway/src/main.cpp";
+    std::ifstream main_stream(main_path, std::ios::binary);
+    REQUIRE(main_stream.good());
+    const std::string main_source(std::istreambuf_iterator<char>{main_stream}, {});
+    CHECK(main_source.find("/v1/") == std::string::npos);
+}
+
+TEST_CASE("Strict Chat rejects derivative fields before admission",
+          "[routes][chat][profile]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("profile-model"));
+    REQUIRE(ts.coordinator.load("profile-model"));
+    auto strict_deps = ts.make_deps();
+    const std::vector<std::pair<std::string, nlohmann::json>> extensions{
+        {"priority", 1},
+        {"top_k", 20},
+        {"min_p", 0.1},
+        {"repeat_penalty", 1.1},
+        {"repeat_last_n", 64},
+        {"chat_template_kwargs", nlohmann::json::object()},
+        {"reasoning_content", "private"},
+        {"reasoning_format", "none"},
+        {"add_generation_prompt", false},
+        {"grammar", "root ::= 'ok'"},
+        {"json_schema", nlohmann::json::object()},
+        {"future_extension", true},
+    };
+    for (const auto& [field, value] : extensions) {
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        nlohmann::json body{{"model", "profile-model"},
+                            {"messages", nlohmann::json::array()}};
+        body[field] = value;
+        request.body = body.dump();
+        httplib::Response response;
+        handle_chat_completions(request, response, strict_deps);
+        REQUIRE(response.status == 400);
+        CHECK(nlohmann::json::parse(response.body)["error"]["code"] ==
+              "unsupported_parameter");
+        CHECK(ts.coordinator.active_request_count() == 0);
+    }
+
+    httplib::Request request;
+    request.is_connection_closed = [] { return false; };
+    request.body =
+        R"({"model":"profile-model","messages":[],"top_k":20})";
+    auto derivative_deps = ts.make_deps();
+    derivative_deps.compatibility_profile =
+        CompatibilityProfile::OpenAIDerivative;
+    httplib::Response derivative_response;
+    handle_chat_completions(request, derivative_response, derivative_deps);
+    REQUIRE(derivative_response.status == 200);
+}
+
 TEST_CASE("Routes: GET /v1/models lists registered models", "[routes][models]") {
     TestServer ts;
     auto reasoning_model = make_info("qwen3.6-27b");
@@ -532,29 +620,18 @@ TEST_CASE("Routes: GET /v1/models lists registered models", "[routes][models]") 
     REQUIRE(body["object"] == "list");
     REQUIRE(body["data"].is_array());
     REQUIRE(body["data"].size() == 2);
-    REQUIRE(body["data"][0]["context_size"] == 65536);
-    REQUIRE(body["data"][0]["context_length"] == 65536);
-    REQUIRE(body["data"][0]["max_context_length"] == 65536);
-    REQUIRE(body["data"][0]["limit"]["context"] == 65536);
     REQUIRE(body["data"][0]["object"] == "model");
-    REQUIRE(body["data"][0]["runtime"] == "llama_cpp");
-    REQUIRE(body["data"][0]["modality"] == "text");
-    REQUIRE(body["data"][0]["inferdeck"]["capabilities"].is_array());
-    REQUIRE(body["data"][0]["inferdeck"]["resources"]["configured_slots"] == 2);
+    REQUIRE(body["data"][0].size() == 4);
     const auto reasoning_entry = std::find_if(
         body["data"].begin(), body["data"].end(), [](const auto& entry) {
             return entry.value("id", "") == "qwen3.6-27b";
         });
     REQUIRE(reasoning_entry != body["data"].end());
-    REQUIRE((*reasoning_entry)["reasoning"] == true);
-    REQUIRE((*reasoning_entry)["reasoning_efforts"] ==
-            nlohmann::json::array({"low", "medium", "high"}));
-    REQUIRE((*reasoning_entry)["reasoning_default_effort"] == "medium");
-    REQUIRE((*reasoning_entry)["inferdeck"]["reasoning"]["none_disables"] == true);
+    REQUIRE(reasoning_entry->size() == 4);
     ts.stop();
 }
 
-TEST_CASE("Routes: GET /v1/models marks loaded model", "[routes][models]") {
+TEST_CASE("Routes: GET /v1/models does not expose residency", "[routes][models]") {
     TestServer ts;
     ts.registry.register_model(make_info("qwen3.6-27b"));
     auto r = ts.coordinator.load("qwen3.6-27b");
@@ -566,9 +643,8 @@ TEST_CASE("Routes: GET /v1/models marks loaded model", "[routes][models]") {
     REQUIRE(res);
     auto body = nlohmann::json::parse(res->body);
     REQUIRE(body["data"].size() == 1);
-    REQUIRE(body["data"][0]["loaded"] == true);
-    REQUIRE(body["data"][0]["inferdeck"]["residency"]["primary"] == true);
-    REQUIRE(body["data"][0]["inferdeck"]["residency"]["free_slots"] == 2);
+    REQUIRE_FALSE(body["data"][0].contains("loaded"));
+    REQUIRE_FALSE(body["data"][0].contains("inferdeck"));
     ts.stop();
 }
 
@@ -592,9 +668,7 @@ TEST_CASE("Routes: stable aliases resolve while preserving request attribution",
         return entry.value("id", "") == "assistant-stable";
     });
     REQUIRE(alias != models.end());
-    CHECK(alias->value("alias", false));
-    CHECK(alias->value("target", "") == "qwen-concrete");
-    CHECK((*alias)["inferdeck"]["alias_contract"]["required_context_size"] == 65536);
+    CHECK(alias->size() == 4);
 
     const auto chat_response = client.Post(
         "/v1/chat/completions",
@@ -610,11 +684,11 @@ TEST_CASE("Routes: stable aliases resolve while preserving request attribution",
     ts.stop();
 }
 
-TEST_CASE("Routes: POST /v1/swap/to/missing returns 404", "[routes][swap]") {
+TEST_CASE("Routes: POST control swap to missing returns 404", "[routes][swap]") {
     TestServer ts;
     REQUIRE(ts.start());
     httplib::Client cli("127.0.0.1", ts.port);
-    auto res = cli.Post("/v1/swap/to/missing", "", "application/json");
+    auto res = cli.Post("/api/inferdeck/v1/swap/to/missing", "", "application/json");
     REQUIRE(res);
     REQUIRE(res->status == 404);
     const auto error = nlohmann::json::parse(res->body)["error"];
@@ -625,13 +699,13 @@ TEST_CASE("Routes: POST /v1/swap/to/missing returns 404", "[routes][swap]") {
     ts.stop();
 }
 
-TEST_CASE("Routes: POST /v1/swap/to/loaded returns 200", "[routes][swap]") {
+TEST_CASE("Routes: POST control swap to loaded returns 200", "[routes][swap]") {
     TestServer ts;
     ts.registry.register_model(make_info("qwen3.6-27b"));
     REQUIRE(ts.coordinator.load("qwen3.6-27b"));
     REQUIRE(ts.start());
     httplib::Client cli("127.0.0.1", ts.port);
-    auto res = cli.Post("/v1/swap/to/qwen3.6-27b", "", "application/json");
+    auto res = cli.Post("/api/inferdeck/v1/swap/to/qwen3.6-27b", "", "application/json");
     REQUIRE(res);
     REQUIRE(res->status == 200);
     auto body = nlohmann::json::parse(res->body);
@@ -639,13 +713,13 @@ TEST_CASE("Routes: POST /v1/swap/to/loaded returns 200", "[routes][swap]") {
     ts.stop();
 }
 
-TEST_CASE("Routes: GET /v1/swap/status returns 200 with model info", "[routes][swap]") {
+TEST_CASE("Routes: GET control swap status returns model info", "[routes][swap]") {
     TestServer ts;
     ts.registry.register_model(make_info("qwen3.6-27b"));
     REQUIRE(ts.coordinator.load("qwen3.6-27b"));
     REQUIRE(ts.start());
     httplib::Client cli("127.0.0.1", ts.port);
-    auto res = cli.Get("/v1/swap/status");
+    auto res = cli.Get("/api/inferdeck/v1/swap/status");
     REQUIRE(res);
     REQUIRE(res->status == 200);
     auto body = nlohmann::json::parse(res->body);
@@ -741,8 +815,12 @@ TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering"
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123,
-        {{"reasoning_content", "thinking"}}, true) ==
+        {{"reasoning_content", "thinking"}}, true, true) ==
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
+    REQUIRE(serialize_chat_stream_delta(
+        "chatcmpl-test", "model", 123,
+        {{"reasoning_content", "thinking"}}, true) ==
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123,
         {{"tool_calls", nlohmann::json::array({{
@@ -768,9 +846,6 @@ TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering"
         {{"content", "Hi"}}, true);
     actual += serialize_chat_stream_delta(
         "chatcmpl-contract", "contract-model", 1787171200,
-        {{"reasoning_content", "thinking"}}, true);
-    actual += serialize_chat_stream_delta(
-        "chatcmpl-contract", "contract-model", 1787171200,
         {{"tool_calls", nlohmann::json::array({{
             {"index", 0}, {"id", "call_1"}, {"type", "function"},
             {"function", {{"name", "lookup"}, {"arguments", ""}}},
@@ -789,7 +864,7 @@ TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering"
     std::ifstream fixture_stream(fixture_path, std::ios::binary);
     REQUIRE(fixture_stream.good());
     const std::string fixture(std::istreambuf_iterator<char>{fixture_stream}, {});
-    REQUIRE(actual == fixture);
+    REQUIRE(actual == fixture + "\n");
 }
 
 TEST_CASE("Routes: POST /v1/chat/completions unknown model returns 404", "[routes][chat]") {
@@ -1000,6 +1075,7 @@ TEST_CASE("Routes: POST /v1/responses translates string input and output", "[rou
 TEST_CASE("Routes: reasoning effort precedence and defaults reach inference",
           "[routes][chat][reasoning]") {
     TestServer ts;
+    ts.compatibility_profile = CompatibilityProfile::OpenAIDerivative;
     auto info = make_info("reasoning-model");
     info.reasoning.supported = true;
     info.reasoning.efforts = {"low", "medium", "xhigh"};
@@ -1383,14 +1459,69 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     httplib::Client client("127.0.0.1", ts.port);
     auto response = client.Post("/v1/images/generations",
         nlohmann::json{{"model", "image-model"}, {"prompt", "a lighthouse"},
-                       {"size", "512x512"}, {"n", 2}, {"seed", 42}}.dump(),
+                       {"size", "512x512"}, {"n", 2}}.dump(),
         "application/json");
     REQUIRE(response);
     REQUIRE(response->status == 200);
+    CHECK_FALSE(response->has_header("X-InferDeck-Job-Id"));
     const auto body = nlohmann::json::parse(response->body);
     REQUIRE(body["data"].size() == 2);
     CHECK(body["data"][0]["b64_json"] == "iVBORw==");
     ts.stop();
+}
+
+TEST_CASE("Strict Images rejects derivative fields before admission",
+          "[routes][images][profile]") {
+    TestServer ts;
+    auto info = make_info("image-profile-model");
+    info.runtime = "stable_diffusion_cpp";
+    info.modality = "image";
+    info.capabilities = {"image_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("image-profile-model"));
+    auto strict_deps = ts.make_deps();
+    const std::vector<std::pair<std::string, nlohmann::json>> extensions{
+        {"negative_prompt", "fog"},
+        {"seed", 42},
+        {"steps", 10},
+        {"guidance_scale", 5.0},
+        {"future_extension", true},
+    };
+    for (const auto& [field, value] : extensions) {
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        nlohmann::json body{{"model", "image-profile-model"},
+                            {"prompt", "a lighthouse"},
+                            {"size", "512x512"}};
+        body[field] = value;
+        request.body = body.dump();
+        httplib::Response response;
+        handle_image_generations(request, response, strict_deps);
+        REQUIRE(response.status == 400);
+        CHECK(nlohmann::json::parse(response.body)["error"]["code"] ==
+              "unsupported_parameter");
+        CHECK(ts.coordinator.active_request_count() == 0);
+    }
+
+    auto derivative_deps = ts.make_deps();
+    derivative_deps.compatibility_profile =
+        CompatibilityProfile::OpenAIDerivative;
+    httplib::Request request;
+    request.is_connection_closed = [] { return false; };
+    request.body = nlohmann::json{
+        {"model", "image-profile-model"},
+        {"prompt", "a lighthouse"},
+        {"size", "512x512"},
+        {"negative_prompt", "fog"},
+        {"seed", 42},
+        {"steps", 10},
+        {"guidance_scale", 5.0},
+    }.dump();
+    httplib::Response response;
+    handle_image_generations(request, response, derivative_deps);
+    REQUIRE(response.status == 200);
+    CHECK(response.has_header("X-InferDeck-Job-Id"));
+    CHECK(ts.coordinator.active_request_count() == 0);
 }
 
 TEST_CASE("Image jobs can be cancelled through the shared tracker", "[routes][images][cancel]") {
@@ -1776,6 +1907,7 @@ TEST_CASE("Media routes reject unsupported request shapes", "[routes][media]") {
 TEST_CASE("Routes: streaming tool call emits llama-server shaped SSE",
           "[routes][chat][stream][tools]") {
     TestServer ts;
+    ts.compatibility_profile = CompatibilityProfile::OpenAIDerivative;
     ts.registry.register_model(make_info("qwen3.6-27b"));
     REQUIRE(ts.coordinator.load("qwen3.6-27b"));
     REQUIRE(ts.start());
@@ -1874,6 +2006,7 @@ TEST_CASE("Routes: streaming tool call emits llama-server shaped SSE",
 TEST_CASE("Routes: streaming holds split UTF-8 and replaces malformed trailing bytes",
           "[routes][chat][stream][utf8]") {
     TestServer ts;
+    ts.compatibility_profile = CompatibilityProfile::OpenAIDerivative;
     ts.registry.register_model(make_info("utf8-model"));
     REQUIRE(ts.coordinator.load("utf8-model"));
     const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("utf8-model"));
