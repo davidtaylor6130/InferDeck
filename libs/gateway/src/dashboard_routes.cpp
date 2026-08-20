@@ -21,7 +21,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #ifdef _WIN32
@@ -722,6 +721,32 @@ double percentile(std::vector<double>& sorted_values, double p) {
     return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac;
 }
 
+nlohmann::json usage_bucket_json(
+    const std::vector<observability::UsageBucketRow>& rows) {
+    nlohmann::json out = nlohmann::json::array();
+    for (const auto& row : rows) {
+        out.push_back({
+            {"bucket", row.bucket},
+            {"model", row.model},
+            {"promptTokens", row.prompt_tokens},
+            {"cachedPromptTokens", row.cached_prompt_tokens},
+            {"completionTokens", row.completion_tokens},
+            {"measuredCompletionTokens", row.measured_completion_tokens},
+            {"measuredPromptTokens", row.measured_prompt_tokens},
+            {"totalTokens", row.total_tokens},
+            {"requests", row.requests},
+            {"successfulRequests", row.successful_requests},
+            {"generationDurationMs", row.generation_duration_ms},
+            {"promptDurationMs", row.prompt_duration_ms},
+            {"peakTokensPerSecond", row.peak_tokens_per_second},
+            {"peakPromptTokensPerSecond", row.peak_prompt_tokens_per_second},
+            {"inputAudioSeconds", row.input_audio_seconds},
+            {"inputCharacters", row.input_characters}
+        });
+    }
+    return out;
+}
+
 nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
     auto& coordinator = deps.gw.coordinator;
     const auto& metrics = *deps.gw.metrics;
@@ -766,37 +791,10 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
         });
     }
 
-    auto bucket_json = [](const std::vector<observability::UsageBucketRow>& rows) {
-        nlohmann::json out = nlohmann::json::array();
-        for (const auto& row : rows) {
-            out.push_back({
-                {"bucket", row.bucket},
-                {"model", row.model},
-                {"promptTokens", row.prompt_tokens},
-                {"cachedPromptTokens", row.cached_prompt_tokens},
-                {"completionTokens", row.completion_tokens},
-                {"measuredCompletionTokens", row.measured_completion_tokens},
-                {"measuredPromptTokens", row.measured_prompt_tokens},
-                {"totalTokens", row.total_tokens},
-                {"requests", row.requests},
-                {"successfulRequests", row.successful_requests},
-                {"generationDurationMs", row.generation_duration_ms},
-                {"promptDurationMs", row.prompt_duration_ms},
-                {"peakTokensPerSecond", row.peak_tokens_per_second},
-                {"peakPromptTokensPerSecond", row.peak_prompt_tokens_per_second},
-                {"inputAudioSeconds", row.input_audio_seconds},
-                {"inputCharacters", row.input_characters}
-            });
-        }
-        return out;
-    };
     const auto monthly_rows = stats_db.monthly_usage();
-    std::unordered_set<std::string> recorded_months;
-    for (const auto& row : monthly_rows) recorded_months.insert(row.bucket);
-    const bool daily_all_time = recorded_months.size() < 12;
-    auto monthly = bucket_json(monthly_rows);
-    auto daily = bucket_json(stats_db.daily_usage(daily_all_time ? 0 : 31));
-    auto hourly = bucket_json(stats_db.hourly_usage(24));
+    auto monthly = usage_bucket_json(monthly_rows);
+    auto daily = usage_bucket_json(stats_db.daily_usage(31));
+    auto hourly = usage_bucket_json(stats_db.hourly_usage(24));
 
     std::vector<double> latencies;
     for (const auto& row : stats_db.recent_requests(500)) {
@@ -864,7 +862,7 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
         {"tokenUsage", usage},
         {"monthlyTokenUsage", monthly},
         {"dailyTokenUsage", daily},
-        {"dailyTokenUsageAllTime", daily_all_time},
+        {"dailyTokenUsageAllTime", false},
         {"hourlyTokenUsage", hourly},
         {"models", model_json["models"]},
         {"current", model_json["current"]},
@@ -1587,6 +1585,17 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         resp.set_content(build_dashboard_status(deps).dump(), "application/json");
     }));
 
+    server.Get(R"(^/api/inferdeck/v1/usage/daily$)",
+               wrap([deps](const httplib::Request& req,
+                           httplib::Response& resp) {
+        (void)req;
+        write_json(resp, 200, {
+            {"dailyTokenUsage",
+             usage_bucket_json(deps.gw.stats_db->daily_usage(0))},
+            {"dailyTokenUsageAllTime", true},
+        });
+    }));
+
     server.Get(R"(^/api/jobs$)", wrap([deps](const httplib::Request& req,
                                              httplib::Response& resp) {
         int limit = 100;
@@ -1670,17 +1679,29 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                 return entry.value("model_name", "") == name;
             });
             nlohmann::json value = existing == pricing.end()
-                ? nlohmann::json{{"model_name", name}, {"currency", "USD"}}
+                ? nlohmann::json{
+                    {"model_name", name},
+                    {"currency", "USD"},
+                    {"prompt_price_per_million",
+                     info->prompt_price_per_million.value_or(0.0)},
+                    {"cached_prompt_price_per_million",
+                     info->cached_prompt_price_per_million.value_or(
+                         info->prompt_price_per_million.value_or(0.0))},
+                    {"completion_price_per_million",
+                     info->completion_price_per_million.value_or(0.0)}}
                 : *existing;
-            value["prompt_price_per_million"] = info->prompt_price_per_million.value_or(0.0);
+            if (info->prompt_price_per_million) {
+                value["prompt_price_per_million"] =
+                    *info->prompt_price_per_million;
+            }
             if (info->cached_prompt_price_per_million) {
                 value["cached_prompt_price_per_million"] =
                     *info->cached_prompt_price_per_million;
-            } else if (!value.contains("cached_prompt_price_per_million")) {
-                value["cached_prompt_price_per_million"] =
-                    info->prompt_price_per_million.value_or(0.0);
             }
-            value["completion_price_per_million"] = info->completion_price_per_million.value_or(0.0);
+            if (info->completion_price_per_million) {
+                value["completion_price_per_million"] =
+                    *info->completion_price_per_million;
+            }
             value["source"] = "model_settings";
             if (existing == pricing.end()) pricing.push_back(std::move(value));
             else *existing = std::move(value);

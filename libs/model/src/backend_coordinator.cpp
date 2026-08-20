@@ -915,6 +915,22 @@ foundation::Result<AudioResult> BackendCoordinator::synthesize(
     return backend->synthesize(backend_slot, request, stream);
 }
 
+foundation::Result<void> BackendCoordinator::validate_speech_request(
+    const std::string& name, const SpeechRequest& request) {
+    auto created = registry_.create_result(name);
+    if (!created) {
+        return foundation::Err<void>(created.error().code,
+                                     created.error().message);
+    }
+    auto* backend = dynamic_cast<ISpeechBackend*>(created->get());
+    if (!backend || !(*created)->info().supports("audio_speech")) {
+        return foundation::Err<void>(
+            foundation::ErrorCode::InvalidArgument,
+            "backend does not support speech synthesis: " + name);
+    }
+    return backend->validate_speech_request(request);
+}
+
 foundation::Result<TranscriptionResult> BackendCoordinator::transcribe(
     const std::string& name, int lease_id, const TranscriptionRequest& request,
     const std::function<bool(int)>& progress) {

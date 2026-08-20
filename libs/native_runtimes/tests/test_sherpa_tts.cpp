@@ -41,6 +41,41 @@ TEST_CASE("Supertonic GPU providers require VRAM accounting",
     CHECK(loaded.error().message.find("VRAM accounting") != std::string::npos);
 }
 
+TEST_CASE("Supertonic validates OpenAI voices before model loading",
+          "[native-runtimes][sherpa-onnx][supertonic][validation]") {
+    inferdeck::model::ModelRegistry registry;
+    inferdeck::native_runtimes::register_factories(registry);
+    inferdeck::model::ModelInfo info;
+    info.name = "supertonic-speaker-validation";
+    info.runtime = "sherpa_onnx";
+    info.modality = "audio_speech";
+    info.capabilities = {"audio_speech"};
+    info.artifacts["engine"] = "supertonic";
+    registry.register_model(info);
+
+    auto created = registry.create_result(info.name);
+    REQUIRE(created);
+    auto* speech = dynamic_cast<inferdeck::model::ISpeechBackend*>(
+        created.value().get());
+    REQUIRE(speech);
+    inferdeck::model::SpeechRequest request;
+    request.input = "hello";
+    request.format = "wav";
+    request.speed = 1.0f;
+    for (const std::string voice : {
+             "alloy", "ash", "ballad", "coral", "echo", "fable", "nova",
+             "onyx", "sage", "shimmer", "verse", "marin", "cedar"}) {
+        request.voice = voice;
+        CHECK(speech->validate_speech_request(request));
+    }
+    request.voice = "999";
+    const auto invalid = speech->validate_speech_request(request);
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error().code ==
+          inferdeck::foundation::ErrorCode::InvalidArgument);
+    CHECK_FALSE(created.value()->is_loaded());
+}
+
 TEST_CASE("Supertonic synthesizes a real WAV in-process",
           "[native-runtimes][sherpa-onnx][supertonic][integration]") {
     const char* model_dir = std::getenv("INFERDECK_SUPERTONIC_TEST_MODEL_DIR");
@@ -82,9 +117,17 @@ TEST_CASE("Supertonic synthesizes a real WAV in-process",
 
     inferdeck::model::SpeechRequest request;
     request.input = "InferDeck neural speech is ready.";
-    request.voice = "alloy";
     request.format = "wav";
     request.speed = 1.0f;
+
+    for (const std::string voice : {
+             "alloy", "ash", "ballad", "coral", "echo", "fable", "nova",
+             "onyx", "sage", "shimmer", "verse", "marin", "cedar"}) {
+        request.voice = voice;
+        CHECK(speech->validate_speech_request(request));
+    }
+
+    request.voice = "alloy";
     auto result = speech->synthesize(0, request, {});
     REQUIRE(result);
     REQUIRE(result->content_type == "audio/wav");

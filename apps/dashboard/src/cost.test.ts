@@ -39,6 +39,35 @@ describe('buildCostDefaults', () => {
     expect(defaults['qwen3.6-35b-a3b'].legacyCachedPromptRatio).toBe(0.95);
     expect(defaults['qwen3.6-35b-a3b'].legacyCachedPromptBefore).toBe('2026-08-18');
   });
+
+  it('keeps partial server pricing finite for newly configured models', () => {
+    const { defaults } = buildCostDefaults([
+      { model_name: 'cached-only', cached_prompt_price_per_million: 0.03 },
+      { model_name: 'prompt-only', prompt_price_per_million: 0.7 },
+      { model_name: 'completion-only', completion_price_per_million: 1.1 },
+    ]);
+    expect(defaults['cached-only']).toMatchObject({
+      promptPerMillion: 0,
+      cachedPromptPerMillion: 0.03,
+      outputPerMillion: 0,
+    });
+    expect(defaults['prompt-only']).toMatchObject({
+      promptPerMillion: 0.7,
+      cachedPromptPerMillion: 0.7,
+      outputPerMillion: 0,
+    });
+    expect(defaults['completion-only']).toMatchObject({
+      promptPerMillion: 0,
+      cachedPromptPerMillion: 0,
+      outputPerMillion: 1.1,
+    });
+    for (const cost of Object.values(defaults)) {
+      expect(Number.isFinite(estimateUsageCost(
+        { promptTokens: 100, cachedPromptTokens: 50, completionTokens: 25 },
+        cost,
+      ))).toBe(true);
+    }
+  });
 });
 
 describe('estimateCostAvoided', () => {
@@ -90,6 +119,10 @@ describe('estimateCostAvoided', () => {
       { model: 'qwen3.6-35b-a3b', bucket: '2026-08-18', promptTokens: 1_000_000, cachedPromptTokens: 0, completionTokens: 0 },
       pricing,
     )).toBeCloseTo(0.14);
+    expect(estimateUsageCost(
+      { model: 'qwen3.6-35b-a3b', lastTimestampUnixMs: Date.UTC(2026, 7, 17, 23, 30), promptTokens: 1_000_000, cachedPromptTokens: 0, completionTokens: 0 },
+      pricing,
+    )).toBeCloseTo(0.0545);
   });
 });
 
@@ -195,6 +228,56 @@ describe('buildTokenSeries', () => {
     const series = buildTokenSeries([], 'qwen3.6-35b-a3b', pricing, monthly, {}, {}, DEFAULT_COST_CONFIG, 'year', daily, [], true);
     expect(series.cachedPrompt.reduce((sum, value) => sum + value, 0)).toBe(950_000);
     expect(series.cost.reduce((sum, value) => sum + value, 0)).toBeCloseTo(0.1945);
+  });
+
+  it('keeps overview and usage all-time costs identical across long mixed-date history', () => {
+    const pricing = {
+      ...DEFAULT_COST_CONFIG,
+      promptPerMillion: 0.14,
+      cachedPromptPerMillion: 0.05,
+      legacyCachedPromptRatio: 0.95,
+      legacyCachedPromptBefore: '2026-08-18',
+    };
+    const monthly: MonthlyUsageRow[] = Array.from({ length: 13 }, (_, index) => ({
+      bucket: index < 12
+        ? `2025-${String(index + 1).padStart(2, '0')}`
+        : '2026-01',
+      model: 'qwen3.6-35b-a3b',
+      promptTokens: index === 0 ? 3_000_000 : 1_000_000,
+      cachedPromptTokens: 0,
+      completionTokens: 0,
+      totalTokens: index === 0 ? 3_000_000 : 1_000_000,
+      requests: index === 0 ? 3 : 1,
+      successfulRequests: index === 0 ? 3 : 1,
+    }));
+    const daily: MonthlyUsageRow[] = [
+      ...Array.from({ length: 13 }, (_, index) => ({
+        bucket: `2026-08-${String(index + 1).padStart(2, '0')}`,
+        model: 'qwen3.6-35b-a3b',
+        promptTokens: 1_000_000,
+        cachedPromptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 1_000_000,
+        requests: 1,
+        successfulRequests: 1,
+      })),
+      { bucket: '2026-08-18', model: 'qwen3.6-35b-a3b', promptTokens: 1_000_000, cachedPromptTokens: 0, completionTokens: 0, totalTokens: 1_000_000, requests: 1, successfulRequests: 1 },
+      { bucket: '2026-08-19', model: 'qwen3.6-35b-a3b', promptTokens: 1_000_000, cachedPromptTokens: 0, completionTokens: 0, totalTokens: 1_000_000, requests: 1, successfulRequests: 1 },
+    ];
+    const defaults = { 'qwen3.6-35b-a3b': pricing };
+    const overview = buildTokenSeries(
+      [], ALL_MODELS, DEFAULT_COST_CONFIG, monthly, {}, defaults,
+      DEFAULT_COST_CONFIG, 'all', daily, [], true,
+    );
+    const usage = buildTokenSeries(
+      [], 'qwen3.6-35b-a3b', pricing, monthly, {}, defaults,
+      DEFAULT_COST_CONFIG, 'all', daily, [], true,
+    );
+    const overviewCost = overview.cost.reduce((sum, value) => sum + value, 0);
+    const usageCost = usage.cost.reduce((sum, value) => sum + value, 0);
+    expect(overview.cachedPrompt.reduce((sum, value) => sum + value, 0)).toBe(12_350_000);
+    expect(overviewCost).toBeCloseTo(0.9885);
+    expect(overviewCost).toBe(usageCost);
   });
 
   it('keeps measured throughput samples separate from historical token totals', () => {

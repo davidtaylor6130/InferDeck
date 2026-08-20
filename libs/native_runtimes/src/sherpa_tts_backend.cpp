@@ -62,13 +62,17 @@ foundation::Result<int> thread_count(const model::ModelInfo& info) {
 
 foundation::Result<int> speaker_id(std::string voice, int speakers) {
     voice = lower(std::move(voice));
-    static constexpr std::array aliases{
-        std::pair{"default", 0}, std::pair{"alloy", 0},
+    static constexpr std::array openai_aliases{
+        std::pair{"alloy", 0},
         std::pair{"ash", 2},     std::pair{"ballad", 1},
         std::pair{"coral", 7},   std::pair{"echo", 3},
         std::pair{"fable", 4},   std::pair{"nova", 5},
         std::pair{"onyx", 0},    std::pair{"sage", 8},
         std::pair{"shimmer", 6}, std::pair{"verse", 9},
+        std::pair{"marin", 10},  std::pair{"cedar", 11},
+    };
+    static constexpr std::array legacy_aliases{
+        std::pair{"default", 0},
         std::pair{"m1", 0},      std::pair{"m2", 1},
         std::pair{"m3", 2},      std::pair{"m4", 3},
         std::pair{"m5", 4},      std::pair{"f1", 5},
@@ -76,24 +80,48 @@ foundation::Result<int> speaker_id(std::string voice, int speakers) {
         std::pair{"f4", 8},      std::pair{"f5", 9},
     };
     int value = -1;
-    const auto alias = std::find_if(
-        aliases.begin(), aliases.end(),
+    const auto openai_alias = std::find_if(
+        openai_aliases.begin(), openai_aliases.end(),
         [&voice](const auto& item) { return item.first == voice; });
-    if (alias != aliases.end()) {
-        value = alias->second;
+    if (openai_alias != openai_aliases.end()) {
+        value = speakers == 1 ? 0 : openai_alias->second;
     } else {
-        const auto [end, error] =
-            std::from_chars(voice.data(), voice.data() + voice.size(), value);
-        if (error != std::errc{} || end != voice.data() + voice.size()) {
-            return foundation::Err<int>(
-                foundation::ErrorCode::InvalidArgument,
-                "voice must be an OpenAI voice alias, M1-M5, F1-F5, or a numeric speaker id");
+        const auto legacy_alias = std::find_if(
+            legacy_aliases.begin(), legacy_aliases.end(),
+            [&voice](const auto& item) { return item.first == voice; });
+        if (legacy_alias != legacy_aliases.end()) {
+            value = legacy_alias->second;
+        } else {
+            const auto [end, error] =
+                std::from_chars(voice.data(), voice.data() + voice.size(), value);
+            if (error != std::errc{} || end != voice.data() + voice.size()) {
+                return foundation::Err<int>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "voice must be an OpenAI voice alias, M1-M5, F1-F5, or a numeric speaker id");
+            }
         }
     }
     if (speakers < 1 || value < 0 || value >= speakers) {
         return foundation::Err<int>(
             foundation::ErrorCode::InvalidArgument,
             "voice speaker id is out of range for this speech model");
+    }
+    return foundation::Ok(value);
+}
+
+foundation::Result<int> configured_speaker_count(
+    const model::ModelInfo& info, const std::string& engine) {
+    if (engine == "supertonic") return foundation::Ok(1);
+    const auto configured = artifact(info, "speakers");
+    if (configured.empty()) return foundation::Ok(1);
+    int value = 0;
+    const auto [end, error] = std::from_chars(
+        configured.data(), configured.data() + configured.size(), value);
+    if (error != std::errc{} || end != configured.data() + configured.size() ||
+        value < 1 || value > 100'000) {
+        return foundation::Err<int>(
+            foundation::ErrorCode::InvalidArgument,
+            "sherpa-onnx speakers must be an integer between 1 and 100000");
     }
     return foundation::Ok(value);
 }
@@ -196,6 +224,11 @@ public:
     foundation::Result<void> load() override {
         set_loaded(false);
         release_tts();
+        auto speakers = configured_speaker_count(info_, engine_);
+        if (!speakers) {
+            return foundation::Err<void>(speakers.error().code,
+                                         speakers.error().message);
+        }
         auto threads = thread_count(info_);
         if (!threads) {
             return foundation::Err<void>(threads.error().code,
@@ -262,6 +295,34 @@ public:
     foundation::Result<void> unload() override {
         set_loaded(false);
         release_tts();
+        return foundation::Ok();
+    }
+
+    foundation::Result<void> validate_speech_request(
+        const model::SpeechRequest& request) override {
+        if (request.format != "wav" && request.format != "pcm") {
+            return foundation::Err<void>(
+                foundation::ErrorCode::InvalidArgument,
+                "sherpa-onnx runtime supports wav and pcm responses");
+        }
+        if (!std::isfinite(request.speed) || request.speed < 0.25f ||
+            request.speed > 4.0f) {
+            return foundation::Err<void>(
+                foundation::ErrorCode::InvalidArgument,
+                "speech speed must be finite and between 0.25 and 4");
+        }
+        auto speakers = tts_
+            ? foundation::Ok(SherpaOnnxOfflineTtsNumSpeakers(tts_))
+            : configured_speaker_count(info_, engine_);
+        if (!speakers) {
+            return foundation::Err<void>(speakers.error().code,
+                                         speakers.error().message);
+        }
+        auto speaker = speaker_id(request.voice, *speakers);
+        if (!speaker) {
+            return foundation::Err<void>(speaker.error().code,
+                                         speaker.error().message);
+        }
         return foundation::Ok();
     }
 

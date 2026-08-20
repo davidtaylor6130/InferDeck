@@ -340,7 +340,7 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
   std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
   const char* all_time_sql =
-    "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch', 'localtime') AS bucket, model, "
+    "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch') AS bucket, model, "
     "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(cached_prompt_tokens),0), "
     "COALESCE(SUM(completion_tokens),0), COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
@@ -354,7 +354,7 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
     "FROM requests "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
   const char* limited_sql =
-    "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch', 'localtime') AS bucket, model, "
+    "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch') AS bucket, model, "
     "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(cached_prompt_tokens),0), "
     "COALESCE(SUM(completion_tokens),0), COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
@@ -400,9 +400,11 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
 }
 
 std::vector<UsageBucketRow> StatsDb::daily_usage(int days) const {
+  const auto today_ms = now_ms() / 86'400'000 * 86'400'000;
   return bucketed_usage(
       "%Y-%m-%d",
-      days <= 0 ? 0 : now_ms() - static_cast<std::int64_t>(days) * 86'400'000);
+      days <= 0 ? 0 : today_ms -
+          static_cast<std::int64_t>(std::max(0, days - 1)) * 86'400'000);
 }
 
 std::vector<UsageBucketRow> StatsDb::hourly_usage(int hours) const {
@@ -415,7 +417,7 @@ std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_
   std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
   const char* sql =
-    "SELECT strftime(?, ts / 1000, 'unixepoch', 'localtime') AS bucket, model, "
+    "SELECT strftime(?, ts / 1000, 'unixepoch') AS bucket, model, "
     "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(cached_prompt_tokens),0), "
     "COALESCE(SUM(completion_tokens),0), COALESCE(SUM(prompt_tokens + completion_tokens),0), COUNT(*), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "

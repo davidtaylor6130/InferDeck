@@ -160,6 +160,8 @@ TEST_CASE("Route classification separates data and control principals",
     CHECK(classify_route("GET", "/v1/swap/status") == RoutePrincipal::ControlRead);
     CHECK(classify_route("POST", "/v1/swap/cancel") == RoutePrincipal::ControlWrite);
     CHECK(classify_route("GET", "/api/status") == RoutePrincipal::DashboardSession);
+    CHECK(classify_route("GET", "/api/inferdeck/v1/usage/daily") ==
+          RoutePrincipal::DashboardSession);
     CHECK(classify_route("GET", "/api/config") == RoutePrincipal::ControlRead);
     CHECK(classify_route("PUT", "/api/config") == RoutePrincipal::ControlWrite);
 }

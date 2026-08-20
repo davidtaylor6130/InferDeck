@@ -3,6 +3,7 @@ import * as api from './api';
 import type {
   ActivityItem,
   ConnectionState,
+  MonthlyUsageRow,
   ModelEvent,
   ModelInfo,
   RequestEvent,
@@ -33,6 +34,16 @@ export interface GatewayValue {
 }
 
 const idleSwap: SwapState = { swapping: false, target: '', from: '', startedUnixMs: 0, lastError: '' };
+
+export function mergeDailyUsage(
+  history: MonthlyUsageRow[], recent: MonthlyUsageRow[],
+): MonthlyUsageRow[] {
+  const rows = new Map<string, MonthlyUsageRow>();
+  for (const row of history) rows.set(`${row.bucket}\0${row.model}`, row);
+  for (const row of recent) rows.set(`${row.bucket}\0${row.model}`, row);
+  return [...rows.values()].sort((left, right) =>
+    left.bucket.localeCompare(right.bucket) || left.model.localeCompare(right.model));
+}
 
 export const GatewayContext = createContext<GatewayValue | null>(null);
 
@@ -148,13 +159,34 @@ export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const sourceRef = useRef<EventSource | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshRef = useRef(0);
+  const dailyUsageRef = useRef<MonthlyUsageRow[] | null>(null);
 
   const refresh = useCallback(async () => {
     const request = ++refreshRef.current;
-    const [statusResult, modelsResult] = await Promise.allSettled([api.getStatus(), api.getModels()]);
+    const [statusResult, modelsResult, dailyResult] = await Promise.allSettled([
+      api.getStatus(),
+      api.getModels(),
+      dailyUsageRef.current === null ? api.getDailyUsage() : Promise.resolve(null),
+    ]);
     if (request !== refreshRef.current) return;
+    if (dailyResult.status === 'fulfilled' && dailyResult.value) {
+      dailyUsageRef.current = dailyResult.value.dailyTokenUsage;
+    }
     if (statusResult.status === 'fulfilled') {
-      setStatus(statusResult.value);
+      const next = statusResult.value;
+      if (dailyUsageRef.current !== null) {
+        const merged = mergeDailyUsage(
+          dailyUsageRef.current, next.dailyTokenUsage ?? [],
+        );
+        dailyUsageRef.current = merged;
+        setStatus({
+          ...next,
+          dailyTokenUsage: merged,
+          dailyTokenUsageAllTime: true,
+        });
+      } else {
+        setStatus(next);
+      }
       setSwap(statusResult.value.swap ?? idleSwap);
       setLastUpdatedAt(Date.now());
     }

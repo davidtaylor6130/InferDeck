@@ -2,6 +2,8 @@
 
 #include "foundation/result.hpp"
 #include "gateway/dashboard_routes.hpp"
+#include "observability/metrics.hpp"
+#include "observability/stats_db.hpp"
 #include "gateway/profile_benchmark_scheduler.hpp"
 #include "httplib.h"
 #include "model/backend_coordinator.hpp"
@@ -73,6 +75,8 @@ struct ConfigRouteServer {
     BackendCoordinator coordinator{registry};
     inferdeck::observability::GpuTelemetry gpu;
     inferdeck::gateway::SwapTracker swap_tracker;
+    inferdeck::observability::Metrics metrics;
+    inferdeck::observability::StatsDb stats_db{":memory:"};
     std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     std::atomic<int> benchmark_delay_ms{0};
     ProfileBenchmarkTrialRunner benchmark_runner =
@@ -153,6 +157,8 @@ struct ConfigRouteServer {
         GatewayDeps gateway_deps{
             coordinator, "15", true, {}, {}, 15000, nullptr, nullptr, nullptr,
             &swap_tracker, &maintenance_resource};
+        gateway_deps.metrics = &metrics;
+        gateway_deps.stats_db = &stats_db;
         DashboardDeps deps{
             gateway_deps,
             gpu,
@@ -390,6 +396,24 @@ TEST_CASE("Pricing API exposes cached input rates for models and aliases",
         "prompt_price_per_million": 0.45,
         "cached_prompt_price_per_million": 0.05,
         "completion_price_per_million": 3.2
+      },
+      {
+        "model_name": "cached-only",
+        "prompt_price_per_million": 1.0,
+        "cached_prompt_price_per_million": 0.1,
+        "completion_price_per_million": 2.0
+      },
+      {
+        "model_name": "prompt-only",
+        "prompt_price_per_million": 0.5,
+        "cached_prompt_price_per_million": 0.05,
+        "completion_price_per_million": 1.0
+      },
+      {
+        "model_name": "completion-only",
+        "prompt_price_per_million": 0.4,
+        "cached_prompt_price_per_million": 0.04,
+        "completion_price_per_million": 0.8
       }
     ])");
     ConfigRouteServer routes(config, pricing_path.string());
@@ -399,6 +423,30 @@ TEST_CASE("Pricing API exposes cached input rates for models and aliases",
     model.cached_prompt_price_per_million = 0.04;
     model.completion_price_per_million = 3.2;
     routes.registry.register_model(model);
+    inferdeck::model::ModelInfo cached_only;
+    cached_only.name = "cached-only";
+    cached_only.cached_prompt_price_per_million = 0.02;
+    routes.registry.register_model(cached_only);
+    inferdeck::model::ModelInfo prompt_only;
+    prompt_only.name = "prompt-only";
+    prompt_only.prompt_price_per_million = 0.6;
+    routes.registry.register_model(prompt_only);
+    inferdeck::model::ModelInfo completion_only;
+    completion_only.name = "completion-only";
+    completion_only.completion_price_per_million = 0.9;
+    routes.registry.register_model(completion_only);
+    inferdeck::model::ModelInfo new_cached_only;
+    new_cached_only.name = "new-cached-only";
+    new_cached_only.cached_prompt_price_per_million = 0.03;
+    routes.registry.register_model(new_cached_only);
+    inferdeck::model::ModelInfo new_prompt_only;
+    new_prompt_only.name = "new-prompt-only";
+    new_prompt_only.prompt_price_per_million = 0.7;
+    routes.registry.register_model(new_prompt_only);
+    inferdeck::model::ModelInfo new_completion_only;
+    new_completion_only.name = "new-completion-only";
+    new_completion_only.completion_price_per_million = 1.1;
+    routes.registry.register_model(new_completion_only);
     inferdeck::model::ModelAlias alias;
     alias.name = "stable-priced-model";
     alias.target = model.name;
@@ -409,12 +457,13 @@ TEST_CASE("Pricing API exposes cached input rates for models and aliases",
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto body = nlohmann::json::parse(response->body);
-    const auto priced = std::find_if(body.begin(), body.end(), [](const auto& entry) {
-        return entry.value("model_name", "") == "priced-model";
-    });
-    const auto aliased = std::find_if(body.begin(), body.end(), [](const auto& entry) {
-        return entry.value("model_name", "") == "stable-priced-model";
-    });
+    const auto find_price = [&body](const std::string& name) {
+        return std::find_if(body.begin(), body.end(), [&name](const auto& entry) {
+            return entry.value("model_name", "") == name;
+        });
+    };
+    const auto priced = find_price("priced-model");
+    const auto aliased = find_price("stable-priced-model");
     REQUIRE(priced != body.end());
     REQUIRE(aliased != body.end());
     CHECK((*priced)["prompt_price_per_million"] == 0.45);
@@ -422,6 +471,63 @@ TEST_CASE("Pricing API exposes cached input rates for models and aliases",
     CHECK((*priced)["completion_price_per_million"] == 3.2);
     CHECK((*aliased)["cached_prompt_price_per_million"] == 0.04);
     CHECK((*aliased)["source"] == "model_alias");
+    const auto cached = find_price("cached-only");
+    const auto prompt = find_price("prompt-only");
+    const auto completion = find_price("completion-only");
+    REQUIRE(cached != body.end());
+    REQUIRE(prompt != body.end());
+    REQUIRE(completion != body.end());
+    CHECK((*cached)["prompt_price_per_million"] == 1.0);
+    CHECK((*cached)["cached_prompt_price_per_million"] == 0.02);
+    CHECK((*cached)["completion_price_per_million"] == 2.0);
+    CHECK((*prompt)["prompt_price_per_million"] == 0.6);
+    CHECK((*prompt)["cached_prompt_price_per_million"] == 0.05);
+    CHECK((*prompt)["completion_price_per_million"] == 1.0);
+    CHECK((*completion)["prompt_price_per_million"] == 0.4);
+    CHECK((*completion)["cached_prompt_price_per_million"] == 0.04);
+    CHECK((*completion)["completion_price_per_million"] == 0.9);
+    const auto new_cached = find_price("new-cached-only");
+    const auto new_prompt = find_price("new-prompt-only");
+    const auto new_completion = find_price("new-completion-only");
+    REQUIRE(new_cached != body.end());
+    REQUIRE(new_prompt != body.end());
+    REQUIRE(new_completion != body.end());
+    CHECK((*new_cached)["prompt_price_per_million"] == 0.0);
+    CHECK((*new_cached)["cached_prompt_price_per_million"] == 0.03);
+    CHECK((*new_cached)["completion_price_per_million"] == 0.0);
+    CHECK((*new_prompt)["prompt_price_per_million"] == 0.7);
+    CHECK((*new_prompt)["cached_prompt_price_per_million"] == 0.7);
+    CHECK((*new_prompt)["completion_price_per_million"] == 0.0);
+    CHECK((*new_completion)["prompt_price_per_million"] == 0.0);
+    CHECK((*new_completion)["cached_prompt_price_per_million"] == 0.0);
+    CHECK((*new_completion)["completion_price_per_million"] == 1.1);
+}
+
+TEST_CASE("Usage API exposes daily usage for the complete retained history",
+          "[gateway][dashboard][usage]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    routes.stats_db.record_request({
+        1704067200000LL, "old-model", 100, 50, 0.0, 0.0, 200, -1});
+    routes.stats_db.record_request({
+        1787011200000LL, "new-model", 10, 5, 0.0, 0.0, 200, -1});
+    auto client = routes.client();
+    const auto status_response = client.Get("/api/status");
+    REQUIRE(status_response);
+    REQUIRE(status_response->status == 200);
+    CHECK(nlohmann::json::parse(status_response->body)
+              ["dailyTokenUsageAllTime"] == false);
+    const auto response = client.Get("/api/inferdeck/v1/usage/daily");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    CHECK(body["dailyTokenUsageAllTime"] == true);
+    CHECK(std::any_of(
+        body["dailyTokenUsage"].begin(), body["dailyTokenUsage"].end(),
+        [](const auto& row) {
+            return row.value("model", "") == "old-model" &&
+                   row.value("bucket", "") == "2024-01-01";
+        }));
 }
 
 TEST_CASE("Configured external models can be unregistered without rewriting unrelated config",

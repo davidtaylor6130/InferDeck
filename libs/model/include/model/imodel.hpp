@@ -163,6 +163,8 @@ public:
 class ISpeechBackend {
 public:
     virtual ~ISpeechBackend() = default;
+    virtual foundation::Result<void> validate_speech_request(
+        const SpeechRequest& request) = 0;
     virtual foundation::Result<AudioResult> synthesize(
         int slot_id, const SpeechRequest& request,
         const std::function<bool(const std::byte*, std::size_t)>& stream = {}) = 0;

@@ -228,6 +228,20 @@ TEST_CASE("StatsDb: zero-day daily usage returns all-time resolution",
   }));
 }
 
+TEST_CASE("StatsDb: billing buckets use UTC across daylight-saving boundaries",
+          "[observability][stats][usage-range][utc]") {
+  StatsDb db(":memory:");
+  REQUIRE(db.healthy());
+  db.record_request({1787009400000LL, "boundary-model", 100, 50,
+                     0.0, 0.0, 200, -1});
+  const auto daily = db.daily_usage(0);
+  const auto hourly = db.hourly_usage(24 * 365 * 100);
+  REQUIRE(daily.size() == 1);
+  REQUIRE(hourly.size() == 1);
+  CHECK(daily[0].bucket == "2026-08-17");
+  CHECK(hourly[0].bucket == "2026-08-17T23");
+}
+
 TEST_CASE("StatsDb: request rows are sanitized before persistence", "[observability][stats]") {
   const auto dir = test_helpers::make_temp_dir("statsdb_sanitize");
   const auto path = (dir / "stats.db").string();

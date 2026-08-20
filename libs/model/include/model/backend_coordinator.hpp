@@ -118,6 +118,8 @@ public:
     foundation::Result<ImageGenerationResult> generate_images(
         const std::string& name, int slot_id, const ImageGenerationRequest& request,
         const std::function<bool(int)>& progress = {});
+    foundation::Result<void> validate_speech_request(
+        const std::string& name, const SpeechRequest& request);
     foundation::Result<AudioResult> synthesize(
         const std::string& name, int slot_id, const SpeechRequest& request,
         const std::function<bool(const std::byte*, std::size_t)>& stream = {});

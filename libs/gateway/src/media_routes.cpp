@@ -647,10 +647,32 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                     "this native speech runtime supports wav and pcm responses");
         return;
     }
+    const std::string& runtime_model = resolved_model->resolved;
+    const auto validation = deps.coordinator.validate_speech_request(
+        runtime_model, request);
+    if (!validation) {
+        const int status = status_for(validation.error().code);
+        write_error(resp, status,
+                    status == 400 ? "invalid_speech_request"
+                                  : "speech_validation_failed",
+                    validation.error().message);
+        return;
+    }
+    const auto validation_deadline = std::chrono::steady_clock::now() +
+        std::chrono::seconds{30};
+    const std::function<bool()> cancelled = [&req] {
+        return req.is_connection_closed();
+    };
+    const auto prepared = ensure_model_loaded(
+        deps, runtime_model, validation_deadline, cancelled);
+    if (!prepared.ok) {
+        write_error(resp, prepared.status, "speech_admission_failed",
+                    prepared.message);
+        return;
+    }
     VoiceSessionGuard voice_session(req, deps);
     auto job = begin_job(model_name, "audio_speech");
     resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
-    const std::string& runtime_model = resolved_model->resolved;
     auto slot = acquire_media_slot(req, deps, runtime_model, job);
     if (!slot) { const int status = status_for(slot.error().code); write_error(resp, status, "speech_admission_failed", slot.error().message); record_media(deps, model_name, 0, status, -1); finish_job(job, status == 499 ? "cancelled" : "failed"); return; }
     SlotGuard guard{&deps.coordinator, runtime_model, *slot};

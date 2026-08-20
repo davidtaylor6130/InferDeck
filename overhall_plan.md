@@ -261,40 +261,40 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Chat streaming
 
-- [ ] Emit `usage: null` on every ordinary Chat streaming chunk when
+- [x] Emit `usage: null` on every ordinary Chat streaming chunk when
       `stream_options.include_usage` is enabled.
-- [ ] Emit a distinct final usage chunk with `choices: []` before `[DONE]`.
-- [ ] Keep the finish-reason chunk separate from the usage-only chunk.
-- [ ] Add byte-exact golden tests for content, reasoning-profile, tool-call, finish,
+- [x] Emit a distinct final usage chunk with `choices: []` before `[DONE]`.
+- [x] Keep the finish-reason chunk separate from the usage-only chunk.
+- [x] Add byte-exact golden tests for content, reasoning-profile, tool-call, finish,
       usage, error, cancellation, and `[DONE]` ordering.
 
 ### Speech
 
-- [ ] Stop silently rewriting explicit MP3 requests to WAV.
-- [ ] Return an OpenAI-shaped 400 `unsupported_response_format` until a native
+- [x] Stop silently rewriting explicit MP3 requests to WAV.
+- [x] Return an OpenAI-shaped 400 `unsupported_response_format` until a native
       in-process encoder exists.
-- [ ] Enforce the official 4,096-character input limit by Unicode character count.
-- [ ] Validate `model`, `input`, `voice`, `speed`, `instructions`,
+- [x] Enforce the official 4,096-character input limit by Unicode character count.
+- [x] Validate `model`, `input`, `voice`, `speed`, `instructions`,
       `response_format`, and `stream_format` before admission.
-- [ ] Remove the regression test that expects MP3 input to return WAV and replace it
+- [x] Remove the regression test that expects MP3 input to return WAV and replace it
       with the strict contract matrix.
 
 ### Pricing issue #103
 
-- [ ] Review PR #105 against current main and this plan's schema boundaries.
-- [ ] Verify separate uncached-input, cached-input, and output rates.
-- [ ] Clamp cached tokens to prompt tokens.
-- [ ] Verify legacy Qwen estimation is date-bounded, deterministic, and identical
+- [x] Review PR #105 against current main and this plan's schema boundaries.
+- [x] Verify separate uncached-input, cached-input, and output rates.
+- [x] Clamp cached tokens to prompt tokens.
+- [x] Verify legacy Qwen estimation is date-bounded, deterministic, and identical
       across overview and usage pages.
-- [ ] Run dashboard, C++, forced historical fixture, build, and live-safe validation.
+- [x] Run dashboard, C++, forced historical fixture, build, and live-safe validation.
 - [ ] Merge the selected implementation before canonical config refactoring.
 - [ ] Close #103 only after matching source, dashboard bundle, deployment artifact,
       and calculation evidence.
 
 ### Exit gate
 
-- [ ] Official OpenAI SDK consumers parse the corrected Chat stream.
-- [ ] No requested audio format is silently substituted.
+- [x] Official OpenAI SDK consumers parse the corrected Chat stream.
+- [x] No requested audio format is silently substituted.
 - [ ] #103 has one canonical merged implementation and no duplicate active PR.
 
 ## Phase 4 - Clean API namespaces and compatibility profiles

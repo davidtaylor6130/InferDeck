@@ -81,7 +81,9 @@ const LEGACY_DEFAULT_PRICES: Record<string, Array<[number, number]>> = {
 
 export type CostDefaults = Record<string, ModelCostConfig>;
 
-export function buildCostDefaults(pricing: PricingEntry[]): { defaults: CostDefaults; fallback: ModelCostConfig } {
+export function buildCostDefaults(
+  pricing: Array<Pick<PricingEntry, 'model_name'> & Partial<PricingEntry>>,
+): { defaults: CostDefaults; fallback: ModelCostConfig } {
   const defaults: CostDefaults = {};
   let fallback = DEFAULT_COST_CONFIG;
   for (const entry of pricing) {
@@ -89,7 +91,10 @@ export function buildCostDefaults(pricing: PricingEntry[]): { defaults: CostDefa
     const config: ModelCostConfig = {
       equivalentModel: entry.equivalent_api_model || DEFAULT_COST_CONFIG.equivalentModel,
       promptPerMillion: sanitizeMoney(entry.prompt_price_per_million, DEFAULT_COST_CONFIG.promptPerMillion),
-      cachedPromptPerMillion: sanitizeMoney(entry.cached_prompt_price_per_million, entry.prompt_price_per_million),
+      cachedPromptPerMillion: sanitizeMoney(
+        entry.cached_prompt_price_per_million,
+        sanitizeMoney(entry.prompt_price_per_million, DEFAULT_COST_CONFIG.promptPerMillion),
+      ),
       outputPerMillion: sanitizeMoney(entry.completion_price_per_million, DEFAULT_COST_CONFIG.outputPerMillion),
       legacyCachedPromptRatio: sanitizeRatio(entry.legacy_cached_prompt_ratio),
       legacyCachedPromptBefore: sanitizeDateKey(entry.legacy_cached_prompt_before),
@@ -252,7 +257,7 @@ function effectiveCachedPromptTokens(usage: CostUsage, cost: ModelCostConfig): n
     date = usage.bucket.slice(0, 10);
   } else if (usage.lastTimestampUnixMs) {
     const timestamp = new Date(usage.lastTimestampUnixMs);
-    if (!Number.isNaN(timestamp.getTime())) date = dateKey(timestamp);
+    if (!Number.isNaN(timestamp.getTime())) date = timestamp.toISOString().slice(0, 10);
   }
   return date && date < cost.legacyCachedPromptBefore
     ? Math.round(prompt * cost.legacyCachedPromptRatio)
@@ -468,13 +473,15 @@ function selectPersistedRows(
 ): MonthlyUsageRow[] {
   if (range === 'day') return hourly;
   if (range === 'week' || range === 'month') return daily;
-  if (range === 'year') return dailyAllTime && daily.length ? daily : monthly;
   const relevant = (rows: MonthlyUsageRow[]) =>
     rows.filter(row => model === ALL_MODELS || row.model === model);
+  if ((range === 'year' || range === 'all') && dailyAllTime && relevant(daily).length) {
+    return daily;
+  }
+  if (range === 'year') return monthly;
   const bucketCount = (rows: MonthlyUsageRow[]) =>
     new Set(relevant(rows).map(row => row.bucket)).size;
-  if (new Set(monthly.map(row => row.bucket)).size >= 12) return monthly;
-  if (dailyAllTime && bucketCount(daily) >= 12) return daily;
+  if (bucketCount(monthly) >= 12) return monthly;
   if (bucketCount(hourly) >= 12) return hourly;
   if (relevant(monthly).length) return monthly;
   if (relevant(daily).length) return daily;

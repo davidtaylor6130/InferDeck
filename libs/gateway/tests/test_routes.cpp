@@ -315,6 +315,15 @@ public:
         return Ok(std::move(result));
     }
 
+    Result<void> validate_speech_request(
+        const SpeechRequest& request) override {
+        if (request.voice == "not-a-voice" || request.voice == "999") {
+            return inferdeck::foundation::Err<void>(
+                ErrorCode::InvalidArgument, "voice is not available");
+        }
+        return Ok();
+    }
+
     Result<TranscriptionResult> transcribe(
         int, const TranscriptionRequest& request,
         const std::function<bool(int)>& progress = {}) override {
@@ -752,6 +761,35 @@ TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering"
     REQUIRE(serialize_chat_stream_terminal(
         "chatcmpl-test", "model", 123, "stop", &result, false) ==
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\"}\n\ndata: [DONE]\n\n");
+
+    std::string actual;
+    actual += serialize_chat_stream_delta(
+        "chatcmpl-contract", "contract-model", 1787171200,
+        {{"content", "Hi"}}, true);
+    actual += serialize_chat_stream_delta(
+        "chatcmpl-contract", "contract-model", 1787171200,
+        {{"reasoning_content", "thinking"}}, true);
+    actual += serialize_chat_stream_delta(
+        "chatcmpl-contract", "contract-model", 1787171200,
+        {{"tool_calls", nlohmann::json::array({{
+            {"index", 0}, {"id", "call_1"}, {"type", "function"},
+            {"function", {{"name", "lookup"}, {"arguments", ""}}},
+        }})}}, true);
+    actual += serialize_chat_stream_delta(
+        "chatcmpl-contract", "contract-model", 1787171200,
+        {{"tool_calls", nlohmann::json::array({{
+            {"index", 0}, {"function", {{"arguments", "{}"}}},
+        }})}}, true);
+    actual += serialize_chat_stream_terminal(
+        "chatcmpl-contract", "contract-model", 1787171200,
+        "tool_calls", &result, true);
+
+    const auto fixture_path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "tests/fixtures/oai_chat_stream_contract.sse";
+    std::ifstream fixture_stream(fixture_path, std::ios::binary);
+    REQUIRE(fixture_stream.good());
+    const std::string fixture(std::istreambuf_iterator<char>{fixture_stream}, {});
+    REQUIRE(actual == fixture);
 }
 
 TEST_CASE("Routes: POST /v1/chat/completions unknown model returns 404", "[routes][chat]") {
@@ -1451,8 +1489,12 @@ TEST_CASE("Routes: speech validates the OpenAI request contract before admission
     info.modality = "audio_speech";
     info.capabilities = {"audio_speech"};
     auto chat_info = make_info("not-speech");
+    auto cold_info = make_info("cold-speech-validation");
+    cold_info.runtime = "sherpa_onnx";
+    cold_info.capabilities = {"audio_speech"};
     ts.registry.register_model(info);
     ts.registry.register_model(chat_info);
+    ts.registry.register_model(cold_info);
     REQUIRE(ts.coordinator.load(info.name));
     REQUIRE(ts.start());
     httplib::Client client("127.0.0.1", ts.port);
@@ -1499,6 +1541,19 @@ TEST_CASE("Routes: speech validates the OpenAI request contract before admission
                   {"stream_format", "sse"}}, "unsupported_stream_format");
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"}},
                  "unsupported_response_format");
+    expect_error({{"model", info.name}, {"input", "hello"},
+                  {"voice", "not-a-voice"}, {"response_format", "wav"}},
+                 "invalid_speech_request");
+    expect_error({{"model", info.name}, {"input", "hello"},
+                  {"voice", {{"id", "not-a-voice"}}},
+                  {"response_format", "wav"}}, "invalid_speech_request");
+    expect_error({{"model", cold_info.name}, {"input", "hello"},
+                  {"voice", "not-a-voice"}, {"response_format", "wav"}},
+                 "invalid_speech_request");
+    expect_error({{"model", cold_info.name}, {"input", "hello"},
+                  {"voice", "999"}, {"response_format", "wav"}},
+                 "invalid_speech_request");
+    CHECK_FALSE(ts.coordinator.is_loaded(cold_info.name));
     CHECK(ts.coordinator.active_request_count() == 0);
     CHECK(media_jobs().size() == initial_jobs);
 
@@ -1949,6 +2004,26 @@ TEST_CASE("Routes: chat stream applies producer backpressure until disconnect",
     std::this_thread::sleep_for(std::chrono::milliseconds{50});
     CHECK(backend->stream_deltas_emitted.load() < 1000);
 
+    std::string emitted;
+    httplib::DataSink sink;
+    sink.write = [&emitted](const char* data, std::size_t size) {
+        emitted.append(data, size);
+        return false;
+    };
+    sink.is_writable = [] { return true; };
+    sink.done = [] {};
+    REQUIRE_FALSE(response.content_provider_(0, 0, sink));
+    const auto frame_end = emitted.find("\n\n");
+    REQUIRE(frame_end + 2 == emitted.size());
+    const auto chunk = nlohmann::json::parse(
+        emitted.substr(6, frame_end - 6));
+    REQUIRE(emitted == serialize_chat_stream_delta(
+        chunk["id"].get<std::string>(), chunk["model"].get<std::string>(),
+        chunk["created"].get<std::int64_t>(),
+        {{"content", std::string(64 * 1024, 'x')}}, false));
+    CHECK(emitted.find("finish_reason\":\"stop") == std::string::npos);
+    CHECK(emitted.find("\"usage\"") == std::string::npos);
+    CHECK(emitted.find("[DONE]") == std::string::npos);
     REQUIRE(response.content_provider_resource_releaser_);
     response.content_provider_resource_releaser_(false);
     CHECK(backend->stream_deltas_emitted.load() < 1000);

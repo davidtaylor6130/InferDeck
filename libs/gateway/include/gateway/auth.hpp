@@ -182,6 +182,7 @@ inline RoutePrincipal classify_route(std::string_view method,
         return RoutePrincipal::OpenAIDataPlane;
     }
     if (path == "/api/status" || path == "/api/pricing" ||
+        path == "/api/inferdeck/v1/usage/daily" ||
         path == "/api/events/stream") {
         return RoutePrincipal::DashboardSession;
     }

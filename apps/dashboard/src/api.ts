@@ -2,6 +2,7 @@ import type {
   JobRecord,
   HealthPayload,
   ModelInfo,
+  MonthlyUsageRow,
   PricingEntry,
   StatusPayload,
   SwapHistoryRow,
@@ -333,6 +334,13 @@ function normalizeModel(value: unknown): ModelInfo | null {
 
 export function getStatus(): Promise<StatusPayload> {
   return getJson<StatusPayload>('/api/status');
+}
+
+export function getDailyUsage(): Promise<{
+  dailyTokenUsage: MonthlyUsageRow[];
+  dailyTokenUsageAllTime: boolean;
+}> {
+  return getJson('/api/inferdeck/v1/usage/daily');
 }
 
 export async function getModels(): Promise<ModelInfo[]> {
