@@ -1,0 +1,31 @@
+server:
+  host: "0.0.0.0"
+  port: 11440
+
+logging:
+  level: "info"
+  file: ""
+
+auth:
+  required: true
+  token: "test-data-token"
+
+control:
+  allow_remote: true
+  allow_data_plane_token: false
+  token: "test-control-token-0123456789abcdef"
+  origins:
+    - "http://admin.example"
+
+cors:
+  origins:
+    - "*"
+
+observability:
+  stats_db: ":memory:"
+  telemetry_poll_ms: 100
+
+gateway:
+  auto_swap: false
+
+model_registry: []

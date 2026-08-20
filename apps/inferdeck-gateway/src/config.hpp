@@ -27,6 +27,10 @@ struct GatewayConfig {
     bool auth_required{false};
     std::string auth_token{};
     std::vector<std::string> cors_origins{};
+    bool control_allow_remote{false};
+    bool control_allow_data_plane_token{false};
+    std::string control_token{};
+    std::vector<std::string> control_origins{};
     std::vector<model::ModelInfo> models{};
     std::string stats_db_path{};
     std::string adlx_helper_path{};
@@ -160,6 +164,56 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
             (!root["auth"]["token"] || root["auth"]["token"].as<std::string>().empty())) {
             return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                          "auth.token is required when authentication is enabled");
+        }
+        if (root["control"]) {
+            const auto& control = root["control"];
+            if (!control.IsMap()) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "control must be a mapping");
+            }
+            const bool allow_remote = control["allow_remote"] &&
+                control["allow_remote"].as<bool>();
+            const bool allow_data_plane_token = control["allow_data_plane_token"] &&
+                control["allow_data_plane_token"].as<bool>();
+            const std::string control_token = control["token"]
+                ? control["token"].as<std::string>() : std::string{};
+            if (control["origins"] && !control["origins"].IsSequence()) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "control.origins must be a sequence");
+            }
+            if (control["origins"]) {
+                for (const auto& origin : control["origins"]) {
+                    const auto value = origin.as<std::string>();
+                    const bool scheme = value.starts_with("http://") ||
+                        value.starts_with("https://");
+                    const auto authority = scheme ? value.find("//") + 2 : 0;
+                    if (value.empty() || value == "*" || value == "null" || !scheme ||
+                        authority >= value.size() ||
+                        value.find_first_of("/?#", authority) != std::string::npos ||
+                        value.find('@', authority) != std::string::npos ||
+                        value.find_first_of(" \t\r\n") != std::string::npos) {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                     "control.origins must contain exact HTTP(S) origins");
+                    }
+                }
+            }
+            if (allow_remote) {
+                if (control_token.size() < 32 ||
+                    control_token.find_first_of(" \t\r\n") != std::string::npos) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "control.token must contain at least 32 non-whitespace characters for remote administration");
+                }
+                if (!control["origins"] || control["origins"].size() == 0) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "control.origins is required for remote administration");
+                }
+                if (!allow_data_plane_token && root["auth"] && root["auth"]["token"] &&
+                    !root["auth"]["token"].as<std::string>().empty() &&
+                    root["auth"]["token"].as<std::string>() == control_token) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 "control.token must differ from auth.token unless explicitly shared");
+                }
+            }
         }
         if (root["gateway"]) {
             const auto& gateway = root["gateway"];
@@ -579,6 +633,22 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (c["origins"] && c["origins"].IsSequence()) {
             for (const auto& o : c["origins"]) {
                 cfg.cors_origins.push_back(o.as<std::string>());
+            }
+        }
+    }
+    if (root["control"]) {
+        const auto& control = root["control"];
+        if (control["allow_remote"]) {
+            cfg.control_allow_remote = control["allow_remote"].as<bool>();
+        }
+        if (control["allow_data_plane_token"]) {
+            cfg.control_allow_data_plane_token =
+                control["allow_data_plane_token"].as<bool>();
+        }
+        if (control["token"]) cfg.control_token = control["token"].as<std::string>();
+        if (control["origins"] && control["origins"].IsSequence()) {
+            for (const auto& origin : control["origins"]) {
+                cfg.control_origins.push_back(origin.as<std::string>());
             }
         }
     }

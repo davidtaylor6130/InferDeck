@@ -18,6 +18,7 @@
 #include <iterator>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <yaml-cpp/yaml.h>
 
@@ -225,6 +226,111 @@ TEST_CASE("Active configuration save schedules an automatic runtime reload",
     CHECK(pending["restartRequired"] == true);
     CHECK(pending["runningRevision"] == "running-before-save");
     CHECK(pending["activeRevision"] == body["activeRevision"]);
+}
+
+TEST_CASE("Configuration API masks and restores every credential",
+          "[gateway][dashboard][config][security]") {
+    TempConfig config;
+    const std::string original =
+        "auth:\n"
+        "  required: true\n"
+        "  token: data-secret\n"
+        "control:\n"
+        "  allow_remote: true\n"
+        "  token: control-secret\n"
+        "  origins: [https://admin.example]\n"
+        "model_store:\n"
+        "  hf_token: hf-secret\n";
+    TempConfig::write(config.base, original);
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+
+    const auto current_response = client.Get("/api/config");
+    REQUIRE(current_response);
+    REQUIRE(current_response->status == 200);
+    const auto current = nlohmann::json::parse(current_response->body);
+    const auto masked = current["yaml"].get<std::string>();
+    CHECK(masked.find("data-secret") == std::string::npos);
+    CHECK(masked.find("control-secret") == std::string::npos);
+    CHECK(masked.find("hf-secret") == std::string::npos);
+    std::size_t sentinel_count = 0;
+    std::size_t position = 0;
+    while ((position = masked.find("__INFERDECK_SECRET__", position)) !=
+           std::string::npos) {
+        ++sentinel_count;
+        position += std::string_view{"__INFERDECK_SECRET__"}.size();
+    }
+    CHECK(sentinel_count == 3);
+
+    const nlohmann::json request{
+        {"yaml", masked},
+        {"revision", current["revision"]},
+    };
+    const auto response = client.Put(
+        "/api/config", request.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(TempConfig::read(config.base) == original);
+}
+
+TEST_CASE("Configuration API redacts noncanonical YAML secret forms",
+          "[gateway][dashboard][config][security]") {
+    TempConfig config;
+    const std::string original =
+        "auth: {required: true, token: flow-data-secret}\n"
+        "\"control\":\n"
+        "  allow_remote: false\n"
+        "  \"token\": >-\n"
+        "    block-control-secret\n"
+        "model_store:\n"
+        "  hf_token: 'quoted-hf-secret'\n";
+    TempConfig::write(config.base, original);
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+
+    const auto current_response = client.Get("/api/config");
+    REQUIRE(current_response);
+    REQUIRE(current_response->status == 200);
+    const auto current = nlohmann::json::parse(current_response->body);
+    const auto masked = current["yaml"].get<std::string>();
+    CHECK(masked.find("flow-data-secret") == std::string::npos);
+    CHECK(masked.find("block-control-secret") == std::string::npos);
+    CHECK(masked.find("quoted-hf-secret") == std::string::npos);
+    const auto masked_yaml = YAML::Load(masked);
+    CHECK(masked_yaml["auth"]["token"].as<std::string>() == "__INFERDECK_SECRET__");
+    CHECK(masked_yaml["control"]["token"].as<std::string>() == "__INFERDECK_SECRET__");
+    CHECK(masked_yaml["model_store"]["hf_token"].as<std::string>() ==
+          "__INFERDECK_SECRET__");
+
+    const nlohmann::json request{
+        {"yaml", masked},
+        {"revision", current["revision"]},
+    };
+    const auto response = client.Put(
+        "/api/config", request.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto restored = YAML::Load(TempConfig::read(config.base));
+    CHECK(restored["auth"]["token"].as<std::string>() == "flow-data-secret");
+    CHECK(restored["control"]["token"].as<std::string>() == "block-control-secret");
+    CHECK(restored["model_store"]["hf_token"].as<std::string>() ==
+          "quoted-hf-secret");
+}
+
+TEST_CASE("Configuration API masks duplicate secret keys without disclosure",
+          "[gateway][dashboard][config][security]") {
+    TempConfig config;
+    TempConfig::write(config.base,
+        "control:\n  token: first-control-secret\n  token: second-control-secret\n");
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+
+    const auto response = client.Get("/api/config");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto masked = nlohmann::json::parse(response->body)["yaml"].get<std::string>();
+    CHECK(masked.find("first-control-secret") == std::string::npos);
+    CHECK(masked.find("second-control-secret") == std::string::npos);
 }
 
 TEST_CASE("Model alias API persists CRUD changes and compatibility contract",

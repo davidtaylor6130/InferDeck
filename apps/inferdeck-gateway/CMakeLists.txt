@@ -72,4 +72,22 @@ if(INFERDECK_BUILD_TESTS)
     set_tests_properties(stats_path_config_tests PROPERTIES LABELS "unit")
     add_test(NAME tts_config_tests COMMAND config_tests "[speech-config]")
     set_tests_properties(tts_config_tests PROPERTIES LABELS "unit")
+    if(WIN32)
+        find_program(INFERDECK_POWERSHELL_EXECUTABLE powershell.exe REQUIRED)
+        add_test(NAME control_security_local
+            COMMAND "${INFERDECK_POWERSHELL_EXECUTABLE}" -NoProfile
+                    -ExecutionPolicy Bypass
+                    -File "${CMAKE_SOURCE_DIR}/Testing/Test-ControlPlaneSecurity.ps1"
+                    -Gateway "$<TARGET_FILE:inferdeck-gateway>")
+        add_test(NAME control_security_remote
+            COMMAND "${INFERDECK_POWERSHELL_EXECUTABLE}" -NoProfile
+                    -ExecutionPolicy Bypass
+                    -File "${CMAKE_SOURCE_DIR}/Testing/Test-ControlPlaneSecurity.ps1"
+                    -Gateway "$<TARGET_FILE:inferdeck-gateway>"
+                    -RemoteControl -TestSlowClient)
+        set_tests_properties(control_security_local control_security_remote PROPERTIES
+            LABELS "integration"
+            TIMEOUT 90
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    endif()
 endif()

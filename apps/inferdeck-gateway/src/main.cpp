@@ -35,11 +35,14 @@
 #include "gateway/anthropic_routes.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
+#include "gateway/deadline_server.hpp"
 #include "gateway/dashboard_routes.hpp"
 #include "gateway/metrics_builder.hpp"
 #include "gateway/media_routes.hpp"
 #include "gateway/model_store.hpp"
 #include "gateway/openai_routes.hpp"
+#include "gateway/request_id.hpp"
+#include "gateway/request_security.hpp"
 #include "gateway/routes.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "httplib.h"
@@ -761,57 +764,181 @@ int run_gateway(const fs::path& config_path) {
         }
     });
 
-    AuthConfig ac;
-    ac.required = cfg.auth_required;
-    ac.token = cfg.auth_token;
-    AuthMiddleware auth(ac);
-    CorsMiddleware cors(cfg.cors_origins);
+    RouteAuthConfig route_auth;
+    route_auth.data_plane.required = cfg.auth_required;
+    route_auth.data_plane.token = cfg.auth_token;
+    route_auth.control_allow_remote = cfg.control_allow_remote;
+    route_auth.control_allow_data_plane_token = cfg.control_allow_data_plane_token;
+    route_auth.control_token = cfg.control_token;
+    RouteAuthorizer authorizer(std::move(route_auth));
+    CorsMiddleware data_cors(cfg.cors_origins);
+    CorsMiddleware control_cors(cfg.control_origins);
 
-    httplib::Server server;
+    DeadlineServer server(server_request_read_deadline);
+    server.set_read_timeout(server_read_timeout);
+    server.set_write_timeout(server_write_timeout);
+    server.set_keep_alive_timeout(server_keep_alive_timeout.count());
+    server.set_payload_max_length(server_body_limit);
     server.new_task_queue = [] {
         return new httplib::ThreadPool(std::max(32u, std::thread::hardware_concurrency() * 2u));
     };
     g_server = &server;
     const auto dashboard_static_dir = find_dashboard_static_dir();
+    const auto apply_cors = [&](RoutePrincipal principal,
+                                const httplib::Request& req,
+                                httplib::Response& resp) {
+        if (principal == RoutePrincipal::DashboardSession ||
+            principal == RoutePrincipal::ControlRead ||
+            principal == RoutePrincipal::ControlWrite) {
+            control_cors.apply(req, resp);
+            return;
+        }
+        data_cors.apply(req, resp);
+    };
+    const auto proxy_indicated = [](const httplib::Request& req) {
+        for (const char* header : {"Forwarded", "X-Forwarded-For", "X-Real-IP",
+                                   "X-Forwarded-Host", "Via"}) {
+            if (req.has_header(header)) return true;
+        }
+        return false;
+    };
+    const auto write_validation_error = [](httplib::Response& resp,
+                                           RequestValidationStatus validation) {
+        if (validation == RequestValidationStatus::BodyNotAllowed) {
+            write_error(resp, 400, "body_not_allowed",
+                        "request body is not allowed for this endpoint");
+        } else if (validation == RequestValidationStatus::PayloadTooLarge) {
+            write_error(resp, 413, "request_too_large",
+                        "request body exceeds the endpoint limit");
+        } else if (validation == RequestValidationStatus::UnsupportedMediaType) {
+            write_error(resp, 415, "unsupported_media_type",
+                        "request Content-Type is not supported by this endpoint");
+        } else if (validation == RequestValidationStatus::InvalidContentLength) {
+            write_error(resp, 400, "invalid_content_length",
+                        "request Content-Length is invalid");
+        } else if (validation == RequestValidationStatus::UnsupportedTransferEncoding) {
+            write_error(resp, 411, "content_length_required",
+                        "chunked request bodies are not supported");
+        }
+    };
+
+    server.set_expect_100_continue_handler(
+        [&](const httplib::Request& req, httplib::Response& resp) {
+            const auto id = request_id(header_value(req, "X-Request-Id"));
+            resp.set_header("X-Request-Id", id);
+            LOG_INFO("http_request_begin", "request_id={} method={} path={}",
+                     id, req.method, req.path);
+            apply_cors(classify_route(req.method, req.path), req, resp);
+            write_error(resp, 417, "expectation_failed",
+                        "Expect: 100-continue is not supported");
+            return 400;
+        });
+
+    server.set_pre_routing_handler([&](const httplib::Request& req,
+                                       httplib::Response& resp) {
+        const auto id = request_id(header_value(req, "X-Request-Id"));
+        resp.set_header("X-Request-Id", id);
+        LOG_INFO("http_request_begin", "request_id={} method={} path={}",
+                 id, req.method, req.path);
+        const auto principal = classify_route(req.method, req.path);
+        apply_cors(principal, req, resp);
+        if (req.has_header("Expect")) {
+            write_error(resp, 417, "expectation_failed",
+                        "Expect request headers are not supported");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        if (g_stop.load() || g_reload.load()) {
+            resp.set_header("Retry-After", "1");
+            write_error(resp, 503, "server_stopping",
+                        "gateway shutdown or reload is in progress");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        const bool proxied = proxy_indicated(req);
+        const bool direct_loopback = RouteAuthorizer::is_direct_loopback(
+            req.remote_addr, header_value(req, "Host"), proxied);
+        const bool control_route = principal == RoutePrincipal::DashboardSession ||
+            principal == RoutePrincipal::ControlRead ||
+            principal == RoutePrincipal::ControlWrite;
+        if (req.method == "OPTIONS") {
+            if (control_route) {
+                if ((principal == RoutePrincipal::DashboardSession && !direct_loopback) ||
+                    (!direct_loopback && !cfg.control_allow_remote)) {
+                    write_error(resp, 403, "forbidden",
+                                "control-plane access is not available from this client");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+                const auto origin = header_value(req, "Origin");
+                if (origin.empty() || !control_cors.allows_origin(origin)) {
+                    write_error(resp, 403, "origin_forbidden",
+                                "request origin is not allowed for the control plane");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        }
+        const auto authorization = authorizer.authorize(
+            principal, header_value(req, "Authorization"), req.remote_addr,
+            header_value(req, "Host"), proxied);
+        if (authorization == AuthorizationStatus::AuthenticationRequired) {
+            resp.set_header("WWW-Authenticate", "Bearer");
+            write_error(resp, 401, "unauthorized", "valid Bearer token required");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        if (authorization == AuthorizationStatus::Forbidden) {
+            write_error(resp, 403, "forbidden",
+                        "control-plane access is not available from this client");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        if (principal == RoutePrincipal::ControlWrite) {
+            const auto origin = header_value(req, "Origin");
+            if ((!origin.empty() && !control_cors.allows_origin(origin)) ||
+                header_value(req, "Sec-Fetch-Site") == "cross-site") {
+                write_error(resp, 403, "origin_forbidden",
+                            "request origin is not allowed for the control plane");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+        }
+        const auto policy = request_policy(
+            req.method, req.path, principal == RoutePrincipal::ControlWrite);
+        const auto validation = validate_request_headers(req, policy);
+        if (validation != RequestValidationStatus::Allowed) {
+            write_validation_error(resp, validation);
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        return httplib::Server::HandlerResponse::Unhandled;
+    });
+    server.set_logger([](const httplib::Request& req,
+                         const httplib::Response& resp) {
+        auto id = resp.get_header_value("X-Request-Id");
+        if (id.empty()) id = request_id(header_value(req, "X-Request-Id"));
+        const int status = resp.status > 0 ? resp.status : 200;
+        LOG_INFO("http_response_committed", "request_id={} method={} path={} status={}",
+                 id, req.method, req.path, status);
+    });
 
     RouteWrapper wrap = [&](httplib::Server::Handler handler) -> httplib::Server::Handler {
         return [&, handler](const httplib::Request& req,
                             httplib::Response& resp) {
-            LOG_INFO("http_request_begin", "method={} path={}", req.method, req.path);
-            cors.apply(req, resp);
-            if (g_stop.load() || g_reload.load()) {
-                resp.set_header("Retry-After", "1");
-                write_error(resp, 503, "server_stopping",
-                            "gateway shutdown or reload is in progress");
-                return;
-            }
-            std::string auth_header = header_value(req, "Authorization");
-            if (auth_header.empty()) {
-                // Anthropic SDK clients (e.g. Claude Code) authenticate via x-api-key.
-                const std::string api_key = header_value(req, "x-api-key");
-                if (!api_key.empty()) auth_header = "Bearer " + api_key;
-            }
-            if (auth.required() && !auth.check(auth_header)) {
-                resp.set_header("WWW-Authenticate", "Bearer");
-                write_error(resp, 401, "unauthorized", "valid Bearer token required");
+            const auto principal = classify_route(req.method, req.path);
+            const auto validation = validate_request(
+                req, request_policy(req.method, req.path,
+                                    principal == RoutePrincipal::ControlWrite));
+            if (validation != RequestValidationStatus::Allowed) {
+                write_validation_error(resp, validation);
                 return;
             }
             try {
                 handler(req, resp);
-                const int logged_status = resp.status > 0 ? resp.status : 200;
-                LOG_INFO("http_request_end", "method={} path={} status={}", req.method, req.path, logged_status);
             } catch (const std::exception& e) {
-                LOG_ERROR("handler_exception", "what={}", e.what());
+                const auto id = resp.get_header_value("X-Request-Id");
+                LOG_ERROR("handler_exception", "request_id={} what={}", id, e.what());
                 if (resp.status == 0) resp.status = 500;
                 write_error(resp, resp.status, "internal_error", "request could not be completed");
-                const int logged_status = resp.status > 0 ? resp.status : 500;
-                LOG_INFO("http_request_end", "method={} path={} status={}", req.method, req.path, logged_status);
             } catch (...) {
-                LOG_ERROR("handler_unknown_exception", "");
+                const auto id = resp.get_header_value("X-Request-Id");
+                LOG_ERROR("handler_unknown_exception", "request_id={}", id);
                 if (resp.status == 0) resp.status = 500;
                 write_error(resp, resp.status, "internal_error", "unknown exception");
-                const int logged_status = resp.status > 0 ? resp.status : 500;
-                LOG_INFO("http_request_end", "method={} path={} status={}", req.method, req.path, logged_status);
             }
         };
     };
@@ -890,8 +1017,9 @@ int run_gateway(const fs::path& config_path) {
                          "application/json");
     }));
     server.Get(R"(^/v1/health$)", wrap([&](const httplib::Request&,
-                                      httplib::Response& resp) {
-        resp.set_content(MetricsBuilder::build_health(metrics, gpu, stats_db).dump(),
+                                            httplib::Response& resp) {
+        resp.set_content(nlohmann::json{{"ok", true},
+                                        {"db_healthy", stats_db.healthy()}}.dump(),
                          "application/json");
     }));
     DashboardDeps dash_deps{
@@ -910,19 +1038,16 @@ int run_gateway(const fs::path& config_path) {
         &profile_benchmark,
         &profile_benchmark_scheduler};
     register_dashboard_routes(server, dash_deps, wrap);
-    if (cors.handles_options()) {
-        server.Options(".*", [&](const httplib::Request& req,
-                                  httplib::Response& resp) {
-            cors.apply(req, resp);
+    if (data_cors.handles_options() || control_cors.handles_options()) {
+        server.Options(".*", [](const httplib::Request&,
+                                 httplib::Response& resp) {
             resp.status = 204;
         });
     }
     server.Get(R"(^/$)", [&](const httplib::Request& req, httplib::Response& resp) {
-        cors.apply(req, resp);
         write_dashboard_file(resp, dashboard_static_dir, req.path);
     });
     server.Get(R"(^/(?!api(?:/|$)|v1(?:/|$)).*)", [&](const httplib::Request& req, httplib::Response& resp) {
-        cors.apply(req, resp);
         write_dashboard_file(resp, dashboard_static_dir, req.path);
     });
 

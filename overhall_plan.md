@@ -225,36 +225,37 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Work
 
-- [ ] Classify every route as OpenAI data plane, read-only public status, dashboard
+- [x] Classify every route as OpenAI data plane, read-only public status, dashboard
       session, or privileged control plane.
-- [ ] Introduce route-scoped principals rather than one global authentication
+- [x] Introduce route-scoped principals rather than one global authentication
       wrapper.
-- [ ] Require control-plane authentication for every mutating operation.
-- [ ] Default privileged control routes to loopback-only access.
-- [ ] Require an explicit `control.allow_remote` setting, a non-empty control token,
+- [x] Require control-plane authentication for every mutating operation.
+- [x] Default privileged control routes to loopback-only access.
+- [x] Require an explicit `control.allow_remote` setting, a non-empty control token,
       and a configured origin allowlist before remote administration can start.
-- [ ] Keep OpenAI data-plane authentication separately configurable.
-- [ ] Remove global `x-api-key` fallback.
-- [ ] Add constant-time credential comparison and secret masking.
-- [ ] Restrict control-plane CORS; prohibit wildcard origins for privileged routes.
-- [ ] Add CSRF protection if browser credentials are cookie-backed.
-- [ ] Apply authorization to model download, archive, permanent removal, aliases,
+- [x] Keep OpenAI data-plane authentication separately configurable.
+- [x] Remove global `x-api-key` fallback.
+- [x] Add constant-time credential comparison and secret masking.
+- [x] Restrict control-plane CORS; prohibit wildcard origins for privileged routes.
+- [x] Treat ambient loopback authority as a CSRF credential: enforce exact
+      mutation origins, Fetch Metadata, and non-simple JSON mutation requests.
+- [x] Apply authorization to model download, archive, permanent removal, aliases,
       config read/write/reset/reload, model load/unload, logs, jobs, cancellation,
       and benchmark operations.
-- [ ] Add endpoint-specific request-body limits and content-type enforcement.
-- [ ] Add read, write, idle, and slow-client deadlines.
-- [ ] Generate or accept a sanitized request ID, return it in response headers, and
+- [x] Add endpoint-specific request-body limits and content-type enforcement.
+- [x] Add read, write, idle, and slow-client deadlines.
+- [x] Generate or accept a sanitized request ID, return it in response headers, and
       include it in every structured log and request outcome.
-- [ ] Update LAN configuration tests so insecure remote administration cannot be
+- [x] Update LAN configuration tests so insecure remote administration cannot be
       accidentally locked in as expected behavior.
 
 ### Exit gate
 
-- [ ] Non-loopback plus unauthenticated control startup fails validation.
-- [ ] Every mutating control endpoint returns 401/403 without the correct principal.
-- [ ] OpenAI credentials cannot administer the control plane unless explicitly
+- [x] Non-loopback plus unauthenticated control startup fails validation.
+- [x] Every mutating control endpoint returns 401/403 without the correct principal.
+- [x] OpenAI credentials cannot administer the control plane unless explicitly
       granted that principal.
-- [ ] Browser-origin and request-size/deadline matrices pass.
+- [x] Browser-origin and request-size/deadline matrices pass.
 
 ## Phase 3 - Immediate OpenAI contract hotfixes
 

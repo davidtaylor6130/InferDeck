@@ -12,6 +12,15 @@ auth:
   required: false
   token: ""
 
+control:
+  allow_remote: false
+  allow_data_plane_token: false
+  token: ""
+  origins:
+    - "http://127.0.0.1:11434"
+    - "http://localhost:11434"
+    - "http://[::1]:11434"
+
 cors:
   origins:
     - "*"

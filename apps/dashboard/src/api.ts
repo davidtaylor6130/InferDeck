@@ -47,7 +47,7 @@ async function deleteJson<T>(path: string, timeoutMs = 30_000): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     method: 'DELETE',
     signal: AbortSignal.timeout(timeoutMs),
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
   });
   const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
   if (!response.ok) throw new Error(payload?.error?.message || `${path} responded ${response.status}`);

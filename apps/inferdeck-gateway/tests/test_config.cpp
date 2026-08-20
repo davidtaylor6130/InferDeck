@@ -47,7 +47,7 @@ model_registry:
     REQUIRE(result);
 }
 
-TEST_CASE("Repository gateway configuration preserves home-lab LAN access", "[config][lan]") {
+TEST_CASE("Repository gateway configuration keeps remote control disabled", "[config][lan]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "config" / "gateway.yml";
     const auto text = inferdeck::gateway::read_text_file(path);
@@ -59,6 +59,34 @@ TEST_CASE("Repository gateway configuration preserves home-lab LAN access", "[co
     CHECK_FALSE(config.auth_required);
     REQUIRE(config.cors_origins.size() == 1);
     CHECK(config.cors_origins.front() == "*");
+    CHECK_FALSE(config.control_allow_remote);
+    CHECK_FALSE(config.control_allow_data_plane_token);
+    CHECK(config.control_token.empty());
+    REQUIRE(config.control_origins.size() == 3);
+    CHECK(std::find(config.control_origins.begin(), config.control_origins.end(), "*") ==
+          config.control_origins.end());
+}
+
+TEST_CASE("Security fixture configurations load with distinct control policies",
+          "[config][lan][security]") {
+    const auto config_dir = std::filesystem::path(INFERDECK_SOURCE_DIR) / "config";
+
+    const auto local_only = load_config(config_dir / "gateway.test-security.yml");
+    CHECK(local_only.host == "0.0.0.0");
+    CHECK(local_only.auth_required);
+    CHECK(local_only.auth_token == "test-data-token");
+    CHECK_FALSE(local_only.control_allow_remote);
+    CHECK(local_only.control_token.empty());
+
+    const auto remote = load_config(config_dir / "gateway.test-security-remote.yml");
+    CHECK(remote.host == "0.0.0.0");
+    CHECK(remote.auth_required);
+    CHECK(remote.auth_token == "test-data-token");
+    CHECK(remote.control_allow_remote);
+    CHECK_FALSE(remote.control_allow_data_plane_token);
+    CHECK(remote.control_token == "test-control-token-0123456789abcdef");
+    REQUIRE(remote.control_origins.size() == 1);
+    CHECK(remote.control_origins.front() == "http://admin.example");
 }
 
 TEST_CASE("Repository gateway configuration keeps statistics in the installed runtime",
@@ -237,6 +265,55 @@ model_registry:
     CHECK_FALSE(validate_config_text("gateway:\n  n_batch: 128\n  n_ubatch: 256\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\nauth:\n  required: true\n  token: secret\n"));
+    CHECK_FALSE(validate_config_text("control:\n  allow_remote: true\n"));
+    CHECK_FALSE(validate_config_text(
+        "control:\n  allow_remote: true\n  token: control-secret\n"));
+    CHECK_FALSE(validate_config_text(R"(
+control:
+  allow_remote: true
+  token: control-secret-0123456789abcdefghi
+  origins: ["*"]
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+control:
+  allow_remote: false
+  origins: ["*"]
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+control:
+  allow_remote: false
+  origins: ["null"]
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+control:
+  allow_remote: false
+  origins: ["https://admin.example/path"]
+)"));
+    CHECK(validate_config_text(R"(
+control:
+  allow_remote: true
+  token: control-secret-0123456789abcdefghi
+  origins: ["https://admin.example"]
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+auth:
+  required: true
+  token: shared-secret-0123456789abcdefghij
+control:
+  allow_remote: true
+  token: shared-secret-0123456789abcdefghij
+  origins: ["https://admin.example"]
+)"));
+    CHECK(validate_config_text(R"(
+auth:
+  required: true
+  token: shared-secret-0123456789abcdefghij
+control:
+  allow_remote: true
+  allow_data_plane_token: true
+  token: shared-secret-0123456789abcdefghij
+  origins: ["https://admin.example"]
+)"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:
   - name: unknown
