@@ -1,5 +1,6 @@
 # InferDeck documentation
 
+- [`adr/`](adr/) - binding architecture decisions and decision template
 - [`architecture.md`](architecture.md) — system architecture, layer by layer
 - [`DEPLOY.md`](DEPLOY.md) — unattended Windows deployment (scheduled tasks + watchdog)
 - [`opencode-setup-guide.md`](opencode-setup-guide.md) — pointing opencode at InferDeck

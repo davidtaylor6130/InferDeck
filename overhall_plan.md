@@ -29,6 +29,31 @@ when every required checkbox and the final definition of done are satisfied.
 - Audit mode: source, documentation, OpenAI contract, GitHub issue, and PR review
 - Implementation rule: one phase or tightly coupled workstream per branch and PR
 
+## Authoritative GitHub mapping
+
+| Scope | Issue |
+|---|---:|
+| Overhaul epic | #107 |
+| Phase 0 - Governance | #108 |
+| Phase 1 - Forced-aligner extraction | #109 |
+| Phase 2 - Security containment | #110 |
+| Phase 3 - Strict `/v1` boundary | #111 |
+| Phase 4 - Typed inference domain | #112 |
+| Phase 5 - Chat Completions | #113 |
+| Phase 6 - Responses | #114 |
+| Phase 7 - Resource roles | #115 |
+| Phase 8 - Audio | #116 |
+| Phase 9 - Lifecycle | #117 |
+| Phase 10 - Configuration | #118 |
+| Phase 11 - Observability and pricing | #119 |
+| Phase 12 - Build and CI | #120 |
+| Phase 13 - Decomposition and documentation | #121 |
+| Phase 14 - Migration and release | #122 |
+
+Epic #107 defines the milestone order. Each phase issue records its predecessor
+in `Blocked by`, so the dependency chain remains explicit even without relying
+on a repository-specific project-board configuration.
+
 ## Non-negotiable invariants
 
 1. Core remains a single native process.
@@ -132,29 +157,29 @@ audit into an authoritative, dependency-ordered backlog.
 
 ### Work
 
-- [ ] Adopt an ADR declaring the OpenAI-only Core, single-process rule, control
+- [x] Adopt an ADR declaring the OpenAI-only Core, single-process rule, control
       plane boundary, canonical inference domain, and compatibility policy.
-- [ ] Add an architecture decision template covering protocol, process, resource,
+- [x] Add an architecture decision template covering protocol, process, resource,
       security, observability, migration, and contract-test impact.
-- [ ] Create a GitHub epic for this plan.
-- [ ] Create one issue for every independently deliverable work item below.
-- [ ] Label issues with `P0` through `P3`, `protocol`, `security`, `architecture`,
+- [x] Create a GitHub epic for this plan.
+- [x] Create one issue for every independently deliverable work item below.
+- [x] Label issues with `P0` through `P3`, `protocol`, `security`, `architecture`,
       `runtime`, `observability`, `build`, and `migration` as applicable.
-- [ ] Add issue dependencies and assign milestone order matching this plan.
-- [ ] Record #99 as blocked by Phase 7's explicit resource-role model.
-- [ ] Record #103 as an early correctness fix before broad configuration changes.
-- [ ] Select PR #105 as the candidate for #103 after diff review.
-- [ ] Close or supersede PR #104 only after owner authorization and preservation of
-      any unique work.
-- [ ] Add CODEOWNERS coverage for OpenAI contracts, coordinator/runtime boundaries,
+- [x] Add issue dependencies and assign milestone order matching this plan.
+- [x] Record #99 as blocked by Phase 7's explicit resource-role model.
+- [x] Record #103 as an early correctness fix before broad configuration changes.
+- [x] Select PR #105 as the candidate for #103 after diff review.
+- [x] Preserve PR #104; close or supersede it only after owner authorization and
+      preservation of any unique work.
+- [x] Add CODEOWNERS coverage for OpenAI contracts, coordinator/runtime boundaries,
       authentication, configuration, and release workflows.
-- [ ] Add a PR template that requires invariant and contract impact declarations.
+- [x] Add a PR template that requires invariant and contract impact declarations.
 
 ### Exit gate
 
-- [ ] Every item in this plan maps to an open or completed GitHub issue.
-- [ ] The epic ordering matches this document.
-- [ ] No untracked P0 or P1 finding remains outside the backlog.
+- [x] Every item in this plan maps to an open or completed GitHub issue.
+- [x] The epic ordering matches this document.
+- [x] No untracked P0 or P1 finding remains outside the backlog.
 
 ## Phase 1 - Forced-aligner containment and extraction
 
