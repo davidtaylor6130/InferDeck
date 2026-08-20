@@ -78,6 +78,17 @@ nlohmann::json make_error_json(int status, const std::string& code,
                                nlohmann::json param = nullptr);
 void write_error(httplib::Response& resp, int status, const std::string& code,
                  const std::string& message);
+std::string serialize_chat_stream_delta(const std::string& id,
+                                        const std::string& model,
+                                        std::int64_t created,
+                                        const nlohmann::json& delta,
+                                        bool include_usage);
+std::string serialize_chat_stream_terminal(const std::string& id,
+                                           const std::string& model,
+                                           std::int64_t created,
+                                           const std::string& finish_reason,
+                                           const model::InferenceResult* result,
+                                           bool include_usage);
 std::string header_value(const httplib::Request& req, const std::string& name);
 std::string request_client_key(const httplib::Request& req);
 

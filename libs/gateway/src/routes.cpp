@@ -244,11 +244,12 @@ std::string dump_json(const nlohmann::json& value) {
 }
 
 std::string sse_chunk_json(const std::string& id, const std::string& model,
-                           const nlohmann::json& delta) {
+                           std::int64_t created, const nlohmann::json& delta,
+                           bool include_usage) {
     nlohmann::json chunk = {
         {"id", id},
         {"object", "chat.completion.chunk"},
-        {"created", std::time(nullptr)},
+        {"created", created},
         {"model", model},
         {"choices", nlohmann::json::array({
             {
@@ -258,16 +259,19 @@ std::string sse_chunk_json(const std::string& id, const std::string& model,
             }
         })},
     };
+    if (include_usage) chunk["usage"] = nullptr;
     return "data: " + dump_json(chunk) + "\n\n";
 }
 
-std::string sse_done(const std::string& id, const std::string& model,
-                     const std::string& finish_reason = "stop",
-                     const model::InferenceResult* result = nullptr) {
-    nlohmann::json chunk = {
+std::string sse_terminal(const std::string& id, const std::string& model,
+                         std::int64_t created,
+                         const std::string& finish_reason,
+                         const model::InferenceResult* result,
+                         bool include_usage) {
+    nlohmann::json finish = {
         {"id", id},
         {"object", "chat.completion.chunk"},
-        {"created", std::time(nullptr)},
+        {"created", created},
         {"model", model},
         {"choices", nlohmann::json::array({
             {
@@ -277,15 +281,26 @@ std::string sse_done(const std::string& id, const std::string& model,
             }
         })},
     };
-    if (result) {
-        chunk["usage"] = {
+    if (include_usage) finish["usage"] = nullptr;
+    std::string output = "data: " + dump_json(finish) + "\n\n";
+    if (include_usage && result) {
+        nlohmann::json usage = {
+            {"id", id},
+            {"object", "chat.completion.chunk"},
+            {"created", created},
+            {"model", model},
+            {"choices", nlohmann::json::array()},
+            {"usage", {
             {"prompt_tokens", result->prompt_tokens},
             {"prompt_tokens_details", {{"cached_tokens", result->cached_prompt_tokens}}},
             {"completion_tokens", result->completion_tokens},
             {"total_tokens", result->prompt_tokens + result->completion_tokens},
+            }},
         };
+        output += "data: " + dump_json(usage) + "\n\n";
     }
-    return "data: " + dump_json(chunk) + "\n\ndata: [DONE]\n\n";
+    output += "data: [DONE]\n\n";
+    return output;
 }
 
 nlohmann::json tool_call_json(const model::ToolCall& tc) {
@@ -474,6 +489,23 @@ bool chat_uses_vision(const nlohmann::json& body) {
 }
 
 } // namespace
+
+std::string serialize_chat_stream_delta(const std::string& id,
+                                        const std::string& model,
+                                        std::int64_t created,
+                                        const nlohmann::json& delta,
+                                        bool include_usage) {
+    return sse_chunk_json(id, model, created, delta, include_usage);
+}
+
+std::string serialize_chat_stream_terminal(const std::string& id,
+                                           const std::string& model,
+                                           std::int64_t created,
+                                           const std::string& finish_reason,
+                                           const model::InferenceResult* result,
+                                           bool include_usage) {
+    return sse_terminal(id, model, created, finish_reason, result, include_usage);
+}
 
 void write_json(httplib::Response& resp, int status,
                 const nlohmann::json& body) {
@@ -1105,6 +1137,16 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
     const bool stream = body.value("stream", false);
+    if (body.contains("stream_options") && !body["stream_options"].is_object()) {
+        write_error(resp, 400, "invalid_request_error",
+                    "stream_options must be an object");
+        return;
+    }
+    if (!stream && body.contains("stream_options")) {
+        write_error(resp, 400, "invalid_request_error",
+                    "stream_options requires stream to be true");
+        return;
+    }
     if (body.contains("stream_options") && body["stream_options"].is_object() &&
         body["stream_options"].contains("include_usage") &&
         !body["stream_options"]["include_usage"].is_boolean()) {
@@ -1131,6 +1173,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
     const std::string id = make_id();
     const std::string stream_model = requested_model;
+    const auto stream_created = static_cast<std::int64_t>(std::time(nullptr));
 
     std::function<void()> release_slot = [slot_id, &deps, model_name,
                                           reservation_key,
@@ -1316,7 +1359,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
     resp.set_chunked_content_provider(
         "text/event-stream",
-        [id, stream_model, state, include_stream_usage](
+        [id, stream_model, stream_created, state, include_stream_usage](
             std::size_t, httplib::DataSink& sink) mutable {
             try {
             std::unique_lock<std::mutex> lk(state->mtx);
@@ -1362,7 +1405,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 for (const auto& delta : deltas) {
                     auto json_delta = delta_json(state->utf8.on_delta(delta));
                     if (json_delta.empty()) continue;
-                    std::string out = sse_chunk_json(id, stream_model, json_delta);
+                    std::string out = serialize_chat_stream_delta(
+                        id, stream_model, stream_created, json_delta,
+                        include_stream_usage);
                     if (!sink.write(out.data(), out.size())) {
                         LOG_WARN("stream_abort", "model={} slot_id={} reason=chunk_write_failed",
                                  state->model_name, state->slot_id);
@@ -1381,7 +1426,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
             auto trailing_delta = delta_json(state->utf8.finish());
             if (!trailing_delta.empty()) {
-                std::string out = sse_chunk_json(id, stream_model, trailing_delta);
+                std::string out = serialize_chat_stream_delta(
+                    id, stream_model, stream_created, trailing_delta,
+                    include_stream_usage);
                 if (!sink.write(out.data(), out.size())) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=trailing_chunk_write_failed",
                              state->model_name, state->slot_id);
@@ -1410,8 +1457,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 const bool has_tool_calls = final_result && !final_result->tool_calls.empty();
                 const std::string finish_reason = has_tool_calls ? "tool_calls" :
                     (final_result ? final_result->finish_reason : "stop");
-                std::string done = sse_done(id, stream_model, finish_reason,
-                    include_stream_usage && final_result ? final_result.get() : nullptr);
+                std::string done = serialize_chat_stream_terminal(
+                    id, stream_model, stream_created, finish_reason,
+                    final_result ? final_result.get() : nullptr,
+                    include_stream_usage);
                 if (!sink.write(done.data(), done.size())) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=done_write_failed",
                              state->model_name, state->slot_id);

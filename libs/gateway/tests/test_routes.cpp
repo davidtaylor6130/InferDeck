@@ -702,7 +702,56 @@ TEST_CASE("Routes: malformed chat parameters fail before slot admission",
     REQUIRE(nlohmann::json::parse(response->body)["error"]["code"] ==
             "invalid_request_error");
     REQUIRE(ts.coordinator.active_request_count() == 0);
+
+    response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"validation-model","stream":true,"stream_options":"usage","messages":[]})",
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 400);
+    REQUIRE(nlohmann::json::parse(response->body)["error"]["code"] ==
+            "invalid_request_error");
+    REQUIRE(ts.coordinator.active_request_count() == 0);
+
+    response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"validation-model","stream_options":null,"messages":[]})",
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 400);
+    REQUIRE(nlohmann::json::parse(response->body)["error"]["code"] ==
+            "invalid_request_error");
+    REQUIRE(ts.coordinator.active_request_count() == 0);
     ts.stop();
+}
+
+TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering",
+          "[routes][chat][stream][golden]") {
+    REQUIRE(serialize_chat_stream_delta(
+        "chatcmpl-test", "model", 123, {{"content", "Hi"}}, true) ==
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
+    REQUIRE(serialize_chat_stream_delta(
+        "chatcmpl-test", "model", 123,
+        {{"reasoning_content", "thinking"}}, true) ==
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
+    REQUIRE(serialize_chat_stream_delta(
+        "chatcmpl-test", "model", 123,
+        {{"tool_calls", nlohmann::json::array({{
+            {"index", 0}, {"id", "call_1"}, {"type", "function"},
+            {"function", {{"name", "f"}, {"arguments", "{}"}}},
+        }})}}, true) ==
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{}\",\"name\":\"f\"},\"id\":\"call_1\",\"index\":0,\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
+
+    InferenceResult result;
+    result.prompt_tokens = 8;
+    result.cached_prompt_tokens = 3;
+    result.completion_tokens = 12;
+    REQUIRE(serialize_chat_stream_terminal(
+        "chatcmpl-test", "model", 123, "tool_calls", &result, true) ==
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\",\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"choices\":[],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":12,\"prompt_tokens\":8,\"prompt_tokens_details\":{\"cached_tokens\":3},\"total_tokens\":20}}\n\ndata: [DONE]\n\n");
+    REQUIRE(serialize_chat_stream_terminal(
+        "chatcmpl-test", "model", 123, "stop", &result, false) ==
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\"}\n\ndata: [DONE]\n\n");
 }
 
 TEST_CASE("Routes: POST /v1/chat/completions unknown model returns 404", "[routes][chat]") {
@@ -800,7 +849,8 @@ TEST_CASE("Routes: typed context errors map without message matching",
     REQUIRE(error["type"] == "invalid_request_error");
     REQUIRE(error["param"].is_null());
     REQUIRE(error["code"] == "context_length_exceeded");
-    REQUIRE(response->body.ends_with("data: [DONE]\n\n"));
+    REQUIRE(response->body ==
+        "data: {\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"prompt is too long\",\"param\":null,\"type\":\"invalid_request_error\"}}\n\ndata: [DONE]\n\n");
     ts.stop();
 }
 
@@ -1351,7 +1401,8 @@ TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speec
     httplib::Client client("127.0.0.1", ts.port);
     auto response = client.Post("/v1/audio/speech",
         nlohmann::json{{"model", "speech-model"}, {"input", "hello"},
-                       {"voice", "default"}, {"speed", 1.0}}.dump(),
+                       {"voice", "default"}, {"response_format", "wav"},
+                       {"speed", 1.0}}.dump(),
         "application/json");
     REQUIRE(response);
     CHECK(response->status == 200);
@@ -1365,7 +1416,8 @@ TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speec
     backend->speech_should_fail.store(true);
     response = client.Post("/v1/audio/speech",
         nlohmann::json{{"model", "speech-model"}, {"input", "hello"},
-                       {"voice", "default"}, {"speed", 1.0}}.dump(),
+                       {"voice", "default"}, {"response_format", "wav"},
+                       {"speed", 1.0}}.dump(),
         "application/json");
     REQUIRE(response);
     CHECK(response->status == 400);
@@ -1378,16 +1430,99 @@ TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speec
                        {"voice", "default"}, {"response_format", "mp3"},
                        {"speed", 1.0}}.dump(), "application/json");
     REQUIRE(response);
-    CHECK(response->status == 200);
-    CHECK(response->get_header_value("Content-Type") == "audio/wav");
-    CHECK(response->body == "RIFF");
+    CHECK(response->status == 400);
+    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
+          "unsupported_response_format");
     const auto usage = ts.stats_db.model_usage();
     REQUIRE(usage.size() == 1);
     CHECK(usage[0].model == "speech-model");
-    CHECK(usage[0].requests == 3);
-    CHECK(usage[0].successful_requests == 2);
-    CHECK(usage[0].input_characters == 10);
+    CHECK(usage[0].requests == 2);
+    CHECK(usage[0].successful_requests == 1);
+    CHECK(usage[0].input_characters == 5);
     CHECK(usage[0].input_audio_seconds == 0.0);
+    ts.stop();
+}
+
+TEST_CASE("Routes: speech validates the OpenAI request contract before admission",
+          "[routes][speech][validation]") {
+    TestServer ts;
+    auto info = make_info("speech-validation");
+    info.runtime = "sherpa_onnx";
+    info.modality = "audio_speech";
+    info.capabilities = {"audio_speech"};
+    auto chat_info = make_info("not-speech");
+    ts.registry.register_model(info);
+    ts.registry.register_model(chat_info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto initial_jobs = media_jobs().size();
+
+    const auto post = [&client](nlohmann::json body) {
+        return client.Post("/v1/audio/speech", body.dump(), "application/json");
+    };
+    const auto expect_error = [&post](nlohmann::json body,
+                                      const std::string& code) {
+        auto response = post(std::move(body));
+        REQUIRE(response);
+        REQUIRE(response->status == 400);
+        CHECK(nlohmann::json::parse(response->body)["error"]["code"] == code);
+    };
+
+    expect_error({{"input", "hello"}, {"voice", "default"}},
+                 "invalid_speech_request");
+    expect_error({{"model", info.name}, {"voice", "default"}},
+                 "invalid_speech_request");
+    expect_error({{"model", info.name}, {"input", "hello"}},
+                 "invalid_speech_request");
+    expect_error({{"model", info.name}, {"input", 7}, {"voice", "default"}},
+                 "invalid_speech_request");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", 7}},
+                 "invalid_speech_request");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
+                  {"speed", "fast"}}, "invalid_speech_request");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
+                  {"speed", 4.01}}, "invalid_speech_request");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
+                  {"instructions", 7}}, "invalid_speech_request");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
+                  {"instructions", "Speak clearly"}}, "unsupported_parameter");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
+                  {"response_format", 7}}, "invalid_speech_request");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
+                  {"response_format", "ogg"}}, "unsupported_response_format");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
+                  {"stream_format", 7}}, "invalid_speech_request");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
+                  {"stream_format", "events"}}, "unsupported_stream_format");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
+                  {"stream_format", "sse"}}, "unsupported_stream_format");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"}},
+                 "unsupported_response_format");
+    CHECK(ts.coordinator.active_request_count() == 0);
+    CHECK(media_jobs().size() == initial_jobs);
+
+    expect_error({{"model", chat_info.name}, {"input", "hello"},
+                  {"voice", "default"}, {"response_format", "wav"}},
+                 "unsupported_capability");
+    CHECK(ts.coordinator.active_request_count() == 0);
+    CHECK(media_jobs().size() == initial_jobs);
+
+    const std::string emoji = "\xf0\x9f\x92\xa1";
+    std::string maximum_input;
+    for (int index = 0; index < 4096; ++index) maximum_input += emoji;
+    auto accepted = post({{"model", info.name}, {"input", maximum_input},
+                          {"voice", {{"id", "voice_custom"}}},
+                          {"instructions", ""}, {"response_format", "wav"},
+                          {"stream_format", "audio"}, {"speed", 0.25}});
+    REQUIRE(accepted);
+    REQUIRE(accepted->status == 200);
+
+    maximum_input += emoji;
+    expect_error({{"model", info.name}, {"input", maximum_input},
+                  {"voice", "default"}, {"response_format", "wav"}},
+                 "invalid_speech_request");
+    CHECK(ts.coordinator.active_request_count() == 0);
     ts.stop();
 }
 
@@ -1595,6 +1730,7 @@ TEST_CASE("Routes: streaming tool call emits llama-server shaped SSE",
         R"({
           "model":"qwen3.6-27b",
           "stream":true,
+          "stream_options":{"include_usage":true},
           "messages":[{"role":"user","content":"review local files"}],
           "tools":[{
             "type":"function",
@@ -1624,7 +1760,22 @@ TEST_CASE("Routes: streaming tool call emits llama-server shaped SSE",
     bool saw_tool_header = false;
     bool saw_tool_args = false;
     bool saw_tool_finish = false;
-    for (const auto& chunk : chunks) {
+    bool saw_usage = false;
+    std::int64_t created = 0;
+    for (std::size_t index = 0; index < chunks.size(); ++index) {
+        const auto& chunk = chunks[index];
+        if (created == 0) created = chunk["created"].get<std::int64_t>();
+        REQUIRE(chunk["created"] == created);
+        REQUIRE(chunk.contains("usage"));
+        if (chunk["choices"].empty()) {
+            REQUIRE(index + 1 == chunks.size());
+            REQUIRE(chunk["usage"]["prompt_tokens"] == 8);
+            REQUIRE(chunk["usage"]["completion_tokens"] == 12);
+            REQUIRE(chunk["usage"]["total_tokens"] == 20);
+            saw_usage = true;
+            continue;
+        }
+        REQUIRE(chunk["usage"].is_null());
         const auto& choice = chunk["choices"][0];
         const auto& delta = choice["delta"];
         if (delta.contains("reasoning_content")) {
@@ -1654,6 +1805,8 @@ TEST_CASE("Routes: streaming tool call emits llama-server shaped SSE",
     REQUIRE(saw_tool_header);
     REQUIRE(saw_tool_args);
     REQUIRE(saw_tool_finish);
+    REQUIRE(saw_usage);
+    REQUIRE(res->body.ends_with("data: [DONE]\n\n"));
     REQUIRE(ts.metrics.total_requests() == 1);
     auto usage = ts.stats_db.model_usage();
     REQUIRE(usage.size() == 1);

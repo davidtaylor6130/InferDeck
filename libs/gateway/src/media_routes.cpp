@@ -539,36 +539,112 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     nlohmann::json body;
     try { body = nlohmann::json::parse(req.body); }
     catch (const std::exception& error) { write_error(resp, 400, "invalid_json", error.what()); return; }
-    const std::string model_name = body.value("model", deps.default_model);
-    const auto resolved_model = resolve_model_name(deps, model_name);
+    if (!body.is_object() || !body.contains("model") || !body["model"].is_string() ||
+        body["model"].get_ref<const std::string&>().empty() ||
+        !body.contains("input") || !body["input"].is_string() ||
+        body["input"].get_ref<const std::string&>().empty() ||
+        !body.contains("voice")) {
+        write_error(resp, 400, "invalid_speech_request",
+                    "model, input, and voice are required");
+        return;
+    }
+    const std::string model_name = body["model"].get<std::string>();
     model::SpeechRequest request;
-    request.input = body.value("input", "");
-    request.voice = body.value("voice", "");
-    request.speed = body.value("speed", 1.0f);
-    const auto info = resolved_model
-        ? deps.coordinator.registry().get_info_result(resolved_model->resolved)
-        : foundation::Err<model::ModelInfo>(foundation::ErrorCode::NotFound,
-                                            "model not registered: " + model_name);
+    request.input = body["input"].get<std::string>();
+    if (body["voice"].is_string()) {
+        request.voice = body["voice"].get<std::string>();
+    } else if (body["voice"].is_object() && body["voice"].contains("id") &&
+               body["voice"]["id"].is_string()) {
+        request.voice = body["voice"]["id"].get<std::string>();
+    }
+    if (request.voice.empty()) {
+        write_error(resp, 400, "invalid_speech_request",
+                    "voice must be a non-empty string or voice ID object");
+        return;
+    }
+    if (body.contains("speed")) {
+        if (!body["speed"].is_number()) {
+            write_error(resp, 400, "invalid_speech_request",
+                        "speed must be a number between 0.25 and 4.0");
+            return;
+        }
+        const double speed = body["speed"].get<double>();
+        if (!std::isfinite(speed) || speed < 0.25 || speed > 4.0) {
+            write_error(resp, 400, "invalid_speech_request",
+                        "speed must be a number between 0.25 and 4.0");
+            return;
+        }
+        request.speed = static_cast<float>(speed);
+    }
+    if (body.contains("instructions")) {
+        if (!body["instructions"].is_string()) {
+            write_error(resp, 400, "invalid_speech_request",
+                        "instructions must be a string");
+            return;
+        }
+        const auto instructions = body["instructions"].get<std::string>();
+        if (utf8_character_count(instructions) > 4096) {
+            write_error(resp, 400, "invalid_speech_request",
+                        "instructions must contain at most 4096 characters");
+            return;
+        }
+        if (!instructions.empty()) {
+            write_error(resp, 400, "unsupported_parameter",
+                        "instructions are not supported by this native speech runtime");
+            return;
+        }
+    }
+    if (utf8_character_count(request.input) > 4096) {
+        write_error(resp, 400, "invalid_speech_request",
+                    "input must contain at most 4096 characters");
+        return;
+    }
+    if (body.contains("response_format") && !body["response_format"].is_string()) {
+        write_error(resp, 400, "invalid_speech_request",
+                    "response_format must be a string");
+        return;
+    }
+    request.format = body.value("response_format", std::string{"mp3"});
+    static const std::array formats{"mp3", "opus", "aac", "flac", "wav", "pcm"};
+    if (std::find(formats.begin(), formats.end(), request.format) == formats.end()) {
+        write_error(resp, 400, "unsupported_response_format",
+                    "response_format must be mp3, opus, aac, flac, wav, or pcm");
+        return;
+    }
+    if (body.contains("stream_format") && !body["stream_format"].is_string()) {
+        write_error(resp, 400, "invalid_speech_request",
+                    "stream_format must be a string");
+        return;
+    }
+    const std::string stream_format = body.value("stream_format", std::string{"audio"});
+    if (stream_format != "audio" && stream_format != "sse") {
+        write_error(resp, 400, "unsupported_stream_format",
+                    "stream_format must be audio or sse");
+        return;
+    }
+    if (stream_format == "sse") {
+        write_error(resp, 400, "unsupported_stream_format",
+                    "SSE speech streaming is not available for this native runtime");
+        return;
+    }
+    const auto resolved_model = resolve_model_name(deps, model_name);
+    if (!resolved_model) {
+        write_error(resp, 404, "model_not_found", resolved_model.error().message);
+        return;
+    }
+    const auto info = deps.coordinator.registry().get_info_result(resolved_model->resolved);
+    if (!info || !info->supports("audio_speech")) {
+        write_error(resp, 400, "unsupported_capability",
+                    "model does not support audio speech generation");
+        return;
+    }
     const bool wav_runtime =
         info && (info->runtime == "sherpa_onnx" ||
                  info->runtime == "windows_sapi");
-    const std::string default_format =
-        wav_runtime ? "wav" : "mp3";
-    request.format = body.value("response_format", default_format);
-    if (wav_runtime && request.format == "mp3") {
-        request.format = "wav";
-    }
     const auto input_characters = utf8_character_count(request.input);
-    static const std::array formats{"mp3", "opus", "aac", "flac", "wav", "pcm"};
-    if (model_name.empty() || !resolved_model || request.input.empty() || request.input.size() > 65536 ||
-        request.voice.empty() || request.voice.size() > 128 ||
-        std::find(formats.begin(), formats.end(), request.format) == formats.end() ||
-        !std::isfinite(request.speed) || request.speed < 0.25f || request.speed > 4.0f) {
-        write_error(resp, 400, "invalid_speech_request", "invalid model, input, voice, speed, or response format");
-        return;
-    }
     if (wav_runtime && request.format != "wav" && request.format != "pcm") {
-        write_error(resp, 400, "unsupported_response_format", "this speech runtime supports wav and pcm responses");
+        write_error(resp, 400, "unsupported_response_format",
+                    "this native speech runtime supports wav and pcm responses");
         return;
     }
     VoiceSessionGuard voice_session(req, deps);
