@@ -191,13 +191,13 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Work
 
-- [ ] Inventory every forced-aligner source, configuration, deployment script,
+- [x] Inventory every forced-aligner source, configuration, deployment script,
       runtime path, service/watchdog, documentation link, test asset, and live
       dependency.
-- [ ] Confirm whether any unique user data or secrets exist outside tracked source.
-- [ ] Define the companion product name, ownership, release lifecycle, and API
+- [x] Confirm whether any unique user data or secrets exist outside tracked source.
+- [x] Define the companion product name, ownership, release lifecycle, and API
       status without presenting `/v1/audio/alignments` as OpenAI.
-- [ ] Preserve the complete feature history in a tag, archive, or companion
+- [x] Preserve the complete feature history in a tag, archive, or companion
       repository before removing Core ownership.
 - [ ] Obtain explicit owner approval before moving or deleting tracked files.
 - [ ] Remove `apps/forced-aligner` from InferDeck Core after the preservation gate.
