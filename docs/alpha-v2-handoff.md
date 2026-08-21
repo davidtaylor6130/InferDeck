@@ -1,5 +1,10 @@
 # InferDeck Alpha V2 handoff
 
+> Historical handoff for the alpha-v2 branch. Its route inventory, test counts,
+> and remaining-work statements are not current product documentation. See
+> [architecture.md](architecture.md), [openai-compatibility.md](openai-compatibility.md),
+> and [overhall_plan.md](../overhall_plan.md).
+
 Branch: `alpha-v2` from `main`/`origin/main` at `798b2ef` (`v0.4.0`).
 
 ## Status by issue
@@ -20,7 +25,6 @@ Branch: `alpha-v2` from `main`/`origin/main` at `798b2ef` (`v0.4.0`).
 
 - Portable model tests compiled directly with Apple Clang 21 and the repository's installed Catch2 libraries: 42 test cases, 190 assertions passed.
 - OpenAI and media route tests plus model-store tests: 31 test cases, 215 assertions passed. The binary requires unsandboxed loopback access for its local HTTP servers.
-- Anthropic route tests: 9 test cases, 46 assertions passed with loopback access.
 - Dashboard tests: 15 tests passed.
 - Model-store tests: 3 test cases, 14 assertions passed, including source filtering, path rejection, and corrupt-artifact non-registration.
 - Configuration tests: 2 test cases, 4 assertions passed for native artifacts and invalid operational values.

@@ -1,0 +1,35 @@
+schema_version: 1
+
+server:
+  host: "0.0.0.0"
+  port: 11439
+
+logging:
+  level: "info"
+  file: ""
+
+auth:
+  required: true
+  token: "test-data-token"
+
+control:
+  allow_remote: false
+  allow_data_plane_token: false
+  token: ""
+  origins:
+    - "http://127.0.0.1:11439"
+    - "http://localhost:11439"
+    - "http://[::1]:11439"
+
+cors:
+  origins:
+    - "*"
+
+observability:
+  stats_db: ":memory:"
+  telemetry_poll_ms: 100
+
+gateway:
+  auto_swap: false
+
+model_registry: []

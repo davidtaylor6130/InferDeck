@@ -32,15 +32,20 @@
 #include "foundation/json_utils.hpp"
 #include "foundation/logging.hpp"
 #include "foundation/path_utils.hpp"
-#include "gateway/anthropic_routes.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
+#include "gateway/deadline_server.hpp"
 #include "gateway/dashboard_routes.hpp"
+#include "gateway/config_repository.hpp"
 #include "gateway/metrics_builder.hpp"
 #include "gateway/media_routes.hpp"
 #include "gateway/model_store.hpp"
 #include "gateway/openai_routes.hpp"
+#include "gateway/request_id.hpp"
+#include "gateway/request_security.hpp"
+#include "gateway/route_manifest.hpp"
 #include "gateway/routes.hpp"
+#include "gateway/shutdown_state.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "httplib.h"
 #include "llama.h"
@@ -66,7 +71,7 @@ std::atomic<bool> g_default_model_loading{false};
 httplib::Server* g_server = nullptr;
 std::once_flag g_llama_init_once;
 constexpr int runtime_reload_result = 75;
-constexpr std::string_view gateway_version = "0.7.2";
+constexpr std::string_view gateway_version = INFERDECK_VERSION;
 
 std::string config_revision(const std::string& text) {
     std::uint64_t hash = 1469598103934665603ULL;
@@ -395,12 +400,12 @@ run_profile_benchmark_trial(
              "Answer directly and concisely. <|think_off|>"},
             {"user", prompts[index].prompt},
         };
-        request.max_tokens = prompts[index].max_tokens;
-        request.temperature = 0.0f;
-        request.top_p = 1.0f;
-        request.top_k = 0;
-        request.repeat_penalty = 1.0f;
-        request.seed = 4242 + static_cast<int>(index);
+        request.max_output_tokens = prompts[index].max_tokens;
+        request.sampling.temperature = 0.0f;
+        request.sampling.top_p = 1.0f;
+        request.sampling.top_k = 0;
+        request.sampling.repeat_penalty = 1.0f;
+        request.sampling.seed = 4242 + static_cast<int>(index);
         const auto started = std::chrono::steady_clock::now();
         std::atomic<bool> first_token{false};
         std::chrono::steady_clock::time_point first_token_at{};
@@ -474,12 +479,12 @@ run_profile_benchmark_trial(
          "separated by single spaces. Do not add punctuation or any "
          "other text."},
     };
-    speed_request.max_tokens = 192;
-    speed_request.temperature = 0.0f;
-    speed_request.top_p = 1.0f;
-    speed_request.top_k = 0;
-    speed_request.repeat_penalty = 1.0f;
-    speed_request.seed = 7001;
+    speed_request.max_output_tokens = 192;
+    speed_request.sampling.temperature = 0.0f;
+    speed_request.sampling.top_p = 1.0f;
+    speed_request.sampling.top_k = 0;
+    speed_request.sampling.repeat_penalty = 1.0f;
+    speed_request.sampling.seed = 7001;
     auto speed_result = runtime->predict_stream(
         *speed_slot, speed_request,
         [&](const model::InferenceDelta&) {
@@ -538,12 +543,12 @@ run_profile_benchmark_trial(
                              std::to_string(parallel_slots) + " request " +
                              std::to_string(index + 1) + "."},
                     };
-                    request.max_tokens = 144;
-                    request.temperature = 0.0f;
-                    request.top_p = 1.0f;
-                    request.top_k = 0;
-                    request.repeat_penalty = 1.0f;
-                    request.seed = 9000 + parallel_slots * 10 + index;
+                    request.max_output_tokens = 144;
+                    request.sampling.temperature = 0.0f;
+                    request.sampling.top_p = 1.0f;
+                    request.sampling.top_k = 0;
+                    request.sampling.repeat_penalty = 1.0f;
+                    request.sampling.seed = 9000 + parallel_slots * 10 + index;
                     auto result = runtime->predict_stream(
                         *slot, request,
                         [&](const model::InferenceDelta&) {
@@ -629,13 +634,10 @@ int run_gateway(const fs::path& config_path) {
     }
     std::call_once(g_llama_init_once, [] {
         LOG_INFO("vulkan_test", "About to initialize llama backend");
-        std::cerr << "DEBUG: About to call llama_backend_init()" << std::endl;
         llama_backend_init();
         const char* sys_info = llama_print_system_info();
-        std::cerr << "DEBUG: llama_print_system_info returned" << std::endl;
         if (sys_info) {
             LOG_INFO("llama_system_info", "{}", sys_info);
-            std::cerr << "DEBUG: sys_info = " << sys_info << std::endl;
         }
     });
 
@@ -694,10 +696,13 @@ int run_gateway(const fs::path& config_path) {
     SwapTracker swap_tracker;
     std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     GatewayDeps deps{coordinator, "15", cfg.auto_swap,
-                     cfg.default_model, cfg.anthropic_model_aliases,
+                     cfg.default_model,
                      cfg.voice_session_grace_ms,
                      &metrics, &stats_db, &events, &swap_tracker,
                      &maintenance_resource};
+    auto derivative_deps = deps;
+    derivative_deps.compatibility_profile =
+        CompatibilityProfile::OpenAIDerivative;
     ProfileBenchmarkManager profile_benchmark{
         coordinator,
         &swap_tracker,
@@ -761,107 +766,284 @@ int run_gateway(const fs::path& config_path) {
         }
     });
 
-    AuthConfig ac;
-    ac.required = cfg.auth_required;
-    ac.token = cfg.auth_token;
-    AuthMiddleware auth(ac);
-    CorsMiddleware cors(cfg.cors_origins);
+    RouteAuthConfig route_auth;
+    route_auth.data_plane.required = cfg.auth_required;
+    route_auth.data_plane.token = cfg.auth_token;
+    route_auth.control_allow_remote = cfg.control_allow_remote;
+    route_auth.control_allow_data_plane_token = cfg.control_allow_data_plane_token;
+    route_auth.control_token = cfg.control_token;
+    RouteAuthorizer authorizer(std::move(route_auth));
+    CorsMiddleware data_cors(cfg.cors_origins);
+    CorsMiddleware control_cors(cfg.control_origins);
 
-    httplib::Server server;
+    DeadlineServer server(server_request_read_deadline);
+    server.set_read_timeout(server_read_timeout);
+    server.set_write_timeout(server_write_timeout);
+    server.set_keep_alive_timeout(server_keep_alive_timeout.count());
+    server.set_payload_max_length(server_body_limit);
     server.new_task_queue = [] {
         return new httplib::ThreadPool(std::max(32u, std::thread::hardware_concurrency() * 2u));
     };
     g_server = &server;
     const auto dashboard_static_dir = find_dashboard_static_dir();
+    const auto apply_cors = [&](RoutePrincipal principal,
+                                const httplib::Request& req,
+                                httplib::Response& resp) {
+        if (principal == RoutePrincipal::DashboardSession ||
+            principal == RoutePrincipal::ControlRead ||
+            principal == RoutePrincipal::ControlWrite) {
+            control_cors.apply(req, resp);
+            return;
+        }
+        data_cors.apply(req, resp);
+    };
+    const auto proxy_indicated = [](const httplib::Request& req) {
+        for (const char* header : {"Forwarded", "X-Forwarded-For", "X-Real-IP",
+                                   "X-Forwarded-Host", "Via"}) {
+            if (req.has_header(header)) return true;
+        }
+        return false;
+    };
+    const auto write_validation_error = [](httplib::Response& resp,
+                                           RequestValidationStatus validation) {
+        if (validation == RequestValidationStatus::BodyNotAllowed) {
+            write_error(resp, 400, "body_not_allowed",
+                        "request body is not allowed for this endpoint");
+        } else if (validation == RequestValidationStatus::PayloadTooLarge) {
+            write_error(resp, 413, "request_too_large",
+                        "request body exceeds the endpoint limit");
+        } else if (validation == RequestValidationStatus::UnsupportedMediaType) {
+            write_error(resp, 415, "unsupported_media_type",
+                        "request Content-Type is not supported by this endpoint");
+        } else if (validation == RequestValidationStatus::InvalidContentLength) {
+            write_error(resp, 400, "invalid_content_length",
+                        "request Content-Length is invalid");
+        } else if (validation == RequestValidationStatus::UnsupportedTransferEncoding) {
+            write_error(resp, 411, "content_length_required",
+                        "chunked request bodies are not supported");
+        }
+    };
+
+    server.set_expect_100_continue_handler(
+        [&](const httplib::Request& req, httplib::Response& resp) {
+            const auto id = request_id(header_value(req, "X-Request-Id"));
+            resp.set_header("X-Request-Id", id);
+            LOG_INFO("http_request_begin", "request_id={} method={} path={}",
+                     id, req.method, req.path);
+            apply_cors(classify_route(req.method, req.path), req, resp);
+            write_error(resp, 417, "expectation_failed",
+                        "Expect: 100-continue is not supported");
+            return 400;
+        });
+
+    server.set_pre_routing_handler([&](const httplib::Request& req,
+                                       httplib::Response& resp) {
+        const auto id = request_id(header_value(req, "X-Request-Id"));
+        resp.set_header("X-Request-Id", id);
+        LOG_INFO("http_request_begin", "request_id={} method={} path={}",
+                 id, req.method, req.path);
+        const auto principal = classify_route(req.method, req.path);
+        apply_cors(principal, req, resp);
+        if (req.has_header("Expect")) {
+            write_error(resp, 417, "expectation_failed",
+                        "Expect request headers are not supported");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        if (g_stop.load() || g_reload.load()) {
+            resp.set_header("Retry-After", "1");
+            write_error(resp, 503, "server_stopping",
+                        "gateway shutdown or reload is in progress");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        const bool disabled_derivative =
+            req.path.starts_with(kOpenAIDerivativeBase) &&
+            !cfg.openai_derivative_compatibility_enabled;
+        if (disabled_derivative) {
+            write_error(resp, 404, "not_found",
+                        "compatibility profile is disabled");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        const bool proxied = proxy_indicated(req);
+        const bool direct_loopback = RouteAuthorizer::is_direct_loopback(
+            req.remote_addr, header_value(req, "Host"), proxied);
+        const bool control_route = principal == RoutePrincipal::DashboardSession ||
+            principal == RoutePrincipal::ControlRead ||
+            principal == RoutePrincipal::ControlWrite;
+        if (req.method == "OPTIONS") {
+            if (control_route) {
+                if ((principal == RoutePrincipal::DashboardSession && !direct_loopback) ||
+                    (!direct_loopback && !cfg.control_allow_remote)) {
+                    write_error(resp, 403, "forbidden",
+                                "control-plane access is not available from this client");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+                const auto origin = header_value(req, "Origin");
+                if (origin.empty() || !control_cors.allows_origin(origin)) {
+                    write_error(resp, 403, "origin_forbidden",
+                                "request origin is not allowed for the control plane");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        }
+        const auto authorization = authorizer.authorize(
+            principal, header_value(req, "Authorization"), req.remote_addr,
+            header_value(req, "Host"), proxied);
+        if (authorization == AuthorizationStatus::AuthenticationRequired) {
+            resp.set_header("WWW-Authenticate", "Bearer");
+            write_error(resp, 401, "unauthorized", "valid Bearer token required");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        if (authorization == AuthorizationStatus::Forbidden) {
+            write_error(resp, 403, "forbidden",
+                        "control-plane access is not available from this client");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        if (principal == RoutePrincipal::ControlWrite) {
+            const auto origin = header_value(req, "Origin");
+            if ((!origin.empty() && !control_cors.allows_origin(origin)) ||
+                header_value(req, "Sec-Fetch-Site") == "cross-site") {
+                write_error(resp, 403, "origin_forbidden",
+                            "request origin is not allowed for the control plane");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+        }
+        const auto policy = request_policy(
+            req.method, req.path, principal == RoutePrincipal::ControlWrite);
+        const auto validation = validate_request_headers(req, policy);
+        if (validation != RequestValidationStatus::Allowed) {
+            write_validation_error(resp, validation);
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        return httplib::Server::HandlerResponse::Unhandled;
+    });
+    server.set_logger([](const httplib::Request& req,
+                         const httplib::Response& resp) {
+        auto id = resp.get_header_value("X-Request-Id");
+        if (id.empty()) id = request_id(header_value(req, "X-Request-Id"));
+        const int status = resp.status > 0 ? resp.status : 200;
+        LOG_INFO("http_response_committed", "request_id={} method={} path={} status={}",
+                 id, req.method, req.path, status);
+    });
 
     RouteWrapper wrap = [&](httplib::Server::Handler handler) -> httplib::Server::Handler {
         return [&, handler](const httplib::Request& req,
                             httplib::Response& resp) {
-            LOG_INFO("http_request_begin", "method={} path={}", req.method, req.path);
-            cors.apply(req, resp);
-            if (g_stop.load() || g_reload.load()) {
-                resp.set_header("Retry-After", "1");
-                write_error(resp, 503, "server_stopping",
-                            "gateway shutdown or reload is in progress");
-                return;
-            }
-            std::string auth_header = header_value(req, "Authorization");
-            if (auth_header.empty()) {
-                // Anthropic SDK clients (e.g. Claude Code) authenticate via x-api-key.
-                const std::string api_key = header_value(req, "x-api-key");
-                if (!api_key.empty()) auth_header = "Bearer " + api_key;
-            }
-            if (auth.required() && !auth.check(auth_header)) {
-                resp.set_header("WWW-Authenticate", "Bearer");
-                write_error(resp, 401, "unauthorized", "valid Bearer token required");
+            const auto principal = classify_route(req.method, req.path);
+            const auto validation = validate_request(
+                req, request_policy(req.method, req.path,
+                                    principal == RoutePrincipal::ControlWrite));
+            if (validation != RequestValidationStatus::Allowed) {
+                write_validation_error(resp, validation);
                 return;
             }
             try {
                 handler(req, resp);
-                const int logged_status = resp.status > 0 ? resp.status : 200;
-                LOG_INFO("http_request_end", "method={} path={} status={}", req.method, req.path, logged_status);
             } catch (const std::exception& e) {
-                LOG_ERROR("handler_exception", "what={}", e.what());
+                const auto id = resp.get_header_value("X-Request-Id");
+                LOG_ERROR("handler_exception", "request_id={} what={}", id, e.what());
                 if (resp.status == 0) resp.status = 500;
                 write_error(resp, resp.status, "internal_error", "request could not be completed");
-                const int logged_status = resp.status > 0 ? resp.status : 500;
-                LOG_INFO("http_request_end", "method={} path={} status={}", req.method, req.path, logged_status);
             } catch (...) {
-                LOG_ERROR("handler_unknown_exception", "");
+                const auto id = resp.get_header_value("X-Request-Id");
+                LOG_ERROR("handler_unknown_exception", "request_id={}", id);
                 if (resp.status == 0) resp.status = 500;
                 write_error(resp, resp.status, "internal_error", "unknown exception");
-                const int logged_status = resp.status > 0 ? resp.status : 500;
-                LOG_INFO("http_request_end", "method={} path={} status={}", req.method, req.path, logged_status);
             }
         };
     };
 
-    server.Get(R"(^/v1/models$)", wrap([&](const httplib::Request& req,
+    server.Get(std::string(strict_openai_route(
+                   StrictOpenAIRoute::Models).pattern),
+               wrap([&](const httplib::Request& req,
                                       httplib::Response& resp) {
         handle_models(req, resp, deps);
     }));
-    server.Post("/v1/swap/to/:name", wrap([&](const httplib::Request& req,
-                                              httplib::Response& resp) {
+    server.Post(control_api_path("/swap/to/:name"),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
         handle_swap_to(req, resp, deps, req.path_params.at("name"));
     }));
-    server.Get(R"(^/v1/swap/status$)", wrap([&](const httplib::Request& req,
-                                           httplib::Response& resp) {
+    server.Get(control_api_pattern("/swap/status"),
+               wrap([&](const httplib::Request& req,
+                        httplib::Response& resp) {
         handle_swap_status(req, resp, deps);
     }));
-    server.Post(R"(^/v1/swap/cancel$)", wrap([&](const httplib::Request& req,
-                                            httplib::Response& resp) {
+    server.Post(control_api_pattern("/swap/cancel"),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
         handle_swap_cancel(req, resp, deps);
     }));
-    server.Post(R"(^/v1/chat/completions$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::ChatCompletions).pattern),
+                wrap([&](const httplib::Request& req,
                                                  httplib::Response& resp) {
         handle_chat_completions(req, resp, deps);
     }));
-    server.Post(R"(^/v1/embeddings$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::Embeddings).pattern),
+                wrap([&](const httplib::Request& req,
                                            httplib::Response& resp) {
         handle_embeddings(req, resp, deps);
     }));
-    server.Post(R"(^/v1/responses$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::Responses).pattern),
+                wrap([&](const httplib::Request& req,
                                           httplib::Response& resp) {
         handle_responses(req, resp, deps);
     }));
-    server.Post(R"(^/v1/images/generations$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::ImageGenerations).pattern),
+                wrap([&](const httplib::Request& req,
                                                         httplib::Response& resp) {
         handle_image_generations(req, resp, deps);
     }));
-    server.Post(R"(^/v1/audio/speech$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::AudioSpeech).pattern),
+                wrap([&](const httplib::Request& req,
                                                    httplib::Response& resp) {
         handle_audio_speech(req, resp, deps);
     }));
-    server.Post(R"(^/v1/audio/transcriptions$)", wrap([&](const httplib::Request& req,
+    server.Post(std::string(strict_openai_route(
+                    StrictOpenAIRoute::AudioTranscriptions).pattern),
+                wrap([&](const httplib::Request& req,
                                                            httplib::Response& resp) {
         handle_audio_transcriptions(req, resp, deps);
     }));
-    server.Get(R"(^/api/media/jobs$)", wrap([&](const httplib::Request&,
-                                                httplib::Response& resp) {
+    if (cfg.openai_derivative_compatibility_enabled) {
+        server.Post(std::string(openai_derivative_route(
+                        OpenAIDerivativeRoute::ChatCompletions).pattern),
+                    wrap([&](const httplib::Request& req,
+                             httplib::Response& resp) {
+            handle_chat_completions(req, resp, derivative_deps);
+        }));
+        server.Post(std::string(openai_derivative_route(
+                        OpenAIDerivativeRoute::Responses).pattern),
+                    wrap([&](const httplib::Request& req,
+                             httplib::Response& resp) {
+            handle_responses(req, resp, derivative_deps);
+        }));
+        server.Post(std::string(openai_derivative_route(
+                        OpenAIDerivativeRoute::Embeddings).pattern),
+                    wrap([&](const httplib::Request& req,
+                             httplib::Response& resp) {
+            handle_embeddings(req, resp, derivative_deps);
+        }));
+        server.Post(std::string(openai_derivative_route(
+                        OpenAIDerivativeRoute::ImageGenerations).pattern),
+                    wrap([&](const httplib::Request& req,
+                             httplib::Response& resp) {
+            handle_image_generations(req, resp, derivative_deps);
+        }));
+    }
+    server.Get(control_api_pattern("/media/jobs"),
+               wrap([&](const httplib::Request&,
+                        httplib::Response& resp) {
         write_json(resp, 200, {{"jobs", media_jobs()}});
     }));
-    server.Post(R"(^/api/media/jobs/([0-9]+)/cancel$)", wrap([&](const httplib::Request& req,
-                                                                 httplib::Response& resp) {
+    server.Post(control_api_pattern("/media/jobs/([0-9]+)/cancel"),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
         auto result = cancel_media_job(static_cast<std::uint64_t>(std::stoull(req.matches[1].str())));
         if (!result) {
             write_error(resp, result.error().code == foundation::ErrorCode::NotFound ? 404 : 409,
@@ -870,59 +1052,58 @@ int run_gateway(const fs::path& config_path) {
         }
         write_json(resp, 200, {{"ok", true}});
     }));
-    server.Post(R"(^/v1/messages$)", wrap([&](const httplib::Request& req,
-                                         httplib::Response& resp) {
-        handle_anthropic_messages(req, resp, deps);
-    }));
-    server.Post(R"(^/v1/messages/count_tokens$)", wrap([&](const httplib::Request& req,
-                                                      httplib::Response& resp) {
-        handle_anthropic_count_tokens(req, resp, deps);
-    }));
-    server.Get(R"(^/v1/metrics$)", wrap([&](const httplib::Request&,
-                                       httplib::Response& resp) {
+    server.Get(control_api_pattern("/metrics"),
+               wrap([&](const httplib::Request&,
+                        httplib::Response& resp) {
         resp.set_content(
             MetricsBuilder::build_live(metrics, gpu, uptime_seconds()).dump(),
             "application/json");
     }));
-    server.Get(R"(^/v1/stats/history$)", wrap([&](const httplib::Request&,
-                                             httplib::Response& resp) {
+    server.Get(control_api_pattern("/stats/history"),
+               wrap([&](const httplib::Request&,
+                        httplib::Response& resp) {
         resp.set_content(MetricsBuilder::build_history(stats_db, 100).dump(),
                          "application/json");
     }));
-    server.Get(R"(^/v1/health$)", wrap([&](const httplib::Request&,
-                                      httplib::Response& resp) {
-        resp.set_content(MetricsBuilder::build_health(metrics, gpu, stats_db).dump(),
+    server.Get(control_api_pattern("/health"),
+               wrap([&](const httplib::Request&,
+                        httplib::Response& resp) {
+        resp.set_content(nlohmann::json{{"ok", true},
+                                        {"db_healthy", stats_db.healthy()}}.dump(),
                          "application/json");
     }));
+    auto request_config_reload = [] {
+        g_reload.store(true);
+        LOG_INFO("config_reload_requested", "validated active profile will be applied");
+        return foundation::Ok();
+    };
+    auto config_repository = std::make_shared<ConfigRepository>(
+        config_path, config_selection.active_path,
+        [](const std::string& text) { return validate_config_text(text); },
+        request_config_reload);
     DashboardDeps dash_deps{
         deps, gpu, cfg.log_file, "data/pricing.json", config_path.string(),
         config_selection.active_path.string(), running_config_revision,
         config_selection.using_active,
         config_selection.fallback_reason,
         [](const std::string& text) { return validate_config_text(text); },
-        [] {
-            g_reload.store(true);
-            LOG_INFO("config_reload_requested", "validated active profile will be applied");
-            return foundation::Ok();
-        },
+        request_config_reload,
         &model_store,
         uptime_seconds,
         &profile_benchmark,
-        &profile_benchmark_scheduler};
+        &profile_benchmark_scheduler,
+        std::move(config_repository)};
     register_dashboard_routes(server, dash_deps, wrap);
-    if (cors.handles_options()) {
-        server.Options(".*", [&](const httplib::Request& req,
-                                  httplib::Response& resp) {
-            cors.apply(req, resp);
+    if (data_cors.handles_options() || control_cors.handles_options()) {
+        server.Options(".*", [](const httplib::Request&,
+                                 httplib::Response& resp) {
             resp.status = 204;
         });
     }
     server.Get(R"(^/$)", [&](const httplib::Request& req, httplib::Response& resp) {
-        cors.apply(req, resp);
         write_dashboard_file(resp, dashboard_static_dir, req.path);
     });
-    server.Get(R"(^/(?!api(?:/|$)|v1(?:/|$)).*)", [&](const httplib::Request& req, httplib::Response& resp) {
-        cors.apply(req, resp);
+    server.Get(R"(^/(?!api(?:/|$)|v1(?:/|$)|compat(?:/|$)).*)", [&](const httplib::Request& req, httplib::Response& resp) {
         write_dashboard_file(resp, dashboard_static_dir, req.path);
     });
 
@@ -956,7 +1137,10 @@ int run_gateway(const fs::path& config_path) {
                         return g_stop.load() || g_reload.load();
                     };
                     options.prepare = [&coordinator, default_model] {
-                        return coordinator.swap_to(default_model);
+                        return coordinator.swap_to_cancellable(
+                            default_model, std::chrono::minutes{5}, [] {
+                                return g_stop.load() || g_reload.load();
+                            });
                     };
                     auto slot = coordinator.acquire_slot(default_model, options);
                     auto loaded = slot
@@ -976,22 +1160,29 @@ int run_gateway(const fs::path& config_path) {
     }
     reload_monitor_stop.store(true);
     if (reload_monitor.joinable()) reload_monitor.join();
-    if (default_model_loader.joinable()) default_model_loader.join();
     g_server = nullptr;
 
-    if (g_reload.load()) {
-        coordinator.drain_active(std::chrono::seconds{120});
+    ShutdownStateMachine shutdown;
+    const auto shutdown_phase = shutdown.run(
+        [&] { coordinator.request_swap_cancel(); },
+        [&] {
+            return !g_default_model_loading.load() &&
+                !swap_tracker.snapshot().swapping &&
+                coordinator.active_request_count() == 0;
+        },
+        ShutdownStateMachine::Clock::now() + std::chrono::seconds{120});
+    if (shutdown_phase == ShutdownPhase::TimedOut) {
+        LOG_FATAL("shutdown_deadline_exceeded",
+                  "backend lifecycle did not quiesce within 120 seconds");
+        foundation::Logger::instance().shutdown();
+        std::quick_exit(2);
     }
+    if (default_model_loader.joinable()) default_model_loader.join();
+    swap_tracker.join();
 
     stats_stop.store(true);
     events.close_all();
     if (stats_thread.joinable()) stats_thread.join();
-
-    const auto swap_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{120};
-    while (swap_tracker.snapshot().swapping &&
-           std::chrono::steady_clock::now() < swap_deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{100});
-    }
 
     if (!listen_ok) {
         LOG_ERROR("server_failed", "could not bind {}:{}", cfg.host, cfg.port);

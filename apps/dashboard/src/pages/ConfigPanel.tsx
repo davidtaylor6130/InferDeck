@@ -26,7 +26,8 @@ export const ConfigPanel: React.FC = () => {
     setBusy(true);
     setMessage('');
     try {
-      const result = await resetActiveConfig();
+      if (!config) throw new Error('Configuration revision is unavailable');
+      const result = await resetActiveConfig(config.activeRevision);
       if (result.removed) {
         setMessage('Active profile removed. InferDeck is applying the stable baseline now.');
         setConfig(await waitForStableConfig());

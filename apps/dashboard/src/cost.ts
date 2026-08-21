@@ -3,7 +3,10 @@ import type { JobRecord, MonthlyUsageRow, PricingEntry, UsageRow } from './types
 export interface ModelCostConfig {
   equivalentModel: string;
   promptPerMillion: number;
+  cachedPromptPerMillion: number;
   outputPerMillion: number;
+  legacyCachedPromptRatio?: number;
+  legacyCachedPromptBefore?: string;
   breakEvenTarget: number;
   source?: string;
   defaultsVersion?: number;
@@ -16,6 +19,7 @@ export interface ModelCostConfig {
 export interface ModelTokenUsage {
   model: string;
   prompt: number;
+  cachedPrompt?: number;
   output: number;
   total: number;
 }
@@ -44,7 +48,7 @@ export type TokenRange = 'day' | 'week' | 'month' | 'year' | 'all';
 export const ALL_MODELS = 'All tracked models';
 export const COST_STORAGE_KEY = 'inferdeck:model-token-costs';
 export const DEFAULT_BREAK_EVEN_TARGET = 1739;
-export const MODEL_COST_DEFAULTS_VERSION = 5;
+export const MODEL_COST_DEFAULTS_VERSION = 6;
 
 export const TOKEN_RANGE_LABELS: Record<TokenRange, string> = {
   day: '24h',
@@ -57,6 +61,7 @@ export const TOKEN_RANGE_LABELS: Record<TokenRange, string> = {
 export const DEFAULT_COST_CONFIG: ModelCostConfig = {
   equivalentModel: 'Not configured',
   promptPerMillion: 0,
+  cachedPromptPerMillion: 0,
   outputPerMillion: 0,
   breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
   source: 'No server-side model pricing',
@@ -76,7 +81,9 @@ const LEGACY_DEFAULT_PRICES: Record<string, Array<[number, number]>> = {
 
 export type CostDefaults = Record<string, ModelCostConfig>;
 
-export function buildCostDefaults(pricing: PricingEntry[]): { defaults: CostDefaults; fallback: ModelCostConfig } {
+export function buildCostDefaults(
+  pricing: Array<Pick<PricingEntry, 'model_name'> & Partial<PricingEntry>>,
+): { defaults: CostDefaults; fallback: ModelCostConfig } {
   const defaults: CostDefaults = {};
   let fallback = DEFAULT_COST_CONFIG;
   for (const entry of pricing) {
@@ -84,7 +91,13 @@ export function buildCostDefaults(pricing: PricingEntry[]): { defaults: CostDefa
     const config: ModelCostConfig = {
       equivalentModel: entry.equivalent_api_model || DEFAULT_COST_CONFIG.equivalentModel,
       promptPerMillion: sanitizeMoney(entry.prompt_price_per_million, DEFAULT_COST_CONFIG.promptPerMillion),
+      cachedPromptPerMillion: sanitizeMoney(
+        entry.cached_prompt_price_per_million,
+        sanitizeMoney(entry.prompt_price_per_million, DEFAULT_COST_CONFIG.promptPerMillion),
+      ),
       outputPerMillion: sanitizeMoney(entry.completion_price_per_million, DEFAULT_COST_CONFIG.outputPerMillion),
+      legacyCachedPromptRatio: sanitizeRatio(entry.legacy_cached_prompt_ratio),
+      legacyCachedPromptBefore: sanitizeDateKey(entry.legacy_cached_prompt_before),
       breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
       source: entry.source === 'model_settings' ? 'Model Settings' : 'data/pricing.json',
       defaultsVersion: MODEL_COST_DEFAULTS_VERSION,
@@ -139,7 +152,10 @@ export function normalizeCostConfig(
       ? source.equivalentModel
       : defaultConfig.equivalentModel,
     promptPerMillion: sanitizeMoney(source?.promptPerMillion, defaultConfig.promptPerMillion),
+    cachedPromptPerMillion: sanitizeMoney(source?.cachedPromptPerMillion, defaultConfig.cachedPromptPerMillion),
     outputPerMillion: sanitizeMoney(source?.outputPerMillion, defaultConfig.outputPerMillion),
+    legacyCachedPromptRatio: sanitizeRatio(source?.legacyCachedPromptRatio ?? defaultConfig.legacyCachedPromptRatio),
+    legacyCachedPromptBefore: sanitizeDateKey(source?.legacyCachedPromptBefore ?? defaultConfig.legacyCachedPromptBefore),
     breakEvenTarget,
     source: typeof source?.source === 'string' && source.source.trim() ? source.source : defaultConfig.source,
     defaultsVersion: Number(source?.defaultsVersion ?? defaultConfig.defaultsVersion ?? MODEL_COST_DEFAULTS_VERSION),
@@ -167,6 +183,7 @@ export function inferredSpeechCostDefault(model: string): ModelCostConfig | unde
     return {
       equivalentModel: 'OpenAI whisper-1',
       promptPerMillion: 0,
+      cachedPromptPerMillion: 0,
       outputPerMillion: 0,
       breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
       source: 'OpenAI model pricing',
@@ -180,6 +197,7 @@ export function inferredSpeechCostDefault(model: string): ModelCostConfig | unde
     return {
       equivalentModel: 'OpenAI tts-1',
       promptPerMillion: 0,
+      cachedPromptPerMillion: 0,
       outputPerMillion: 0,
       breakEvenTarget: DEFAULT_BREAK_EVEN_TARGET,
       source: 'OpenAI model pricing',
@@ -197,6 +215,15 @@ function sanitizeMoney(value: unknown, fallback: number): number {
   return Number.isFinite(number) && number >= 0 ? number : fallback;
 }
 
+function sanitizeRatio(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 && number <= 1 ? number : undefined;
+}
+
+function sanitizeDateKey(value: unknown): string | undefined {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
+}
+
 function isLegacyDefaultConfig(model: string, config: Partial<ModelCostConfig>): boolean {
   if (!config.defaultsVersion && config.equivalentModel === DEFAULT_COST_CONFIG.equivalentModel) return true;
   const prompt = Number(config.promptPerMillion);
@@ -207,11 +234,38 @@ function isLegacyDefaultConfig(model: string, config: Partial<ModelCostConfig>):
 }
 
 export function estimateCostAvoided(usage: ModelTokenUsage, cost: ModelCostConfig): number {
-  return (usage.prompt / 1_000_000) * cost.promptPerMillion + (usage.output / 1_000_000) * cost.outputPerMillion;
+  const prompt = Math.max(0, Number(usage.prompt));
+  const cachedPrompt = Math.min(prompt, Math.max(0, Number(usage.cachedPrompt ?? 0)));
+  const uncachedPrompt = prompt - cachedPrompt;
+  return (uncachedPrompt / 1_000_000) * cost.promptPerMillion +
+    (cachedPrompt / 1_000_000) * cost.cachedPromptPerMillion +
+    (usage.output / 1_000_000) * cost.outputPerMillion;
+}
+
+type CostUsage = Pick<UsageRow | MonthlyUsageRow, 'promptTokens' | 'cachedPromptTokens' | 'completionTokens' | 'inputAudioSeconds' | 'inputCharacters'> &
+  Partial<Pick<UsageRow, 'model' | 'lastTimestampUnixMs'>> &
+  Partial<Pick<MonthlyUsageRow, 'bucket'>>;
+
+function effectiveCachedPromptTokens(usage: CostUsage, cost: ModelCostConfig): number {
+  const prompt = Math.max(0, Number(usage.promptTokens ?? 0));
+  const recorded = Math.min(prompt, Math.max(0, Number(usage.cachedPromptTokens ?? 0)));
+  if (recorded > 0 || prompt === 0 || !cost.legacyCachedPromptRatio || !cost.legacyCachedPromptBefore) {
+    return recorded;
+  }
+  let date: string | undefined;
+  if (usage.bucket && /^\d{4}-\d{2}-\d{2}/.test(usage.bucket)) {
+    date = usage.bucket.slice(0, 10);
+  } else if (usage.lastTimestampUnixMs) {
+    const timestamp = new Date(usage.lastTimestampUnixMs);
+    if (!Number.isNaN(timestamp.getTime())) date = timestamp.toISOString().slice(0, 10);
+  }
+  return date && date < cost.legacyCachedPromptBefore
+    ? Math.round(prompt * cost.legacyCachedPromptRatio)
+    : recorded;
 }
 
 export function estimateUsageCost(
-  usage: Pick<UsageRow | MonthlyUsageRow, 'promptTokens' | 'completionTokens' | 'inputAudioSeconds' | 'inputCharacters'>,
+  usage: CostUsage,
   cost: ModelCostConfig,
 ): number {
   if (cost.billingUnit === 'audio_minute') {
@@ -223,7 +277,7 @@ export function estimateUsageCost(
   const prompt = Number(usage.promptTokens ?? 0);
   const output = Number(usage.completionTokens ?? 0);
   return estimateCostAvoided(
-    { model: '', prompt, output, total: prompt + output },
+    { model: usage.model ?? '', prompt, cachedPrompt: effectiveCachedPromptTokens(usage, cost), output, total: prompt + output },
     cost,
   );
 }
@@ -288,8 +342,10 @@ export function buildTokenSeries(
       if (!bucket) continue;
       const prompt = Number(row.promptTokens ?? 0);
       const output = Number(row.completionTokens ?? 0);
+      const rowCost = model === ALL_MODELS ? getCostConfigForModel(row.model, saved, defaults, fallback) : cost;
+      const cachedPrompt = effectiveCachedPromptTokens(row, rowCost);
       bucket.prompt += prompt;
-      bucket.cachedPrompt += Number(row.cachedPromptTokens ?? 0);
+      bucket.cachedPrompt += cachedPrompt;
       bucket.output += output;
       bucket.total += Number(row.totalTokens ?? prompt + output);
       bucket.requests += Number(row.requests ?? 0);
@@ -303,8 +359,8 @@ export function buildTokenSeries(
       bucket.peakTokensPerSecond = Math.max(bucket.peakTokensPerSecond, Number(row.peakTokensPerSecond ?? 0));
       bucket.peakPromptTokensPerSecond = Math.max(bucket.peakPromptTokensPerSecond, Number(row.peakPromptTokensPerSecond ?? 0));
       bucket.cost += estimateUsageCost(
-        row,
-        model === ALL_MODELS ? getCostConfigForModel(row.model, saved, defaults, fallback) : cost,
+        { ...row, cachedPromptTokens: cachedPrompt },
+        rowCost,
       );
     }
   } else {
@@ -315,10 +371,13 @@ export function buildTokenSeries(
       const bucket = chartBucket ? byBucket.get(chartBucket.key) : undefined;
       if (!bucket) continue;
       const prompt = Number(job.promptTokens ?? 0);
-      const uncachedPrompt = Math.max(0, prompt - Number(job.cachedPromptTokens ?? 0));
       const output = Number(job.completionTokens ?? 0);
       const jobModel = job.model || 'Unknown model';
+      const jobCost = model === ALL_MODELS ? getCostConfigForModel(jobModel, saved, defaults, fallback) : cost;
+      const cachedPrompt = effectiveCachedPromptTokens(job, jobCost);
+      const uncachedPrompt = prompt - cachedPrompt;
       bucket.prompt += prompt;
+      bucket.cachedPrompt += cachedPrompt;
       bucket.output += output;
       bucket.total += Number(job.totalTokens ?? prompt + output);
       bucket.requests += 1;
@@ -340,11 +399,12 @@ export function buildTokenSeries(
       bucket.cost += estimateUsageCost(
         {
           promptTokens: prompt,
+          cachedPromptTokens: cachedPrompt,
           completionTokens: output,
           inputAudioSeconds: job.inputAudioSeconds,
           inputCharacters: job.inputCharacters,
         },
-        model === ALL_MODELS ? getCostConfigForModel(jobModel, saved, defaults, fallback) : cost,
+        jobCost,
       );
     }
   }
@@ -389,6 +449,7 @@ export function tokenUsageFromSeries(model: string, series: TokenSeries): ModelT
   return {
     model,
     prompt: series.prompt.reduce((sum, value) => sum + value, 0),
+    cachedPrompt: series.cachedPrompt.reduce((sum, value) => sum + value, 0),
     output: series.output.reduce((sum, value) => sum + value, 0),
     total: series.total.reduce((sum, value) => sum + value, 0),
   };
@@ -412,13 +473,15 @@ function selectPersistedRows(
 ): MonthlyUsageRow[] {
   if (range === 'day') return hourly;
   if (range === 'week' || range === 'month') return daily;
-  if (range === 'year') return monthly;
   const relevant = (rows: MonthlyUsageRow[]) =>
     rows.filter(row => model === ALL_MODELS || row.model === model);
+  if ((range === 'year' || range === 'all') && dailyAllTime && relevant(daily).length) {
+    return daily;
+  }
+  if (range === 'year') return monthly;
   const bucketCount = (rows: MonthlyUsageRow[]) =>
     new Set(relevant(rows).map(row => row.bucket)).size;
-  if (new Set(monthly.map(row => row.bucket)).size >= 12) return monthly;
-  if (dailyAllTime && bucketCount(daily) >= 12) return daily;
+  if (bucketCount(monthly) >= 12) return monthly;
   if (bucketCount(hourly) >= 12) return hourly;
   if (relevant(monthly).length) return monthly;
   if (relevant(daily).length) return daily;

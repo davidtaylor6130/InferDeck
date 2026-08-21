@@ -9,7 +9,6 @@ import {
   TOKEN_RANGE_LABELS,
   buildCostDefaults,
   buildTokenSeries,
-  estimatePortfolioCostAvoided,
   getCostConfigForModel,
   loadCostConfig,
   saveCostConfig,
@@ -72,14 +71,6 @@ export const OverviewPage: React.FC = () => {
   const tokensIn = summary?.promptTokens ?? stats?.lifetimeTokensIn ?? 0;
   const tokensOut = summary?.completionTokens ?? stats?.lifetimeTokensOut ?? 0;
   const totalLifetimeTokens = tokensIn + tokensOut;
-  const llmCost = estimatePortfolioCostAvoided(llmUsage, {}, costDefaults.defaults, costDefaults.fallback);
-  const dictationCost = estimatePortfolioCostAvoided(dictationUsage, savedCosts, costDefaults.defaults, costDefaults.fallback);
-  const totalCost = llmCost + dictationCost;
-  const portfolio = getCostConfigForModel(ALL_MODELS, savedCosts, costDefaults.defaults, costDefaults.fallback);
-  const roiRemaining = Math.max(0, portfolio.breakEvenTarget - totalCost);
-  const roiProgress = portfolio.breakEvenTarget > 0
-    ? Math.min(100, totalCost / portfolio.breakEvenTarget * 100)
-    : 0;
   const llmMonthly = useMemo(
     () => withSharedBuckets(
       bucketUsageForSection(status?.monthlyTokenUsage ?? [], models, 'llm'),
@@ -122,6 +113,30 @@ export const OverviewPage: React.FC = () => {
     ),
     [status?.hourlyTokenUsage, models],
   );
+  const llmLifetimeSeries = useMemo(
+    () => buildTokenSeries(
+      [], ALL_MODELS, DEFAULT_COST_CONFIG, llmMonthly, {},
+      costDefaults.defaults, costDefaults.fallback, 'all', llmDaily, llmHourly,
+      Boolean(status?.dailyTokenUsageAllTime),
+    ),
+    [llmMonthly, costDefaults, llmDaily, llmHourly, status?.dailyTokenUsageAllTime],
+  );
+  const dictationLifetimeSeries = useMemo(
+    () => buildTokenSeries(
+      [], ALL_MODELS, DEFAULT_COST_CONFIG, dictationMonthly, savedCosts,
+      costDefaults.defaults, costDefaults.fallback, 'all', dictationDaily,
+      dictationHourly, Boolean(status?.dailyTokenUsageAllTime),
+    ),
+    [dictationMonthly, savedCosts, costDefaults, dictationDaily, dictationHourly, status?.dailyTokenUsageAllTime],
+  );
+  const llmCost = llmLifetimeSeries.cost.reduce((sum, value) => sum + value, 0);
+  const dictationCost = dictationLifetimeSeries.cost.reduce((sum, value) => sum + value, 0);
+  const totalCost = llmCost + dictationCost;
+  const portfolio = getCostConfigForModel(ALL_MODELS, savedCosts, costDefaults.defaults, costDefaults.fallback);
+  const roiRemaining = Math.max(0, portfolio.breakEvenTarget - totalCost);
+  const roiProgress = portfolio.breakEvenTarget > 0
+    ? Math.min(100, totalCost / portfolio.breakEvenTarget * 100)
+    : 0;
   const llmSeries = useMemo(
     () => buildTokenSeries(
       [],

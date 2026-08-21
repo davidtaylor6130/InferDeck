@@ -9,8 +9,6 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json_fwd.hpp>
-
 #include "chat.h"
 #include "common.h"
 #include "model/imodel.hpp"
@@ -61,11 +59,6 @@ struct LlamaCppConfig {
   inferdeck::model::SamplingConfig sampling{};  // server-side sampler defaults (issue #42)
 };
 
-inferdeck::foundation::Result<std::string> apply_reasoning_effort(
-    common_chat_templates_inputs& inputs,
-    const nlohmann::ordered_json& body,
-    const inferdeck::model::ModelInfo& info);
-
 class LlamaCppModel final : public inferdeck::model::IModel,
                             public inferdeck::model::IEmbeddingBackend {
 public:
@@ -80,6 +73,8 @@ public:
   const inferdeck::model::ChatTemplateMeta& chat_template_meta() const noexcept override { return chat_template_meta_; }
 
   inferdeck::foundation::Result<void> load() override;
+  inferdeck::foundation::Result<void> load(
+      const inferdeck::model::LifecycleControl& control) override;
   inferdeck::foundation::Result<void> unload() override;
   bool is_loaded() const noexcept override { return loaded_.load(); }
 

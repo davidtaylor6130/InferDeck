@@ -7,6 +7,36 @@
 
 namespace inferdeck::model {
 
+enum class ModelRole {
+    Conversation,
+    Helper,
+    Media,
+    Embedding,
+    Maintenance,
+};
+
+enum class ModelCompute {
+    Cpu,
+    VulkanGpu,
+    CudaGpu,
+    RocmGpu,
+    Mixed,
+};
+
+enum class ResidencyPolicy {
+    Always,
+    Managed,
+    OnDemand,
+};
+
+std::string to_string(ModelRole value);
+std::string to_string(ModelCompute value);
+std::string to_string(ResidencyPolicy value);
+std::optional<ModelRole> parse_model_role(const std::string& value);
+std::optional<ModelCompute> parse_model_compute(const std::string& value);
+std::optional<ResidencyPolicy> parse_residency_policy(
+    const std::string& value);
+
 struct SamplingConfig {
     float temperature{0.8f};
     float top_p{0.95f};
@@ -53,6 +83,14 @@ struct ModelInfo {
     std::string family{};
     std::string runtime{"llama_cpp"};
     std::string modality{"text"};
+    ModelRole role{ModelRole::Conversation};
+    ModelCompute compute{ModelCompute::VulkanGpu};
+    ResidencyPolicy residency{ResidencyPolicy::Managed};
+    std::string admission_pool{"conversation"};
+    int concurrency_limit{0};
+    int memory_required_mb{0};
+    bool eviction_eligible{true};
+    bool resource_metadata_explicit{false};
     std::vector<std::string> capabilities{"chat_completions", "responses"};
     std::string gguf_path{};
     std::string mmproj_path{};
@@ -75,6 +113,7 @@ struct ModelInfo {
     std::string reasoning_format{};
     std::string chat_template_path{};
     std::optional<double> prompt_price_per_million{};
+    std::optional<double> cached_prompt_price_per_million{};
     std::optional<double> completion_price_per_million{};
     std::map<std::string, std::string> artifacts{};
     SamplingConfig sampling{};
@@ -83,5 +122,8 @@ struct ModelInfo {
 
     [[nodiscard]] bool supports(const std::string& capability) const;
 };
+
+void normalize_model_resources(ModelInfo& info);
+std::optional<std::string> validate_model_resources(const ModelInfo& info);
 
 } // namespace inferdeck::model

@@ -11,23 +11,7 @@
 
 namespace inferdeck::observability {
 
-struct RequestRow {
-  std::int64_t timestamp_unix_ms{};
-  std::string model;
-  int prompt_tokens{};
-  int completion_tokens{};
-  double duration_ms{};
-  double tokens_per_second{};
-  int status_code{};
-  int slot_id{-1};
-  double input_audio_seconds{};
-  std::int64_t input_characters{};
-  int cached_prompt_tokens{};
-  double generation_duration_ms{};
-  double prompt_duration_ms{};
-  double prompt_tokens_per_second{};
-  std::string resolved_model;
-};
+using RequestRow = RequestRecord;
 
 struct SwapRow {
   std::int64_t timestamp_unix_ms{};
@@ -95,7 +79,10 @@ public:
   void record_request(const RequestRow& row);
   void record_swap(const SwapRow& row);
 
-  std::vector<RequestRow> recent_requests(int limit = 100) const;
+  std::vector<RequestRow> recent_requests(
+      int limit = 100,
+      const std::string& protocol_profile = {},
+      const std::string& endpoint = {}) const;
   std::vector<SwapRow>    recent_swaps(int limit = 100) const;
   std::vector<ModelUsageRow> model_usage() const;
   LifetimeTotals lifetime_totals() const;
@@ -113,6 +100,8 @@ private:
 
   std::string path_;
   void* db_{nullptr};
+  void* request_stmt_{nullptr};
+  void* swap_stmt_{nullptr};
   mutable std::mutex mtx_;
   std::atomic<bool> healthy_{false};
 };

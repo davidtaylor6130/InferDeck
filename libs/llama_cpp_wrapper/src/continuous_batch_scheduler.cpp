@@ -100,6 +100,12 @@ bool ContinuousBatchScheduler::should_cancel(const SlotTask* task) const noexcep
 }
 
 void ContinuousBatchScheduler::push_event(SlotTask* task, TokenEvent ev) {
+    if (!ev.is_done && !ev.is_error &&
+        task->out_first_token_duration_ms <= 0.0f) {
+        task->out_first_token_duration_ms =
+            std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - task->started_at).count();
+    }
     {
         std::lock_guard lk(task->out_mtx);
         task->out_queue.push(std::move(ev));

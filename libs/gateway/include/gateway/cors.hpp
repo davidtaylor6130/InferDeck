@@ -3,6 +3,7 @@
 #include <httplib.h>
 #include <algorithm>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace inferdeck::gateway {
@@ -16,10 +17,9 @@ public:
         if (origins_.empty()) return;
         const auto origin = req.get_header_value("Origin");
         if (origin.empty()) return;
-        const bool wildcard = std::find(origins_.begin(), origins_.end(), "*") != origins_.end();
-        if (wildcard) {
+        if (allows_wildcard()) {
             resp.set_header("Access-Control-Allow-Origin", "*");
-        } else if (std::find(origins_.begin(), origins_.end(), origin) != origins_.end()) {
+        } else if (allows_origin(origin)) {
             resp.set_header("Access-Control-Allow-Origin", origin);
         } else {
             return;
@@ -28,11 +28,16 @@ public:
         resp.set_header("Access-Control-Allow-Methods",
                         "GET, POST, PUT, DELETE, OPTIONS");
         resp.set_header("Access-Control-Allow-Headers",
-                        "Authorization, Content-Type, X-Request-Id, X-Api-Key, "
-                        "Anthropic-Version, Anthropic-Beta, OpenAI-Beta");
+                        "Authorization, Content-Type, X-Request-Id, OpenAI-Beta");
     }
 
     [[nodiscard]] bool handles_options() const noexcept { return !origins_.empty(); }
+    [[nodiscard]] bool allows_origin(std::string_view origin) const {
+        return std::find(origins_.begin(), origins_.end(), origin) != origins_.end();
+    }
+    [[nodiscard]] bool allows_wildcard() const {
+        return std::find(origins_.begin(), origins_.end(), "*") != origins_.end();
+    }
 
 private:
     std::vector<std::string> origins_;

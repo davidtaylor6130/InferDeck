@@ -17,6 +17,69 @@ TEST_CASE("Gateway configuration rejects a missing explicit file", "[config]") {
     CHECK_THROWS_AS(load_config(missing), std::runtime_error);
 }
 
+TEST_CASE("Configuration schema rejects unknown keys with precise paths",
+          "[config][schema][unknown-key]") {
+    const auto top_level = validate_config_text(
+        "schema_version: 1\nservre: {}\n");
+    REQUIRE_FALSE(top_level);
+    CHECK(top_level.error().message ==
+          "unknown configuration key: servre");
+
+    const auto nested = validate_config_text(
+        "schema_version: 1\n"
+        "gateway:\n"
+        "  sampling:\n"
+        "    tempertaure: 0.7\n");
+    REQUIRE_FALSE(nested);
+    CHECK(nested.error().message ==
+          "unknown configuration key: gateway.sampling.tempertaure");
+
+    const auto model = validate_config_text(
+        "schema_version: 1\n"
+        "model_registry:\n"
+        "  - name: test\n"
+        "    runtme: llama_cpp\n");
+    REQUIRE_FALSE(model);
+    CHECK(model.error().message ==
+          "unknown configuration key: model_registry[0].runtme");
+
+    const auto removed_profile = validate_config_text(
+        "schema_version: 1\nanthropic:\n  model_aliases: {}\n");
+    REQUIRE_FALSE(removed_profile);
+    CHECK(removed_profile.error().message ==
+          "unknown configuration key: anthropic");
+}
+
+TEST_CASE("Configuration schema versions extension ownership",
+          "[config][schema][version]") {
+    CHECK(validate_config_text(
+        "schema_version: 1\nextensions:\n  vendor: true\n"));
+    const auto missing = validate_config_text(
+        "extensions:\n  vendor: true\n");
+    REQUIRE_FALSE(missing);
+    CHECK(missing.error().message ==
+          "schema_version is required when extensions are configured");
+    const auto future = validate_config_text("schema_version: 2\n");
+    REQUIRE_FALSE(future);
+    CHECK(future.error().message == "unsupported schema_version: 2");
+}
+
+TEST_CASE("Runtime contracts reject undeclared capabilities",
+          "[config][runtime-contract]") {
+    const auto result = validate_config_text(R"(
+model_registry:
+  - name: invalid-capability
+    runtime: llama_cpp
+    modality: text
+    capabilities: [image_generation]
+    gguf_path: model.gguf
+)");
+    REQUIRE_FALSE(result);
+    CHECK(result.error().message.find(
+              "does not support capability image_generation") !=
+          std::string::npos);
+}
+
 TEST_CASE("Gateway configuration accepts native runtime artifacts", "[config]") {
     auto result = validate_config_text(R"(
 server:
@@ -47,7 +110,99 @@ model_registry:
     REQUIRE(result);
 }
 
-TEST_CASE("Repository gateway configuration preserves home-lab LAN access", "[config][lan]") {
+TEST_CASE("Gateway configuration decodes explicit model resource metadata",
+          "[config][resources]") {
+    const auto path = std::filesystem::temp_directory_path() /
+        "inferdeck-explicit-resource-config.yml";
+    {
+        std::ofstream output(path);
+        output << R"(model_registry:
+  - name: helper
+    runtime: windows_sapi
+    modality: audio_speech
+    capabilities: [audio_speech]
+    n_slots: 1
+    role: media
+    compute: cpu
+    residency: always
+    admission_pool: audio
+    concurrency_limit: 1
+    memory_required_mb: 32
+    eviction_eligible: false
+)";
+    }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    const auto& info = config.models.front();
+    CHECK(info.resource_metadata_explicit);
+    CHECK(info.role == inferdeck::model::ModelRole::Media);
+    CHECK(info.compute == inferdeck::model::ModelCompute::Cpu);
+    CHECK(info.residency == inferdeck::model::ResidencyPolicy::Always);
+    CHECK(info.admission_pool == "audio");
+    CHECK(info.concurrency_limit == 1);
+    CHECK(info.memory_required_mb == 32);
+    CHECK_FALSE(info.eviction_eligible);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
+
+TEST_CASE("Gateway configuration rejects partial and impossible resources",
+          "[config][resources]") {
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: partial
+    gguf_path: model.gguf
+    role: conversation
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: gpu-helper
+    gguf_path: model.gguf
+    n_slots: 1
+    role: helper
+    compute: vulkan_gpu
+    residency: always
+    admission_pool: helper
+    concurrency_limit: 1
+    memory_required_mb: 64
+    eviction_eligible: false
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: evict-always
+    runtime: windows_sapi
+    modality: audio_speech
+    n_slots: 1
+    role: media
+    compute: cpu
+    residency: always
+    admission_pool: audio
+    concurrency_limit: 1
+    memory_required_mb: 32
+    eviction_eligible: true
+)"));
+}
+
+TEST_CASE("Compatibility profiles are explicit and default off", "[config]") {
+    const auto valid = validate_config_text(R"(
+compatibility:
+  openai_derivative:
+    enabled: true
+)");
+    REQUIRE(valid);
+    CHECK_FALSE(validate_config_text(R"(
+compatibility:
+  unknown:
+    enabled: true
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+compatibility:
+  openai_derivative:
+    mode: permissive
+)"));
+}
+
+TEST_CASE("Repository gateway configuration keeps remote control disabled", "[config][lan]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "config" / "gateway.yml";
     const auto text = inferdeck::gateway::read_text_file(path);
@@ -59,6 +214,35 @@ TEST_CASE("Repository gateway configuration preserves home-lab LAN access", "[co
     CHECK_FALSE(config.auth_required);
     REQUIRE(config.cors_origins.size() == 1);
     CHECK(config.cors_origins.front() == "*");
+    CHECK_FALSE(config.control_allow_remote);
+    CHECK_FALSE(config.control_allow_data_plane_token);
+    CHECK_FALSE(config.openai_derivative_compatibility_enabled);
+    CHECK(config.control_token.empty());
+    REQUIRE(config.control_origins.size() == 3);
+    CHECK(std::find(config.control_origins.begin(), config.control_origins.end(), "*") ==
+          config.control_origins.end());
+}
+
+TEST_CASE("Security fixture configurations load with distinct control policies",
+          "[config][lan][security]") {
+    const auto config_dir = std::filesystem::path(INFERDECK_SOURCE_DIR) / "config";
+
+    const auto local_only = load_config(config_dir / "gateway.test-security.yml");
+    CHECK(local_only.host == "0.0.0.0");
+    CHECK(local_only.auth_required);
+    CHECK(local_only.auth_token == "test-data-token");
+    CHECK_FALSE(local_only.control_allow_remote);
+    CHECK(local_only.control_token.empty());
+
+    const auto remote = load_config(config_dir / "gateway.test-security-remote.yml");
+    CHECK(remote.host == "0.0.0.0");
+    CHECK(remote.auth_required);
+    CHECK(remote.auth_token == "test-data-token");
+    CHECK(remote.control_allow_remote);
+    CHECK_FALSE(remote.control_allow_data_plane_token);
+    CHECK(remote.control_token == "test-control-token-0123456789abcdef");
+    REQUIRE(remote.control_origins.size() == 1);
+    CHECK(remote.control_origins.front() == "http://admin.example");
 }
 
 TEST_CASE("Repository gateway configuration keeps statistics in the installed runtime",
@@ -98,6 +282,12 @@ TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
         [](const auto& model) { return model.name == "qwen3.8-27b"; });
     REQUIRE(qwen != config.models.end());
     CHECK(qwen->family == "qwen3.8");
+    REQUIRE(qwen->prompt_price_per_million);
+    REQUIRE(qwen->cached_prompt_price_per_million);
+    REQUIRE(qwen->completion_price_per_million);
+    CHECK(*qwen->prompt_price_per_million == 0.45);
+    CHECK(*qwen->cached_prompt_price_per_million == 0.05);
+    CHECK(*qwen->completion_price_per_million == 3.20);
     CHECK(qwen->gguf_path ==
           "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/"
           "Qwen3.8-27B-Q4_K_M.gguf");
@@ -234,9 +424,64 @@ model_registry:
 )"));
     CHECK_FALSE(validate_config_text("gateway:\n  cache_type_k: made_up\n"));
     CHECK_FALSE(validate_config_text("gateway:\n  sampling:\n    temperature: .nan\n"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: bad-cached-price
+    gguf_path: model.gguf
+    cached_prompt_price_per_million: -0.01
+)"));
     CHECK_FALSE(validate_config_text("gateway:\n  n_batch: 128\n  n_ubatch: 256\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\nauth:\n  required: true\n  token: secret\n"));
+    CHECK_FALSE(validate_config_text("control:\n  allow_remote: true\n"));
+    CHECK_FALSE(validate_config_text(
+        "control:\n  allow_remote: true\n  token: control-secret\n"));
+    CHECK_FALSE(validate_config_text(R"(
+control:
+  allow_remote: true
+  token: control-secret-0123456789abcdefghi
+  origins: ["*"]
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+control:
+  allow_remote: false
+  origins: ["*"]
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+control:
+  allow_remote: false
+  origins: ["null"]
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+control:
+  allow_remote: false
+  origins: ["https://admin.example/path"]
+)"));
+    CHECK(validate_config_text(R"(
+control:
+  allow_remote: true
+  token: control-secret-0123456789abcdefghi
+  origins: ["https://admin.example"]
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+auth:
+  required: true
+  token: shared-secret-0123456789abcdefghij
+control:
+  allow_remote: true
+  token: shared-secret-0123456789abcdefghij
+  origins: ["https://admin.example"]
+)"));
+    CHECK(validate_config_text(R"(
+auth:
+  required: true
+  token: shared-secret-0123456789abcdefghij
+control:
+  allow_remote: true
+  allow_data_plane_token: true
+  token: shared-secret-0123456789abcdefghij
+  origins: ["https://admin.example"]
+)"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:
   - name: unknown

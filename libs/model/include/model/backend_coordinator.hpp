@@ -42,12 +42,27 @@ struct ResidencyInfo {
     std::string name;
     std::string runtime;
     std::string modality;
+    std::string role;
+    std::string compute;
+    std::string residency;
+    std::string admission_pool;
+    int concurrency_limit{0};
+    int memory_required_mb{0};
+    bool eviction_eligible{false};
     int slots{0};
     int free_slots{0};
     int active_requests{0};
     int estimated_vram_mb{0};
     bool primary{false};
     bool resizing{false};
+};
+
+struct ModelIdentitySnapshot {
+    std::string requested;
+    std::string resolved;
+    std::optional<std::string> selected;
+    std::vector<std::string> resident;
+    std::vector<std::string> executing;
 };
 
 class BackendCoordinator {
@@ -70,6 +85,9 @@ public:
 
     [[nodiscard]] bool is_loaded(const std::string& name) const;
     [[nodiscard]] std::optional<std::string> get_loaded_model() const;
+    [[nodiscard]] std::optional<std::string> selected_model() const;
+    [[nodiscard]] ModelIdentitySnapshot identity_snapshot(
+        std::string requested = {}, std::string resolved = {}) const;
     [[nodiscard]] std::vector<std::string> get_loaded_models() const;
     [[nodiscard]] std::vector<ResidencyInfo> residency() const;
     [[nodiscard]] int get_vram_usage() const;
@@ -118,6 +136,8 @@ public:
     foundation::Result<ImageGenerationResult> generate_images(
         const std::string& name, int slot_id, const ImageGenerationRequest& request,
         const std::function<bool(int)>& progress = {});
+    foundation::Result<void> validate_speech_request(
+        const std::string& name, const SpeechRequest& request);
     foundation::Result<AudioResult> synthesize(
         const std::string& name, int slot_id, const SpeechRequest& request,
         const std::function<bool(const std::byte*, std::size_t)>& stream = {});
@@ -135,7 +155,8 @@ public:
     bool swap_cancel_requested() const noexcept { return swap_cancel_.load(); }
 
     foundation::Result<void> swap_to_cancellable(const std::string& name,
-                                                 std::chrono::milliseconds timeout = std::chrono::milliseconds{30000});
+        std::chrono::milliseconds timeout = std::chrono::milliseconds{30000},
+        std::function<bool()> cancelled = {});
 
 private:
     using clock = std::chrono::steady_clock;
@@ -163,6 +184,7 @@ private:
     bool model_is_primary_locked(const std::string& name) const;
     bool model_is_priority_media_locked(const std::string& name) const;
     bool model_is_independent_sidecar_locked(const std::string& name) const;
+    bool admission_pool_allows_locked(const std::string& name) const;
     bool request_waits_for_priority_media_locked(
         const std::string& name, const std::string& reservation_key) const;
     bool waiter_is_actionable_locked(const SlotWaiter& waiter) const;
@@ -171,7 +193,12 @@ private:
     foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot);
     foundation::Result<int> backend_slot_for_lease_locked(
         const std::string& name, int lease_id) const;
-    foundation::Result<void> prepare_capacity_for(const std::string& name);
+    foundation::Result<void> unload_with_control(
+        const std::string& name, const LifecycleControl& control);
+    foundation::Result<void> swap_to_with_control(
+        const std::string& name, const LifecycleControl& control);
+    foundation::Result<void> prepare_capacity_for(
+        const std::string& name, const LifecycleControl& control);
     foundation::Result<void> require_priority_session_allows(
         const std::string& name);
     int estimated_vram_locked() const;

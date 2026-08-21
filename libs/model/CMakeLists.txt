@@ -4,7 +4,10 @@ project(model LANGUAGES CXX)
 set(MODEL_SOURCES
     src/model_info.cpp
     src/model_registry.cpp
-    src/backend_coordinator.cpp
+    src/backend_coordinator_lifecycle.cpp
+    src/backend_coordinator_queue.cpp
+    src/backend_coordinator_execution.cpp
+    src/backend_coordinator_residency.cpp
 )
 
 add_library(model STATIC ${MODEL_SOURCES})
@@ -17,6 +20,7 @@ target_include_directories(model
 target_link_libraries(model
     PUBLIC
         foundation
+        inference
 )
 
 set_target_properties(model PROPERTIES

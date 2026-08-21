@@ -1,0 +1,16 @@
+* @davidtaylor6130
+
+/docs/adr/ @davidtaylor6130
+/overhall_plan.md @davidtaylor6130
+/libs/gateway/ @davidtaylor6130
+/tests/integration/ @davidtaylor6130
+/tests/parity/ @davidtaylor6130
+
+/libs/model/ @davidtaylor6130
+/libs/llama_cpp_wrapper/ @davidtaylor6130
+/libs/native_runtimes/ @davidtaylor6130
+/apps/inferdeck-gateway/ @davidtaylor6130
+
+/config/ @davidtaylor6130
+/.github/ @davidtaylor6130
+/CMakeLists.txt @davidtaylor6130

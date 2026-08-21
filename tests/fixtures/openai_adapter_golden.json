@@ -1,0 +1,59 @@
+{
+  "chat_request": {
+    "model": "adapter-model",
+    "messages": [
+      {"role": "developer", "content": "policy"},
+      {"role": "user", "content": "answer"}
+    ],
+    "max_completion_tokens": 64,
+    "temperature": 0.25,
+    "top_p": 0.9,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "lookup",
+          "description": "find",
+          "parameters": {"type": "object"}
+        }
+      }
+    ],
+    "tool_choice": {"type": "function", "function": {"name": "lookup"}},
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "answer",
+        "schema": {"type": "object"},
+        "strict": true
+      }
+    }
+  },
+  "canonical": {
+    "roles": ["developer", "user"],
+    "texts": ["policy", "answer"],
+    "max_output_tokens": 64,
+    "temperature": 0.25,
+    "top_p": 0.9,
+    "tool_name": "lookup",
+    "tool_schema": "{\"type\":\"object\"}",
+    "tool_choice": "lookup",
+    "output_kind": "json_schema",
+    "output_name": "answer",
+    "output_strict": true
+  },
+  "responses_event_types": [
+    "response.created",
+    "response.in_progress",
+    "response.output_item.added",
+    "response.content_part.added",
+    "response.reasoning_text.delta",
+    "response.output_item.added",
+    "response.function_call_arguments.delta",
+    "response.reasoning_text.done",
+    "response.content_part.done",
+    "response.output_item.done",
+    "response.function_call_arguments.done",
+    "response.output_item.done",
+    "response.completed"
+  ]
+}

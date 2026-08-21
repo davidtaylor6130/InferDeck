@@ -2,6 +2,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import App, { DASHBOARD_PAGES } from './App';
+import { INFERDECK_VERSION } from './version';
 
 describe('dashboard boundary', () => {
   it('keeps a global home plus complete LLM and dictation administration sections', () => {
@@ -22,7 +23,7 @@ describe('dashboard boundary', () => {
 
   it('renders the product version in the bottom sidebar footer', () => {
     const html = renderToStaticMarkup(<App />);
-    expect(html).toContain('InferDeck v0.7.2');
-    expect(html.indexOf('InferDeck v0.7.2')).toBeLessThan(html.indexOf('<main'));
+    expect(html).toContain(`InferDeck v${INFERDECK_VERSION}`);
+    expect(html.indexOf(`InferDeck v${INFERDECK_VERSION}`)).toBeLessThan(html.indexOf('<main'));
   });
 });

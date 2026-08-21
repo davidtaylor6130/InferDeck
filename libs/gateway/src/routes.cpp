@@ -1,5 +1,9 @@
 #include "gateway/routes.hpp"
 
+#include "gateway/openai_adapter.hpp"
+#include "gateway/openai_error.hpp"
+#include "gateway/generation_session.hpp"
+#include "gateway/request_id.hpp"
 #include "gateway/streaming_sanitizer.hpp"
 #include "foundation/logging.hpp"
 
@@ -40,6 +44,26 @@ std::int64_t now_ms() {
 
 } // namespace
 
+RequestObservation observe_request(const httplib::Request& req,
+                                   const httplib::Response& resp,
+                                   const GatewayDeps& deps,
+                                   std::string modality,
+                                   bool stream) {
+    RequestObservation observation;
+    observation.request_id = resp.get_header_value("X-Request-Id");
+    if (observation.request_id.empty()) {
+        observation.request_id = request_id(header_value(req, "X-Request-Id"));
+    }
+    observation.principal_class = "openai_data_plane";
+    observation.endpoint = req.path;
+    observation.protocol_profile =
+        deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative
+            ? "openai_derivative" : "strict_openai";
+    observation.modality = std::move(modality);
+    observation.stream = stream;
+    return observation;
+}
+
 void record_request(observability::Metrics* metrics,
                     observability::StatsDb* stats_db,
                     foundation::EventBus* events,
@@ -49,72 +73,102 @@ void record_request(observability::Metrics* metrics,
                     int slot_id,
                     double input_audio_seconds,
                     std::int64_t input_characters,
-                    const std::string& resolved_model_name) {
+                    const std::string& resolved_model_name,
+                    const RequestObservation& observation) {
     observability::RequestRecord rec;
     rec.timestamp_unix_ms = now_ms();
     rec.model = model_name;
-    rec.prompt_tokens = result.prompt_tokens;
-    rec.completion_tokens = result.completion_tokens;
-    rec.duration_ms = result.duration_ms;
-    rec.tokens_per_second = result.tokens_per_second;
+    rec.resolved_model = resolved_model_name.empty() ? rec.model : resolved_model_name;
+    rec.request_id = observation.request_id;
+    rec.principal_class = observation.principal_class;
+    rec.endpoint = observation.endpoint;
+    rec.protocol_profile = observation.protocol_profile;
+    rec.modality = observation.modality;
+    rec.stream = observation.stream;
+    rec.finish_code = result.finish_reason;
+    rec.error_code = observation.error_code;
+    rec.prompt_tokens = std::max(0, result.prompt_tokens);
+    rec.cached_prompt_tokens = std::clamp(result.cached_prompt_tokens, 0, rec.prompt_tokens);
+    rec.cache_write_tokens = rec.prompt_tokens - rec.cached_prompt_tokens;
+    rec.completion_tokens = std::max(0, result.completion_tokens);
+    rec.reasoning_tokens = std::max(0, result.reasoning_tokens);
+    rec.duration_ms = std::max(0.0, static_cast<double>(result.duration_ms));
+    rec.generation_duration_ms = std::max(0.0, static_cast<double>(result.generation_duration_ms));
+    rec.tokens_per_second = rec.modality == "text" && rec.generation_duration_ms > 0.0
+        ? rec.completion_tokens * 1000.0 / rec.generation_duration_ms
+        : 0.0;
     rec.status_code = status_code;
     rec.slot_id = slot_id;
     const double prompt_duration_ms = result.prompt_duration_ms > 0.0f
         ? result.prompt_duration_ms
         : std::max(0.0, static_cast<double>(
               result.duration_ms - result.generation_duration_ms));
-    const int evaluated_prompt_tokens =
-        std::max(0, result.prompt_tokens - result.cached_prompt_tokens);
+    rec.prompt_duration_ms = prompt_duration_ms;
+    rec.prompt_tokens_per_second = rec.prompt_duration_ms > 0.0
+        ? rec.cache_write_tokens * 1000.0 / rec.prompt_duration_ms
+        : 0.0;
+    rec.queue_duration_ms = std::max(0.0, observation.queue_duration_ms);
+    rec.swap_load_duration_ms = std::max(0.0, observation.swap_load_duration_ms);
+    rec.first_token_duration_ms = result.first_token_duration_ms > 0.0f
+        ? result.first_token_duration_ms
+        : std::max(0.0, observation.first_token_duration_ms);
+    rec.input_audio_seconds = std::max(0.0, input_audio_seconds);
+    rec.output_audio_seconds = std::max(0.0, observation.output_audio_seconds);
+    rec.input_characters = std::max<std::int64_t>(0, input_characters);
+    rec.input_image_count = std::max(0, observation.input_image_count);
+    rec.output_image_count = std::max(0, observation.output_image_count);
     if (metrics) metrics->record_request(rec);
     LOG_INFO("request_recorded",
-             "model={} status={} slot_id={} prompt_tokens={} cached_prompt_tokens={} completion_tokens={} duration_ms={} generation_duration_ms={} tps={}",
+             "request_id={} endpoint={} profile={} modality={} model={} resolved_model={} status={} finish_code={} error_code={} slot_id={} prompt_tokens={} cached_prompt_tokens={} completion_tokens={} duration_ms={} generation_duration_ms={} tps={}",
+             rec.request_id,
+             rec.endpoint,
+             rec.protocol_profile,
+             rec.modality,
              model_name,
+             rec.resolved_model,
              status_code,
+             rec.finish_code,
+             rec.error_code,
              slot_id,
              result.prompt_tokens,
              result.cached_prompt_tokens,
              result.completion_tokens,
              result.duration_ms,
              result.generation_duration_ms,
-             result.tokens_per_second);
-    if (stats_db) {
-        observability::RequestRow row;
-        row.timestamp_unix_ms = rec.timestamp_unix_ms;
-        row.model = rec.model;
-        row.resolved_model = resolved_model_name.empty() ? rec.model : resolved_model_name;
-        row.prompt_tokens = rec.prompt_tokens;
-        row.cached_prompt_tokens = result.cached_prompt_tokens;
-        row.completion_tokens = rec.completion_tokens;
-        row.duration_ms = rec.duration_ms;
-        row.generation_duration_ms = result.generation_duration_ms;
-        row.prompt_duration_ms = prompt_duration_ms;
-        row.tokens_per_second = rec.tokens_per_second;
-        row.prompt_tokens_per_second = row.prompt_duration_ms > 0.0
-            ? static_cast<double>(evaluated_prompt_tokens) / (row.prompt_duration_ms / 1000.0)
-            : 0.0;
-        row.status_code = rec.status_code;
-        row.slot_id = rec.slot_id;
-        row.input_audio_seconds = input_audio_seconds;
-        row.input_characters = input_characters;
-        stats_db->record_request(row);
-    }
+             rec.tokens_per_second);
+    if (stats_db) stats_db->record_request(rec);
     if (events) {
         events->publish("request", nlohmann::json{
             {"timestampUnixMs", rec.timestamp_unix_ms},
-            {"model", model_name},
-            {"resolvedModel", resolved_model_name.empty() ? model_name : resolved_model_name},
-            {"promptTokens", result.prompt_tokens},
-            {"completionTokens", result.completion_tokens},
-            {"durationMs", result.duration_ms},
-            {"generationDurationMs", result.generation_duration_ms},
-            {"tokensPerSecond", result.tokens_per_second},
-            {"promptTokensPerSecond", prompt_duration_ms > 0.0
-                ? static_cast<double>(evaluated_prompt_tokens) /
-                    (prompt_duration_ms / 1000.0)
-                : 0.0},
+            {"requestId", rec.request_id},
+            {"principalClass", rec.principal_class},
+            {"endpoint", rec.endpoint},
+            {"protocolProfile", rec.protocol_profile},
+            {"modality", rec.modality},
+            {"model", rec.model},
+            {"resolvedModel", rec.resolved_model},
+            {"stream", rec.stream},
+            {"finishCode", rec.finish_code},
+            {"errorCode", rec.error_code},
+            {"promptTokens", rec.prompt_tokens},
+            {"cachedPromptTokens", rec.cached_prompt_tokens},
+            {"cacheWriteTokens", rec.cache_write_tokens},
+            {"completionTokens", rec.completion_tokens},
+            {"reasoningTokens", rec.reasoning_tokens},
+            {"durationMs", rec.duration_ms},
+            {"generationDurationMs", rec.generation_duration_ms},
+            {"promptDurationMs", rec.prompt_duration_ms},
+            {"firstTokenDurationMs", rec.first_token_duration_ms},
+            {"queueDurationMs", rec.queue_duration_ms},
+            {"swapLoadDurationMs", rec.swap_load_duration_ms},
+            {"tokensPerSecond", rec.tokens_per_second},
+            {"promptTokensPerSecond", rec.prompt_tokens_per_second},
             {"status", status_code},
-            {"inputAudioSeconds", input_audio_seconds},
-            {"inputCharacters", input_characters},
+            {"inputAudioSeconds", rec.input_audio_seconds},
+            {"outputAudioSeconds", rec.output_audio_seconds},
+            {"inputCharacters", rec.input_characters},
+            {"inputImageCount", rec.input_image_count},
+            {"outputImageCount", rec.output_image_count},
         }.dump());
     }
 }
@@ -126,10 +180,12 @@ void record_request(const GatewayDeps& deps,
                     int slot_id,
                     double input_audio_seconds,
                     std::int64_t input_characters,
-                    const std::string& resolved_model_name) {
+                    const std::string& resolved_model_name,
+                    const RequestObservation& observation) {
     record_request(deps.metrics, deps.stats_db, deps.events,
                    model_name, result, status_code, slot_id,
-                   input_audio_seconds, input_characters, resolved_model_name);
+                   input_audio_seconds, input_characters, resolved_model_name,
+                   observation);
 }
 
 foundation::Result<ResolvedModelName> resolve_model_name(
@@ -244,11 +300,12 @@ std::string dump_json(const nlohmann::json& value) {
 }
 
 std::string sse_chunk_json(const std::string& id, const std::string& model,
-                           const nlohmann::json& delta) {
+                           std::int64_t created, const nlohmann::json& delta,
+                           bool include_usage) {
     nlohmann::json chunk = {
         {"id", id},
         {"object", "chat.completion.chunk"},
-        {"created", std::time(nullptr)},
+        {"created", created},
         {"model", model},
         {"choices", nlohmann::json::array({
             {
@@ -258,16 +315,19 @@ std::string sse_chunk_json(const std::string& id, const std::string& model,
             }
         })},
     };
+    if (include_usage) chunk["usage"] = nullptr;
     return "data: " + dump_json(chunk) + "\n\n";
 }
 
-std::string sse_done(const std::string& id, const std::string& model,
-                     const std::string& finish_reason = "stop",
-                     const model::InferenceResult* result = nullptr) {
-    nlohmann::json chunk = {
+std::string sse_terminal(const std::string& id, const std::string& model,
+                         std::int64_t created,
+                         const std::string& finish_reason,
+                         const model::InferenceResult* result,
+                         bool include_usage) {
+    nlohmann::json finish = {
         {"id", id},
         {"object", "chat.completion.chunk"},
-        {"created", std::time(nullptr)},
+        {"created", created},
         {"model", model},
         {"choices", nlohmann::json::array({
             {
@@ -277,15 +337,26 @@ std::string sse_done(const std::string& id, const std::string& model,
             }
         })},
     };
-    if (result) {
-        chunk["usage"] = {
+    if (include_usage) finish["usage"] = nullptr;
+    std::string output = "data: " + dump_json(finish) + "\n\n";
+    if (include_usage && result) {
+        nlohmann::json usage = {
+            {"id", id},
+            {"object", "chat.completion.chunk"},
+            {"created", created},
+            {"model", model},
+            {"choices", nlohmann::json::array()},
+            {"usage", {
             {"prompt_tokens", result->prompt_tokens},
             {"prompt_tokens_details", {{"cached_tokens", result->cached_prompt_tokens}}},
             {"completion_tokens", result->completion_tokens},
             {"total_tokens", result->prompt_tokens + result->completion_tokens},
+            }},
         };
+        output += "data: " + dump_json(usage) + "\n\n";
     }
-    return "data: " + dump_json(chunk) + "\n\ndata: [DONE]\n\n";
+    output += "data: [DONE]\n\n";
+    return output;
 }
 
 nlohmann::json tool_call_json(const model::ToolCall& tc) {
@@ -313,31 +384,6 @@ nlohmann::json tool_call_delta_json(const model::ToolCallDelta& tc) {
         out["function"] = fn;
     }
     return out;
-}
-
-foundation::Result<model::InferenceRequest> make_inference_request(
-    const nlohmann::json& body) {
-    try {
-        model::InferenceRequest ir;
-        ir.openai_body_json = body.dump();
-        ir.max_tokens = body.value("max_tokens", body.value(
-            "max_completion_tokens", model::k_max_tokens_use_context_budget));
-        if (body.contains("temperature") && !body["temperature"].is_null())
-            ir.temperature = body["temperature"].get<float>();
-        if (body.contains("top_p") && !body["top_p"].is_null())
-            ir.top_p = body["top_p"].get<float>();
-        if (body.contains("top_k") && !body["top_k"].is_null())
-            ir.top_k = body["top_k"].get<int>();
-        if (body.contains("repeat_penalty") && !body["repeat_penalty"].is_null())
-            ir.repeat_penalty = body["repeat_penalty"].get<float>();
-        if (body.contains("repeat_last_n") && !body["repeat_last_n"].is_null())
-            ir.repeat_last_n = body["repeat_last_n"].get<int>();
-        ir.seed = body.value("seed", -1);
-        return foundation::Ok(std::move(ir));
-    } catch (const nlohmann::json::exception& error) {
-        return foundation::Err<model::InferenceRequest>(
-            foundation::ErrorCode::InvalidArgument, error.what());
-    }
 }
 
 foundation::Result<std::optional<std::string>> normalize_reasoning_request(
@@ -414,25 +460,12 @@ foundation::Result<std::optional<std::string>> normalize_reasoning_request(
     return foundation::Ok(std::optional<std::string>{std::move(resolved)});
 }
 
-struct ErrorClass {
-    int status;
-    std::string type;
-    std::string code;
-};
-
-ErrorClass classify_inference_error(foundation::ErrorCode code) {
-    if (code == foundation::ErrorCode::ContextLengthExceeded) {
-        return {400, "invalid_request_error", "context_length_exceeded"};
-    }
-    const bool invalid = code == foundation::ErrorCode::InvalidArgument ||
-                         code == foundation::ErrorCode::ParseError;
-    if (!invalid) return {500, "server_error", "inference_error"};
-    return {400, "invalid_request_error", "invalid_request_error"};
-}
-
-nlohmann::json delta_json(const model::InferenceDelta& delta) {
+nlohmann::json delta_json(const model::InferenceDelta& delta,
+                          bool include_reasoning_content) {
     nlohmann::json out = nlohmann::json::object();
-    if (!delta.reasoning_text.empty()) out["reasoning_content"] = delta.reasoning_text;
+    if (include_reasoning_content && !delta.reasoning_text.empty()) {
+        out["reasoning_content"] = delta.reasoning_text;
+    }
     if (!delta.content.empty()) out["content"] = delta.content;
     if (!delta.tool_calls.empty()) {
         out["tool_calls"] = nlohmann::json::array();
@@ -475,6 +508,26 @@ bool chat_uses_vision(const nlohmann::json& body) {
 
 } // namespace
 
+std::string serialize_chat_stream_delta(const std::string& id,
+                                        const std::string& model,
+                                        std::int64_t created,
+                                        const nlohmann::json& delta,
+                                        bool include_usage,
+                                        bool include_reasoning_content) {
+    auto filtered = delta;
+    if (!include_reasoning_content) filtered.erase("reasoning_content");
+    return sse_chunk_json(id, model, created, filtered, include_usage);
+}
+
+std::string serialize_chat_stream_terminal(const std::string& id,
+                                           const std::string& model,
+                                           std::int64_t created,
+                                           const std::string& finish_reason,
+                                           const model::InferenceResult* result,
+                                           bool include_usage) {
+    return sse_terminal(id, model, created, finish_reason, result, include_usage);
+}
+
 void write_json(httplib::Response& resp, int status,
                 const nlohmann::json& body) {
     resp.status = status;
@@ -500,8 +553,9 @@ nlohmann::json make_error_json(int status, const std::string& code,
 }
 
 void write_error(httplib::Response& resp, int status, const std::string& code,
-                 const std::string& message) {
-    write_json(resp, status, make_error_json(status, code, message));
+                 const std::string& message, nlohmann::json param) {
+    write_json(resp, status,
+               make_error_json(status, code, message, std::move(param)));
 }
 
 std::string header_value(const httplib::Request& req, const std::string& name) {
@@ -511,162 +565,50 @@ std::string header_value(const httplib::Request& req, const std::string& name) {
 }
 
 std::string request_client_key(const httplib::Request& req) {
-    const auto explicit_key = header_value(req, "X-InferDeck-Voice-Session");
-    if (!explicit_key.empty()) return explicit_key;
-    return req.remote_addr.empty() ? "local" : req.remote_addr;
+    const auto session = header_value(req, "X-InferDeck-Voice-Session");
+    if (session.size() < 8 || session.size() > 128 ||
+        !std::all_of(session.begin(), session.end(), [](unsigned char value) {
+            return std::isalnum(value) || value == '-' || value == '_' || value == '.';
+        })) {
+        return {};
+    }
+    const auto authorization = header_value(req, "Authorization");
+    if (!authorization.starts_with("Bearer ") || authorization.size() <= 7) {
+        return {};
+    }
+    return authorization.substr(7) + '\x1f' + session;
+}
+
+bool require_json_media_type(const httplib::Request& req,
+                             httplib::Response& resp) {
+    const std::string value = req.get_header_value("Content-Type");
+    if (value.empty() && req.version.empty()) return true;
+    const auto separator = value.find(';');
+    const std::string media = value.substr(0, separator);
+    if (media == "application/json") return true;
+    write_error(resp, 415, "unsupported_media_type",
+                "Content-Type must be application/json");
+    return false;
 }
 
 void handle_models(const httplib::Request& req, httplib::Response& resp,
                    const GatewayDeps& deps) {
     (void)req;
     nlohmann::json data = nlohmann::json::array();
-    std::unordered_map<std::string, model::ResidencyInfo> residency;
-    for (const auto& resident : deps.coordinator.residency()) {
-        residency.emplace(resident.name, resident);
-    }
     for (const auto& name : deps.coordinator.registry().list()) {
-        const auto& info = deps.coordinator.registry().get_info(name);
-        const bool runtime_available = deps.coordinator.registry().has_factory(info.runtime);
-        const auto resident = residency.find(name);
-        const bool loaded = resident != residency.end();
-        const auto residency_json = loaded ? nlohmann::json{
-            {"loaded", true},
-            {"primary", resident->second.primary},
-            {"slots", resident->second.slots},
-            {"free_slots", resident->second.free_slots},
-            {"active_requests", resident->second.active_requests},
-            {"estimated_vram_mb", resident->second.estimated_vram_mb},
-            {"resizing", resident->second.resizing},
-        } : nlohmann::json{
-            {"loaded", false},
-            {"primary", false},
-            {"slots", 0},
-            {"free_slots", 0},
-            {"active_requests", 0},
-            {"estimated_vram_mb", 0},
-            {"resizing", false},
-        };
-        const nlohmann::json reasoning = {
-            {"supported", info.reasoning.supported},
-            {"efforts", info.reasoning.efforts},
-            {"default_effort", info.reasoning.default_effort},
-            {"none_disables", info.reasoning.none_disables},
-            {"aliases", info.reasoning.aliases},
-        };
-        nlohmann::json entry = {
+        data.push_back({
             {"id", name},
             {"object", "model"},
             {"created", std::time(nullptr)},
             {"owned_by", "inferdeck"},
-            {"alias", false},
-            {"alias_target", nullptr},
-            {"vram_required_mb", info.vram_required_mb},
-            {"context_size", info.context_size},
-            {"context_length", info.context_size},
-            {"max_context_length", info.context_size},
-            {"limit", {{"context", info.context_size}}},
-            {"n_slots", info.n_slots},
-            {"has_vision", info.has_vision},
-            {"reasoning", info.reasoning.supported},
-            {"reasoning_efforts", info.reasoning.efforts},
-            {"reasoning_default_effort", info.reasoning.default_effort},
-            {"runtime", info.runtime},
-            {"runtime_available", runtime_available},
-            {"modality", info.modality},
-            {"capabilities", info.capabilities},
-            {"prompt_price_per_million", info.prompt_price_per_million
-                ? nlohmann::json(*info.prompt_price_per_million) : nlohmann::json(nullptr)},
-            {"completion_price_per_million", info.completion_price_per_million
-                ? nlohmann::json(*info.completion_price_per_million) : nlohmann::json(nullptr)},
-            {"optimization", {
-                {"status", info.optimization.status},
-                {"measured_at", info.optimization.measured_at},
-                {"quality_passes", info.optimization.quality_passes},
-                {"quality_total", info.optimization.quality_total},
-                {"single_tokens_per_second", info.optimization.single_tokens_per_second},
-                {"parallel_tokens_per_second", info.optimization.parallel_tokens_per_second},
-                {"schedule_enabled", info.optimization.schedule_enabled},
-                {"schedule_window_start", info.optimization.schedule_window_start},
-                {"schedule_window_end", info.optimization.schedule_window_end},
-            }},
-            {"loaded", loaded},
-            {"inferdeck", {
-                {"runtime", info.runtime},
-                {"runtime_available", runtime_available},
-                {"modality", info.modality},
-                {"capabilities", info.capabilities},
-                {"reasoning", reasoning},
-                {"optimization", {
-                    {"status", info.optimization.status},
-                    {"measured_at", info.optimization.measured_at},
-                    {"quality_passes", info.optimization.quality_passes},
-                    {"quality_total", info.optimization.quality_total},
-                    {"single_tokens_per_second", info.optimization.single_tokens_per_second},
-                    {"parallel_tokens_per_second", info.optimization.parallel_tokens_per_second},
-                }},
-                {"resources", {
-                    {"vram_required_mb", info.vram_required_mb},
-                    {"vram_fixed_mb", info.vram_fixed_mb},
-                    {"vram_per_slot_mb", info.vram_per_slot_mb},
-                    {"configured_slots", info.n_slots},
-                    {"minimum_slots", info.min_slots},
-                }},
-                {"residency", residency_json},
-            }},
-        };
-        data.push_back(entry);
+        });
     }
     for (const auto& alias : deps.coordinator.registry().aliases()) {
-        const auto info = deps.coordinator.registry().get_info_result(alias.target);
-        if (!info) continue;
-        const auto resident = residency.find(alias.target);
-        const nlohmann::json reasoning = {
-            {"supported", info->reasoning.supported},
-            {"efforts", info->reasoning.efforts},
-            {"default_effort", info->reasoning.default_effort},
-            {"none_disables", info->reasoning.none_disables},
-            {"aliases", info->reasoning.aliases},
-        };
         data.push_back({
             {"id", alias.name},
             {"object", "model"},
             {"created", std::time(nullptr)},
             {"owned_by", "inferdeck"},
-            {"alias", true},
-            {"alias_target", alias.target},
-            {"target", alias.target},
-            {"required_context_size", alias.required_context_size},
-            {"required_capabilities", alias.required_capabilities},
-            {"context_size", info->context_size},
-            {"context_length", info->context_size},
-            {"max_context_length", info->context_size},
-            {"limit", {{"context", info->context_size}}},
-            {"n_slots", info->n_slots},
-            {"has_vision", info->has_vision},
-            {"reasoning", info->reasoning.supported},
-            {"reasoning_efforts", info->reasoning.efforts},
-            {"reasoning_default_effort", info->reasoning.default_effort},
-            {"runtime", info->runtime},
-            {"runtime_available", deps.coordinator.registry().has_factory(info->runtime)},
-            {"modality", info->modality},
-            {"capabilities", info->capabilities},
-            {"prompt_price_per_million", info->prompt_price_per_million
-                ? nlohmann::json(*info->prompt_price_per_million) : nlohmann::json(nullptr)},
-            {"completion_price_per_million", info->completion_price_per_million
-                ? nlohmann::json(*info->completion_price_per_million) : nlohmann::json(nullptr)},
-            {"loaded", resident != residency.end()},
-            {"inferdeck", {
-                {"runtime", info->runtime},
-                {"runtime_available", deps.coordinator.registry().has_factory(info->runtime)},
-                {"modality", info->modality},
-                {"capabilities", info->capabilities},
-                {"reasoning", reasoning},
-                {"alias_contract", {
-                    {"target", alias.target},
-                    {"required_context_size", alias.required_context_size},
-                    {"required_capabilities", alias.required_capabilities},
-                }},
-            }},
         });
     }
     nlohmann::json body = {
@@ -682,9 +624,8 @@ bool maintenance_mode_active(const GatewayDeps& deps) noexcept {
 }
 
 ComputeResource model_compute_resource(const model::ModelInfo& info) noexcept {
-    return info.modality != "text" && info.vram_required_mb <= 0
-        ? ComputeResource::Cpu
-        : ComputeResource::Gpu;
+    return info.compute == model::ModelCompute::Cpu
+        ? ComputeResource::Cpu : ComputeResource::Gpu;
 }
 
 bool maintenance_blocks_model(const GatewayDeps& deps,
@@ -777,12 +718,14 @@ EnsureLoadedResult ensure_model_loaded(
     }
     if (!deps.auto_swap) {
         return {false, 503, "model_not_loaded",
-                "model not loaded; POST /v1/swap/to/" + model_name + " then retry",
+                "model not loaded; POST /api/inferdeck/v1/swap/to/" +
+                    model_name + " then retry",
                 foundation::ErrorCode::NotLoaded};
     }
 
     const auto info = deps.coordinator.registry().get_info_result(model_name);
-    if (info && info->modality != "text" && info->vram_required_mb <= 0) {
+    if (info && info->role != model::ModelRole::Conversation &&
+        info->compute == model::ModelCompute::Cpu) {
         if (!deps.coordinator.registry().has_factory(info->runtime)) {
             return {false, 503, "runtime_unavailable",
                     "runtime is not linked: " + info->runtime,
@@ -878,10 +821,16 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
                         const GatewayDeps& deps) {
     (void)req;
     auto current = deps.coordinator.get_loaded_model();
+    const auto identities = deps.coordinator.identity_snapshot();
     const auto snap = deps.swap_tracker ? deps.swap_tracker->snapshot() : SwapSnapshot{};
     nlohmann::json body = {
         {"loaded_model", current ? *current : ""},
         {"loaded_models", deps.coordinator.get_loaded_models()},
+        {"identities", {
+            {"selected", identities.selected ? *identities.selected : ""},
+            {"resident", identities.resident},
+            {"executing", identities.executing},
+        }},
         {"residency", nlohmann::json::array()},
         {"vram_usage_mb", deps.coordinator.get_vram_usage()},
         {"vram_budget_mb", deps.coordinator.vram_budget_mb()},
@@ -901,6 +850,13 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
             {"name", resident.name},
             {"runtime", resident.runtime},
             {"modality", resident.modality},
+            {"role", resident.role},
+            {"compute", resident.compute},
+            {"residency_policy", resident.residency},
+            {"admission_pool", resident.admission_pool},
+            {"concurrency_limit", resident.concurrency_limit},
+            {"memory_required_mb", resident.memory_required_mb},
+            {"eviction_eligible", resident.eviction_eligible},
             {"slots", resident.slots},
             {"free_slots", resident.free_slots},
             {"active_requests", resident.active_requests},
@@ -912,537 +868,6 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
     write_json(resp, 200, body);
 }
 
-namespace {
-
-struct AcquiredChatSlot {
-    int slot_id{-1};
-    std::string reservation_key;
-    std::optional<std::uint64_t> voice_session_token;
-};
-
-std::optional<AcquiredChatSlot> acquire_chat_slot(
-    const httplib::Request& req, httplib::Response& resp,
-    const GatewayDeps& deps, const nlohmann::json& body,
-    const std::string& requested_model, const std::string& model_name) {
-    AcquiredChatSlot acquired;
-    acquired.reservation_key = request_client_key(req);
-    acquired.voice_session_token = deps.coordinator.hold_priority_session(
-        acquired.reservation_key, model_name);
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::minutes{5};
-    const std::function<bool()> cancelled = [&req] {
-        return req.is_connection_closed();
-    };
-    model::AcquireSlotOptions opts;
-    opts.timeout = std::chrono::minutes{5};
-    opts.block = true;
-    opts.priority = body.contains("priority") && body["priority"].is_number_integer()
-        ? std::clamp(body["priority"].get<int>(), -100, 100) : 0;
-    opts.reservation_key = acquired.reservation_key;
-    if (acquired.voice_session_token) opts.priority = 100;
-    opts.cancelled = cancelled;
-    opts.prepare = [&deps, &model_name, deadline, cancelled] {
-        auto loaded = ensure_model_loaded(deps, model_name, deadline, cancelled);
-        if (loaded.ok) return foundation::Ok();
-        return foundation::Err<void>(loaded.error_code, loaded.message);
-    };
-    auto slot = deps.coordinator.acquire_slot(model_name, opts);
-    if (slot) {
-        acquired.slot_id = *slot;
-        return acquired;
-    }
-    if (acquired.voice_session_token) {
-        deps.coordinator.complete_priority_session_hold(
-            acquired.reservation_key, *acquired.voice_session_token,
-            std::chrono::milliseconds{deps.voice_session_grace_ms});
-    }
-    int status = 503;
-    std::string code = "no_slots";
-    if (slot.error().code == foundation::ErrorCode::Timeout) {
-        code = "slot_timeout";
-    } else if (slot.error().code == foundation::ErrorCode::Cancelled) {
-        code = "cancelled";
-    } else if (slot.error().code == foundation::ErrorCode::NotFound) {
-        status = 404;
-        code = "model_not_loaded";
-    } else if (slot.error().code == foundation::ErrorCode::NotLoaded) {
-        code = "model_not_loaded";
-    }
-    resp.set_header("Retry-After",
-        slot.error().code == foundation::ErrorCode::NotLoaded
-            ? deps.default_swap_timeout_s : "1");
-    model::InferenceResult failed;
-    record_request(deps, requested_model, failed, status, -1, 0.0, 0, model_name);
-    write_error(resp, status, code, slot.error().message);
-    return std::nullopt;
-}
-
-void handle_non_stream_chat(
-    httplib::Response& resp, const GatewayDeps& deps,
-    const std::string& requested_model, const std::string& model_name,
-    int slot_id, const std::string& id,
-    const model::InferenceRequest& inference_request) {
-    model::InferenceResult result;
-    try {
-        auto predicted = deps.coordinator.predict(
-            model_name, slot_id, inference_request);
-        if (!predicted) {
-            const auto error = classify_inference_error(predicted.error().code);
-            LOG_ERROR("inference_failed",
-                      "model={} slot_id={} status={} code={} error={}",
-                      model_name, slot_id, error.status, error.code,
-                      predicted.error().message);
-            model::InferenceResult failed;
-            record_request(deps, requested_model, failed, error.status,
-                           slot_id, 0.0, 0, model_name);
-            write_error(resp, error.status, error.code,
-                        predicted.error().message);
-            return;
-        }
-        result = std::move(*predicted);
-    } catch (const std::exception& error) {
-        LOG_ERROR("predict_exception", "what={}", error.what());
-        model::InferenceResult failed;
-        record_request(deps, requested_model, failed, 500, slot_id,
-                       0.0, 0, model_name);
-        write_error(resp, 500, "inference_exception", error.what());
-        return;
-    } catch (...) {
-        LOG_ERROR("predict_unknown_exception", "");
-        model::InferenceResult failed;
-        record_request(deps, requested_model, failed, 500, slot_id,
-                       0.0, 0, model_name);
-        write_error(resp, 500, "inference_exception", "unknown exception");
-        return;
-    }
-    record_request(deps, requested_model, result, 200, slot_id,
-                   0.0, 0, model_name);
-    nlohmann::json message = {
-        {"role", "assistant"},
-        {"content", result.text},
-    };
-    if (!result.reasoning_text.empty()) {
-        message["reasoning_content"] = result.reasoning_text;
-    }
-    if (!result.tool_calls.empty()) {
-        message["tool_calls"] = nlohmann::json::array();
-        for (const auto& call : result.tool_calls) {
-            message["tool_calls"].push_back(tool_call_json(call));
-        }
-    }
-    const std::string finish_reason = !result.tool_calls.empty()
-        ? "tool_calls" : result.finish_reason;
-    write_json(resp, 200, {
-        {"id", id},
-        {"object", "chat.completion"},
-        {"created", std::time(nullptr)},
-        {"model", requested_model},
-        {"choices", nlohmann::json::array({{
-            {"index", 0},
-            {"message", message},
-            {"finish_reason", finish_reason},
-        }})},
-        {"usage", {
-            {"prompt_tokens", result.prompt_tokens},
-            {"prompt_tokens_details", {
-                {"cached_tokens", result.cached_prompt_tokens},
-            }},
-            {"completion_tokens", result.completion_tokens},
-            {"total_tokens", result.prompt_tokens + result.completion_tokens},
-        }},
-    });
-}
-
-} // namespace
-
-void handle_chat_completions(const httplib::Request& req, httplib::Response& resp,
-                             const GatewayDeps& deps) {
-    nlohmann::json body;
-    try {
-        body = nlohmann::json::parse(req.body);
-    } catch (const std::exception& e) {
-        write_error(resp, 400, "invalid_json", e.what());
-        return;
-    }
-    if (!body.contains("model") || !body["model"].is_string()) {
-        write_error(resp, 400, "missing_model", "request body must include 'model'");
-        return;
-    }
-    std::string requested_model = body["model"].get<std::string>();
-    if (requested_model.size() > 7 && requested_model.compare(requested_model.size() - 7, 7, ":latest") == 0) {
-        requested_model.resize(requested_model.size() - 7);
-    }
-
-    const auto resolved_model = resolve_model_name(deps, requested_model);
-    if (!resolved_model) {
-        write_error(resp, 404, "model_not_found", resolved_model.error().message);
-        return;
-    }
-    const std::string& model_name = resolved_model->resolved;
-    if (maintenance_blocks_model(deps, model_name)) {
-        write_error(resp, 503, "maintenance_mode",
-                    "measured model optimization is using the same compute resource");
-        return;
-    }
-    const auto model_info = deps.coordinator.registry().get_info_result(model_name);
-    if (!model_info) {
-        write_error(resp, 404, "model_not_found", model_info.error().message);
-        return;
-    }
-    if (!model_info->has_vision && chat_uses_vision(body)) {
-        write_error(resp, 400, "unsupported_capability",
-                    "model does not support image input: " + model_name);
-        return;
-    }
-    auto reasoning_effort = normalize_reasoning_request(body, *model_info);
-    if (!reasoning_effort) {
-        write_error(resp, 400, "invalid_request_error",
-                    reasoning_effort.error().message);
-        return;
-    }
-    if (body.contains("stream") && !body["stream"].is_boolean()) {
-        write_error(resp, 400, "invalid_request_error", "stream must be a boolean");
-        return;
-    }
-    const bool stream = body.value("stream", false);
-    if (body.contains("stream_options") && body["stream_options"].is_object() &&
-        body["stream_options"].contains("include_usage") &&
-        !body["stream_options"]["include_usage"].is_boolean()) {
-        write_error(resp, 400, "invalid_request_error",
-                    "stream_options.include_usage must be a boolean");
-        return;
-    }
-    const bool include_stream_usage = body.contains("stream_options") &&
-        body["stream_options"].is_object() &&
-        body["stream_options"].value("include_usage", false);
-    auto inference_request = make_inference_request(body);
-    if (!inference_request) {
-        write_error(resp, 400, "invalid_request_error",
-                    inference_request.error().message);
-        return;
-    }
-
-    auto acquired = acquire_chat_slot(
-        req, resp, deps, body, requested_model, model_name);
-    if (!acquired) return;
-    const int slot_id = acquired->slot_id;
-    const auto& reservation_key = acquired->reservation_key;
-    const auto& voice_session_token = acquired->voice_session_token;
-
-    const std::string id = make_id();
-    const std::string stream_model = requested_model;
-
-    std::function<void()> release_slot = [slot_id, &deps, model_name,
-                                          reservation_key,
-                                          voice_session_token]() noexcept {
-        if (slot_id >= 0) {
-            (void)deps.coordinator.release_slot(model_name, slot_id);
-        }
-        if (voice_session_token) {
-            deps.coordinator.complete_priority_session_hold(
-                reservation_key, *voice_session_token,
-                std::chrono::milliseconds{deps.voice_session_grace_ms});
-        }
-    };
-    struct ReleaseGuard {
-        std::function<void()>* fn;
-        bool armed{true};
-        void disarm() { armed = false; }
-        ~ReleaseGuard() { if (armed && fn) (*fn)(); }
-    } guard{&release_slot};
-
-    if (!stream) {
-        handle_non_stream_chat(resp, deps, requested_model, model_name,
-                               slot_id, id, *inference_request);
-        return;
-    }
-
-    resp.set_header("Content-Type", "text/event-stream");
-    resp.set_header("Cache-Control", "no-cache");
-    resp.set_header("Connection", "keep-alive");
-
-    struct StreamState {
-        std::mutex mtx;
-        std::condition_variable cv;
-        std::deque<model::InferenceDelta> delta_queue;
-        std::size_t pending_bytes{0};
-        bool inference_done{false};
-        bool inference_error{false};
-        foundation::ErrorCode error_code{foundation::ErrorCode::Internal};
-        std::string error_msg;
-        std::shared_ptr<model::InferenceResult> final_result;
-        std::atomic<bool> aborted{false};
-        std::thread inference_thread;
-        int slot_id{-1};
-        std::string model_name;
-        std::string requested_model;
-        model::BackendCoordinator* coordinator{nullptr};
-        observability::Metrics* metrics{nullptr};
-        observability::StatsDb* stats_db{nullptr};
-        foundation::EventBus* events{nullptr};
-        std::atomic<bool> cleanup_done{false};
-        std::string reservation_key;
-        std::uint64_t voice_session_token{0};
-        int voice_session_grace_ms{0};
-        InferenceDeltaUtf8Buffer utf8;
-
-        void finish_once(bool aborted_stream, int fallback_status, const std::string& reason) {
-            bool expected = false;
-            if (!cleanup_done.compare_exchange_strong(expected, true)) return;
-            if (aborted_stream) {
-                aborted.store(true);
-            }
-            cv.notify_all();
-            if (inference_thread.joinable()) {
-                if (inference_thread.get_id() == std::this_thread::get_id()) {
-                    inference_thread.detach();
-                } else {
-                    inference_thread.join();
-                }
-            }
-
-            std::shared_ptr<model::InferenceResult> result;
-            bool error = false;
-            {
-                std::lock_guard<std::mutex> lk(mtx);
-                result = final_result;
-                error = inference_error;
-            }
-
-            int status = fallback_status;
-            if (result && !aborted_stream && !error) {
-                status = 200;
-                record_request(metrics, stats_db, events, requested_model, *result, status, slot_id,
-                               0.0, 0, model_name);
-            } else {
-                model::InferenceResult failed;
-                status = aborted_stream ? 499
-                       : (error && fallback_status < 400 ? 500 : fallback_status);
-                record_request(metrics, stats_db, events, requested_model, failed, status, slot_id,
-                               0.0, 0, model_name);
-            }
-
-            LOG_INFO("stream_recorded", "model={} slot_id={} status={} reason={}",
-                     model_name, slot_id, status, reason);
-            if (coordinator) {
-                auto released = coordinator->release_slot(model_name, slot_id);
-                if (!released) {
-                    LOG_WARN("stream_cleanup_release_failed", "model={} slot_id={} reason={}",
-                             model_name, slot_id, released.error().message);
-                }
-                if (voice_session_token != 0) {
-                    coordinator->complete_priority_session_hold(
-                        reservation_key, voice_session_token,
-                        std::chrono::milliseconds{voice_session_grace_ms});
-                }
-            }
-            LOG_INFO("stream_cleanup", "model={} slot_id={} aborted={} reason={}",
-                     model_name, slot_id, aborted_stream, reason);
-        }
-    };
-
-    auto state = std::make_shared<StreamState>();
-    state->slot_id = slot_id;
-    state->model_name = model_name;
-    state->requested_model = requested_model;
-    state->coordinator = &deps.coordinator;
-    state->metrics = deps.metrics;
-    state->stats_db = deps.stats_db;
-    state->events = deps.events;
-    state->reservation_key = reservation_key;
-    state->voice_session_token = voice_session_token.value_or(0);
-    state->voice_session_grace_ms = deps.voice_session_grace_ms;
-
-    state->inference_thread = std::thread(
-        [state, ir = std::move(*inference_request)]() {
-        try {
-            auto result = state->coordinator->predict_stream(
-                state->model_name, state->slot_id, ir,
-                [state](const model::InferenceDelta& delta) -> bool {
-                    if (state->aborted.load()) return false;
-                    {
-                        const auto bytes = delta_size(delta);
-                        std::unique_lock<std::mutex> lk(state->mtx);
-                        state->cv.wait(lk, [state, bytes] {
-                            const bool byte_capacity =
-                                state->delta_queue.empty() ||
-                                (bytes <= max_pending_stream_bytes &&
-                                 state->pending_bytes <=
-                                     max_pending_stream_bytes - bytes);
-                            return state->aborted.load() ||
-                                   (state->delta_queue.size() <
-                                        max_pending_stream_deltas &&
-                                    byte_capacity);
-                        });
-                        if (state->aborted.load()) return false;
-                        state->delta_queue.push_back(delta);
-                        state->pending_bytes += bytes;
-                    }
-                    state->cv.notify_one();
-                    return !state->aborted.load();
-                },
-            &state->aborted);
-            {
-                std::lock_guard<std::mutex> lk(state->mtx);
-                if (result) {
-                    state->final_result = std::make_shared<model::InferenceResult>(std::move(*result));
-                } else {
-                    state->inference_error = true;
-                    state->error_code = result.error().code;
-                    state->error_msg = result.error().message;
-                }
-                state->inference_done = true;
-            }
-            state->cv.notify_all();
-        } catch (const std::exception& e) {
-            LOG_ERROR("inference_thread_exception", "model={} slot_id={} what={}",
-                      state->model_name, state->slot_id, e.what());
-            std::lock_guard<std::mutex> lk(state->mtx);
-            state->inference_error = true;
-            state->error_msg = e.what();
-            state->inference_done = true;
-            state->cv.notify_all();
-        } catch (...) {
-            LOG_ERROR("inference_thread_exception", "model={} slot_id={} what=unknown",
-                      state->model_name, state->slot_id);
-            std::lock_guard<std::mutex> lk(state->mtx);
-            state->inference_error = true;
-            state->error_msg = "unknown exception";
-            state->inference_done = true;
-            state->cv.notify_all();
-        }
-    });
-    guard.disarm();
-
-    resp.set_chunked_content_provider(
-        "text/event-stream",
-        [id, stream_model, state, include_stream_usage](
-            std::size_t, httplib::DataSink& sink) mutable {
-            try {
-            std::unique_lock<std::mutex> lk(state->mtx);
-
-            while (!state->cv.wait_for(lk, std::chrono::seconds{2}, [&] {
-                return !state->delta_queue.empty() || state->inference_done || state->aborted.load();
-            })) {
-                lk.unlock();
-                if (!sink.write(": \n\n", 4)) {
-                    LOG_WARN("stream_abort", "model={} slot_id={} reason=heartbeat_write_failed",
-                             state->model_name, state->slot_id);
-                    state->finish_once(true, 499, "heartbeat_write_failed");
-                    return false;
-                }
-                lk.lock();
-            }
-
-            if (state->aborted.load() && !state->inference_done && state->delta_queue.empty()) {
-                lk.unlock();
-                LOG_WARN("stream_abort", "model={} slot_id={} reason=aborted",
-                         state->model_name, state->slot_id);
-                state->finish_once(true, 499, "aborted");
-                return false;
-            }
-
-            if (!state->delta_queue.empty()) {
-                std::deque<model::InferenceDelta> deltas;
-                while (!state->delta_queue.empty()) {
-                    state->pending_bytes -= delta_size(state->delta_queue.front());
-                    deltas.push_back(std::move(state->delta_queue.front()));
-                    state->delta_queue.pop_front();
-                }
-                lk.unlock();
-                state->cv.notify_all();
-
-                if (!sink.is_writable()) {
-                    LOG_WARN("stream_abort", "model={} slot_id={} reason=sink_not_writable",
-                             state->model_name, state->slot_id);
-                    state->finish_once(true, 499, "sink_not_writable");
-                    return false;
-                }
-
-                for (const auto& delta : deltas) {
-                    auto json_delta = delta_json(state->utf8.on_delta(delta));
-                    if (json_delta.empty()) continue;
-                    std::string out = sse_chunk_json(id, stream_model, json_delta);
-                    if (!sink.write(out.data(), out.size())) {
-                        LOG_WARN("stream_abort", "model={} slot_id={} reason=chunk_write_failed",
-                                 state->model_name, state->slot_id);
-                        state->finish_once(true, 499, "chunk_write_failed");
-                        return false;
-                    }
-                }
-                return true;
-            }
-
-            const bool inference_error = state->inference_error;
-            const auto error_code = state->error_code;
-            const std::string error_msg = state->error_msg;
-            const auto final_result = state->final_result;
-            lk.unlock();
-
-            auto trailing_delta = delta_json(state->utf8.finish());
-            if (!trailing_delta.empty()) {
-                std::string out = sse_chunk_json(id, stream_model, trailing_delta);
-                if (!sink.write(out.data(), out.size())) {
-                    LOG_WARN("stream_abort", "model={} slot_id={} reason=trailing_chunk_write_failed",
-                             state->model_name, state->slot_id);
-                    state->finish_once(true, 499, "trailing_chunk_write_failed");
-                    return false;
-                }
-            }
-
-            if (inference_error) {
-                const auto ec = classify_inference_error(error_code);
-                LOG_ERROR("inference_failed",
-                          "model={} slot_id={} status={} code={} error={}",
-                          state->model_name, state->slot_id, ec.status, ec.code, error_msg);
-                auto error = make_error_json(ec.status, ec.code, error_msg);
-                error["error"]["type"] = ec.type;
-                std::string err = "data: " + dump_json(error) +
-                    "\n\ndata: [DONE]\n\n";
-                if (!sink.write(err.data(), err.size())) {
-                    LOG_WARN("stream_abort", "model={} slot_id={} reason=error_write_failed",
-                             state->model_name, state->slot_id);
-                    state->finish_once(true, 499, "error_write_failed");
-                    return false;
-                }
-                state->finish_once(false, ec.status, "inference_error");
-            } else {
-                const bool has_tool_calls = final_result && !final_result->tool_calls.empty();
-                const std::string finish_reason = has_tool_calls ? "tool_calls" :
-                    (final_result ? final_result->finish_reason : "stop");
-                std::string done = sse_done(id, stream_model, finish_reason,
-                    include_stream_usage && final_result ? final_result.get() : nullptr);
-                if (!sink.write(done.data(), done.size())) {
-                    LOG_WARN("stream_abort", "model={} slot_id={} reason=done_write_failed",
-                             state->model_name, state->slot_id);
-                    state->finish_once(true, 499, "done_write_failed");
-                    return false;
-                }
-                state->finish_once(false, 200, "completed");
-            }
-            sink.done();
-            return false;
-            } catch (const std::exception& e) {
-                LOG_ERROR("stream_provider_exception", "model={} slot_id={} what={}",
-                          state->model_name, state->slot_id, e.what());
-                state->finish_once(true, 500, "provider_exception");
-                return false;
-            } catch (...) {
-                LOG_ERROR("stream_provider_unknown_exception", "model={} slot_id={}",
-                          state->model_name, state->slot_id);
-                state->finish_once(true, 500, "provider_unknown_exception");
-                return false;
-            }
-        },
-        [state](bool success) {
-            if (!success) {
-                LOG_WARN("stream_abort", "model={} slot_id={} reason=resource_releaser",
-                         state->model_name, state->slot_id);
-                state->finish_once(true, 499, "resource_releaser");
-            } else {
-                state->finish_once(false, 200, "resource_releaser_success");
-            }
-        });
-}
+#include "chat_routes.ipp"
 
 } // namespace inferdeck::gateway

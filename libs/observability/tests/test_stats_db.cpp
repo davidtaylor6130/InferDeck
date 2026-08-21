@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <filesystem>
 #include <limits>
 #include <thread>
 #include <sqlite3.h>
@@ -121,6 +122,16 @@ TEST_CASE("StatsDb: existing token ledger is migrated without losing history",
 
   StatsDb migrated(path);
   REQUIRE(migrated.healthy());
+  CHECK(std::filesystem::exists(path + ".backup-v0"));
+  sqlite3* migrated_raw = nullptr;
+  REQUIRE(sqlite3_open(path.c_str(), &migrated_raw) == SQLITE_OK);
+  sqlite3_stmt* version = nullptr;
+  REQUIRE(sqlite3_prepare_v2(migrated_raw, "PRAGMA user_version;", -1,
+                             &version, nullptr) == SQLITE_OK);
+  REQUIRE(sqlite3_step(version) == SQLITE_ROW);
+  CHECK(sqlite3_column_int(version, 0) == 2);
+  sqlite3_finalize(version);
+  sqlite3_close(migrated_raw);
   const auto rows = migrated.recent_requests(10);
   REQUIRE(rows.size() == 1);
   CHECK(rows[0].model == "historic-llm");
@@ -228,6 +239,20 @@ TEST_CASE("StatsDb: zero-day daily usage returns all-time resolution",
   }));
 }
 
+TEST_CASE("StatsDb: billing buckets use UTC across daylight-saving boundaries",
+          "[observability][stats][usage-range][utc]") {
+  StatsDb db(":memory:");
+  REQUIRE(db.healthy());
+  db.record_request({1787009400000LL, "boundary-model", 100, 50,
+                     0.0, 0.0, 200, -1});
+  const auto daily = db.daily_usage(0);
+  const auto hourly = db.hourly_usage(24 * 365 * 100);
+  REQUIRE(daily.size() == 1);
+  REQUIRE(hourly.size() == 1);
+  CHECK(daily[0].bucket == "2026-08-17");
+  CHECK(hourly[0].bucket == "2026-08-17T23");
+}
+
 TEST_CASE("StatsDb: request rows are sanitized before persistence", "[observability][stats]") {
   const auto dir = test_helpers::make_temp_dir("statsdb_sanitize");
   const auto path = (dir / "stats.db").string();
@@ -301,4 +326,112 @@ TEST_CASE("StatsDb: close on destruction", "[observability][stats]") {
   REQUIRE(db2.healthy());
   db2.record_request({1, "x", 1, 1, 1.0, 1.0, 200, 0});
   REQUIRE(db2.recent_requests(10).size() == 1);
+}
+
+TEST_CASE("StatsDb: canonical request dimensions round-trip",
+          "[observability][stats][canonical]") {
+  StatsDb db(":memory:");
+  REQUIRE(db.healthy());
+  RequestRow row;
+  row.timestamp_unix_ms = 1234;
+  row.model = "alias";
+  row.resolved_model = "real-model";
+  row.request_id = "req-canonical";
+  row.principal_class = "openai_data_plane";
+  row.endpoint = "/v1/chat/completions";
+  row.protocol_profile = "strict_openai";
+  row.modality = "text";
+  row.stream = true;
+  row.finish_code = "stop";
+  row.error_code = "";
+  row.prompt_tokens = 100;
+  row.cached_prompt_tokens = 75;
+  row.cache_write_tokens = 25;
+  row.completion_tokens = 20;
+  row.reasoning_tokens = 5;
+  row.queue_duration_ms = 2.0;
+  row.swap_load_duration_ms = 3.0;
+  row.prompt_duration_ms = 4.0;
+  row.generation_duration_ms = 5.0;
+  row.first_token_duration_ms = 6.0;
+  row.duration_ms = 20.0;
+  row.tokens_per_second = 4000.0;
+  row.prompt_tokens_per_second = 6250.0;
+  row.status_code = 200;
+  row.slot_id = 1;
+  row.input_audio_seconds = 7.0;
+  row.output_audio_seconds = 8.0;
+  row.input_characters = 9;
+  row.input_image_count = 10;
+  row.output_image_count = 11;
+  db.record_request(row);
+
+  const auto rows = db.recent_requests(1);
+  REQUIRE(rows.size() == 1);
+  CHECK(rows[0].request_id == row.request_id);
+  CHECK(rows[0].principal_class == row.principal_class);
+  CHECK(rows[0].endpoint == row.endpoint);
+  CHECK(rows[0].protocol_profile == row.protocol_profile);
+  CHECK(rows[0].modality == row.modality);
+  CHECK(rows[0].stream);
+  CHECK(rows[0].finish_code == row.finish_code);
+  CHECK(rows[0].cache_write_tokens == 25);
+  CHECK(rows[0].reasoning_tokens == 5);
+  CHECK(rows[0].queue_duration_ms == Catch::Approx(2.0));
+  CHECK(rows[0].swap_load_duration_ms == Catch::Approx(3.0));
+  CHECK(rows[0].first_token_duration_ms == Catch::Approx(6.0));
+  CHECK(rows[0].output_audio_seconds == Catch::Approx(8.0));
+  CHECK(rows[0].input_image_count == 10);
+  CHECK(rows[0].output_image_count == 11);
+}
+
+TEST_CASE("StatsDb: failed schema migration rolls back",
+          "[observability][stats][migration][rollback]") {
+  const auto dir = test_helpers::make_temp_dir("statsdb_migrate_rollback");
+  const auto path = (dir / "stats.db").string();
+  sqlite3* raw = nullptr;
+  REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+  REQUIRE(sqlite3_exec(raw,
+      "CREATE VIEW requests AS SELECT 1 AS id; PRAGMA user_version=1;",
+      nullptr, nullptr, nullptr) == SQLITE_OK);
+  sqlite3_close(raw);
+
+  StatsDb failed(path);
+  CHECK_FALSE(failed.healthy());
+  REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+  sqlite3_stmt* stmt = nullptr;
+  REQUIRE(sqlite3_prepare_v2(raw,
+      "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='swaps';",
+      -1, &stmt, nullptr) == SQLITE_OK);
+  REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+  CHECK(sqlite3_column_int(stmt, 0) == 0);
+  sqlite3_finalize(stmt);
+  sqlite3_close(raw);
+}
+
+TEST_CASE("StatsDb: recent requests filter by profile and endpoint",
+          "[observability][stats][filters]") {
+  StatsDb db(":memory:");
+  RequestRow strict;
+  strict.timestamp_unix_ms = 1;
+  strict.model = "strict";
+  strict.protocol_profile = "strict_openai";
+  strict.endpoint = "/v1/chat/completions";
+  db.record_request(strict);
+  RequestRow derivative;
+  derivative.timestamp_unix_ms = 2;
+  derivative.model = "derivative";
+  derivative.protocol_profile = "openai_derivative";
+  derivative.endpoint = "/compat/openai-derivative/v1/responses";
+  db.record_request(derivative);
+
+  const auto strict_rows = db.recent_requests(10, "strict_openai", {});
+  REQUIRE(strict_rows.size() == 1);
+  CHECK(strict_rows[0].model == "strict");
+  const auto response_rows = db.recent_requests(
+      10, {}, "/compat/openai-derivative/v1/responses");
+  REQUIRE(response_rows.size() == 1);
+  CHECK(response_rows[0].model == "derivative");
+  CHECK(db.recent_requests(10, "strict_openai",
+      "/compat/openai-derivative/v1/responses").empty());
 }

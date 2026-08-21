@@ -87,7 +87,7 @@ including WAVE_FORMAT_EXTENSIBLE, and returns `json`, `text`, `verbose_json`,
 the Open WebUI default. Parakeet remains available with automatic language
 detection across 25 European languages, punctuation, and capitalization. Image
 and transcription callbacks publish progress; active media jobs can be
-cancelled through the dashboard or `POST /api/media/jobs/:id/cancel`.
+cancelled through the dashboard or `POST /api/inferdeck/v1/media/jobs/:id/cancel`.
 
 The dashboard is an administration surface only. It does not capture a
 microphone, transcribe recordings, synthesize speech, or play audio. Voice
@@ -114,17 +114,19 @@ DEFAULT_MODELS=gemma-4-31b
 ```
 
 Use the InferDeck LAN address instead of `host.docker.internal` when Open WebUI
-runs on another machine. Supertonic accepts `M1` through `M5`, `F1` through
-`F5`, numeric speaker IDs, and standard OpenAI voice aliases. InferDeck returns
-WAV; Open WebUI detects the content type and handles browser delivery. Leave
+runs on another machine. Supertonic accepts the standard OpenAI voice names,
+`M1` through `M5`, `F1` through `F5`, and numeric speaker IDs when the loaded
+model has the corresponding speakers. The configured one-style Supertonic model
+maps every standard OpenAI voice name to that single local style. Leave
 Open WebUI audio preprocessing enabled so browser WebM or Ogg recordings are
 converted to MP3 before InferDeck receives them. InferDeck accepts that MP3
 upload as well as direct RIFF/WAVE input. Select `gemma-4-31b` as the
 conversation model; it is also the repository default.
 Its configured context is Gemma 4 31B's full 262,144-token window.
 Open WebUI 0.11.0 requests MP3 from OpenAI-compatible TTS providers. InferDeck's
-native speech runtimes accept that request and return `audio/wav`; Open WebUI
-uses the response content type to transcode the audio into its MP3 cache.
+native speech runtimes reject explicit MP3 output with
+`unsupported_response_format`; configure `response_format` as `wav` until a
+native in-process MP3 encoder is available.
 On an existing Open WebUI installation, these settings may already be persisted
 in its database; update them in the Admin settings if changed environment
 variables do not take effect after a restart.

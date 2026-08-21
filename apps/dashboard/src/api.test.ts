@@ -20,8 +20,7 @@ afterEach(() => {
 describe('getModels', () => {
   it('normalizes loaded residency fields while preserving registry metadata', async () => {
     respondWith({
-      object: 'list',
-      data: [{
+      models: [{
         id: 'qwen3.6-27b',
         family: 'qwen3.6',
         runtime: 'llama_cpp',
@@ -30,7 +29,7 @@ describe('getModels', () => {
         capabilities: ['chat'],
         context_size: 65_536,
         vram_required_mb: 24_000,
-        n_slots: 4,
+        n_slots: 2,
         has_vision: false,
         loaded: true,
         optimization: {
@@ -41,17 +40,10 @@ describe('getModels', () => {
           single_tokens_per_second: 50.16,
           parallel_tokens_per_second: 51.24,
         },
-        inferdeck: {
-          residency: {
-            loaded: true,
-            primary: true,
-            slots: 2,
-            free_slots: 1,
-            active_requests: 1,
-            estimated_vram_mb: 23_500,
-            resizing: true,
-          },
-        },
+        primary: true,
+        free_slots: 1,
+        active_requests: 1,
+        resizing: true,
       }],
     });
 
@@ -86,7 +78,7 @@ describe('getModels', () => {
 
   it('keeps configured slots and registry metadata for an unloaded entry', async () => {
     respondWith({
-      data: [{
+      models: [{
         id: 'whisper-base-en',
         runtime: 'whisper_cpp',
         runtime_available: true,
@@ -97,16 +89,10 @@ describe('getModels', () => {
         n_slots: 3,
         has_vision: false,
         loaded: false,
-        inferdeck: {
-          residency: {
-            loaded: false,
-            primary: false,
-            slots: 0,
-            free_slots: 0,
-            active_requests: 0,
-            resizing: false,
-          },
-        },
+        primary: false,
+        free_slots: 0,
+        active_requests: 0,
+        resizing: false,
       }],
     });
 
@@ -245,7 +231,7 @@ describe('profile optimization', () => {
     expect(result.recommended.contextPerSlot).toBe(100_000);
     const fetchMock = vi.mocked(fetch);
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/optimize/profile',
+      '/api/inferdeck/v1/optimize/profile',
       expect.objectContaining({
         method: 'POST',
         body: expect.stringContaining('"contextPerSlot":100000'),
@@ -292,7 +278,7 @@ describe('profile optimization', () => {
     const fetchMock = vi.mocked(fetch);
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      '/api/optimize/benchmark',
+      '/api/inferdeck/v1/optimize/benchmark',
       expect.objectContaining({
         method: 'POST',
         body: expect.stringContaining('"candidateLimit":3'),
@@ -300,12 +286,12 @@ describe('profile optimization', () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      '/api/optimize/benchmark',
+      '/api/inferdeck/v1/optimize/benchmark',
       expect.objectContaining({ headers: { Accept: 'application/json' } }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      '/api/optimize/benchmark/cancel',
+      '/api/inferdeck/v1/optimize/benchmark/cancel',
       expect.objectContaining({ method: 'POST' }),
     );
   });

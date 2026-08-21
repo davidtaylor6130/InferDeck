@@ -42,7 +42,7 @@ if ($existing) {
 $listener = Get-InferDeckListenerIdentity
 if ($listener) {
     Assert-InferDeckListenerOwner -Identity $listener -ExpectedExecutable $exe
-    throw "The expected InferDeck executable already owns port 11434 but did not pass /v1/health."
+    throw "The expected InferDeck executable already owns port 11434 but did not pass /api/inferdeck/v1/health."
 }
 
 Set-Location $root

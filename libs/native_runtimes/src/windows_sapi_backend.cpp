@@ -185,6 +185,38 @@ public:
         return foundation::Ok();
     }
 
+    foundation::Result<void> validate_speech_request(
+        const model::SpeechRequest& request) override {
+        if (request.format != "wav" && request.format != "pcm") {
+            return foundation::Err<void>(
+                foundation::ErrorCode::InvalidArgument,
+                "Windows speech runtime supports wav and pcm responses");
+        }
+        if (!std::isfinite(request.speed) || request.speed < 0.25f ||
+            request.speed > 4.0f) {
+            return foundation::Err<void>(
+                foundation::ErrorCode::InvalidArgument,
+                "speech speed must be finite and between 0.25 and 4");
+        }
+        auto text = utf8_to_wide(request.input);
+        if (!text) return foundation::Result<void>(std::unexpect, text.error());
+        ComApartment apartment;
+        if (!apartment.available()) {
+            return foundation::Err<void>(
+                foundation::ErrorCode::Unavailable,
+                "Windows speech COM initialization failed");
+        }
+        ComPtr<ISpVoice> voice;
+        if (FAILED(CoCreateInstance(
+                CLSID_SpVoice, nullptr, CLSCTX_INPROC_SERVER,
+                __uuidof(ISpVoice), reinterpret_cast<void**>(voice.put())))) {
+            return foundation::Err<void>(
+                foundation::ErrorCode::Unavailable,
+                "Windows speech voice is unavailable");
+        }
+        return select_voice(*voice.get(), request.voice);
+    }
+
     foundation::Result<model::AudioResult> synthesize(
         int, const model::SpeechRequest& request,
         const std::function<bool(const std::byte*, std::size_t)>& stream) override {
@@ -341,6 +373,10 @@ public:
         result.content_type = request.format == "wav" ? "audio/wav" : "audio/pcm";
         result.duration_ms = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - started).count();
+        result.output_audio_seconds = sample_rate > 0
+            ? static_cast<double>(stats.cbSize.QuadPart) /
+                (sample_rate * sizeof(std::int16_t))
+            : 0.0;
         foundation::LOG_INFO("windows_sapi_audio_ready",
                              "bytes={} duration_ms={:.2f}",
                              result.bytes.size(), result.duration_ms);

@@ -1,1 +1,2 @@
 * text=auto eol=lf
+tests/fixtures/*.sse text eol=lf whitespace=-blank-at-eof

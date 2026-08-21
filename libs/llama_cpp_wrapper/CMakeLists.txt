@@ -8,6 +8,7 @@ endif()
 
 add_library(llama_cpp_wrapper STATIC
     src/llama_cpp_model.cpp
+    src/llama_chat_adapter.cpp
     src/continuous_batch_scheduler.cpp
 )
 
@@ -41,7 +42,7 @@ else()
 endif()
 
 if(WIN32)
-    target_link_libraries(llama_cpp_wrapper PUBLIC psapi dxgi)
+    target_link_libraries(llama_cpp_wrapper PRIVATE psapi dxgi)
 endif()
 
 if(INFERDECK_BUILD_TESTS)

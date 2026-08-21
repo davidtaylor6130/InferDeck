@@ -18,6 +18,29 @@ struct RequestRecord {
   double tokens_per_second{};
   int status_code{};
   int slot_id{-1};
+  double input_audio_seconds{};
+  std::int64_t input_characters{};
+  int cached_prompt_tokens{};
+  double generation_duration_ms{};
+  double prompt_duration_ms{};
+  double prompt_tokens_per_second{};
+  std::string resolved_model;
+  std::string request_id;
+  std::string principal_class;
+  std::string endpoint;
+  std::string protocol_profile;
+  std::string modality;
+  bool stream{};
+  std::string finish_code;
+  std::string error_code;
+  int cache_write_tokens{};
+  int reasoning_tokens{};
+  double queue_duration_ms{};
+  double swap_load_duration_ms{};
+  double first_token_duration_ms{};
+  double output_audio_seconds{};
+  int input_image_count{};
+  int output_image_count{};
 };
 
 struct SwapRecord {

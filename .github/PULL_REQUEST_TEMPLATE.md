@@ -1,28 +1,61 @@
-## Summary
+## Outcome
 
-Brief description of the changes.
+State the user-visible result and the behavior that is now proven.
 
-## Related Issues
+## Scope and tracking
 
-Closes # (issue number)
+- Overhaul phase:
+- Closes:
+- Depends on:
+- ADR:
+- Explicitly out of scope:
 
-## Changes
+## Architecture impact
 
-- 
-- 
-- 
+- [ ] Core remains one native executable with no subprocess or proxy runtime.
+- [ ] `/v1` changes conform only to the pinned OpenAI contract.
+- [ ] Backends receive typed domain objects, not HTTP or protocol JSON.
+- [ ] Validation finishes before admission, loading, swapping, or slot acquisition.
+- [ ] Runtime work uses coordinator admission, cancellation, shutdown, and metrics.
+- [ ] No untrusted request field controls scheduler priority.
+- [ ] Unsupported behavior returns a deterministic OpenAI-shaped error.
 
-## Testing
+Describe every changed invariant, or state why this change cannot affect it.
 
-- [ ] `pnpm typecheck` passes
-- [ ] `pnpm test` passes
-- [ ] `pnpm lint` passes
-- [ ] Manual testing completed
+## Contract and control-plane impact
 
-## Screenshots (if applicable)
+- OpenAI endpoints, schemas, errors, and SSE framing:
+- `/api/inferdeck/v1` administration and authorization:
+- Compatibility profiles or client migration:
 
-Attach screenshots of UI changes.
+## Resource and lifecycle impact
 
-## Notes
+- Compute and model roles:
+- Residency, slots, deadlines, and cancellation:
+- Startup, shutdown, failure, and rollback behavior:
 
-Any additional context or deployment notes.
+## Security and data impact
+
+- Authentication, authorization, bind address, CORS, and secrets:
+- Configuration, database, telemetry, pricing, and data migrations:
+
+## Verification evidence
+
+- [ ] Focused unit tests
+- [ ] Applicable integration and OpenAI contract tests
+- [ ] Architecture checks
+- [ ] Release gateway build
+- [ ] Dashboard tests and build, or not applicable
+- [ ] Documentation and route inventory truth check
+- [ ] Reviewed diff excludes unrelated work
+- [ ] Deployment and live-path evidence, or not applicable
+
+Commands, results, logs, screenshots, and fixture references:
+
+## Authorization gates
+
+- [ ] No tracked files or user data are moved or deleted.
+- [ ] No live `C:\InferDeck` state is changed.
+
+If either box cannot be checked, link the owner's explicit authorization and
+describe the exact targets, preservation method, and rollback path.

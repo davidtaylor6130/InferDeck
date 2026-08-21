@@ -22,7 +22,13 @@ const tools = [
       description: "Read a file from the workspace and return its contents",
       parameters: {
         type: "object",
-        properties: { path: { type: "string", description: "workspace-relative path" } },
+        properties: {
+          path: {
+            type: "string",
+            enum: REQUIRED_FILES,
+            description: "workspace-relative path",
+          },
+        },
         required: ["path"],
       },
     },
@@ -44,12 +50,26 @@ const tools = [
 const fakeToolResult = (name, args) => {
   if (name === "list_files") {
     const dir = args.dir.replaceAll("\\", "/").replace(/\/+$/, "");
-    return JSON.stringify(dir === "src" ? REQUIRED_FILES : []);
+    return JSON.stringify({
+      files: dir === "src" ? REQUIRED_FILES : [],
+      instruction: "Call read_file once for every listed file before answering.",
+    });
   }
   if (name === "read_file") {
     const path = args.path.replaceAll("\\", "/").replace(/^\.\/+/, "");
-    if (path === "src/main.c") return '#include "util.h"\nint main(void) { return answer(); }\n';
-    if (path === "src/util.c") return "int answer(void) { return 42; }\n";
+    const content = path === "src/main.c"
+      ? '#include "util.h"\nint main(void) { return answer(); }\n'
+      : path === "src/util.c"
+        ? "int answer(void) { return 42; }\n"
+        : null;
+    if (content !== null) {
+      return JSON.stringify({
+        path,
+        content,
+        remaining: REQUIRED_FILES.filter((file) => !taskState.readFiles.has(file)),
+        instruction: "Read every remaining file before answering.",
+      });
+    }
     return JSON.stringify({ error: `file not found: ${path}` });
   }
   return JSON.stringify({ error: `unknown tool: ${name}` });
@@ -81,6 +101,8 @@ async function streamOnce(iter) {
         tools,
         stream: true,
         max_tokens: MAX_TOKENS,
+        temperature: 0,
+        top_p: 1,
       }),
       signal: deadline.signal,
     });

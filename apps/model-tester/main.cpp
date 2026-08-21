@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
     if (s1.has_value() && s2.has_value()) {
         InferenceRequest req;
         req.prompt = "hello";
-        req.max_tokens = 16;
+        req.max_output_tokens = 16;
         auto r1 = coord.predict("qwen3.6-27b", s1.value(), req);
         auto r2 = coord.predict("qwen3.6-27b", s2.value(), req);
         std::cout << "[model-tester] predict 1 ok=" << r1.has_value()

@@ -3,9 +3,12 @@ project(gateway LANGUAGES CXX)
 
 set(GATEWAY_SOURCES
     src/streaming_sanitizer.cpp
+    src/generation_session.cpp
     src/routes.cpp
+    src/openai_adapter.cpp
+    src/responses_adapter.cpp
+    src/openai_error.cpp
     src/openai_routes.cpp
-    src/anthropic_routes.cpp
     src/dashboard_routes.cpp
     src/metrics_builder.cpp
     src/model_store.cpp
@@ -13,6 +16,8 @@ set(GATEWAY_SOURCES
     src/media_routes.cpp
     src/profile_benchmark.cpp
     src/profile_benchmark_scheduler.cpp
+    src/config_repository.cpp
+    src/config_secrets.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})
@@ -32,6 +37,7 @@ target_link_libraries(gateway
         optimize
         nlohmann_json::nlohmann_json
         httplib::httplib
+    PRIVATE
         yaml-cpp::yaml-cpp
 )
 

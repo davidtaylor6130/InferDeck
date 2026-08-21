@@ -6,61 +6,24 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "foundation/result.hpp"
+#include "inference/domain.hpp"
 #include "model/ibackend.hpp"
 
 namespace inferdeck::model {
 
-inline constexpr int k_max_tokens_use_context_budget = -1;
+inline constexpr int k_max_tokens_use_context_budget =
+    inference::kUseContextBudget;
 
-struct ChatMessage {
-    std::string role{};
-    std::string content{};
-    std::string tool_call_id{};
-    std::string name{};
-};
+using ChatMessage = inference::Message;
+using ToolCall = inference::ToolCall;
+using ToolCallDelta = inference::ToolCallDelta;
+using InferenceRequest = inference::GenerationRequest;
 
-struct ToolCall {
-    std::string id{};
-    std::string type{"function"};
-    std::string function_name{};
-    std::string function_arguments{};
-};
-
-struct ToolCallDelta {
-    std::size_t index{0};
-    std::string id{};
-    std::string type{};
-    std::string function_name{};
-    std::string function_arguments{};
-};
-
-struct InferenceDelta {
-    std::string content{};
-    std::string reasoning_text{};
-    std::vector<ToolCallDelta> tool_calls{};
-};
-
-struct InferenceRequest {
-    std::string prompt{};
-    std::vector<ChatMessage> messages{};
-    std::string tools_json{};
-    std::string openai_body_json{};
-    int max_tokens{k_max_tokens_use_context_budget};
-    // Sampler params are optional so the server can tell an explicit client
-    // value apart from "unset" (issue #42). When unset, the server-side
-    // SamplingConfig default applies; when set, the client value wins.
-    std::optional<float> temperature{};
-    std::optional<float> top_p{};
-    std::optional<int> top_k{};
-    std::optional<float> repeat_penalty{};
-    std::optional<int> repeat_last_n{};
-    int seed{-1};
-    std::optional<std::string> tool_format{};
-    std::optional<std::string> grammar{};
-};
+using InferenceDelta = inference::GenerationDelta;
 
 struct ChatTemplateMeta {
     std::string thinking_start_tag;
@@ -69,25 +32,20 @@ struct ChatTemplateMeta {
     bool supports_thinking = false;
 };
 
-struct InferenceResult {
-    std::string text{};
-    std::string reasoning_text{};
-    std::string finish_reason{"stop"};
-    int prompt_tokens{0};
-    int cached_prompt_tokens{0};
-    int completion_tokens{0};
-    float duration_ms{0.0f};
-    float generation_duration_ms{0.0f};
-    float prompt_duration_ms{0.0f};
-    float tokens_per_second{0.0f};
-    int mtp_drafted_tokens{0};
-    int mtp_accepted_tokens{0};
-    std::vector<std::string> tool_calls_json{};
-    std::vector<ToolCall> tool_calls{};
+using InferenceResult = inference::GenerationResult;
+
+struct EmbeddingTextInput {
+    std::string text;
 };
 
+struct EmbeddingTokenInput {
+    std::vector<std::int32_t> tokens;
+};
+
+using EmbeddingInput = std::variant<EmbeddingTextInput, EmbeddingTokenInput>;
+
 struct EmbeddingRequest {
-    std::vector<std::string> inputs;
+    std::vector<EmbeddingInput> inputs;
     std::optional<int> dimensions{};
 };
 
@@ -124,6 +82,7 @@ struct AudioResult {
     std::vector<std::byte> bytes;
     std::string content_type;
     float duration_ms{0.0f};
+    double output_audio_seconds{0.0};
 };
 
 struct TranscriptionRequest {
@@ -163,6 +122,8 @@ public:
 class ISpeechBackend {
 public:
     virtual ~ISpeechBackend() = default;
+    virtual foundation::Result<void> validate_speech_request(
+        const SpeechRequest& request) = 0;
     virtual foundation::Result<AudioResult> synthesize(
         int slot_id, const SpeechRequest& request,
         const std::function<bool(const std::byte*, std::size_t)>& stream = {}) = 0;

@@ -1,12 +1,14 @@
 [
   {
-    "completion_price_per_million": 1.35,
+    "cached_prompt_price_per_million": 0,
+    "completion_price_per_million": 0,
     "currency": "USD",
     "equivalent_api_model": null,
     "model_name": "default",
-    "prompt_price_per_million": 0.55
+    "prompt_price_per_million": 0
   },
   {
+    "cached_prompt_price_per_million": 0.2,
     "completion_price_per_million": 0.6,
     "currency": "USD",
     "equivalent_api_model": "Nemotron-4-Mini-4B-Instruct",
@@ -14,14 +16,91 @@
     "prompt_price_per_million": 0.2
   },
   {
-    "completion_price_per_million": 0.9,
+    "cached_prompt_price_per_million": 0.05,
+    "completion_price_per_million": 3.2,
     "currency": "USD",
-    "equivalent_api_model": "Equivalent API model",
+    "equivalent_api_model": "OpenRouter Qwen3.8 27B",
+    "model_name": "qwen3.8-27b",
+    "prompt_price_per_million": 0.45,
+    "source_url": "https://openrouter.ai/qwen/qwen3.8-27b"
+  },
+  {
+    "cached_prompt_price_per_million": 0.289,
+    "completion_price_per_million": 2.4,
+    "currency": "USD",
+    "equivalent_api_model": "OpenRouter Qwen3.6 27B",
+    "model_name": "qwen3.6-27b",
+    "prompt_price_per_million": 0.289,
+    "source_url": "https://openrouter.ai/qwen/qwen3.6-27b"
+  },
+  {
+    "cached_prompt_price_per_million": 0.05,
+    "completion_price_per_million": 1,
+    "currency": "USD",
+    "equivalent_api_model": "OpenRouter Qwen3.6 35B A3B",
+    "legacy_cached_prompt_before": "2026-08-18",
+    "legacy_cached_prompt_ratio": 0.95,
     "model_name": "qwen3.6-35b-a3b",
-    "prompt_price_per_million": 0.14
+    "prompt_price_per_million": 0.14,
+    "source_url": "https://openrouter.ai/qwen/qwen3.6-35b-a3b"
+  },
+  {
+    "cached_prompt_price_per_million": 0.07,
+    "completion_price_per_million": 0.28,
+    "currency": "USD",
+    "equivalent_api_model": "OpenRouter Qwen3 Coder 30B A3B Instruct",
+    "model_name": "qwen3-coder-30b-a3b",
+    "prompt_price_per_million": 0.07,
+    "source_url": "https://openrouter.ai/qwen/qwen3-coder-30b-a3b-instruct"
+  },
+  {
+    "cached_prompt_price_per_million": 0.07,
+    "completion_price_per_million": 0.8,
+    "currency": "USD",
+    "equivalent_api_model": "OpenRouter Qwen3 Coder Next",
+    "model_name": "qwen3-coder-next",
+    "prompt_price_per_million": 0.12,
+    "source_url": "https://openrouter.ai/qwen/qwen3-coder-next"
+  },
+  {
+    "cached_prompt_price_per_million": 0.1,
+    "completion_price_per_million": 0.1,
+    "currency": "USD",
+    "equivalent_api_model": "Qwen2.5 Coder 3B API",
+    "model_name": "qwen2.5-coder-3b",
+    "prompt_price_per_million": 0.1,
+    "source_url": "https://pricepertoken.com/pricing-page/model/qwen-qwen2.5-coder-3b"
+  },
+  {
+    "cached_prompt_price_per_million": 0.07,
+    "completion_price_per_million": 0.34,
+    "currency": "USD",
+    "equivalent_api_model": "OpenRouter Gemma 4 26B A4B",
+    "model_name": "gemma-4-26b-a4b",
+    "prompt_price_per_million": 0.07,
+    "source_url": "https://openrouter.ai/google/gemma-4-26b-a4b-it"
+  },
+  {
+    "cached_prompt_price_per_million": 0.1,
+    "completion_price_per_million": 0.34,
+    "currency": "USD",
+    "equivalent_api_model": "OpenRouter Gemma 4 31B",
+    "model_name": "gemma-4-31b",
+    "prompt_price_per_million": 0.1,
+    "source_url": "https://openrouter.ai/google/gemma-4-31b-it"
+  },
+  {
+    "cached_prompt_price_per_million": 0.03,
+    "completion_price_per_million": 0.13,
+    "currency": "USD",
+    "equivalent_api_model": "OpenRouter gpt-oss-20b",
+    "model_name": "gpt-oss-20b",
+    "prompt_price_per_million": 0.03,
+    "source_url": "https://openrouter.ai/openai/gpt-oss-20b"
   },
   {
     "billing_unit": "audio_minute",
+    "cached_prompt_price_per_million": 0,
     "completion_price_per_million": 0,
     "currency": "USD",
     "equivalent_api_model": "OpenAI whisper-1",
@@ -31,7 +110,19 @@
     "source_url": "https://developers.openai.com/api/docs/models/whisper-1"
   },
   {
+    "billing_unit": "audio_minute",
+    "cached_prompt_price_per_million": 0,
+    "completion_price_per_million": 0,
+    "currency": "USD",
+    "equivalent_api_model": "OpenAI whisper-1",
+    "model_name": "whisper-base-en",
+    "price_per_unit": 0.006,
+    "prompt_price_per_million": 0,
+    "source_url": "https://developers.openai.com/api/docs/models/whisper-1"
+  },
+  {
     "billing_unit": "million_characters",
+    "cached_prompt_price_per_million": 0,
     "completion_price_per_million": 0,
     "currency": "USD",
     "equivalent_api_model": "OpenAI tts-1",

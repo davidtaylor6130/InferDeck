@@ -2,11 +2,14 @@ import type {
   JobRecord,
   HealthPayload,
   ModelInfo,
+  MonthlyUsageRow,
   PricingEntry,
   StatusPayload,
   SwapHistoryRow,
 } from './types';
 import { API_BASE } from './utils';
+
+const CONTROL_API_BASE = '/api/inferdeck/v1';
 
 async function getJson<T>(path: string, timeoutMs = 15_000): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -43,11 +46,11 @@ async function putJson<T>(path: string, body: unknown, timeoutMs = 30_000): Prom
   return payload;
 }
 
-async function deleteJson<T>(path: string, timeoutMs = 30_000): Promise<T> {
+async function deleteJson<T>(path: string, timeoutMs = 30_000, headers?: Record<string, string>): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     method: 'DELETE',
     signal: AbortSignal.timeout(timeoutMs),
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...headers },
   });
   const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
   if (!response.ok) throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
@@ -303,6 +306,7 @@ function normalizeModel(value: unknown): ModelInfo | null {
     free_slots: asNumber(residency.free_slots) ?? asNumber(entry.free_slots),
     active_requests: asNumber(residency.active_requests) ?? asNumber(entry.active_requests),
     prompt_price_per_million: asNumber(entry.prompt_price_per_million),
+    cached_prompt_price_per_million: asNumber(entry.cached_prompt_price_per_million),
     completion_price_per_million: asNumber(entry.completion_price_per_million),
     alias: asBoolean(entry.alias),
     alias_target: asString(entry.alias_target),
@@ -331,39 +335,46 @@ function normalizeModel(value: unknown): ModelInfo | null {
 }
 
 export function getStatus(): Promise<StatusPayload> {
-  return getJson<StatusPayload>('/api/status');
+  return getJson<StatusPayload>(`${CONTROL_API_BASE}/status`);
+}
+
+export function getDailyUsage(): Promise<{
+  dailyTokenUsage: MonthlyUsageRow[];
+  dailyTokenUsageAllTime: boolean;
+}> {
+  return getJson(`${CONTROL_API_BASE}/usage/daily`);
 }
 
 export async function getModels(): Promise<ModelInfo[]> {
-  const body = await getJson<{ data?: unknown }>('/v1/models');
-  if (!Array.isArray(body.data)) return [];
-  return body.data
+  const body = await getJson<{ models?: unknown }>(`${CONTROL_API_BASE}/models`);
+  if (!Array.isArray(body.models)) return [];
+  return body.models
     .map(normalizeModel)
     .filter((model): model is ModelInfo => model !== null);
 }
 
 export async function getJobs(limit = 100): Promise<JobRecord[]> {
-  const body = await getJson<{ jobs: JobRecord[] }>(`/api/jobs?limit=${limit}`);
+  const body = await getJson<{ jobs: JobRecord[] }>(`${CONTROL_API_BASE}/jobs?limit=${limit}`);
   return Array.isArray(body.jobs) ? body.jobs : [];
 }
 
 export async function getSwapHistory(): Promise<SwapHistoryRow[]> {
-  const body = await getJson<{ swaps: SwapHistoryRow[] }>('/v1/stats/history');
+  const body = await getJson<{ swaps: SwapHistoryRow[] }>(`${CONTROL_API_BASE}/stats/history`);
   return Array.isArray(body.swaps) ? body.swaps : [];
 }
 
 export async function getLogs(limit = 250): Promise<string[]> {
-  const body = await getJson<{ logs: Array<{ message: string }> }>(`/api/logs?limit=${limit}`);
+  const body = await getJson<{ logs: Array<{ message: string }> }>(`${CONTROL_API_BASE}/logs?limit=${limit}`);
   return Array.isArray(body.logs) ? body.logs.map(line => line.message) : [];
 }
 
 export async function getPricing(): Promise<PricingEntry[]> {
-  const body = await getJson<PricingEntry[]>('/api/pricing');
+  const body = await getJson<PricingEntry[]>(`${CONTROL_API_BASE}/pricing`);
   return Array.isArray(body) ? body : [];
 }
 
 export function getHealth(): Promise<HealthPayload> {
-  return getJson<HealthPayload>('/v1/health');
+  return getJson<HealthPayload>(`${CONTROL_API_BASE}/health`);
 }
 
 export interface ModelAliasRecord {
@@ -373,47 +384,52 @@ export interface ModelAliasRecord {
   requiredCapabilities: string[];
 }
 
-export async function getModelAliases(): Promise<ModelAliasRecord[]> {
-  const body = await getJson<{ aliases?: ModelAliasRecord[] }>('/api/model-aliases');
-  return Array.isArray(body.aliases) ? body.aliases : [];
+export interface ModelAliasDocument {
+  aliases: ModelAliasRecord[];
+  revision: string;
 }
 
-export function saveModelAlias(name: string, target: string): Promise<ModelAliasRecord> {
-  return putJson<ModelAliasRecord>(`/api/model-aliases/${encodeURIComponent(name)}`, { target });
+export async function getModelAliases(): Promise<ModelAliasDocument> {
+  const body = await getJson<{ aliases?: ModelAliasRecord[]; revision?: string }>(`${CONTROL_API_BASE}/model-aliases`);
+  return { aliases: Array.isArray(body.aliases) ? body.aliases : [], revision: body.revision ?? '' };
 }
 
-export function deleteModelAlias(name: string): Promise<{ ok: boolean }> {
-  return deleteJson(`/api/model-aliases/${encodeURIComponent(name)}`);
+export function saveModelAlias(name: string, target: string, revision: string): Promise<ModelAliasRecord & { revision: string }> {
+  return putJson<ModelAliasRecord & { revision: string }>(`${CONTROL_API_BASE}/model-aliases/${encodeURIComponent(name)}`, { target, revision });
+}
+
+export function deleteModelAlias(name: string, revision: string): Promise<{ ok: boolean; revision: string }> {
+  return deleteJson(`${CONTROL_API_BASE}/model-aliases/${encodeURIComponent(name)}`, 30_000, { 'If-Match': revision });
 }
 
 export function getConfig(): Promise<ConfigDocument> {
-  return getJson<ConfigDocument>('/api/config');
+  return getJson<ConfigDocument>(`${CONTROL_API_BASE}/config`);
 }
 
 export function saveConfig(yaml: string, revision: string): Promise<ConfigDocument & { ok: boolean }> {
-  return putJson<ConfigDocument & { ok: boolean }>('/api/config', { yaml, revision });
+  return putJson<ConfigDocument & { ok: boolean }>(`${CONTROL_API_BASE}/config`, { yaml, revision });
 }
 
 export function saveActiveConfig(yaml: string, revision: string): Promise<ConfigApplyResult> {
-  return putJson<ConfigApplyResult>('/api/config/active', { yaml, revision });
+  return putJson<ConfigApplyResult>(`${CONTROL_API_BASE}/config/active`, { yaml, revision });
 }
 
 export function optimizeProfile(input: ProfileOptimizationInput): Promise<ProfileOptimizationResult> {
-  return postJson<ProfileOptimizationResult>('/api/optimize/profile', input);
+  return postJson<ProfileOptimizationResult>(`${CONTROL_API_BASE}/optimize/profile`, input);
 }
 
 export function startProfileBenchmark(
   input: ProfileOptimizationInput & { candidateLimit?: number },
 ): Promise<ProfileBenchmarkSnapshot> {
-  return postJson<ProfileBenchmarkSnapshot>('/api/optimize/benchmark', input);
+  return postJson<ProfileBenchmarkSnapshot>(`${CONTROL_API_BASE}/optimize/benchmark`, input);
 }
 
 export function getProfileBenchmark(): Promise<ProfileBenchmarkSnapshot> {
-  return getJson<ProfileBenchmarkSnapshot>('/api/optimize/benchmark');
+  return getJson<ProfileBenchmarkSnapshot>(`${CONTROL_API_BASE}/optimize/benchmark`);
 }
 
 export function cancelProfileBenchmark(): Promise<ProfileBenchmarkSnapshot> {
-  return postJson<ProfileBenchmarkSnapshot>('/api/optimize/benchmark/cancel', {});
+  return postJson<ProfileBenchmarkSnapshot>(`${CONTROL_API_BASE}/optimize/benchmark/cancel`, {});
 }
 
 export interface ScheduledOptimizationRecord {
@@ -429,11 +445,11 @@ export interface ScheduledOptimizationRecord {
 }
 
 export function getOptimizationSchedule(): Promise<{ timezone: string; schedules: ScheduledOptimizationRecord[] }> {
-  return getJson('/api/optimize/schedule');
+  return getJson(`${CONTROL_API_BASE}/optimize/schedule`);
 }
 
-export function resetActiveConfig(): Promise<{ ok: boolean; removed: boolean; restartRequired: boolean; applyScheduled: boolean }> {
-  return deleteJson('/api/config/active');
+export function resetActiveConfig(revision: string): Promise<{ ok: boolean; removed: boolean; restartRequired: boolean; applyScheduled: boolean }> {
+  return deleteJson(`${CONTROL_API_BASE}/config/active`, 30_000, { 'If-Match': revision });
 }
 
 const delay = (milliseconds: number) =>
@@ -451,7 +467,7 @@ async function waitForConfig(
   let lastFailure = 'InferDeck has not returned yet.';
   while (Date.now() < deadline) {
     try {
-      const config = await getJson<ConfigDocument>('/api/config', Math.min(3_000, timeoutMs));
+      const config = await getJson<ConfigDocument>(`${CONTROL_API_BASE}/config`, Math.min(3_000, timeoutMs));
       if (config.fallbackReason) {
         throw new ConfigFallbackError(`InferDeck rejected the saved profile: ${config.fallbackReason}`);
       }
@@ -499,17 +515,17 @@ export async function searchStore(query: string, runtime = '', modality = '', li
   const params = new URLSearchParams({ q: query, limit: String(limit) });
   if (runtime) params.set('runtime', runtime);
   if (modality) params.set('modality', modality);
-  const body = await getJson<{ models: StoreModel[] }>(`/api/model-store/search?${params}`);
+  const body = await getJson<{ models: StoreModel[] }>(`${CONTROL_API_BASE}/model-store/search?${params}`);
   return body.models;
 }
 
 export async function inspectStoreModel(repo: string): Promise<StoreFile[]> {
-  const body = await getJson<{ files: StoreFile[] }>(`/api/model-store/inspect?repo=${encodeURIComponent(repo)}`);
+  const body = await getJson<{ files: StoreFile[] }>(`${CONTROL_API_BASE}/model-store/inspect?repo=${encodeURIComponent(repo)}`);
   return body.files;
 }
 
 export function installStoreModel(file: StoreFile, modelName: string): Promise<{ id: number; state: string }> {
-  return postJson<{ id: number; state: string }>('/api/model-store/downloads', {
+  return postJson<{ id: number; state: string }>(`${CONTROL_API_BASE}/model-store/downloads`, {
     repo: file.repo, filename: file.name, runtime: file.runtime, modality: file.modality, modelName,
   });
 }
@@ -519,46 +535,50 @@ export async function getStoreActivity(): Promise<{
   installed: Record<string, InstalledStoreModel>;
   library: InstalledStoreModel[];
 }> {
-  return getJson('/api/model-store/downloads');
+  return getJson(`${CONTROL_API_BASE}/model-store/downloads`);
 }
 
 export function controlStoreDownload(id: number, action: 'cancel' | 'resume'): Promise<{ ok: boolean }> {
-  return postJson<{ ok: boolean }>(`/api/model-store/downloads/${id}/${action}`);
+  return postJson<{ ok: boolean }>(`${CONTROL_API_BASE}/model-store/downloads/${id}/${action}`);
 }
 
 export function removeStoreModel(model: string, action: 'archive' | 'remove'): Promise<{ ok: boolean }> {
-  return postJson<{ ok: boolean }>(`/api/model-store/${action}`, { model });
+  return postJson<{ ok: boolean }>(`${CONTROL_API_BASE}/model-store/${action}`, { model });
 }
 
-export function unregisterConfiguredModel(model: string): Promise<{
+export async function unregisterConfiguredModel(model: string): Promise<{
   ok: boolean;
   filesDeleted: boolean;
   restartRequired: boolean;
 }> {
-  return postJson('/api/model-store/unregister', { model });
+  const config = await getConfig();
+  return postJson(`${CONTROL_API_BASE}/model-store/unregister`, {
+    model,
+    revision: config.activeRevision,
+  });
 }
 
 export async function getMediaJobs(): Promise<MediaJob[]> {
-  const body = await getJson<{ jobs: MediaJob[] }>('/api/media/jobs');
+  const body = await getJson<{ jobs: MediaJob[] }>(`${CONTROL_API_BASE}/media/jobs`);
   return body.jobs;
 }
 
 export function cancelMediaJob(id: number): Promise<{ ok: boolean }> {
-  return postJson<{ ok: boolean }>(`/api/media/jobs/${id}/cancel`);
+  return postJson<{ ok: boolean }>(`${CONTROL_API_BASE}/media/jobs/${id}/cancel`);
 }
 
 export function swapTo(model: string): Promise<{ status: string }> {
-  return postJson<{ status: string }>(`/v1/swap/to/${encodeURIComponent(model)}`);
+  return postJson<{ status: string }>(`${CONTROL_API_BASE}/swap/to/${encodeURIComponent(model)}`);
 }
 
 export function cancelSwap(): Promise<{ status: string }> {
-  return postJson<{ status: string }>('/v1/swap/cancel');
+  return postJson<{ status: string }>(`${CONTROL_API_BASE}/swap/cancel`);
 }
 
 export function unloadModel(model?: string): Promise<{ ok: boolean }> {
-  return postJson<{ ok: boolean }>('/api/models/unload', model ? { model } : undefined);
+  return postJson<{ ok: boolean }>(`${CONTROL_API_BASE}/models/unload`, model ? { model } : undefined);
 }
 
 export function eventStreamUrl(): string {
-  return `${API_BASE}/api/events/stream`;
+  return `${API_BASE}${CONTROL_API_BASE}/events/stream`;
 }

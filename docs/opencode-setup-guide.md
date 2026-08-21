@@ -83,9 +83,9 @@ variants so OpenCode exposes them through `/variants` and `variant_cycle`:
 }
 ```
 
-`chat_template_kwargs.reasoning_effort` remains supported and takes precedence
-over the protocol-level field. If neither is supplied, the model profile's
-default is used.
+`reasoning_effort` is supported on strict OpenAI routes. The derivative
+`chat_template_kwargs.reasoning_effort` form is available only when the
+default-off OpenAI-derivative profile is enabled and its `/compat` base is used.
 
 ## Troubleshooting
 
@@ -93,9 +93,10 @@ default is used.
 |---|---|
 | `connect ECONNREFUSED` | Gateway not running — start InferDeck first |
 | `context length exceeded` | Reduce context or output limit |
-| `reasoning_content` missing | Don't pass `--reasoning-format` to the engine (default is correct) |
+| `reasoning_content` missing | Use OpenAI Responses reasoning events, or explicitly enable and target the derivative compatibility profile |
 
 ## Reference
 
-- [Full diagnostics](qwen36-opencode-diagnostics.md)
-- [Smoke test script](../scripts/test-qwen36-response.ps1)
+- [Strict OpenAI compatibility](openai-compatibility.md)
+- [Architecture](architecture.md)
+- [Streaming tool-call harness](../Testing/mini-ralph.mjs)

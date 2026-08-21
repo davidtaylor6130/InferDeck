@@ -31,6 +31,7 @@ export interface ModelInfo {
   active_requests?: number;
   optimization?: ModelOptimizationInfo;
   prompt_price_per_million?: number;
+  cached_prompt_price_per_million?: number;
   completion_price_per_million?: number;
   alias?: boolean;
   alias_target?: string;
@@ -74,16 +75,35 @@ export interface ModelEvent {
 
 export interface RequestEvent {
   timestampUnixMs: number;
+  requestId: string;
+  principalClass: string;
+  endpoint: string;
+  protocolProfile: string;
+  modality: string;
   model: string;
+  resolvedModel: string;
+  stream: boolean;
+  finishCode: string;
+  errorCode: string;
   promptTokens: number;
+  cachedPromptTokens: number;
+  cacheWriteTokens: number;
   completionTokens: number;
+  reasoningTokens: number;
   durationMs: number;
-  generationDurationMs?: number;
+  generationDurationMs: number;
+  promptDurationMs: number;
+  firstTokenDurationMs: number;
+  queueDurationMs: number;
+  swapLoadDurationMs: number;
   tokensPerSecond: number;
-  promptTokensPerSecond?: number;
+  promptTokensPerSecond: number;
   status: number;
-  inputAudioSeconds?: number;
-  inputCharacters?: number;
+  inputAudioSeconds: number;
+  outputAudioSeconds: number;
+  inputCharacters: number;
+  inputImageCount: number;
+  outputImageCount: number;
 }
 
 export interface SwapState {
@@ -183,21 +203,36 @@ export interface JobRecord {
   status: 'succeeded' | 'failed';
   model: string;
   resolvedModel?: string;
+  principalClass?: string;
+  endpoint?: string;
+  protocolProfile?: string;
+  modality?: string;
+  stream?: boolean;
+  finishCode?: string;
+  errorCode?: string;
   createdAt: string;
   timestampUnixMs: number;
   promptTokens: number;
   cachedPromptTokens?: number;
+  cacheWriteTokens?: number;
   completionTokens: number;
+  reasoningTokens?: number;
   totalTokens: number;
   tokensPerSecond: number;
   promptTokensPerSecond?: number;
   generationDurationMs?: number;
   promptDurationMs?: number;
+  queueDurationMs?: number;
+  swapLoadDurationMs?: number;
+  firstTokenDurationMs?: number;
   durationMs: number;
   httpStatus: number;
   slotId: number;
   inputAudioSeconds?: number;
+  outputAudioSeconds?: number;
   inputCharacters?: number;
+  inputImageCount?: number;
+  outputImageCount?: number;
 }
 
 export interface SwapHistoryRow {
@@ -212,7 +247,10 @@ export interface SwapHistoryRow {
 export interface PricingEntry {
   model_name: string;
   prompt_price_per_million: number;
+  cached_prompt_price_per_million?: number;
   completion_price_per_million: number;
+  legacy_cached_prompt_ratio?: number;
+  legacy_cached_prompt_before?: string;
   equivalent_api_model?: string | null;
   currency?: string;
   billing_unit?: 'tokens' | 'audio_minute' | 'million_characters';

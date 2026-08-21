@@ -352,7 +352,8 @@ TEST_CASE("BackendCoordinator: routes embeddings by capability", "[model][coordi
     auto slot = coordinator.acquire_slot(info.name);
     REQUIRE(slot.has_value());
     EmbeddingRequest request;
-    request.inputs = {"one", "two"};
+    request.inputs = {EmbeddingTextInput{"one"},
+                      EmbeddingTokenInput{{1, 2, 3}}};
     auto result = coordinator.embed(info.name, *slot, request);
     REQUIRE(result.has_value());
     REQUIRE(result->embeddings.size() == 2);
@@ -916,7 +917,7 @@ TEST_CASE("BackendCoordinator: predict routes to model", "[model][coordinator]")
     REQUIRE(s.has_value());
     InferenceRequest req;
     req.prompt = "hi";
-    req.max_tokens = 8;
+    req.max_output_tokens = 8;
     auto r = c.predict("a", s.value(), req);
     REQUIRE(r.has_value());
     REQUIRE(r.value().text == "hello world");
@@ -1759,6 +1760,28 @@ TEST_CASE("BackendCoordinator: restores residency after target load failure", "[
     REQUIRE(coordinator.get_loaded_model() == "a");
 }
 
+TEST_CASE("BackendCoordinator: zero-budget swap restores failed replacement",
+          "[model][coordinator][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->load_should_fail.store(info.name == "replacement");
+        return backend;
+    });
+    reg.register_model(make_info("current"));
+    reg.register_model(make_info("replacement"));
+    BackendCoordinator coordinator(reg);
+
+    REQUIRE(coordinator.swap_to("current"));
+    const auto result = coordinator.swap_to("replacement");
+    REQUIRE_FALSE(result);
+    REQUIRE(coordinator.is_loaded("current"));
+    REQUIRE_FALSE(coordinator.is_loaded("replacement"));
+    REQUIRE(coordinator.selected_model() == "current");
+    REQUIRE(coordinator.last_resource_decision().find("restored") !=
+            std::string::npos);
+}
+
 TEST_CASE("BackendCoordinator: unregister refuses loaded model", "[model][coordinator]") {
     ModelRegistry reg;
     reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
@@ -1816,4 +1839,115 @@ TEST_CASE("ModelRegistry: stable aliases enforce their compatibility contract", 
     CHECK(*registry.resolve("production") == "compatible");
     REQUIRE_FALSE(registry.set_alias({"nested", "production"}));
     REQUIRE_FALSE(registry.set_alias({"primary", "compatible"}));
+}
+
+TEST_CASE("BackendCoordinator: explicit CPU helper never becomes selected",
+          "[model][coordinator][resources][helper]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto conversation = make_info("conversation");
+    conversation.role = ModelRole::Conversation;
+    conversation.compute = ModelCompute::VulkanGpu;
+    conversation.residency = ResidencyPolicy::Managed;
+    conversation.admission_pool = "conversation";
+    conversation.concurrency_limit = conversation.n_slots;
+    conversation.eviction_eligible = true;
+    conversation.resource_metadata_explicit = true;
+    auto helper = make_info("helper");
+    helper.role = ModelRole::Helper;
+    helper.compute = ModelCompute::Cpu;
+    helper.residency = ResidencyPolicy::Always;
+    helper.admission_pool = "helper";
+    helper.concurrency_limit = 1;
+    helper.n_slots = 1;
+    helper.min_slots = 1;
+    helper.memory_required_mb = 64;
+    helper.eviction_eligible = false;
+    helper.resource_metadata_explicit = true;
+    registry.register_model(conversation);
+    registry.register_model(helper);
+    BackendCoordinator coordinator(registry);
+
+    REQUIRE(coordinator.load("conversation"));
+    REQUIRE(coordinator.load("helper"));
+    CHECK(coordinator.selected_model() == "conversation");
+    REQUIRE(coordinator.swap_to("helper"));
+    CHECK(coordinator.selected_model() == "conversation");
+    REQUIRE(coordinator.is_loaded("helper"));
+    REQUIRE(coordinator.is_loaded("conversation"));
+
+    const auto residency = coordinator.residency();
+    const auto found = std::find_if(
+        residency.begin(), residency.end(),
+        [](const auto& item) { return item.name == "helper"; });
+    REQUIRE(found != residency.end());
+    CHECK(found->role == "helper");
+    CHECK(found->compute == "cpu");
+    CHECK(found->residency == "always");
+    CHECK_FALSE(found->primary);
+    CHECK_FALSE(found->eviction_eligible);
+
+    const auto slot = coordinator.acquire_slot("helper");
+    REQUIRE(slot);
+    const auto identities = coordinator.identity_snapshot("helper-alias", "helper");
+    CHECK(identities.requested == "helper-alias");
+    CHECK(identities.resolved == "helper");
+    CHECK(identities.selected == "conversation");
+    CHECK(identities.resident == std::vector<std::string>{"conversation", "helper"});
+    CHECK(identities.executing == std::vector<std::string>{"helper"});
+    REQUIRE(coordinator.release_slot("helper", *slot));
+}
+
+TEST_CASE("ModelRegistry: impossible explicit resources are rejected",
+          "[model][resources]") {
+    ModelRegistry registry;
+    auto helper = make_info("bad-helper");
+    helper.role = ModelRole::Helper;
+    helper.compute = ModelCompute::VulkanGpu;
+    helper.residency = ResidencyPolicy::Always;
+    helper.admission_pool = "helper";
+    helper.concurrency_limit = 1;
+    helper.eviction_eligible = false;
+    helper.resource_metadata_explicit = true;
+    CHECK_THROWS_AS(registry.register_model(helper), std::invalid_argument);
+}
+
+TEST_CASE("BackendCoordinator: admission pool limits span models",
+          "[model][coordinator][resources][admission]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    const auto make_helper = [](const std::string& name) {
+        auto info = make_info(name);
+        info.role = ModelRole::Helper;
+        info.compute = ModelCompute::Cpu;
+        info.residency = ResidencyPolicy::Always;
+        info.admission_pool = "helper";
+        info.n_slots = 1;
+        info.min_slots = 1;
+        info.concurrency_limit = 1;
+        info.eviction_eligible = false;
+        info.resource_metadata_explicit = true;
+        return info;
+    };
+    registry.register_model(make_helper("helper-a"));
+    registry.register_model(make_helper("helper-b"));
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load("helper-a"));
+    REQUIRE(coordinator.load("helper-b"));
+
+    const auto first = coordinator.acquire_slot("helper-a");
+    REQUIRE(first);
+    AcquireSlotOptions immediate;
+    immediate.block = false;
+    const auto rejected = coordinator.acquire_slot("helper-b", immediate);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == ErrorCode::Unavailable);
+    REQUIRE(coordinator.release_slot("helper-a", *first));
+    const auto second = coordinator.acquire_slot("helper-b", immediate);
+    REQUIRE(second);
+    REQUIRE(coordinator.release_slot("helper-b", *second));
 }

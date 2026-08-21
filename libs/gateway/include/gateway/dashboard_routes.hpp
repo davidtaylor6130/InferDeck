@@ -10,9 +10,12 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace inferdeck::gateway {
+
+class ConfigRepository;
 
 using RouteWrapper = std::function<httplib::Server::Handler(httplib::Server::Handler)>;
 
@@ -32,6 +35,7 @@ struct DashboardDeps {
     std::function<std::int64_t()> uptime_seconds;
     ProfileBenchmarkManager* profile_benchmark{nullptr};
     ProfileBenchmarkScheduler* profile_benchmark_scheduler{nullptr};
+    std::shared_ptr<ConfigRepository> config_repository;
 };
 
 void register_dashboard_routes(httplib::Server& server, const DashboardDeps& deps,

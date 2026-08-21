@@ -39,13 +39,13 @@ libs/third_party/llama.cpp    Vendored, Vulkan build (gitignored — cloned, not
 config/gateway.yml            Active config (only this one is read)
 config/gateway.test-ralph.yml Small-model config for the mini-ralph harness (port 11435)
 config/sampler-profiles/      Per-model sampler configs
-data/pricing.json             Dashboard cost defaults, served via GET /api/pricing
+data/pricing.json             Dashboard cost defaults, served via GET /api/inferdeck/v1/pricing
 
 Testing/                      mini-ralph.mjs streaming tool-call harness (untracked,
                               do not delete)
 tests/integration/            Catch2 integration tests (mocked coordinator)
 tests/parity/                 Parity with raw llama-server
-tests/fixtures/               Realistic request payloads (opencode/openwebui/Anthropic)
+tests/fixtures/               Realistic OpenAI request payloads (opencode/openwebui)
 ```
 
 Deleted in the 2026-06 cleanup (see `docs/v2-cleanup-report.md`, history
@@ -90,41 +90,52 @@ bash tests/parity/run.sh
 
 ## Deployment
 
-The live server runs from `C:\InferDeck\bin\`, launched by
-`C:\InferDeck\Start-InferDeck.ps1` (scheduled tasks at startup/logon
-plus a 15-min watchdog). A deploy requires copying **both** artifacts —
-updating only one leaves a mismatched install:
+The authoritative live boot target is the automatic LocalSystem NSSM service
+`InferDeck`. Read
+`HKLM:\SYSTEM\CurrentControlSet\Services\InferDeck\Parameters` directly:
+`Application` is `C:\InferDeck\inferdeck-gateway.exe`, `AppDirectory` is
+`C:\InferDeck`, and `AppParameters` is `-c config\gateway.yml`. Legacy
+startup/logon/watchdog tasks and the old `InferDeckGateway` service are
+disabled and are not deployment targets.
 
-- `build/bin/Release/inferdeck-gateway.exe` → `C:\InferDeck\bin\gateway-service.exe`
-- `apps/inferdeck-gateway/static/` (index.html + assets) → `C:\InferDeck\bin\static/`
+A deploy requires copying **both** artifacts from the same revision:
+
+- `build/bin/Release/inferdeck-gateway.exe` → `C:\InferDeck\inferdeck-gateway.exe`
+- `apps/inferdeck-gateway/static/` → `C:\InferDeck\static/`
 
 The gateway serves the dashboard from `executable_dir()/static`, so the
 exe and its static dir must come from the same build. Replacing just the
 exe makes the new gateway serve the old dashboard. The exe can't be
-overwritten while running — stop the process (or rename the file aside)
-first. Clear stale hashed bundles in `bin/static/assets/` so only the
+overwritten while running. Obtain explicit authorization, verify the service
+and child PID, then stop only `InferDeck` before activation. Clear stale
+hashed bundles in `static/assets/` so only the
 current `index-*.js`/`index-*.css` remain.
 
 ## HTTP API
 
 OpenAI-compatible (`/v1`):
 - `POST /v1/chat/completions` — streaming + non-streaming, tool calls,
-  reasoning_content. SSE chunks end with `data: [DONE]`.
-- `GET /v1/models`, `GET /v1/health`, `GET /v1/metrics`, `GET /v1/stats/history`
+  with SSE chunks ending in `data: [DONE]`.
+- `GET /v1/models`, `GET /api/inferdeck/v1/health`, `GET /api/inferdeck/v1/metrics`, `GET /api/inferdeck/v1/stats/history`
+
+The OpenAI-derivative compatibility profile is default-off. Its chat,
+Responses, embeddings, and image-generation routes use
+`/compat/openai-derivative/v1` and may never add routes or fields to strict
+`/v1`. InferDeck Core owns no non-OpenAI protocol.
 
 Swap control:
-- `POST /v1/swap/to/:name` — **async**: returns `202 {"status":"swapping"}`
+- `POST /api/inferdeck/v1/swap/to/:name` — **async**: returns `202 {"status":"swapping"}`
   immediately (200 if already loaded, 404 unknown, 409 if a swap is running).
   Progress arrives as `model` events on the SSE stream.
-- `POST /v1/swap/cancel` — requests cancellation of the in-flight swap.
-- `GET /v1/swap/status` — loaded model, vram, active requests, SwapTracker state.
+- `POST /api/inferdeck/v1/swap/cancel` — requests cancellation of the in-flight swap.
+- `GET /api/inferdeck/v1/swap/status` — loaded model, vram, active requests, SwapTracker state.
 
-Dashboard (`/api`, registered in `libs/gateway/src/dashboard_routes.cpp`):
-- `GET /api/status` — queue/swap/hardware/summary (incl. p50/p95 latency),
+Dashboard (`/api/inferdeck/v1`, registered in `libs/gateway/src/dashboard_routes.cpp`):
+- `GET /api/inferdeck/v1/status` — queue/swap/hardware/summary (incl. p50/p95 latency),
   tokenUsage, monthlyTokenUsage
-- `GET /api/jobs`, `GET /api/logs`, `GET /api/pricing` (serves data/pricing.json)
-- `POST /api/models/load` (async, same path as /v1/swap/to), `POST /api/models/unload`
-- `GET /api/events/stream` — **SSE** (there is no WebSocket anywhere).
+- `GET /api/inferdeck/v1/jobs`, `GET /api/inferdeck/v1/logs`, `GET /api/inferdeck/v1/pricing` (serves data/pricing.json)
+- `POST /api/inferdeck/v1/models/load` (async, same path as /api/inferdeck/v1/swap/to), `POST /api/inferdeck/v1/models/unload`
+- `GET /api/inferdeck/v1/events/stream` — **SSE** (there is no WebSocket anywhere).
   Named events, each ~1Hz or on occurrence:
   - `stats`: gpu{utilizationPct,vramUsedMb,temperatureC,powerW}, loadedModel,
     activeRequests, swapping, lifetime counters, uptime
@@ -153,13 +164,13 @@ shutdown.
 
 Concurrency invariants:
 - `BackendCoordinator::predict/predict_stream` must NOT hold `mutex_`
-  during inference (fixed 2026-06; holding it froze /api/status and
+  during inference (fixed 2026-06; holding it froze /api/inferdeck/v1/status and
   second-slot acquisition for the whole generation).
 - Slot acquisition increments `active_requests_`; `unload` drains it
   with a 30s timeout, so an IModel can't be destroyed mid-predict.
 - `StreamState` is shared_ptr-owned by both the inference thread and
   the chunked provider; `finish_once` is idempotent via CAS.
-- CPU STT/TTS sidecars bypass GPU preparation. A successful STT request
+- CPU STT/TTS native runtimes bypass GPU preparation. A successful STT request
   reserves the default chat model for that client through TTS; the bounded
   grace is configured by `gateway.voice_session_grace_ms`.
 
@@ -176,27 +187,9 @@ Concurrency invariants:
 
 ## Known open items
 
-- **qwen3.6-35b-a3b re-prefills the whole prompt every turn** (~60s at
-  80k ctx). It is a hybrid recurrent/linear-attention model: the
-  recurrent state cannot be rewound to an arbitrary position
-  (`llama_memory_seq_rm` mid-sequence fails, `pos_min==pos_max` in the
-  `llama_prompt_cache_fallback` log line), and thinking-model history
-  re-rendering always diverges just before the generation boundary, so
-  a rewind is always needed. Fix = llama-server-style recurrent-state
-  checkpoints (snapshot before each generation, restore on rewind).
-  Full-attention models reuse the cache fine, and follow-up turns that
-  strictly extend the cache skip the rewind entirely
-  (`llama_prompt_cache_extend`). `swa_full` does not help; keep false.
-
-- `config/gateway.yml` has `gateway.auto_swap: true` while the original
-  design said "no auto-swap, return 503". Both paths exist in
-  `handle_chat_completions`; the config flag decides. Owner decision on
-  the default is still pending (see docs/v2-cleanup-report.md §3.9).
-- Remaining report items not yet implemented: error-code enum on
-  foundation::Error instead of message substring matching (§3.3/3.4),
-  UTF-8 hold-back in the streaming path (§3.6), god-function splits
-  (§4.1/4.2), sampler magic numbers → sampler-profiles (§3.10),
-  Vulkan SDK path from env (§3.11).
+- Remaining owner decision: `gateway.auto_swap` defaults to enabled although
+  the original design returned 503 when a requested model was not resident.
+  Both behaviors are intentional and selected by configuration.
 
 ## Don'ts
 
@@ -215,14 +208,14 @@ React 19 + Vite + Tailwind in `apps/dashboard/`. Four pages:
 **Overview** (model card + swap progress/cancel, live SSE sparklines,
 lifetime counters, activity feed), **Models** (registry table with
 async load/cancel/unload, swap history), **Usage & Cost** (token/cost
-graph, per-model table; price defaults come from `GET /api/pricing`,
+graph, per-model table; price defaults come from `GET /api/inferdeck/v1/pricing`,
 user overrides persist in localStorage under
 `inferdeck:model-token-costs`), **System** (hardware meters, log
 viewer).
 
-State comes from one `EventSource('/api/events/stream')` in
+State comes from one `EventSource('/api/inferdeck/v1/events/stream')` in
 `src/gateway.tsx` with a connected/reconnecting/offline state machine
-and a 30s `/api/status` polling fallback. API base is same-origin
+and a 30s `/api/inferdeck/v1/status` polling fallback. API base is same-origin
 (`VITE_API_BASE` override for `pnpm dev`, which proxies /api and /v1
 to :11434).
 
@@ -246,7 +239,7 @@ exe post-build by CMake.
    old code has burned hours before.
 2. **Slow first token?** LCP miss — check prompt-cache behavior in
    llama_cpp_model.cpp.
-3. **Swap stuck?** `GET /v1/swap/status`, then `POST /v1/swap/cancel`.
+3. **Swap stuck?** `GET /api/inferdeck/v1/swap/status`, then `POST /api/inferdeck/v1/swap/cancel`.
    Partial state after a cancel is acceptable; the next swap re-unloads.
 4. **Dashboard frozen during generation?** That bug was the coordinator
    holding `mutex_` across predict — do not reintroduce it.

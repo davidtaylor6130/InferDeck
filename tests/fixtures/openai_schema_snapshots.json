@@ -1,0 +1,23 @@
+{
+  "models": ["data", "object"],
+  "model": ["created", "id", "object", "owned_by"],
+  "chat_completion": ["choices", "created", "id", "model", "object", "usage"],
+  "chat_choice": ["finish_reason", "index", "message"],
+  "chat_message": ["content", "role"],
+  "chat_usage": ["completion_tokens", "prompt_tokens", "prompt_tokens_details", "total_tokens"],
+  "chat_stream_chunk": ["choices", "created", "id", "model", "object", "usage"],
+  "chat_stream_chunk_without_usage": ["choices", "created", "id", "model", "object"],
+  "responses_completed": ["background", "completed_at", "conversation", "created_at", "error", "id", "incomplete_details", "instructions", "max_output_tokens", "metadata", "model", "object", "output", "output_text", "parallel_tool_calls", "previous_response_id", "reasoning", "service_tier", "status", "store", "temperature", "text", "tool_choice", "tools", "top_p", "truncation", "usage"],
+  "responses_in_progress": ["background", "conversation", "created_at", "error", "id", "incomplete_details", "instructions", "max_output_tokens", "metadata", "model", "object", "output", "output_text", "parallel_tool_calls", "previous_response_id", "reasoning", "service_tier", "status", "store", "temperature", "text", "tool_choice", "tools", "top_p", "truncation", "usage"],
+  "response_message": ["content", "id", "role", "status", "type"],
+  "response_output_text": ["annotations", "text", "type"],
+  "response_usage": ["input_tokens", "input_tokens_details", "output_tokens", "output_tokens_details", "total_tokens"],
+  "embeddings": ["data", "model", "object", "usage"],
+  "embedding": ["embedding", "index", "object"],
+  "embedding_usage": ["prompt_tokens", "total_tokens"],
+  "images": ["created", "data", "output_format"],
+  "image": ["b64_json"],
+  "transcription": ["text"],
+  "verbose_transcription": ["duration", "language", "segments", "task", "text"],
+  "transcription_segment": ["avg_logprob", "end", "id", "no_speech_prob", "seek", "start", "temperature", "text", "tokens"]
+}
