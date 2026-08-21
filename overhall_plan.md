@@ -502,7 +502,7 @@ current implementation cannot satisfy the native single-process rule.
 
 - [ ] Extract configuration structs, schema, validation, decoding, persistence and
       reload coordination from `config.hpp`.
-- [ ] Add include guards to all remaining headers.
+- [x] Add include guards to all remaining headers.
 - [ ] Introduce one versioned configuration schema.
 - [ ] Reject unknown keys with precise paths unless an explicitly versioned
       extension container owns them.
