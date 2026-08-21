@@ -2050,6 +2050,7 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     CHECK(verbose["language"] == "en");
     REQUIRE(verbose["segments"].size() == 1);
     CHECK(verbose["segments"][0]["tokens"] == nlohmann::json::array({50364, 1234, 50389}));
+    CHECK_FALSE(verbose["segments"][0].contains("compression_ratio"));
 
     response = transcribe("srt");
     REQUIRE(response);

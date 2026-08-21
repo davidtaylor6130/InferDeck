@@ -431,7 +431,7 @@ current implementation cannot satisfy the native single-process rule.
 - [ ] Complete speech instructions and stream-format behavior.
 - [ ] Complete transcription response formats, timestamp granularities, includes,
       logprobs, chunking and streaming behavior for the supported baseline.
-- [ ] Remove fabricated transcription metrics such as constant compression ratio.
+- [x] Remove fabricated transcription metrics such as constant compression ratio.
 - [ ] Keep internal cancellation outcomes separate from client-visible HTTP status.
 
 ### Models

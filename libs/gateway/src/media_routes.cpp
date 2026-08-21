@@ -446,7 +446,6 @@ nlohmann::json verbose_transcription(const model::TranscriptionResult& result,
             {"tokens", segment.tokens},
             {"temperature", temperature},
             {"avg_logprob", segment.avg_logprob},
-            {"compression_ratio", 0.0},
             {"no_speech_prob", segment.no_speech_probability},
         });
     }
