@@ -1,7 +1,7 @@
 param(
     [string]$Gateway = 'build\bin\Release\inferdeck-gateway.exe',
     [string]$Config = 'config\gateway.test-security.yml',
-    [string]$LanAddress = '192.168.0.168',
+    [string]$LanAddress = '',
     [int]$Port = 11439,
     [int]$StartupTimeoutSeconds = 55,
     [switch]$RemoteControl,
@@ -19,6 +19,17 @@ if ($RemoteControl) {
 }
 $gatewayPath = (Resolve-Path -LiteralPath $Gateway).Path
 $configPath = (Resolve-Path -LiteralPath $Config).Path
+if (-not $LanAddress) {
+    $LanAddress = [Net.Dns]::GetHostAddresses([Net.Dns]::GetHostName()) |
+        Where-Object {
+            $_.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and
+            -not [Net.IPAddress]::IsLoopback($_)
+        } |
+        Select-Object -First 1 -ExpandProperty IPAddressToString
+    if (-not $LanAddress) {
+        throw 'No non-loopback IPv4 address is available for the remote-control security probe'
+    }
+}
 $logSuffix = [DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff')
 $logDirectory = Split-Path $gatewayPath -Parent
 $stdoutPath = Join-Path $logDirectory "security-fixture-$Port-$logSuffix.stdout.log"
