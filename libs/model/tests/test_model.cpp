@@ -1760,6 +1760,28 @@ TEST_CASE("BackendCoordinator: restores residency after target load failure", "[
     REQUIRE(coordinator.get_loaded_model() == "a");
 }
 
+TEST_CASE("BackendCoordinator: zero-budget swap restores failed replacement",
+          "[model][coordinator][residency]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->load_should_fail.store(info.name == "replacement");
+        return backend;
+    });
+    reg.register_model(make_info("current"));
+    reg.register_model(make_info("replacement"));
+    BackendCoordinator coordinator(reg);
+
+    REQUIRE(coordinator.swap_to("current"));
+    const auto result = coordinator.swap_to("replacement");
+    REQUIRE_FALSE(result);
+    REQUIRE(coordinator.is_loaded("current"));
+    REQUIRE_FALSE(coordinator.is_loaded("replacement"));
+    REQUIRE(coordinator.selected_model() == "current");
+    REQUIRE(coordinator.last_resource_decision().find("restored") !=
+            std::string::npos);
+}
+
 TEST_CASE("BackendCoordinator: unregister refuses loaded model", "[model][coordinator]") {
     ModelRegistry reg;
     reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {

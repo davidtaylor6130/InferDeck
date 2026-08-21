@@ -450,22 +450,22 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Explicit model resource model
 
-- [ ] Replace modality-derived lifecycle rules with explicit metadata:
-  - [ ] `role`: conversation, helper, media, embedding, maintenance;
-  - [ ] `compute`: CPU, Vulkan GPU, CUDA GPU, ROCm GPU or mixed;
-  - [ ] `residency`: always, managed or on-demand;
-  - [ ] `admission_pool` and concurrency limit;
-  - [ ] memory requirements and eviction eligibility.
-- [ ] Separate default/selected model, requested model, resolved model, resident set
+- [x] Replace modality-derived lifecycle rules with explicit metadata:
+  - [x] `role`: conversation, helper, media, embedding, maintenance;
+  - [x] `compute`: CPU, Vulkan GPU, CUDA GPU, ROCm GPU or mixed;
+  - [x] `residency`: always, managed or on-demand;
+  - [x] `admission_pool` and concurrency limit;
+  - [x] memory requirements and eviction eligibility.
+- [x] Separate default/selected model, requested model, resolved model, resident set
       and executing model in coordinator state and APIs.
-- [ ] Validate impossible role/compute/residency combinations in configuration.
+- [x] Validate impossible role/compute/residency combinations in configuration.
 
 ### Deadlines, cancellation and shutdown
 
-- [ ] Replace ignored swap timeouts with one propagated deadline.
-- [ ] Propagate cancellation through queue wait, drain, resize, eviction, unload,
+- [x] Replace ignored swap timeouts with one propagated deadline.
+- [x] Propagate cancellation through queue wait, drain, resize, eviction, unload,
       load, inference and stream delivery.
-- [ ] Make residency changes transactional and restore the last usable state after
+- [x] Make residency changes transactional and restore the last usable state after
       failure where possible.
 - [ ] Replace polling plus unconditional join with a bounded shutdown state machine.
 - [ ] Add fake backends that block each lifecycle stage for deterministic tests.
@@ -473,10 +473,10 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Voice reservations
 
-- [ ] Replace source-IP fallback with an explicit opaque session identity scoped to
+- [x] Replace source-IP fallback with an explicit opaque session identity scoped to
       an authenticated principal.
-- [ ] Ensure clients sharing an IP cannot affect one another's priority session.
-- [ ] Keep voice priority internal rather than request-body controlled.
+- [x] Ensure clients sharing an IP cannot affect one another's priority session.
+- [x] Keep voice priority internal rather than request-body controlled.
 
 ### Issue #99
 
@@ -492,8 +492,8 @@ current implementation cannot satisfy the native single-process rule.
 ### Exit gate
 
 - [ ] Cancellation and shutdown remain bounded with deliberately hung fake backends.
-- [ ] CPU helpers and media runtimes cannot evict or redefine conversation models.
-- [ ] Requested, resolved, selected, resident and executing identities are testable
+- [x] CPU helpers and media runtimes cannot evict or redefine conversation models.
+- [x] Requested, resolved, selected, resident and executing identities are testable
       and unambiguous.
 
 ## Phase 8 - Transactional configuration and state

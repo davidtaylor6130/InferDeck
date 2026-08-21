@@ -155,7 +155,8 @@ public:
     bool swap_cancel_requested() const noexcept { return swap_cancel_.load(); }
 
     foundation::Result<void> swap_to_cancellable(const std::string& name,
-                                                 std::chrono::milliseconds timeout = std::chrono::milliseconds{30000});
+        std::chrono::milliseconds timeout = std::chrono::milliseconds{30000},
+        std::function<bool()> cancelled = {});
 
 private:
     using clock = std::chrono::steady_clock;
@@ -192,7 +193,12 @@ private:
     foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot);
     foundation::Result<int> backend_slot_for_lease_locked(
         const std::string& name, int lease_id) const;
-    foundation::Result<void> prepare_capacity_for(const std::string& name);
+    foundation::Result<void> unload_with_control(
+        const std::string& name, const LifecycleControl& control);
+    foundation::Result<void> swap_to_with_control(
+        const std::string& name, const LifecycleControl& control);
+    foundation::Result<void> prepare_capacity_for(
+        const std::string& name, const LifecycleControl& control);
     foundation::Result<void> require_priority_session_allows(
         const std::string& name);
     int estimated_vram_locked() const;

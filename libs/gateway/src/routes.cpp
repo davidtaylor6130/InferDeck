@@ -512,9 +512,18 @@ std::string header_value(const httplib::Request& req, const std::string& name) {
 }
 
 std::string request_client_key(const httplib::Request& req) {
-    const auto explicit_key = header_value(req, "X-InferDeck-Voice-Session");
-    if (!explicit_key.empty()) return explicit_key;
-    return req.remote_addr.empty() ? "local" : req.remote_addr;
+    const auto session = header_value(req, "X-InferDeck-Voice-Session");
+    if (session.size() < 8 || session.size() > 128 ||
+        !std::all_of(session.begin(), session.end(), [](unsigned char value) {
+            return std::isalnum(value) || value == '-' || value == '_' || value == '.';
+        })) {
+        return {};
+    }
+    const auto authorization = header_value(req, "Authorization");
+    if (!authorization.starts_with("Bearer ") || authorization.size() <= 7) {
+        return {};
+    }
+    return authorization.substr(7) + '\x1f' + session;
 }
 
 bool require_json_media_type(const httplib::Request& req,
@@ -820,8 +829,10 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     const std::string& requested_model, const std::string& model_name) {
     AcquiredChatSlot acquired;
     acquired.reservation_key = request_client_key(req);
-    acquired.voice_session_token = deps.coordinator.hold_priority_session(
-        acquired.reservation_key, model_name);
+    if (!acquired.reservation_key.empty()) {
+        acquired.voice_session_token = deps.coordinator.hold_priority_session(
+            acquired.reservation_key, model_name);
+    }
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::minutes{5};
     const std::function<bool()> cancelled = [&req] {

@@ -1134,6 +1134,36 @@ TEST_CASE("Routes: GET control swap status returns model info", "[routes][swap]"
     ts.stop();
 }
 
+TEST_CASE("Routes: voice sessions require opaque principal-scoped identity",
+          "[routes][voice][security]") {
+    httplib::Request first;
+    first.remote_addr = "192.0.2.10";
+    first.headers.emplace("Authorization", "Bearer principal-a");
+    first.headers.emplace("X-InferDeck-Voice-Session", "session-0001");
+    httplib::Request second = first;
+    second.headers.erase("Authorization");
+    second.headers.emplace("Authorization", "Bearer principal-b");
+    httplib::Request same_principal = first;
+    same_principal.headers.erase("X-InferDeck-Voice-Session");
+    same_principal.headers.emplace("X-InferDeck-Voice-Session", "session-0002");
+
+    const auto first_key = request_client_key(first);
+    REQUIRE_FALSE(first_key.empty());
+    REQUIRE(request_client_key(second) != first_key);
+    REQUIRE(request_client_key(same_principal) != first_key);
+
+    httplib::Request missing_session = first;
+    missing_session.headers.erase("X-InferDeck-Voice-Session");
+    REQUIRE(request_client_key(missing_session).empty());
+    httplib::Request missing_principal = first;
+    missing_principal.headers.erase("Authorization");
+    REQUIRE(request_client_key(missing_principal).empty());
+    httplib::Request invalid_session = first;
+    invalid_session.headers.erase("X-InferDeck-Voice-Session");
+    invalid_session.headers.emplace("X-InferDeck-Voice-Session", "bad session");
+    REQUIRE(request_client_key(invalid_session).empty());
+}
+
 TEST_CASE("Routes: POST /v1/chat/completions missing model returns 400", "[routes][chat]") {
     TestServer ts;
     REQUIRE(ts.start());
@@ -2575,6 +2605,12 @@ TEST_CASE("Routes: Open WebUI voice reservation spans STT through TTS",
     REQUIRE(ts.start());
 
     httplib::Client client("127.0.0.1", ts.port);
+    client.set_default_headers({
+        {"Authorization", "Bearer voice-principal"},
+        {"X-InferDeck-Voice-Session", "voice-session-0001"},
+    });
+    const std::string session_key =
+        std::string{"voice-principal"} + '\x1f' + "voice-session-0001";
     const auto transcription = client.Post(
         "/v1/audio/transcriptions", httplib::UploadFormDataItems{
             {"file", test_wav(), "test.wav", "audio/wav"},
@@ -2582,7 +2618,7 @@ TEST_CASE("Routes: Open WebUI voice reservation spans STT through TTS",
         });
     REQUIRE(transcription);
     REQUIRE(transcription->status == 200);
-    CHECK(ts.coordinator.priority_session_matches("127.0.0.1", "gemma"));
+    CHECK(ts.coordinator.priority_session_matches(session_key, "gemma"));
 
     const auto synthesized = client.Post(
         "/v1/audio/speech",
@@ -2591,7 +2627,7 @@ TEST_CASE("Routes: Open WebUI voice reservation spans STT through TTS",
         "application/json");
     REQUIRE(synthesized);
     REQUIRE(synthesized->status == 200);
-    CHECK_FALSE(ts.coordinator.priority_session_matches("127.0.0.1", "gemma"));
+    CHECK_FALSE(ts.coordinator.priority_session_matches(session_key, "gemma"));
     ts.stop();
 }
 

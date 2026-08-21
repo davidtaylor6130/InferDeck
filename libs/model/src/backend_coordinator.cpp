@@ -109,7 +109,8 @@ foundation::Result<void> BackendCoordinator::load_with_lock_deadline(
         }
         instance = instances_.at(name).get();
     }
-    auto r = instance->load();
+    const LifecycleControl control{deadline, cancelled};
+    auto r = instance->load(control);
     if (!r) return r;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -138,12 +139,29 @@ foundation::Result<void> BackendCoordinator::unload_current() {
 }
 
 foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
+    return unload_with_control(name, {});
+}
+
+foundation::Result<void> BackendCoordinator::unload_with_control(
+    const std::string& name, const LifecycleControl& control) {
     const auto info = registry_.get_info_result(name);
     std::unique_lock<std::recursive_mutex> swap_lock(swap_mutex_, std::defer_lock);
     std::unique_lock<std::recursive_mutex> sidecar_lock(sidecar_mutex_, std::defer_lock);
-    if (info && is_independent_sidecar(*info)) sidecar_lock.lock();
-    else swap_lock.lock();
-    auto drain_deadline = clock::now() + std::chrono::milliseconds{30000};
+    auto* lifecycle_lock = info && is_independent_sidecar(*info)
+        ? &sidecar_lock : &swap_lock;
+    while (!lifecycle_lock->try_lock()) {
+        if (control.is_cancelled()) {
+            return foundation::Err<void>(foundation::ErrorCode::Cancelled,
+                                         "model unload cancelled: " + name);
+        }
+        if (control.is_expired()) {
+            return foundation::Err<void>(foundation::ErrorCode::Timeout,
+                                         "timeout waiting to start model unload: " + name);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    const auto drain_deadline = std::min(
+        control.deadline, clock::now() + std::chrono::milliseconds{30000});
     std::unique_ptr<IBackend> instance;
     bool was_primary = false;
     int released_vram = 0;
@@ -154,8 +172,16 @@ foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
             const auto active = active_requests_by_model_.find(name);
             return active != active_requests_by_model_.end() && active->second > 0;
         };
-        while (has_active_requests() && clock::now() < drain_deadline) {
+        while (has_active_requests() && clock::now() < drain_deadline &&
+               !control.is_cancelled()) {
             cv_.wait_for(lock, std::chrono::milliseconds{100});
+        }
+        if (control.is_cancelled()) {
+            draining_models_.erase(name);
+            lock.unlock();
+            cv_.notify_all();
+            return foundation::Err<void>(foundation::ErrorCode::Cancelled,
+                                          "model unload cancelled: " + name);
         }
         if (has_active_requests()) {
             draining_models_.erase(name);
@@ -177,7 +203,7 @@ foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
         }
     }
 
-    auto r = instance ? instance->unload() : foundation::Ok();
+    auto r = instance ? instance->unload(control) : foundation::Ok();
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -199,34 +225,72 @@ foundation::Result<void> BackendCoordinator::ensure_loaded(const std::string& na
 }
 
 foundation::Result<void> BackendCoordinator::swap_to(const std::string& name) {
+  return swap_to_with_control(name, {});
+}
+
+foundation::Result<void> BackendCoordinator::swap_to_with_control(
+    const std::string& name, const LifecycleControl& control) {
   if (is_loaded(name)) return foundation::Ok();
   auto info = registry_.get_info_result(name);
   if (!info) return foundation::Err<void>(info.error().code, info.error().message);
-  if (is_independent_sidecar(*info)) return load(name);
-  std::lock_guard<std::recursive_mutex> swap_lock(swap_mutex_);
+  if (is_independent_sidecar(*info)) {
+    return load_with_lock_deadline(name, control.deadline, control.cancelled);
+  }
+  std::unique_lock<std::recursive_mutex> swap_lock(swap_mutex_, std::defer_lock);
+  while (!swap_lock.try_lock()) {
+    if (control.is_cancelled()) {
+      return foundation::Err<void>(foundation::ErrorCode::Cancelled,
+                                   "model swap cancelled: " + name);
+    }
+    if (control.is_expired()) {
+      return foundation::Err<void>(foundation::ErrorCode::Timeout,
+                                   "timeout waiting to start model swap: " + name);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+  }
   if (is_loaded(name)) return foundation::Ok();
   auto priority_allowed = require_priority_session_allows(name);
   if (!priority_allowed) return priority_allowed;
   if (vram_budget_mb() <= 0) {
-    auto drain_r = unload_current();
+    auto current = get_loaded_model();
+    auto drain_r = current ? unload_with_control(*current, control)
+                           : foundation::Ok();
     if (!drain_r) return drain_r;
-    return load(name);
+    auto loaded = load_with_lock_deadline(
+        name, control.deadline, control.cancelled);
+    if (loaded || !current) return loaded;
+    const LifecycleControl recovery{
+        clock::now() + std::chrono::seconds{30}, {}};
+    auto restored = load_with_lock_deadline(
+        *current, recovery.deadline, recovery.cancelled);
+    if (restored) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      current_loaded_ = *current;
+      last_resource_decision_ =
+          "load failed for " + name + "; previous residency restored";
+    }
+    return loaded;
   }
   const auto before = residency();
   const auto previous_primary = get_loaded_model();
-  auto capacity = prepare_capacity_for(name);
+  auto capacity = prepare_capacity_for(name, control);
   if (!capacity) return capacity;
   priority_allowed = require_priority_session_allows(name);
   if (!priority_allowed) return priority_allowed;
-  auto loaded = load(name);
+  auto loaded = load_with_lock_deadline(name, control.deadline, control.cancelled);
   if (loaded) return loaded;
 
-  (void)unload(name);
+  const LifecycleControl recovery{
+      clock::now() + std::chrono::seconds{30}, {}};
+  (void)unload_with_control(name, recovery);
   for (const auto& prior : before) {
     const auto* backend = get_backend(prior.name);
     if (backend && backend->is_loaded() && backend->n_slots() == prior.slots) continue;
-    if (backend && backend->is_loaded()) (void)unload(prior.name);
-    (void)load(prior.name);
+    if (backend && backend->is_loaded()) {
+      (void)unload_with_control(prior.name, recovery);
+    }
+    (void)load_with_lock_deadline(
+        prior.name, recovery.deadline, recovery.cancelled);
   }
   if (previous_primary && is_loaded(*previous_primary)) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -237,7 +301,13 @@ foundation::Result<void> BackendCoordinator::swap_to(const std::string& name) {
 }
 
 foundation::Result<void> BackendCoordinator::swap_to_cancellable(
-    const std::string& name, std::chrono::milliseconds timeout) {
+    const std::string& name, std::chrono::milliseconds timeout,
+    std::function<bool()> cancelled) {
+  const LifecycleControl control{
+      clock::now() + timeout,
+      [this, cancelled = std::move(cancelled)] {
+        return swap_cancel_.load() || (cancelled && cancelled());
+      }};
   auto info = registry_.get_info_result(name);
   if (!info) return foundation::Err<void>(info.error().code, info.error().message);
   if (is_independent_sidecar(*info)) {
@@ -246,9 +316,11 @@ foundation::Result<void> BackendCoordinator::swap_to_cancellable(
       return foundation::Err(foundation::ErrorCode::Cancelled,
                              "swap cancelled before sidecar load");
     }
-    return load(name);
+    auto result = load_with_lock_deadline(
+        name, control.deadline, control.cancelled);
+    reset_swap_cancel();
+    return result;
   }
-  std::lock_guard<std::recursive_mutex> swap_lock(swap_mutex_);
   if (is_loaded(name)) return foundation::Ok();
   if (swap_cancel_.load()) {
     reset_swap_cancel();
@@ -260,14 +332,13 @@ foundation::Result<void> BackendCoordinator::swap_to_cancellable(
     if (swap_cancel_.load()) {
       result = foundation::Err(foundation::ErrorCode::Cancelled, "swap cancelled before load");
     } else {
-      result = swap_to(name);
+      result = swap_to_with_control(name, control);
     }
   } catch (...) {
     result = foundation::Err(foundation::ErrorCode::Internal, "swap threw");
   }
   swap_in_progress_.store(false);
   reset_swap_cancel();
-  (void)timeout;
   return result;
 }
 
@@ -1067,7 +1138,16 @@ void BackendCoordinator::select_primary_locked() {
     }
 }
 
-foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::string& name) {
+foundation::Result<void> BackendCoordinator::prepare_capacity_for(
+    const std::string& name, const LifecycleControl& control) {
+    if (control.is_cancelled()) {
+        return foundation::Err<void>(foundation::ErrorCode::Cancelled,
+                                     "capacity preparation cancelled: " + name);
+    }
+    if (control.is_expired()) {
+        return foundation::Err<void>(foundation::ErrorCode::Timeout,
+                                     "capacity preparation timed out: " + name);
+    }
     auto priority_allowed = require_priority_session_allows(name);
     if (!priority_allowed) return priority_allowed;
     auto info = registry_.get_info_result(name);
@@ -1087,6 +1167,14 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::str
     }
 
     while (true) {
+        if (control.is_cancelled()) {
+            return foundation::Err<void>(foundation::ErrorCode::Cancelled,
+                                         "capacity resize cancelled: " + name);
+        }
+        if (control.is_expired()) {
+            return foundation::Err<void>(foundation::ErrorCode::Timeout,
+                                         "capacity resize timed out: " + name);
+        }
         std::string candidate;
         int next_slots = 0;
         {
@@ -1117,7 +1205,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::str
             resizing_models_.erase(candidate);
             return priority_allowed;
         }
-        auto resized = backend->resize_slots(next_slots);
+        auto resized = backend->resize_slots(next_slots, control);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             resizing_models_.erase(candidate);
@@ -1132,6 +1220,14 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::str
     }
 
     while (true) {
+        if (control.is_cancelled()) {
+            return foundation::Err<void>(foundation::ErrorCode::Cancelled,
+                                         "capacity eviction cancelled: " + name);
+        }
+        if (control.is_expired()) {
+            return foundation::Err<void>(foundation::ErrorCode::Timeout,
+                                         "capacity eviction timed out: " + name);
+        }
         std::string candidate;
         int candidate_vram = 0;
         {
@@ -1154,7 +1250,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::str
         if (candidate.empty()) break;
         priority_allowed = require_priority_session_allows(name);
         if (!priority_allowed) return priority_allowed;
-        auto unloaded = unload(candidate);
+        auto unloaded = unload_with_control(candidate, control);
         if (!unloaded) return unloaded;
         {
             std::lock_guard<std::mutex> lock(mutex_);

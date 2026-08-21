@@ -646,8 +646,21 @@ LlamaCppModel::~LlamaCppModel() {
 }
 
 Result<void> LlamaCppModel::load() {
+  return load({});
+}
+
+Result<void> LlamaCppModel::load(
+    const inferdeck::model::LifecycleControl& control) {
   std::lock_guard lk(mtx_);
   if (loaded_.load()) return Result<void>{};
+  if (control.is_cancelled()) {
+    return Result<void>(std::unexpect,
+        make_error(ErrorCode::Cancelled, "model load cancelled"));
+  }
+  if (control.is_expired()) {
+    return Result<void>(std::unexpect,
+        make_error(ErrorCode::Timeout, "model load deadline expired"));
+  }
   if (resolved_gguf_path_.empty()) {
     return Result<void>(std::unexpect,
         make_error(ErrorCode::NotFound, "empty gguf_path"));
@@ -672,6 +685,13 @@ Result<void> LlamaCppModel::load() {
       : (cfg_.use_mlock ? LLAMA_LOAD_MODE_MLOCK : LLAMA_LOAD_MODE_NONE);
   mparams.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
   mparams.load_mtp = cfg_.mtp_enabled;
+  mparams.progress_callback = [](float, void* user_data) {
+    const auto* lifecycle = static_cast<
+        const inferdeck::model::LifecycleControl*>(user_data);
+    return !lifecycle->is_cancelled() && !lifecycle->is_expired();
+  };
+  mparams.progress_callback_user_data =
+      const_cast<inferdeck::model::LifecycleControl*>(&control);
 
   llama_backend_init();
   const char* sys_info = llama_print_system_info();
@@ -702,6 +722,14 @@ Result<void> LlamaCppModel::load() {
 
   model_ = llama_model_load_from_file(resolved_gguf_path_.string().c_str(), mparams);
   if (model_ == nullptr) {
+    if (control.is_cancelled()) {
+      return Result<void>(std::unexpect,
+          make_error(ErrorCode::Cancelled, "model load cancelled"));
+    }
+    if (control.is_expired()) {
+      return Result<void>(std::unexpect,
+          make_error(ErrorCode::Timeout, "model load deadline expired"));
+    }
     const char* err = llama_print_system_info();
     LOG_ERROR("model_load_failed", "llama_model_load_from_file returned null for {}", resolved_gguf_path_.string());
     if (err) LOG_ERROR("model_load_failed", "system_info: {}", err);

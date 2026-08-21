@@ -73,6 +73,8 @@ public:
   const inferdeck::model::ChatTemplateMeta& chat_template_meta() const noexcept override { return chat_template_meta_; }
 
   inferdeck::foundation::Result<void> load() override;
+  inferdeck::foundation::Result<void> load(
+      const inferdeck::model::LifecycleControl& control) override;
   inferdeck::foundation::Result<void> unload() override;
   bool is_loaded() const noexcept override { return loaded_.load(); }
 

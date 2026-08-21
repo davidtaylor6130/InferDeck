@@ -133,7 +133,8 @@ public:
     VoiceSessionGuard(const httplib::Request& req, const GatewayDeps& deps)
         : coordinator_(&deps.coordinator), key_(request_client_key(req)),
           duration_(deps.voice_session_grace_ms) {
-        if (deps.default_model.empty() || deps.voice_session_grace_ms <= 0) {
+        if (key_.empty() || deps.default_model.empty() ||
+            deps.voice_session_grace_ms <= 0) {
             coordinator_ = nullptr;
             return;
         }

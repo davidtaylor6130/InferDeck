@@ -1152,7 +1152,10 @@ int run_gateway(const fs::path& config_path) {
                         return g_stop.load() || g_reload.load();
                     };
                     options.prepare = [&coordinator, default_model] {
-                        return coordinator.swap_to(default_model);
+                        return coordinator.swap_to_cancellable(
+                            default_model, std::chrono::minutes{5}, [] {
+                                return g_stop.load() || g_reload.load();
+                            });
                     };
                     auto slot = coordinator.acquire_slot(default_model, options);
                     auto loaded = slot
