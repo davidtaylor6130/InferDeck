@@ -570,7 +570,7 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Exit gate
 
-- [ ] Two clean builds from the same revision produce an explained, minimized
+- [x] Two clean builds from the same revision produce an explained, minimized
       artifact difference or reproducible output.
 - [x] Release archives include version, checksums, dependency manifest and SBOM.
 - [x] No dependency resolution relies on an unspecified latest version.
