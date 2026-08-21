@@ -71,6 +71,9 @@ function Test-ReleaseDefinition([string]$Text) {
         $Text -match '(?i)forced-aligner|apps/forced-aligner') {
         Add-Failure 'release package includes a non-Core launcher or companion'
     }
+    if ($Text -notmatch [regex]::Escape("Where-Object Name -NotIn @('fmtd.dll', 'spdlogd.dll')")) {
+        Add-Failure 'release package does not exclude debug-only runtime DLLs'
+    }
 }
 
 $scanRoots = @(
@@ -121,11 +124,15 @@ if ($SelfTest) {
     Test-StrictPath '/v1/vendor/messages'
     Test-ControlClassification '/api/inferdeck/v1/unprotected' 'PublicStatus'
     Test-SseTerminator "data: {}`n"
-    Test-ReleaseDefinition 'Copy-Item ops\*.ps1 dist\ops\'
-    if ($failures.Count -ne $before + 6) {
-        throw "Architecture policy self-test expected six violations; observed $($failures.Count - $before)"
+    Test-ReleaseDefinition @"
+Copy-Item ops\*.ps1 dist\ops\
+Where-Object Name -NotIn @('fmtd.dll', 'spdlogd.dll')
+"@
+    Test-ReleaseDefinition 'Copy-Item build\bin\Release\*.dll dist\'
+    if ($failures.Count -ne $before + 7) {
+        throw "Architecture policy self-test expected seven violations; observed $($failures.Count - $before)"
     }
-    $failures.RemoveRange($before, 6)
+    $failures.RemoveRange($before, 7)
 }
 
 if ($failures.Count -gt 0) {

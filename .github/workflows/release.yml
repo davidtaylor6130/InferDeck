@@ -132,7 +132,9 @@ jobs:
           Copy-Item data\pricing.json dist\data\
 
           # llama.cpp + ggml DLLs built from source (live alongside the exe)
-          Copy-Item build\bin\Release\*.dll dist\
+          Get-ChildItem build\bin\Release\*.dll |
+            Where-Object Name -NotIn @('fmtd.dll', 'spdlogd.dll') |
+            Copy-Item -Destination dist\
 
           # vcpkg runtime DLLs (x64-windows is a dynamic triplet) — already
           # included above since vcpkg copies them to bin\Release\ on Windows,
