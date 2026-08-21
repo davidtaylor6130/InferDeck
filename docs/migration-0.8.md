@@ -11,7 +11,7 @@ directory, configuration schema, and StatsDb as one migration unit.
 | `/v1/health` | `/api/inferdeck/v1/health` |
 | `/v1/swap/*` | `/api/inferdeck/v1/swap/*` |
 | runtime metadata in `/v1/models` | `/api/inferdeck/v1/models` |
-| vendor fields on `/v1` | default-off `/compat/openai-derivative/v1` or remove them |
+| vendor fields on `/v1` | remove them |
 | Anthropic Messages | use an OpenAI Chat Completions or Responses client |
 | forced alignment through Core | operate the separately preserved companion |
 

@@ -92,14 +92,12 @@ and the same dashboard. See the [roadmap](#roadmap).
 - **OpenAI Responses and embeddings APIs** at `POST /v1/responses` and
   `POST /v1/embeddings`. Responses is stateless; unsupported storage,
   background, and conversation fields are rejected explicitly.
-- **Strict OpenAI Core.** OpenAI-derivative fields such as
-  `reasoning_content`, sampler extensions, and queue priority are isolated
-  under `/compat/openai-derivative/v1` when explicitly enabled. They never
-  extend the strict `/v1` contract.
-- **Experimental native audio APIs.** Code paths exist for CPU-only Parakeet
+- **Strict OpenAI Core.** `/v1` exposes only the pinned OpenAI surface.
+  OpenAI-derivative and non-OpenAI routes are not registered.
+- **Native audio APIs.** CPU-only Parakeet
   TDT 0.6B v3 transcription at `POST /v1/audio/transcriptions` and in-process
-  Supertonic 3 speech synthesis at `POST /v1/audio/speech`. These paths have
-  not yet been thoroughly tested end to end.
+  Supertonic 3 speech synthesis at `POST /v1/audio/speech` are release-built
+  and live-verified end to end.
 - **Experimental image generation API.** A compile-gated
   stable-diffusion.cpp path exists at `POST /v1/images/generations`, but it has
   not yet been thoroughly tested end to end.
@@ -291,9 +289,8 @@ pwsh -File tests/parity/run.ps1 `
 | `POST /v1/chat/completions` | OpenAI-compatible; SSE streaming and tool calls |
 | `POST /v1/responses` | Stateless OpenAI Responses compatibility; streaming, tools, reasoning, and structured output translation |
 | `POST /v1/embeddings` | OpenAI-compatible float or base64 embeddings for registered embedding models |
-| `POST /compat/openai-derivative/v1/chat/completions` · `POST /compat/openai-derivative/v1/responses` · `POST /compat/openai-derivative/v1/embeddings` · `POST /compat/openai-derivative/v1/images/generations` | default-off profile for explicitly enabled derivative fields |
-| `POST /v1/audio/transcriptions` | Experimental, not yet fully tested; intended to provide request-scoped WAV-to-text via Parakeet TDT when sherpa-onnx is linked |
-| `POST /v1/audio/speech` | Experimental, not yet fully tested; intended to provide request-scoped WAV or PCM output via Supertonic 3 when sherpa-onnx is linked |
+| `POST /v1/audio/transcriptions` | Request-scoped WAV-to-text via native Parakeet TDT or whisper.cpp models |
+| `POST /v1/audio/speech` | Request-scoped WAV or PCM output via native Supertonic 3 |
 | `POST /v1/images/generations` | Experimental, not yet fully tested; intended to provide base64 PNG generation when stable-diffusion.cpp is linked and an image model is registered |
 | `GET /v1/models` · `GET /api/inferdeck/v1/health` · `GET /api/inferdeck/v1/metrics` · `GET /api/inferdeck/v1/stats/history` | model discovery, health, live metrics, and usage history |
 | `POST /api/inferdeck/v1/swap/to/:name` | async swap, `202` + SSE progress; `POST /api/inferdeck/v1/swap/cancel`; `GET /api/inferdeck/v1/swap/status` |
