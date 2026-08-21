@@ -59,12 +59,19 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
       - name: Build dashboard
         shell: pwsh
         run: |
           pnpm install --frozen-lockfile
           pnpm --filter dashboard test
           pnpm test:openai-contract
+          python -m pip install --disable-pip-version-check -r Testing/requirements-openai-contract.txt
+          python -m unittest -v Testing.openai_sdk_contract_test
           pnpm --filter dashboard build
 
       - name: Provision Whisper runtime source

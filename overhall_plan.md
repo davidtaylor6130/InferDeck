@@ -406,7 +406,7 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Preserve developer messages and function-call/output pairing.
 - [x] Support current function-call output content forms.
 - [x] Generate one immutable response timestamp and model identity.
-- [ ] Produce complete, internally consistent Response objects.
+- [x] Produce complete, internally consistent Response objects.
 - [x] Produce typed Responses SSE events directly from canonical output events.
 - [x] Define explicit behavior for storage, background, conversation,
       previous-response, include, truncation, service-tier and cache fields.
@@ -442,9 +442,9 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Exit gate
 
-- [ ] Pinned official Python and JavaScript SDK contract suites pass.
-- [ ] Stream and non-stream schema snapshots pass for every supported endpoint.
-- [ ] No malformed request changes jobs, queue, residency or active-request state.
+- [x] Pinned official Python and JavaScript SDK contract suites pass.
+- [x] Stream and non-stream schema snapshots pass for every supported endpoint.
+- [x] No malformed request changes jobs, queue, residency or active-request state.
 
 ## Phase 7 - Coordinator, lifecycle and issue #99
 

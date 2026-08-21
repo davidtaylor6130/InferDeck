@@ -145,9 +145,11 @@ nlohmann::json result_to_response(const model::InferenceResult& result,
             {"arguments", tool.function_arguments},
         });
     }
-    return {
+    auto response = nlohmann::json{
         {"id", response_id}, {"object", "response"},
         {"created_at", created_at}, {"status", "completed"},
+        {"completed_at", static_cast<std::int64_t>(std::time(nullptr))},
+        {"output_text", result.text},
         {"background", false}, {"conversation", nullptr},
         {"error", nullptr}, {"incomplete_details", nullptr},
         {"instructions", request.value("instructions", nlohmann::json(nullptr))},
@@ -172,6 +174,7 @@ nlohmann::json result_to_response(const model::InferenceResult& result,
             {"total_tokens", result.prompt_tokens + result.completion_tokens},
         }},
     };
+    return response;
 }
 
 struct ToolStreamState {
@@ -207,9 +210,10 @@ nlohmann::json stream_response_object(const ResponsesStreamState& state,
                                       const std::string& status,
                                       nlohmann::json output,
                                       nlohmann::json error = nullptr) {
-    return {
+    auto response = nlohmann::json{
         {"id", state.response_id}, {"object", "response"},
         {"created_at", state.created_at}, {"status", status},
+        {"output_text", state.text},
         {"background", false}, {"conversation", nullptr},
         {"error", error}, {"incomplete_details", nullptr},
         {"instructions", state.request.value("instructions", nlohmann::json(nullptr))},
@@ -228,6 +232,11 @@ nlohmann::json stream_response_object(const ResponsesStreamState& state,
         {"truncation", "disabled"},
         {"usage", response_usage(state.usage)},
     };
+    if (status == "completed") {
+        response["completed_at"] =
+            static_cast<std::int64_t>(std::time(nullptr));
+    }
+    return response;
 }
 
 bool emit_response_event(ResponsesStreamState& state, httplib::DataSink& sink,
@@ -507,7 +516,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         return token_input;
     };
     if (!body.contains("input")) {
-        write_error(resp, 400, "invalid_input", "request body must include ''input''");
+        write_error(resp, 400, "invalid_input", "request body must include 'input'");
         return;
     }
     const auto& input = body["input"];

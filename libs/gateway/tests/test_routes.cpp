@@ -42,6 +42,32 @@ using inferdeck::foundation::ErrorCode;
 using inferdeck::foundation::Ok;
 using inferdeck::foundation::Result;
 
+namespace {
+
+const nlohmann::json& openai_schema_snapshots() {
+    static const nlohmann::json snapshots = [] {
+        const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+            "tests/fixtures/openai_schema_snapshots.json";
+        std::ifstream input(path, std::ios::binary);
+        if (!input.good()) throw std::runtime_error("cannot read OpenAI schema snapshots");
+        return nlohmann::json::parse(input);
+    }();
+    return snapshots;
+}
+
+nlohmann::json object_keys(const nlohmann::json& value) {
+    nlohmann::json keys = nlohmann::json::array();
+    for (const auto& item : value.items()) keys.push_back(item.key());
+    return keys;
+}
+
+void check_schema(const nlohmann::json& value, const char* snapshot) {
+    REQUIRE(value.is_object());
+    CHECK(object_keys(value) == openai_schema_snapshots().at(snapshot));
+}
+
+}
+
 TEST_CASE("OpenAI error mapping is centralized and typed",
           "[routes][errors]") {
     const auto context = map_openai_error(
@@ -813,6 +839,53 @@ TEST_CASE("Strict JSON endpoints reject wrong media types before admission",
     server.stop();
 }
 
+TEST_CASE("Malformed strict requests cannot mutate admission or residency state",
+          "[routes][strict][mutation]") {
+    TestServer server;
+    REQUIRE(server.start());
+    httplib::Client client("127.0.0.1", server.port);
+    const auto initial_jobs = media_jobs().size();
+    const auto initial_loaded = server.coordinator.get_loaded_models();
+
+    const std::vector<std::pair<std::string, nlohmann::json>> malformed_json{
+        {"/v1/chat/completions",
+         {{"model", "missing"}, {"messages", 42}}},
+        {"/v1/responses",
+         {{"model", "missing"}, {"input", 42}}},
+        {"/v1/embeddings",
+         {{"model", "missing"}, {"input", nlohmann::json::object()}}},
+        {"/v1/images/generations",
+         {{"model", "missing"}, {"prompt", 42}}},
+        {"/v1/audio/speech",
+         {{"model", "missing"}, {"input", 42}, {"voice", "default"},
+          {"response_format", "wav"}}},
+    };
+    for (const auto& [path, body] : malformed_json) {
+        INFO(path);
+        const auto response =
+            client.Post(path, body.dump(), "application/json");
+        REQUIRE(response);
+        CHECK(response->status == 400);
+    }
+
+    const auto transcription = client.Post(
+        "/v1/audio/transcriptions", httplib::UploadFormDataItems{
+            {"file", test_wav(), "test.wav", "audio/wav"},
+            {"model", "missing", "", ""},
+            {"response_format", "future", "", ""},
+        });
+    REQUIRE(transcription);
+    CHECK(transcription->status == 400);
+
+    CHECK(server.metrics.total_requests() == 0);
+    CHECK(server.coordinator.active_request_count() == 0);
+    CHECK(server.coordinator.queued_request_count() == 0);
+    CHECK(server.coordinator.get_loaded_models() == initial_loaded);
+    CHECK(media_jobs().size() == initial_jobs);
+    CHECK(server.stats_db.recent_requests(1).empty());
+    server.stop();
+}
+
 TEST_CASE("Strict Chat rejects derivative fields before admission",
           "[routes][chat][profile]") {
     TestServer ts;
@@ -877,10 +950,12 @@ TEST_CASE("Routes: GET /v1/models lists registered models", "[routes][models]") 
     REQUIRE(res->status == 200);
 
     auto body = nlohmann::json::parse(res->body);
+    check_schema(body, "models");
     REQUIRE(body["object"] == "list");
     REQUIRE(body["data"].is_array());
     REQUIRE(body["data"].size() == 2);
     REQUIRE(body["data"][0]["object"] == "model");
+    check_schema(body["data"][0], "model");
     REQUIRE(body["data"][0].size() == 4);
     const auto reasoning_entry = std::find_if(
         body["data"].begin(), body["data"].end(), [](const auto& entry) {
@@ -936,7 +1011,12 @@ TEST_CASE("Routes: stable aliases resolve while preserving request attribution",
         "application/json");
     REQUIRE(chat_response);
     REQUIRE(chat_response->status == 200);
-    CHECK(nlohmann::json::parse(chat_response->body)["model"] == "assistant-stable");
+    const auto chat = nlohmann::json::parse(chat_response->body);
+    CHECK(chat["model"] == "assistant-stable");
+    check_schema(chat, "chat_completion");
+    check_schema(chat["choices"][0], "chat_choice");
+    check_schema(chat["choices"][0]["message"], "chat_message");
+    check_schema(chat["usage"], "chat_usage");
 
     const auto stream_response = client.Post(
         "/v1/chat/completions",
@@ -952,6 +1032,9 @@ TEST_CASE("Routes: stable aliases resolve while preserving request attribution",
         position = newline + 1;
         if (!line.starts_with("data: ") || line == "data: [DONE]") continue;
         const auto chunk = nlohmann::json::parse(line.substr(6));
+        check_schema(chunk, chunk.contains("usage")
+                                ? "chat_stream_chunk"
+                                : "chat_stream_chunk_without_usage");
         if (chunk.contains("model")) {
             CHECK(chunk["model"] == "assistant-stable");
         }
@@ -1403,10 +1486,13 @@ TEST_CASE("Routes: POST /v1/embeddings returns ordered float vectors", "[routes]
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto body = nlohmann::json::parse(response->body);
+    check_schema(body, "embeddings");
     REQUIRE(body["object"] == "list");
     REQUIRE(body["model"] == info.name);
     REQUIRE(body["data"].size() == 2);
     REQUIRE(body["data"][0]["index"] == 0);
+    check_schema(body["data"][0], "embedding");
+    check_schema(body["usage"], "embedding_usage");
     REQUIRE(body["data"][0]["embedding"] == nlohmann::json::array({1.0, 1.0}));
     REQUIRE(body["data"][1]["embedding"] == nlohmann::json::array({2.0, 2.0}));
     REQUIRE(body["usage"]["prompt_tokens"] == 6);
@@ -1565,6 +1651,7 @@ TEST_CASE("Routes: POST /v1/responses translates string input and output", "[rou
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto body = nlohmann::json::parse(response->body);
+    check_schema(body, "responses_completed");
     REQUIRE(body["object"] == "response");
     REQUIRE(body["status"] == "completed");
     REQUIRE(body["model"] == "chat-model");
@@ -1577,8 +1664,15 @@ TEST_CASE("Routes: POST /v1/responses translates string input and output", "[rou
     CHECK(body["truncation"] == "disabled");
     REQUIRE(body["output"].size() == 1);
     REQUIRE(body["output"][0]["type"] == "message");
+    check_schema(body["output"][0], "response_message");
+    check_schema(body["output"][0]["content"][0], "response_output_text");
+    check_schema(body["usage"], "response_usage");
     REQUIRE(body["output"][0]["content"][0]["type"] == "output_text");
     REQUIRE(body["output"][0]["content"][0]["text"] == "Hello from model");
+    REQUIRE(body["output_text"] == "Hello from model");
+    REQUIRE(body["completed_at"].is_number_integer());
+    CHECK(body["completed_at"].get<std::int64_t>() >=
+          body["created_at"].get<std::int64_t>());
     REQUIRE(body["usage"]["input_tokens"] == 3);
     REQUIRE(body["usage"]["output_tokens"] == 4);
     ts.stop();
@@ -1847,6 +1941,10 @@ TEST_CASE("Routes: POST /v1/responses streams typed reasoning and tool events", 
         offset = end + 1;
         const auto event = nlohmann::json::parse(data);
         if (!event.contains("response")) continue;
+        check_schema(event["response"],
+                     event["type"] == "response.completed"
+                         ? "responses_completed"
+                         : "responses_in_progress");
         CHECK(event["response"]["model"] == "chat-model");
         const auto event_created =
             event["response"]["created_at"].get<std::int64_t>();
@@ -1854,6 +1952,12 @@ TEST_CASE("Routes: POST /v1/responses streams typed reasoning and tool events", 
         CHECK(event_created == *created_at);
         CHECK(event["response"]["store"] == false);
         CHECK(event["response"]["truncation"] == "disabled");
+        if (event["type"] == "response.completed") {
+            CHECK(event["response"]["output_text"].is_string());
+            CHECK(event["response"]["completed_at"].is_number_integer());
+        } else {
+            CHECK_FALSE(event["response"].contains("completed_at"));
+        }
     }
     REQUIRE(created_at.has_value());
     ts.stop();
@@ -2006,9 +2110,11 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     REQUIRE(response->status == 200);
     CHECK_FALSE(response->has_header("X-InferDeck-Job-Id"));
     const auto body = nlohmann::json::parse(response->body);
+    check_schema(body, "images");
     REQUIRE(body["data"].size() == 2);
     CHECK(body["output_format"] == "png");
     CHECK(body["data"][0]["b64_json"] == "iVBORw==");
+    check_schema(body["data"][0], "image");
     ts.stop();
 }
 
@@ -2341,6 +2447,7 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     REQUIRE(response);
     REQUIRE(response->status == 200);
     CHECK(nlohmann::json::parse(response->body)["text"] == "test transcript");
+    check_schema(nlohmann::json::parse(response->body), "transcription");
 
     response = transcribe("text");
     REQUIRE(response);
@@ -2352,9 +2459,11 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto verbose = nlohmann::json::parse(response->body);
+    check_schema(verbose, "verbose_transcription");
     CHECK(verbose["task"] == "transcribe");
     CHECK(verbose["language"] == "en");
     REQUIRE(verbose["segments"].size() == 1);
+    check_schema(verbose["segments"][0], "transcription_segment");
     CHECK(verbose["segments"][0]["tokens"] == nlohmann::json::array({50364, 1234, 50389}));
     CHECK_FALSE(verbose["segments"][0].contains("compression_ratio"));
 

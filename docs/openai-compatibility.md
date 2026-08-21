@@ -15,6 +15,23 @@ The pinned versions are compatibility fixtures, not floating minimums. A
 baseline update must change the manifest fixture, SDK contract locks, schema
 snapshots, and this document together, then pass both official SDK suites.
 
+Run the pinned client contracts with:
+
+```powershell
+pnpm test:openai-contract
+python -m pip install -r Testing/requirements-openai-contract.txt
+python -m unittest -v Testing.openai_sdk_contract_test
+```
+
+Both suites exercise every route in the strict manifest through the official
+client request serializers and response parsers. Chat Completions and Responses
+also cover their supported streaming forms.
+
+The C++ route suite locks every successful strict response shape to
+`tests/fixtures/openai_schema_snapshots.json`. It also sends malformed requests
+to every strict generation endpoint and verifies that jobs, queue depth, model
+residency, active requests, metrics, and request history remain unchanged.
+
 ## Strict Chat Completions contract
 
 POST /v1/chat/completions requires a non-empty model and message array and

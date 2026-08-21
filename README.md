@@ -270,6 +270,13 @@ ctest --test-dir build -C Release --output-on-failure -L "unit|integration"
 # Dashboard unit tests
 pnpm --filter dashboard test
 
+# Pinned OpenAI JavaScript SDK 7.5.0 contract
+pnpm test:openai-contract
+
+# Pinned OpenAI Python SDK 3.3.1 contract
+python -m pip install -r Testing/requirements-openai-contract.txt
+python -m unittest -v Testing.openai_sdk_contract_test
+
 # Real-model parity needs raw llama-server and InferDeck running with the same model
 pwsh -File tests/parity/record_baseline.ps1 -Model qwen3.6-27b
 pwsh -File tests/parity/run.ps1 `
