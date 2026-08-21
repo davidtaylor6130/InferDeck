@@ -413,10 +413,10 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Embeddings
 
-- [ ] Support string, string-array, token-ID array and token-ID matrix input.
-- [ ] Validate dimensions, encoding format, user and input limits.
+- [x] Support string, string-array, token-ID array and token-ID matrix input.
+- [x] Validate dimensions, encoding format, user and input limits.
 - [x] Encode base64 floats with explicit little-endian representation.
-- [ ] Remove public priority and reject unknown unsupported fields explicitly.
+- [x] Remove public priority and reject unknown unsupported fields explicitly.
 
 ### Images
 

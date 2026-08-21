@@ -1096,7 +1096,22 @@ Result<inferdeck::model::EmbeddingResult> LlamaCppModel::embed(
       return Result<EmbeddingResult>(std::unexpect,
           make_error(ErrorCode::Cancelled, "embedding request cancelled"));
     }
-    auto tokens = common_tokenize(vocab_, input, true, true);
+    std::vector<llama_token> tokens;
+    if (const auto* text = std::get_if<inferdeck::model::EmbeddingTextInput>(&input)) {
+      tokens = common_tokenize(vocab_, text->text, true, true);
+    } else {
+      const auto& token_input = std::get<inferdeck::model::EmbeddingTokenInput>(input);
+      const int32_t vocabulary_size = llama_vocab_n_tokens(vocab_);
+      tokens.reserve(token_input.tokens.size());
+      for (const std::int32_t token : token_input.tokens) {
+        if (token < 0 || token >= vocabulary_size) {
+          return Result<EmbeddingResult>(std::unexpect,
+              make_error(ErrorCode::InvalidArgument,
+                         "embedding input contains an invalid token ID"));
+        }
+        tokens.push_back(static_cast<llama_token>(token));
+      }
+    }
     if (tokens.empty() || tokens.size() > llama_n_batch(shared_ctx_)) {
       return Result<EmbeddingResult>(std::unexpect,
           make_error(ErrorCode::InvalidArgument, "embedding input exceeds model batch limit"));

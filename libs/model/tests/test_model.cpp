@@ -352,7 +352,8 @@ TEST_CASE("BackendCoordinator: routes embeddings by capability", "[model][coordi
     auto slot = coordinator.acquire_slot(info.name);
     REQUIRE(slot.has_value());
     EmbeddingRequest request;
-    request.inputs = {"one", "two"};
+    request.inputs = {EmbeddingTextInput{"one"},
+                      EmbeddingTokenInput{{1, 2, 3}}};
     auto result = coordinator.embed(info.name, *slot, request);
     REQUIRE(result.has_value());
     REQUIRE(result->embeddings.size() == 2);

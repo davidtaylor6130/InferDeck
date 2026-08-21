@@ -6,6 +6,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "foundation/result.hpp"
@@ -33,8 +34,18 @@ struct ChatTemplateMeta {
 
 using InferenceResult = inference::GenerationResult;
 
+struct EmbeddingTextInput {
+    std::string text;
+};
+
+struct EmbeddingTokenInput {
+    std::vector<std::int32_t> tokens;
+};
+
+using EmbeddingInput = std::variant<EmbeddingTextInput, EmbeddingTokenInput>;
+
 struct EmbeddingRequest {
-    std::vector<std::string> inputs;
+    std::vector<EmbeddingInput> inputs;
     std::optional<int> dimensions{};
 };
 

@@ -30,6 +30,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
+#include <type_traits>
 
 using namespace inferdeck;
 using namespace inferdeck::model;
@@ -417,7 +418,15 @@ public:
         for (std::size_t i = 0; i < request.inputs.size(); ++i) {
             result.embeddings.emplace_back(static_cast<std::size_t>(dimensions),
                                            static_cast<float>(i + 1));
-            result.prompt_tokens += static_cast<int>(request.inputs[i].size());
+            result.prompt_tokens += static_cast<int>(std::visit(
+                [](const auto& input) -> std::size_t {
+                    using T = std::decay_t<decltype(input)>;
+                    if constexpr (std::is_same_v<T, EmbeddingTextInput>) {
+                        return input.text.size();
+                    } else {
+                        return input.tokens.size();
+                    }
+                }, request.inputs[i]));
         }
         result.duration_ms = 2.0f;
         return Ok(std::move(result));
@@ -1213,6 +1222,48 @@ TEST_CASE("Routes: POST /v1/embeddings supports base64 encoding", "[routes][embe
     ts.stop();
 }
 
+TEST_CASE("Routes: POST /v1/embeddings preserves token input shapes and order",
+          "[routes][embeddings]") {
+    TestServer ts;
+    auto info = make_info("embed-model");
+    info.modality = "embedding";
+    info.capabilities = {"embeddings"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto vector_response = client.Post("/v1/embeddings", nlohmann::json{
+        {"model", info.name}, {"input", nlohmann::json::array({10, 20, 30})},
+    }.dump(), "application/json");
+    REQUIRE(vector_response);
+    REQUIRE(vector_response->status == 200);
+    const auto vector_body = nlohmann::json::parse(vector_response->body);
+    REQUIRE(vector_body["data"].size() == 1);
+    REQUIRE(vector_body["data"][0]["index"] == 0);
+    REQUIRE(vector_body["usage"]["prompt_tokens"] == 3);
+
+    auto matrix_response = client.Post("/v1/embeddings", nlohmann::json{
+        {"model", info.name},
+        {"input", nlohmann::json::array({
+            nlohmann::json::array({1, 2}),
+            nlohmann::json::array({3, 4, 5}),
+        })},
+    }.dump(), "application/json");
+    REQUIRE(matrix_response);
+    REQUIRE(matrix_response->status == 200);
+    const auto matrix_body = nlohmann::json::parse(matrix_response->body);
+    REQUIRE(matrix_body["data"].size() == 2);
+    REQUIRE(matrix_body["data"][0]["index"] == 0);
+    REQUIRE(matrix_body["data"][0]["embedding"] ==
+            nlohmann::json::array({1.0, 1.0, 1.0}));
+    REQUIRE(matrix_body["data"][1]["index"] == 1);
+    REQUIRE(matrix_body["data"][1]["embedding"] ==
+            nlohmann::json::array({2.0, 2.0, 2.0}));
+    REQUIRE(matrix_body["usage"]["prompt_tokens"] == 5);
+    ts.stop();
+}
+
 TEST_CASE("Routes: embeddings validate strict fields before acquisition",
           "[routes][embeddings][validation]") {
     TestServer server;
@@ -1228,6 +1279,21 @@ TEST_CASE("Routes: embeddings validate strict fields before acquisition",
         {{"model", info.name}, {"input", "one"}, {"user", 42}},
         {{"model", info.name}, {"input", "one"},
          {"encoding_format", "hex"}},
+        {{"model", info.name}, {"input", nlohmann::json::array()}},
+        {{"model", info.name},
+         {"input", nlohmann::json::array({"one", 2})}},
+        {{"model", info.name},
+         {"input", nlohmann::json::array({1, "two"})}},
+        {{"model", info.name},
+         {"input", nlohmann::json::array({
+             nlohmann::json::array({1}), 2})}},
+        {{"model", info.name},
+         {"input", nlohmann::json::array({-1, 2})}},
+        {{"model", info.name},
+         {"input", nlohmann::json::array({1.5, 2})}},
+        {{"model", info.name},
+         {"input", nlohmann::json::array({
+             nlohmann::json::array(), nlohmann::json::array({1})})}},
     };
     for (const auto& body : invalid) {
         httplib::Request request;
@@ -1237,6 +1303,23 @@ TEST_CASE("Routes: embeddings validate strict fields before acquisition",
         INFO(body.dump());
         CHECK(response.status == 400);
     }
+    CHECK(server.metrics.total_requests() == 0);
+    CHECK(server.coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("Routes: embeddings validate input before model resolution",
+          "[routes][embeddings][validation]") {
+    TestServer server;
+    httplib::Request request;
+    request.body = nlohmann::json{
+        {"model", "missing-model"},
+        {"input", nlohmann::json::array({1, "mixed"})},
+    }.dump();
+    httplib::Response response;
+    handle_embeddings(request, response, server.make_deps());
+    REQUIRE(response.status == 400);
+    REQUIRE(nlohmann::json::parse(response.body)["error"]["code"] ==
+            "invalid_input");
     CHECK(server.metrics.total_requests() == 0);
     CHECK(server.coordinator.active_request_count() == 0);
 }
