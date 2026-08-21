@@ -126,12 +126,26 @@ Models owns stable aliases plus catalogue and installed-artifact operations. Cat
 
 ## Throughput and usage semantics
 
+- One canonical request record feeds in-memory metrics, the SQLite ledger,
+  structured completion logs, and `request` SSE events. It carries the request
+  ID, principal class, endpoint/profile, modality, requested and resolved model,
+  outcome, phase timings, token classes, and modality-specific usage units.
+- The request ID echoed in `X-Request-Id` is the correlation key for access
+  logs, completion logs, SQLite rows, and SSE events.
 - **TPS** is generated tokens divided by scheduler-measured generation time; prompt prefill is excluded.
 - **Prompt processing** is uncached prompt tokens divided by the scheduler-measured prefill interval.
 - **Peak TPS** and peak prompt-processing speed are maxima from comparable successful requests with measured phase timings, never configured estimates.
 - A missing duration produces an unavailable dashboard value rather than a fabricated zero-speed measurement.
 
 The LLM Usage range selector drives the chart, summary totals, per-model requests and tokens, weighted throughput, peaks, and cost through the same hourly, daily, or monthly buckets. The table headers are keyboard-sortable, expose `aria-sort`, start alphabetically for model names and highest-first for numeric columns, and reverse on a second activation. Lifetime data is only shown where it is labelled lifetime.
+
+SQLite uses WAL mode and schema version 2. Upgrading a disk ledger creates a
+`stats.db.backup-v<old-version>` backup and applies the migration in one
+transaction; failure rolls back without exposing a partially upgraded schema.
+Prepared insert statements remain open for the database lifetime. Dashboard
+lifetime totals are folded from the same all-time daily buckets used by cost
+views, so lifetime and date-aware cache pricing cannot diverge. Diagnostic jobs
+accept `protocol_profile` and `endpoint` filters.
 
 ## Persistence boundary
 

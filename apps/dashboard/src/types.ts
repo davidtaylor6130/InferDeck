@@ -75,16 +75,35 @@ export interface ModelEvent {
 
 export interface RequestEvent {
   timestampUnixMs: number;
+  requestId: string;
+  principalClass: string;
+  endpoint: string;
+  protocolProfile: string;
+  modality: string;
   model: string;
+  resolvedModel: string;
+  stream: boolean;
+  finishCode: string;
+  errorCode: string;
   promptTokens: number;
+  cachedPromptTokens: number;
+  cacheWriteTokens: number;
   completionTokens: number;
+  reasoningTokens: number;
   durationMs: number;
-  generationDurationMs?: number;
+  generationDurationMs: number;
+  promptDurationMs: number;
+  firstTokenDurationMs: number;
+  queueDurationMs: number;
+  swapLoadDurationMs: number;
   tokensPerSecond: number;
-  promptTokensPerSecond?: number;
+  promptTokensPerSecond: number;
   status: number;
-  inputAudioSeconds?: number;
-  inputCharacters?: number;
+  inputAudioSeconds: number;
+  outputAudioSeconds: number;
+  inputCharacters: number;
+  inputImageCount: number;
+  outputImageCount: number;
 }
 
 export interface SwapState {

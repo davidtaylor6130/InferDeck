@@ -534,8 +534,15 @@ TEST_CASE("Usage API exposes daily usage for the complete retained history",
     const auto status_response = client.Get("/api/inferdeck/v1/status");
     REQUIRE(status_response);
     REQUIRE(status_response->status == 200);
-    CHECK(nlohmann::json::parse(status_response->body)
-              ["dailyTokenUsageAllTime"] == false);
+    const auto status = nlohmann::json::parse(status_response->body);
+    CHECK(status["dailyTokenUsageAllTime"] == false);
+    const auto sum_tokens = [](const auto& rows) {
+        std::int64_t total = 0;
+        for (const auto& row : rows) total += row.value("totalTokens", 0LL);
+        return total;
+    };
+    CHECK(sum_tokens(status["tokenUsage"]) == 165);
+    CHECK(sum_tokens(status["monthlyTokenUsage"]) == 165);
     const auto response = client.Get("/api/inferdeck/v1/usage/daily");
     REQUIRE(response);
     REQUIRE(response->status == 200);

@@ -635,37 +635,60 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
     for (auto it = system.begin(); it != system.end(); ++it) hardware[it.key()] = it.value();
 
     nlohmann::json usage = nlohmann::json::array();
+    std::unordered_map<std::string, observability::UsageBucketRow> canonical_usage;
+    for (const auto& bucket : stats_db.daily_usage(0)) {
+        auto& total = canonical_usage[bucket.model];
+        total.model = bucket.model;
+        total.prompt_tokens += bucket.prompt_tokens;
+        total.cached_prompt_tokens += bucket.cached_prompt_tokens;
+        total.completion_tokens += bucket.completion_tokens;
+        total.total_tokens += bucket.total_tokens;
+        total.requests += bucket.requests;
+        total.successful_requests += bucket.successful_requests;
+        total.measured_completion_tokens += bucket.measured_completion_tokens;
+        total.measured_prompt_tokens += bucket.measured_prompt_tokens;
+        total.generation_duration_ms += bucket.generation_duration_ms;
+        total.prompt_duration_ms += bucket.prompt_duration_ms;
+        total.peak_tokens_per_second = std::max(
+            total.peak_tokens_per_second, bucket.peak_tokens_per_second);
+        total.peak_prompt_tokens_per_second = std::max(
+            total.peak_prompt_tokens_per_second,
+            bucket.peak_prompt_tokens_per_second);
+        total.input_audio_seconds += bucket.input_audio_seconds;
+        total.input_characters += bucket.input_characters;
+    }
     std::int64_t prompt_tokens = 0;
     std::int64_t completion_tokens = 0;
     std::int64_t requests = 0;
     for (const auto& row : stats_db.model_usage()) {
-        prompt_tokens += row.prompt_tokens;
-        completion_tokens += row.completion_tokens;
-        requests += row.requests;
-        const double avg_tps = row.total_generation_duration_ms > 0.0
-            ? static_cast<double>(row.measured_completion_tokens) / (row.total_generation_duration_ms / 1000.0)
+        const auto& canonical = canonical_usage.at(row.model);
+        prompt_tokens += canonical.prompt_tokens;
+        completion_tokens += canonical.completion_tokens;
+        requests += canonical.requests;
+        const double avg_tps = canonical.generation_duration_ms > 0.0
+            ? static_cast<double>(canonical.measured_completion_tokens) / (canonical.generation_duration_ms / 1000.0)
             : 0.0;
-        const double avg_prompt_tps = row.total_prompt_duration_ms > 0.0
-            ? static_cast<double>(row.measured_prompt_tokens) /
-                (row.total_prompt_duration_ms / 1000.0)
+        const double avg_prompt_tps = canonical.prompt_duration_ms > 0.0
+            ? static_cast<double>(canonical.measured_prompt_tokens) /
+                (canonical.prompt_duration_ms / 1000.0)
             : 0.0;
         usage.push_back({
             {"model", row.model},
-            {"requests", row.requests},
-            {"successfulRequests", row.successful_requests},
-            {"promptTokens", row.prompt_tokens},
-            {"cachedPromptTokens", row.cached_prompt_tokens},
-            {"completionTokens", row.completion_tokens},
-            {"measuredCompletionTokens", row.measured_completion_tokens},
-            {"measuredPromptTokens", row.measured_prompt_tokens},
-            {"totalTokens", row.prompt_tokens + row.completion_tokens},
-            {"peakTokensPerSecond", row.peak_tokens_per_second},
+            {"requests", canonical.requests},
+            {"successfulRequests", canonical.successful_requests},
+            {"promptTokens", canonical.prompt_tokens},
+            {"cachedPromptTokens", canonical.cached_prompt_tokens},
+            {"completionTokens", canonical.completion_tokens},
+            {"measuredCompletionTokens", canonical.measured_completion_tokens},
+            {"measuredPromptTokens", canonical.measured_prompt_tokens},
+            {"totalTokens", canonical.total_tokens},
+            {"peakTokensPerSecond", canonical.peak_tokens_per_second},
             {"avgTokensPerSecond", avg_tps},
-            {"peakPromptTokensPerSecond", row.peak_prompt_tokens_per_second},
+            {"peakPromptTokensPerSecond", canonical.peak_prompt_tokens_per_second},
             {"avgPromptTokensPerSecond", avg_prompt_tps},
             {"lastTimestampUnixMs", row.last_timestamp_unix_ms},
-            {"inputAudioSeconds", row.input_audio_seconds},
-            {"inputCharacters", row.input_characters}
+            {"inputAudioSeconds", canonical.input_audio_seconds},
+            {"inputCharacters", canonical.input_characters}
         });
     }
 

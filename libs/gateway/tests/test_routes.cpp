@@ -3297,6 +3297,7 @@ TEST_CASE("request observation uses one canonical record for every sink",
     result.prompt_tokens = 100;
     result.cached_prompt_tokens = 60;
     result.completion_tokens = 20;
+    result.reasoning_tokens = 7;
     result.prompt_duration_ms = 20.0f;
     result.generation_duration_ms = 10.0f;
     result.duration_ms = 35.0f;
@@ -3309,6 +3310,12 @@ TEST_CASE("request observation uses one canonical record for every sink",
     observation.protocol_profile = "strict_openai";
     observation.modality = "text";
     observation.stream = true;
+    observation.queue_duration_ms = 3.0;
+    observation.swap_load_duration_ms = 4.0;
+    observation.first_token_duration_ms = 5.0;
+    observation.output_audio_seconds = 1.5;
+    observation.input_image_count = 2;
+    observation.output_image_count = 1;
 
     record_request(&metrics, &stats, &events, "alias", result, 200, 2,
                    0.0, 0, "real", observation);
@@ -3324,6 +3331,13 @@ TEST_CASE("request observation uses one canonical record for every sink",
     CHECK(payload["endpoint"] == rows[0].endpoint);
     CHECK(payload["protocolProfile"] == rows[0].protocol_profile);
     CHECK(payload["cacheWriteTokens"] == rows[0].cache_write_tokens);
+    CHECK(payload["reasoningTokens"] == rows[0].reasoning_tokens);
+    CHECK(payload["queueDurationMs"] == rows[0].queue_duration_ms);
+    CHECK(payload["swapLoadDurationMs"] == rows[0].swap_load_duration_ms);
+    CHECK(payload["firstTokenDurationMs"] == rows[0].first_token_duration_ms);
+    CHECK(payload["outputAudioSeconds"] == rows[0].output_audio_seconds);
+    CHECK(payload["inputImageCount"] == rows[0].input_image_count);
+    CHECK(payload["outputImageCount"] == rows[0].output_image_count);
     CHECK(rows[0].cache_write_tokens == 40);
     CHECK(rows[0].tokens_per_second == Catch::Approx(2000.0));
     CHECK(payload["tokensPerSecond"].get<double>() ==
