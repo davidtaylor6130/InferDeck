@@ -1,4 +1,5 @@
 #include "gateway/config_repository.hpp"
+#include "gateway/config_secrets.hpp"
 
 #include <fstream>
 #include <iomanip>
@@ -121,13 +122,15 @@ foundation::Result<ConfigCommit> ConfigRepository::write_base(
             foundation::ErrorCode::AlreadyExists,
             "base configuration revision conflict");
     }
-    auto valid = validate_locked(text);
+    const auto restored = restore_config_secrets(text, current->base);
+    auto valid = validate_locked(restored);
     if (!valid) return foundation::Err<ConfigCommit>(
         valid.error().code, valid.error().message);
-    auto written = write_atomic_locked(base_path_, text);
+    auto written = write_atomic_locked(base_path_, restored);
     if (!written) return foundation::Err<ConfigCommit>(
         written.error().code, written.error().message);
-    return foundation::Ok(ConfigCommit{revision(text), text != current->base});
+    return foundation::Ok(ConfigCommit{
+        revision(restored), restored != current->base});
 }
 
 foundation::Result<ConfigCommit> ConfigRepository::write_active(
@@ -141,10 +144,12 @@ foundation::Result<ConfigCommit> ConfigRepository::write_active(
             foundation::ErrorCode::AlreadyExists,
             "active configuration revision conflict");
     }
-    auto valid = validate_locked(text);
+    const auto& source = current->has_active ? current->active : current->base;
+    const auto restored = restore_config_secrets(text, source);
+    auto valid = validate_locked(restored);
     if (!valid) return foundation::Err<ConfigCommit>(
         valid.error().code, valid.error().message);
-    auto written = write_atomic_locked(active_path_, text);
+    auto written = write_atomic_locked(active_path_, restored);
     if (!written) return foundation::Err<ConfigCommit>(
         written.error().code, written.error().message);
     if (reload_) {
@@ -163,7 +168,8 @@ foundation::Result<ConfigCommit> ConfigRepository::write_active(
         }
     }
     return foundation::Ok(ConfigCommit{
-        revision(text), !current->has_active || text != current->active});
+        revision(restored),
+        !current->has_active || restored != current->active});
 }
 
 foundation::Result<ConfigCommit> ConfigRepository::reset_active(
@@ -197,6 +203,55 @@ foundation::Result<ConfigCommit> ConfigRepository::reset_active(
         }
     }
     return foundation::Ok(ConfigCommit{current->base_revision, removed});
+}
+
+foundation::Result<ConfigCommit> ConfigRepository::transact_active(
+    const std::string& expected_revision, ActiveTransform transform,
+    Rollback rollback) {
+    std::lock_guard lock(mutex_);
+    auto current = snapshot_locked();
+    if (!current) return foundation::Err<ConfigCommit>(
+        current.error().code, current.error().message);
+    if (expected_revision != current->active_revision) {
+        return foundation::Err<ConfigCommit>(
+            foundation::ErrorCode::AlreadyExists,
+            "active configuration revision conflict");
+    }
+    auto transformed = transform(*current);
+    if (!transformed) {
+        if (rollback) rollback();
+        return foundation::Err<ConfigCommit>(
+            transformed.error().code, transformed.error().message);
+    }
+    auto valid = validate_locked(*transformed);
+    if (!valid) {
+        if (rollback) rollback();
+        return foundation::Err<ConfigCommit>(valid.error().code, valid.error().message);
+    }
+    auto written = write_atomic_locked(active_path_, *transformed);
+    if (!written) {
+        if (rollback) rollback();
+        return foundation::Err<ConfigCommit>(written.error().code, written.error().message);
+    }
+    if (reload_) {
+        auto reloaded = reload_();
+        if (!reloaded) {
+            if (current->has_active) {
+                (void)write_atomic_locked(active_path_, current->active);
+            } else {
+                std::error_code ignored;
+                std::filesystem::remove(active_path_, ignored);
+            }
+            if (rollback) rollback();
+            return foundation::Err<ConfigCommit>(
+                reloaded.error().code,
+                "reload failed; configuration and state restored: " +
+                    reloaded.error().message);
+        }
+    }
+    return foundation::Ok(ConfigCommit{
+        revision(*transformed),
+        !current->has_active || *transformed != current->active});
 }
 
 }

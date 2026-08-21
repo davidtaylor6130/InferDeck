@@ -17,6 +17,47 @@ TEST_CASE("Gateway configuration rejects a missing explicit file", "[config]") {
     CHECK_THROWS_AS(load_config(missing), std::runtime_error);
 }
 
+TEST_CASE("Configuration schema rejects unknown keys with precise paths",
+          "[config][schema][unknown-key]") {
+    const auto top_level = validate_config_text(
+        "schema_version: 1\nservre: {}\n");
+    REQUIRE_FALSE(top_level);
+    CHECK(top_level.error().message ==
+          "unknown configuration key: servre");
+
+    const auto nested = validate_config_text(
+        "schema_version: 1\n"
+        "gateway:\n"
+        "  sampling:\n"
+        "    tempertaure: 0.7\n");
+    REQUIRE_FALSE(nested);
+    CHECK(nested.error().message ==
+          "unknown configuration key: gateway.sampling.tempertaure");
+
+    const auto model = validate_config_text(
+        "schema_version: 1\n"
+        "model_registry:\n"
+        "  - name: test\n"
+        "    runtme: llama_cpp\n");
+    REQUIRE_FALSE(model);
+    CHECK(model.error().message ==
+          "unknown configuration key: model_registry[0].runtme");
+}
+
+TEST_CASE("Configuration schema versions extension ownership",
+          "[config][schema][version]") {
+    CHECK(validate_config_text(
+        "schema_version: 1\nextensions:\n  vendor: true\n"));
+    const auto missing = validate_config_text(
+        "extensions:\n  vendor: true\n");
+    REQUIRE_FALSE(missing);
+    CHECK(missing.error().message ==
+          "schema_version is required when extensions are configured");
+    const auto future = validate_config_text("schema_version: 2\n");
+    REQUIRE_FALSE(future);
+    CHECK(future.error().message == "unsupported schema_version: 2");
+}
+
 TEST_CASE("Gateway configuration accepts native runtime artifacts", "[config]") {
     auto result = validate_config_text(R"(
 server:

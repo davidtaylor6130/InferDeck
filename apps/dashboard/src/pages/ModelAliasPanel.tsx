@@ -5,6 +5,7 @@ import { type DashboardSection } from '../dashboardSections';
 
 export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ section }) => {
   const [aliases, setAliases] = useState<ModelAliasRecord[]>([]);
+  const [revision, setRevision] = useState('');
   const [models, setModels] = useState<Awaited<ReturnType<typeof getModels>>>([]);
   const [name, setName] = useState('');
   const [target, setTarget] = useState('');
@@ -17,8 +18,9 @@ export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ secti
   )), [models, section]);
 
   const refresh = async () => {
-    const [nextAliases, nextModels] = await Promise.all([getModelAliases(), getModels()]);
-    setAliases(nextAliases);
+    const [aliasDocument, nextModels] = await Promise.all([getModelAliases(), getModels()]);
+    setAliases(aliasDocument.aliases);
+    setRevision(aliasDocument.revision);
     setModels(nextModels);
   };
 
@@ -31,7 +33,7 @@ export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ secti
     setBusy(true);
     setError('');
     try {
-      await saveModelAlias(aliasName, aliasTarget);
+      await saveModelAlias(aliasName, aliasTarget, revision);
       setName('');
       await refresh();
     } catch (reason) {
@@ -46,7 +48,7 @@ export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ secti
     setBusy(true);
     setError('');
     try {
-      await deleteModelAlias(aliasName);
+      await deleteModelAlias(aliasName, revision);
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));

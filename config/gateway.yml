@@ -1,3 +1,5 @@
+schema_version: 1
+
 server:
   # Home-lab contract: accept connections on LAN and overlay-network interfaces.
   # Covered by the automated [config][lan] regression test.

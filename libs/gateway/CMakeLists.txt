@@ -18,6 +18,7 @@ set(GATEWAY_SOURCES
     src/profile_benchmark.cpp
     src/profile_benchmark_scheduler.cpp
     src/config_repository.cpp
+    src/config_secrets.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})

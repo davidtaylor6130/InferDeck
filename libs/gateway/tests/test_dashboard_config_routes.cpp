@@ -366,10 +366,14 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     routes.registry.register_model(target);
     auto client = routes.client();
 
+    const auto initial_aliases = client.Get("/api/inferdeck/v1/model-aliases");
+    REQUIRE(initial_aliases);
+    const auto initial_alias_document = nlohmann::json::parse(initial_aliases->body);
     const nlohmann::json create{
         {"target", "concrete-model"},
         {"requiredContextSize", 16384},
         {"requiredCapabilities", nlohmann::json::array({"chat_completions"})},
+        {"revision", initial_alias_document["revision"]},
     };
     const auto created = client.Put(
         "/api/inferdeck/v1/model-aliases/stable-chat", create.dump(), "application/json");
@@ -390,7 +394,10 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     REQUIRE(persisted["model_aliases"]);
     CHECK(persisted["model_aliases"][0]["name"].as<std::string>() == "stable-chat");
 
-    const auto removed = client.Delete("/api/inferdeck/v1/model-aliases/stable-chat");
+    httplib::Headers delete_headers{
+        {"If-Match", nlohmann::json::parse(listed->body)["revision"].get<std::string>()}};
+    const auto removed = client.Delete(
+        "/api/inferdeck/v1/model-aliases/stable-chat", delete_headers);
     REQUIRE(removed);
     REQUIRE(removed->status == 200);
     CHECK(routes.registry.aliases().empty());
@@ -594,8 +601,15 @@ TEST_CASE("Configured external models can be unregistered without rewriting unre
     routes.registry.register_model(external);
 
     auto client = routes.client();
+    const auto current_response = client.Get("/api/inferdeck/v1/config");
+    REQUIRE(current_response);
+    const auto current = nlohmann::json::parse(current_response->body);
+    const nlohmann::json request{
+        {"model", "external-model"},
+        {"revision", current["activeRevision"]},
+    };
     const auto removed = client.Post(
-        "/api/inferdeck/v1/model-store/unregister", R"({"model":"external-model"})",
+        "/api/inferdeck/v1/model-store/unregister", request.dump(),
         "application/json");
     REQUIRE(removed);
     CHECK(removed->status == 200);

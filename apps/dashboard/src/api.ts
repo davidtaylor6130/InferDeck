@@ -384,17 +384,22 @@ export interface ModelAliasRecord {
   requiredCapabilities: string[];
 }
 
-export async function getModelAliases(): Promise<ModelAliasRecord[]> {
-  const body = await getJson<{ aliases?: ModelAliasRecord[] }>(`${CONTROL_API_BASE}/model-aliases`);
-  return Array.isArray(body.aliases) ? body.aliases : [];
+export interface ModelAliasDocument {
+  aliases: ModelAliasRecord[];
+  revision: string;
 }
 
-export function saveModelAlias(name: string, target: string): Promise<ModelAliasRecord> {
-  return putJson<ModelAliasRecord>(`${CONTROL_API_BASE}/model-aliases/${encodeURIComponent(name)}`, { target });
+export async function getModelAliases(): Promise<ModelAliasDocument> {
+  const body = await getJson<{ aliases?: ModelAliasRecord[]; revision?: string }>(`${CONTROL_API_BASE}/model-aliases`);
+  return { aliases: Array.isArray(body.aliases) ? body.aliases : [], revision: body.revision ?? '' };
 }
 
-export function deleteModelAlias(name: string): Promise<{ ok: boolean }> {
-  return deleteJson(`${CONTROL_API_BASE}/model-aliases/${encodeURIComponent(name)}`);
+export function saveModelAlias(name: string, target: string, revision: string): Promise<ModelAliasRecord & { revision: string }> {
+  return putJson<ModelAliasRecord & { revision: string }>(`${CONTROL_API_BASE}/model-aliases/${encodeURIComponent(name)}`, { target, revision });
+}
+
+export function deleteModelAlias(name: string, revision: string): Promise<{ ok: boolean; revision: string }> {
+  return deleteJson(`${CONTROL_API_BASE}/model-aliases/${encodeURIComponent(name)}`, 30_000, { 'If-Match': revision });
 }
 
 export function getConfig(): Promise<ConfigDocument> {
@@ -541,12 +546,16 @@ export function removeStoreModel(model: string, action: 'archive' | 'remove'): P
   return postJson<{ ok: boolean }>(`${CONTROL_API_BASE}/model-store/${action}`, { model });
 }
 
-export function unregisterConfiguredModel(model: string): Promise<{
+export async function unregisterConfiguredModel(model: string): Promise<{
   ok: boolean;
   filesDeleted: boolean;
   restartRequired: boolean;
 }> {
-  return postJson(`${CONTROL_API_BASE}/model-store/unregister`, { model });
+  const config = await getConfig();
+  return postJson(`${CONTROL_API_BASE}/model-store/unregister`, {
+    model,
+    revision: config.activeRevision,
+  });
 }
 
 export async function getMediaJobs(): Promise<MediaJob[]> {

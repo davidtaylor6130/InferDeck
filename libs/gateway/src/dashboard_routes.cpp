@@ -1,5 +1,6 @@
 #include "gateway/dashboard_routes.hpp"
 #include "gateway/config_repository.hpp"
+#include "gateway/config_secrets.hpp"
 
 #include "foundation/logging.hpp"
 #include "optimize/profile_optimizer.hpp"
@@ -44,7 +45,6 @@ namespace optimize = inferdeck::optimize;
 
 constexpr std::size_t max_dashboard_streams = 64;
 std::atomic<std::size_t> dashboard_streams{0};
-std::mutex config_write_mutex;
 
 foundation::Result<void> write_config_atomic(const std::filesystem::path& path,
                                              const std::string& text);
@@ -187,18 +187,8 @@ foundation::Result<std::string> remove_model_registry_entry(
         "could not locate the configured model block without rewriting the configuration");
 }
 
-foundation::Result<void> persist_aliases(
-    const DashboardDeps& deps, const std::vector<model::ModelAlias>& aliases) {
-    const auto source_path = !deps.active_config_file.empty() &&
-            std::filesystem::exists(deps.active_config_file)
-        ? deps.active_config_file : deps.base_config_file;
-    const auto destination_path = deps.active_config_file.empty()
-        ? deps.base_config_file : deps.active_config_file;
-    const auto text = read_text(source_path);
-    if (text.empty()) {
-        return foundation::Err<void>(foundation::ErrorCode::IoError,
-                                     "configuration file is unreadable");
-    }
+foundation::Result<std::string> render_aliases(
+    const std::string& text, const std::vector<model::ModelAlias>& aliases) {
     try {
         YAML::Load(text);
         YAML::Node entries(YAML::NodeType::Sequence);
@@ -215,18 +205,14 @@ foundation::Result<void> persist_aliases(
         YAML::Emitter emitter;
         emitter << entries;
         if (!emitter.good()) {
-            return foundation::Err<void>(foundation::ErrorCode::ParseError,
-                                         emitter.GetLastError());
+            return foundation::Err<std::string>(foundation::ErrorCode::ParseError,
+                                                emitter.GetLastError());
         }
-        const std::string updated = replace_top_level_yaml_section(
-            text, "model_aliases", emitter.c_str());
-        if (deps.validate_config) {
-            const auto valid = deps.validate_config(updated);
-            if (!valid) return valid;
-        }
-        return write_config_atomic(destination_path, updated);
+        return foundation::Ok(replace_top_level_yaml_section(
+            text, "model_aliases", emitter.c_str()));
     } catch (const std::exception& error) {
-        return foundation::Err<void>(foundation::ErrorCode::ParseError, error.what());
+        return foundation::Err<std::string>(
+            foundation::ErrorCode::ParseError, error.what());
     }
 }
 
@@ -1273,7 +1259,10 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
 
     server.Post(R"(^/api/inferdeck/v1/model-store/unregister$)", wrap([deps](const httplib::Request& req,
                                                                 httplib::Response& resp) {
-        std::lock_guard lock(config_write_mutex);
+        if (!deps.config_repository) {
+            write_error(resp, 503, "config_unavailable", "configuration repository is unavailable");
+            return;
+        }
         try {
             const auto body = nlohmann::json::parse(req.body);
             const std::string name = body.value("model", "");
@@ -1281,59 +1270,47 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                 write_error(resp, 400, "missing_model", "request body must include model");
                 return;
             }
+            if (!body.contains("revision") || !body["revision"].is_string()) {
+                write_error(resp, 400, "invalid_model_unregister", "revision is required");
+                return;
+            }
             const auto info = deps.gw.coordinator.registry().get_info_result(name);
             if (!info) {
                 write_error(resp, 404, "model_not_found", info.error().message);
                 return;
             }
-            const auto source_path = !deps.active_config_file.empty() &&
-                    std::filesystem::exists(deps.active_config_file)
-                ? deps.active_config_file : deps.base_config_file;
-            const auto destination_path = deps.active_config_file.empty()
-                ? deps.base_config_file : deps.active_config_file;
-            const auto original = read_text(source_path);
-            if (original.empty()) {
-                write_error(resp, 500, "config_read_failed",
-                            "configuration file is empty or unreadable");
-                return;
-            }
-            const auto root = YAML::Load(original);
-            if (root["default_model"] &&
-                root["default_model"].as<std::string>() == name) {
-                write_error(resp, 409, "default_model",
+            bool unregistered = false;
+            const auto written = deps.config_repository->transact_active(
+                body["revision"].get<std::string>(),
+                [&](const ConfigSnapshot& snapshot) -> foundation::Result<std::string> {
+                    const auto& original = snapshot.has_active ? snapshot.active : snapshot.base;
+                    const auto root = YAML::Load(original);
+                    if (root["default_model"] &&
+                        root["default_model"].as<std::string>() == name) {
+                        return foundation::Err<std::string>(
+                            foundation::ErrorCode::AlreadyExists,
                             "change the default model before removing " + name);
-                return;
-            }
-            for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
-                if (alias.target == name) {
-                    write_error(resp, 409, "model_has_alias",
-                                "remove or retarget alias " + alias.name + " first");
-                    return;
-                }
-            }
-            const auto updated = remove_model_registry_entry(original, name);
-            if (!updated) {
-                const int status = updated.error().code == foundation::ErrorCode::NotFound
-                    ? 404 : 409;
-                write_error(resp, status, "model_unregister_failed", updated.error().message);
-                return;
-            }
-            if (deps.validate_config) {
-                const auto valid = deps.validate_config(*updated);
-                if (!valid) {
-                    write_error(resp, 400, "invalid_configuration", valid.error().message);
-                    return;
-                }
-            }
-            const auto removed = deps.gw.coordinator.unregister(name);
-            if (!removed) {
-                write_error(resp, 409, "model_unregister_failed", removed.error().message);
-                return;
-            }
-            const auto written = write_config_atomic(destination_path, *updated);
+                    }
+                    for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
+                        if (alias.target == name) return foundation::Err<std::string>(
+                            foundation::ErrorCode::AlreadyExists,
+                            "remove or retarget alias " + alias.name + " first");
+                    }
+                    auto updated = remove_model_registry_entry(original, name);
+                    if (!updated) return updated;
+                    const auto removed = deps.gw.coordinator.unregister(name);
+                    if (!removed) return foundation::Err<std::string>(
+                        removed.error().code, removed.error().message);
+                    unregistered = true;
+                    return updated;
+                },
+                [&] {
+                    if (unregistered) deps.gw.coordinator.registry().register_model(*info);
+                });
             if (!written) {
-                deps.gw.coordinator.registry().register_model(*info);
-                write_error(resp, 500, "model_unregister_persist_failed",
+                const int status = written.error().code == foundation::ErrorCode::AlreadyExists
+                    ? 409 : written.error().code == foundation::ErrorCode::NotFound ? 404 : 500;
+                write_error(resp, status, "model_unregister_persist_failed",
                             written.error().message);
                 return;
             }
@@ -1341,6 +1318,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                 {"ok", true},
                 {"filesDeleted", false},
                 {"restartRequired", false},
+                {"revision", written->revision},
             });
         } catch (const std::exception& error) {
             write_error(resp, 400, "invalid_model_unregister", error.what());
@@ -1353,12 +1331,27 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
             aliases.push_back(alias_json(alias));
         }
-        write_json(resp, 200, {{"aliases", std::move(aliases)}});
+        if (!deps.config_repository) {
+            write_error(resp, 503, "config_unavailable", "configuration repository is unavailable");
+            return;
+        }
+        const auto snapshot = deps.config_repository->snapshot();
+        if (!snapshot) {
+            write_error(resp, 500, "config_read_failed", snapshot.error().message);
+            return;
+        }
+        write_json(resp, 200, {
+            {"aliases", std::move(aliases)},
+            {"revision", snapshot->active_revision},
+        });
     }));
 
     server.Put(R"(^/api/inferdeck/v1/model-aliases/([A-Za-z0-9_.-]+)$)",
                wrap([deps](const httplib::Request& req, httplib::Response& resp) {
-        std::lock_guard lock(config_write_mutex);
+        if (!deps.config_repository) {
+            write_error(resp, 503, "config_unavailable", "configuration repository is unavailable");
+            return;
+        }
         const std::string name = req.matches[1].str();
         if (name.empty() || name.size() > 128) {
             write_error(resp, 400, "invalid_model_alias", "alias name is invalid");
@@ -1366,6 +1359,10 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
         try {
             const auto body = nlohmann::json::parse(req.body);
+            if (!body.contains("revision") || !body["revision"].is_string()) {
+                write_error(resp, 400, "invalid_model_alias", "revision is required");
+                return;
+            }
             model::ModelAlias requested;
             requested.name = name;
             requested.target = body.value("target", "");
@@ -1378,20 +1375,33 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
                 if (alias.name == name) previous = alias;
             }
-            const auto applied = deps.gw.coordinator.registry().set_alias(std::move(requested));
-            if (!applied) {
-                write_error(resp, 409, "incompatible_model_alias", applied.error().message);
-                return;
-            }
-            const auto persisted = persist_aliases(
-                deps, deps.gw.coordinator.registry().aliases());
+            std::optional<model::ModelAlias> committed;
+            const auto persisted = deps.config_repository->transact_active(
+                body["revision"].get<std::string>(),
+                [&](const ConfigSnapshot& snapshot) -> foundation::Result<std::string> {
+                    const auto applied = deps.gw.coordinator.registry().set_alias(requested);
+                    if (!applied) return foundation::Err<std::string>(
+                        applied.error().code, applied.error().message);
+                    committed = *applied;
+                    return render_aliases(
+                        snapshot.has_active ? snapshot.active : snapshot.base,
+                        deps.gw.coordinator.registry().aliases());
+                },
+                [&] {
+                    if (previous) (void)deps.gw.coordinator.registry().set_alias(*previous);
+                    else (void)deps.gw.coordinator.registry().remove_alias(name);
+                });
             if (!persisted) {
-                if (previous) (void)deps.gw.coordinator.registry().set_alias(*previous);
-                else (void)deps.gw.coordinator.registry().remove_alias(name);
-                write_error(resp, 500, "model_alias_persist_failed", persisted.error().message);
+                const int status = persisted.error().code == foundation::ErrorCode::AlreadyExists
+                    ? 409 : persisted.error().code == foundation::ErrorCode::InvalidArgument ? 400 : 500;
+                write_error(resp, status,
+                            status == 409 ? "config_conflict" : "model_alias_persist_failed",
+                            persisted.error().message);
                 return;
             }
-            write_json(resp, previous ? 200 : 201, alias_json(*applied));
+            auto response = alias_json(*committed);
+            response["revision"] = persisted->revision;
+            write_json(resp, previous ? 200 : 201, response);
         } catch (const std::exception& error) {
             write_error(resp, 400, "invalid_model_alias", error.what());
         }
@@ -1399,7 +1409,14 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
 
     server.Delete(R"(^/api/inferdeck/v1/model-aliases/([A-Za-z0-9_.-]+)$)",
                   wrap([deps](const httplib::Request& req, httplib::Response& resp) {
-        std::lock_guard lock(config_write_mutex);
+        if (!deps.config_repository) {
+            write_error(resp, 503, "config_unavailable", "configuration repository is unavailable");
+            return;
+        }
+        if (!req.has_header("If-Match") || req.get_header_value("If-Match").empty()) {
+            write_error(resp, 400, "invalid_model_alias", "If-Match revision is required");
+            return;
+        }
         const std::string name = req.matches[1].str();
         std::optional<model::ModelAlias> previous;
         for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
@@ -1409,19 +1426,26 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             write_error(resp, 404, "model_alias_not_found", "model alias not found: " + name);
             return;
         }
-        const auto removed = deps.gw.coordinator.registry().remove_alias(name);
-        if (!removed) {
-            write_error(resp, 404, "model_alias_not_found", removed.error().message);
-            return;
-        }
-        const auto persisted = persist_aliases(
-            deps, deps.gw.coordinator.registry().aliases());
+        const auto persisted = deps.config_repository->transact_active(
+            req.get_header_value("If-Match"),
+            [&](const ConfigSnapshot& snapshot) -> foundation::Result<std::string> {
+                const auto removed = deps.gw.coordinator.registry().remove_alias(name);
+                if (!removed) return foundation::Err<std::string>(
+                    removed.error().code, removed.error().message);
+                return render_aliases(
+                    snapshot.has_active ? snapshot.active : snapshot.base,
+                    deps.gw.coordinator.registry().aliases());
+            },
+            [&] { (void)deps.gw.coordinator.registry().set_alias(*previous); });
         if (!persisted) {
-            (void)deps.gw.coordinator.registry().set_alias(*previous);
-            write_error(resp, 500, "model_alias_persist_failed", persisted.error().message);
+            const int status = persisted.error().code == foundation::ErrorCode::AlreadyExists
+                ? 409 : 500;
+            write_error(resp, status,
+                        status == 409 ? "config_conflict" : "model_alias_persist_failed",
+                        persisted.error().message);
             return;
         }
-        write_json(resp, 200, {{"ok", true}});
+        write_json(resp, 200, {{"ok", true}, {"revision", persisted->revision}});
     }));
 
     server.Get(R"(^/api/inferdeck/v1/config$)", wrap([deps](const httplib::Request& req,
@@ -1438,9 +1462,9 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         }
         const std::string& desired = snapshot->has_active ? snapshot->active : snapshot->base;
         write_json(resp, 200, {
-            {"yaml", mask_config_secret(snapshot->base)},
+            {"yaml", mask_config_secrets(snapshot->base)},
             {"revision", snapshot->base_revision},
-            {"activeYaml", mask_config_secret(desired)},
+            {"activeYaml", mask_config_secrets(desired)},
             {"activeRevision", snapshot->active_revision},
             {"runningRevision", deps.running_config_revision},
             {"hasActiveProfile", snapshot->has_active},
@@ -1484,7 +1508,6 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             write_error(resp, 500, "config_read_failed", current.error().message);
             return;
         }
-        submitted = restore_config_secret(std::move(submitted), current->base);
         auto written = deps.config_repository->write_base(
             body["revision"].get<std::string>(), submitted);
         if (!written) {
@@ -1536,8 +1559,6 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             write_error(resp, 500, "config_read_failed", current.error().message);
             return;
         }
-        submitted = restore_config_secret(
-            std::move(submitted), current->has_active ? current->active : current->base);
         auto written = deps.config_repository->write_active(
             body["revision"].get<std::string>(), submitted);
         if (!written) {

@@ -26,6 +26,9 @@ class ConfigRepository {
 public:
     using Validator = std::function<foundation::Result<void>(const std::string&)>;
     using Reload = std::function<foundation::Result<void>()>;
+    using ActiveTransform = std::function<foundation::Result<std::string>(
+        const ConfigSnapshot&)>;
+    using Rollback = std::function<void()>;
 
     ConfigRepository(std::filesystem::path base_path,
                      std::filesystem::path active_path,
@@ -38,6 +41,9 @@ public:
         const std::string& expected_revision, const std::string& text);
     foundation::Result<ConfigCommit> reset_active(
         const std::string& expected_revision);
+    foundation::Result<ConfigCommit> transact_active(
+        const std::string& expected_revision, ActiveTransform transform,
+        Rollback rollback);
 
     static std::string revision(const std::string& text);
 
