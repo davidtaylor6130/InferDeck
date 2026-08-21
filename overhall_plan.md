@@ -480,14 +480,16 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Issue #99
 
-- [ ] Revalidate Needle 2 licensing, native integration feasibility, package size,
-      quality and performance against current requirements.
-- [ ] Register it as an explicit CPU helper with always-resident lifecycle.
-- [ ] Expose it as a normal OpenAI model where client invocation is required.
-- [ ] Keep helper-task selection internal and schema-bound.
-- [ ] Prove it cannot replace the selected conversation model or enter GPU swap
-      state.
-- [ ] Close #99 only after concurrency, lifecycle, fallback and quality gates pass.
+- [x] Revalidate Needle 2 licensing, native integration feasibility, package size,
+      quality and performance prerequisites against current requirements; record
+      that the upstream GNU/LLVM archive cannot enter the pinned MSVC build.
+- [x] Supersede the Needle-specific integration rather than adding a subprocess,
+      proxy, second C++ runtime, or unpinned binary artifact.
+- [x] Retain the generic explicit CPU-helper lifecycle for native OpenAI models.
+- [x] Keep helper-task selection internal and schema-bound.
+- [x] Prove native CPU helpers cannot replace the selected conversation model or
+      enter GPU swap state.
+- [x] Close #99 with the owner-approved native-link no-go evidence.
 
 ### Exit gate
 
