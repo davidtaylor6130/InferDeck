@@ -15,6 +15,22 @@ The pinned versions are compatibility fixtures, not floating minimums. A
 baseline update must change the manifest fixture, SDK contract locks, schema
 snapshots, and this document together, then pass both official SDK suites.
 
+## Strict Chat Completions contract
+
+POST /v1/chat/completions requires a non-empty model and message array and
+decodes developer, system, user, assistant, and tool messages in their original
+order. Strict content parts use Chat Completions names (`text` and
+`image_url`); Responses-only content tags are rejected. Nested content, tool,
+tool-call, tool-choice, response-format, stop, token-limit, sampling, seed, and
+stream-option shapes are validated before model resolution or slot admission.
+
+The response `model` is the requested public identity, including an alias, in
+both streamed and non-streamed output; the resolved backend identity remains
+internal operational metadata. Native priority, sampler controls, template
+kwargs, and `reasoning_content` are not part of strict `/v1`. They remain
+available only through the explicitly enabled OpenAI-derivative profile, and
+strict output never emits derivative reasoning fields.
+
 ## Native Images contract
 
 POST /v1/images/generations accepts the pinned OpenAI request field names.

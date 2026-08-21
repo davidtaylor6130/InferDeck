@@ -969,6 +969,53 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             }
         }
     }
+    if (body.contains("stream") && !body["stream"].is_boolean()) {
+        write_error(resp, 400, "invalid_request_error",
+                    "stream must be a boolean");
+        return;
+    }
+    const bool stream = body.value("stream", false);
+    if (body.contains("stream_options") &&
+        !body["stream_options"].is_object()) {
+        write_error(resp, 400, "invalid_request_error",
+                    "stream_options must be an object");
+        return;
+    }
+    if (!stream && body.contains("stream_options")) {
+        write_error(resp, 400, "invalid_request_error",
+                    "stream_options requires stream to be true");
+        return;
+    }
+    if (body.contains("stream_options")) {
+        static constexpr std::array<std::string_view, 1>
+            stream_option_fields{"include_usage"};
+        for (const auto& field : body["stream_options"].items()) {
+            if (std::find(stream_option_fields.begin(),
+                          stream_option_fields.end(), field.key()) ==
+                stream_option_fields.end()) {
+                write_error(
+                    resp, 400, "unsupported_parameter",
+                    "unsupported stream_options parameter: " + field.key());
+                return;
+            }
+        }
+        if (body["stream_options"].contains("include_usage") &&
+            !body["stream_options"]["include_usage"].is_boolean()) {
+            write_error(resp, 400, "invalid_request_error",
+                        "stream_options.include_usage must be a boolean");
+            return;
+        }
+    }
+    const bool include_stream_usage =
+        body.contains("stream_options") &&
+        body["stream_options"].value("include_usage", false);
+    auto inference_request =
+        parse_openai_chat_request(body, derivative);
+    if (!inference_request) {
+        write_error(resp, 400, "invalid_request_error",
+                    inference_request.error().message);
+        return;
+    }
     std::string requested_model = body["model"].get<std::string>();
     const auto resolved_model = resolve_model_name(deps, requested_model);
     if (!resolved_model) {
@@ -997,37 +1044,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     reasoning_effort.error().message);
         return;
     }
-    if (body.contains("stream") && !body["stream"].is_boolean()) {
-        write_error(resp, 400, "invalid_request_error", "stream must be a boolean");
-        return;
-    }
-    const bool stream = body.value("stream", false);
-    if (body.contains("stream_options") && !body["stream_options"].is_object()) {
-        write_error(resp, 400, "invalid_request_error",
-                    "stream_options must be an object");
-        return;
-    }
-    if (!stream && body.contains("stream_options")) {
-        write_error(resp, 400, "invalid_request_error",
-                    "stream_options requires stream to be true");
-        return;
-    }
-    if (body.contains("stream_options") && body["stream_options"].is_object() &&
-        body["stream_options"].contains("include_usage") &&
-        !body["stream_options"]["include_usage"].is_boolean()) {
-        write_error(resp, 400, "invalid_request_error",
-                    "stream_options.include_usage must be a boolean");
-        return;
-    }
-    const bool include_stream_usage = body.contains("stream_options") &&
-        body["stream_options"].is_object() &&
-        body["stream_options"].value("include_usage", false);
-    auto inference_request = parse_openai_chat_request(body, derivative);
-    if (!inference_request) {
-        write_error(resp, 400, "invalid_request_error",
-                    inference_request.error().message);
-        return;
-    }
+    inference_request->reasoning_effort = *reasoning_effort;
 
     const int priority = derivative && body.contains("priority") &&
             body["priority"].is_number_integer()

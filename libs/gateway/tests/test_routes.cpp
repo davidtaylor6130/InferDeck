@@ -57,6 +57,7 @@ TEST_CASE("OpenAI error mapping is centralized and typed",
 TEST_CASE("OpenAI adapter produces canonical multimodal and tool inputs",
           "[routes][adapter]") {
     const nlohmann::json body = {
+        {"model", "adapter-model"},
         {"messages", nlohmann::json::array({
             {{"role", "developer"}, {"content", "policy"}},
             {{"role", "user"},
@@ -116,6 +117,7 @@ TEST_CASE("OpenAI adapter validates assistant tool call type",
           "[routes][adapter][validation]") {
     const auto request_with = [](const nlohmann::json& tool_call) {
         return nlohmann::json{
+            {"model", "adapter-model"},
             {"messages", nlohmann::json::array({
                 {{"role", "assistant"},
                  {"content", nullptr},
@@ -197,6 +199,7 @@ TEST_CASE("Responses route contains no Chat translation shim",
 TEST_CASE("Derivative OpenAI adapter preserves reasoning toggle",
           "[routes][adapter][reasoning]") {
     const nlohmann::json body = {
+        {"model", "adapter-model"},
         {"messages", nlohmann::json::array({
             {{"role", "user"}, {"content", "answer"}}
         })},
@@ -837,7 +840,7 @@ TEST_CASE("Strict Chat rejects derivative fields before admission",
     httplib::Request request;
     request.is_connection_closed = [] { return false; };
     request.body =
-        R"({"model":"profile-model","messages":[],"top_k":20})";
+        R"({"model":"profile-model","messages":[{"role":"user","content":"test"}],"top_k":20})";
     auto derivative_deps = ts.make_deps();
     derivative_deps.compatibility_profile =
         CompatibilityProfile::OpenAIDerivative;
@@ -923,10 +926,62 @@ TEST_CASE("Routes: stable aliases resolve while preserving request attribution",
     REQUIRE(chat_response);
     REQUIRE(chat_response->status == 200);
     CHECK(nlohmann::json::parse(chat_response->body)["model"] == "assistant-stable");
+
+    const auto stream_response = client.Post(
+        "/v1/chat/completions",
+        R"({"model":"assistant-stable","stream":true,"messages":[{"role":"user","content":"hi again"}]})",
+        "application/json");
+    REQUIRE(stream_response);
+    REQUIRE(stream_response->status == 200);
+    std::size_t position = 0;
+    while (position < stream_response->body.size()) {
+        auto newline = stream_response->body.find('\n', position);
+        if (newline == std::string::npos) newline = stream_response->body.size();
+        const auto line = stream_response->body.substr(position, newline - position);
+        position = newline + 1;
+        if (!line.starts_with("data: ") || line == "data: [DONE]") continue;
+        const auto chunk = nlohmann::json::parse(line.substr(6));
+        if (chunk.contains("model")) {
+            CHECK(chunk["model"] == "assistant-stable");
+        }
+    }
     const auto rows = ts.stats_db.recent_requests(1);
     REQUIRE(rows.size() == 1);
     CHECK(rows[0].model == "assistant-stable");
     CHECK(rows[0].resolved_model == "qwen-concrete");
+    ts.stop();
+}
+
+TEST_CASE("Strict Chat never emits derivative reasoning fields",
+          "[routes][chat][profile][reasoning]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("strict-reasoning"));
+    REQUIRE(ts.coordinator.load("strict-reasoning"));
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+    const std::string tools = R"(
+      "tools":[{"type":"function","function":{"name":"list_workspace","parameters":{"type":"object"}}}]
+    )";
+
+    const auto nonstream = client.Post(
+        "/v1/chat/completions",
+        "{\"model\":\"strict-reasoning\",\"messages\":[{\"role\":\"user\",\"content\":\"list files\"}]," +
+            tools + "}",
+        "application/json");
+    REQUIRE(nonstream);
+    REQUIRE(nonstream->status == 200);
+    CHECK_FALSE(nlohmann::json::parse(nonstream->body)["choices"][0]["message"]
+                    .contains("reasoning_content"));
+
+    const auto stream = client.Post(
+        "/v1/chat/completions",
+        "{\"model\":\"strict-reasoning\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"list files\"}]," +
+            tools + "}",
+        "application/json");
+    REQUIRE(stream);
+    REQUIRE(stream->status == 200);
+    CHECK(stream->body.find("reasoning_content") == std::string::npos);
+    CHECK(stream->body.ends_with("data: [DONE]\n\n"));
     ts.stop();
 }
 
@@ -1052,6 +1107,94 @@ TEST_CASE("Routes: malformed chat parameters fail before slot admission",
             "invalid_request_error");
     REQUIRE(ts.coordinator.active_request_count() == 0);
     ts.stop();
+}
+
+TEST_CASE("Routes: complete Chat shape validates before model resolution",
+          "[routes][chat][validation]") {
+    TestServer ts;
+    const auto base = [] {
+        return nlohmann::json{
+            {"model", "missing-model"},
+            {"messages", nlohmann::json::array({
+                {{"role", "user"}, {"content", "hello"}},
+            })},
+        };
+    };
+    std::vector<nlohmann::json> invalid;
+    auto add = [&invalid, &base](const std::string& field,
+                                 nlohmann::json value) {
+        auto body = base();
+        body[field] = std::move(value);
+        invalid.push_back(std::move(body));
+    };
+    add("messages", nlohmann::json::array());
+    add("temperature", 2.1);
+    add("top_p", -0.1);
+    add("max_completion_tokens", 0);
+    add("seed", 1.5);
+    add("parallel_tool_calls", "yes");
+    add("stop", nlohmann::json::array({"a", "b", "c", "d", "e"}));
+    add("stream_options", {{"include_usage", true}, {"unknown", true}});
+    add("tools", nlohmann::json::array({
+        {{"type", "function"},
+         {"function", {{"name", "lookup"},
+                        {"parameters", nlohmann::json::array()}}}},
+    }));
+    add("tool_choice", {{"type", "function"},
+                        {"function", {{"name", ""}}}});
+    add("response_format",
+        {{"type", "json_schema"},
+         {"json_schema", {{"schema", {{"type", "object"}}}}}});
+    auto both_limits = base();
+    both_limits["max_tokens"] = 8;
+    both_limits["max_completion_tokens"] = 8;
+    invalid.push_back(std::move(both_limits));
+    auto unknown_message = base();
+    unknown_message["messages"][0]["reasoning_content"] = "private";
+    invalid.push_back(std::move(unknown_message));
+    auto missing_content = base();
+    missing_content["messages"][0].erase("content");
+    invalid.push_back(std::move(missing_content));
+    auto responses_text = base();
+    responses_text["messages"][0]["content"] = nlohmann::json::array({
+        {{"type", "input_text"}, {"text", "wrong protocol"}},
+    });
+    invalid.push_back(std::move(responses_text));
+    auto unknown_content_field = base();
+    unknown_content_field["messages"][0]["content"] = nlohmann::json::array({
+        {{"type", "text"}, {"text", "hello"}, {"ignored", true}},
+    });
+    invalid.push_back(std::move(unknown_content_field));
+    auto malformed_tool_call = base();
+    malformed_tool_call["messages"] = nlohmann::json::array({
+        {{"role", "assistant"},
+         {"content", nullptr},
+         {"tool_calls", nlohmann::json::array({
+             {{"id", "call_1"},
+              {"type", "function"},
+              {"function", {{"name", "lookup"},
+                            {"arguments", nlohmann::json::object()}}}},
+         })}},
+    });
+    invalid.push_back(std::move(malformed_tool_call));
+    auto missing_tool_call_id = base();
+    missing_tool_call_id["messages"][0] = {
+        {"role", "tool"}, {"content", "result"},
+    };
+    invalid.push_back(std::move(missing_tool_call_id));
+    add("response_format",
+        {{"type", "text"}, {"json_schema", nlohmann::json::object()}});
+
+    for (const auto& body : invalid) {
+        httplib::Request request;
+        request.body = body.dump();
+        httplib::Response response;
+        handle_chat_completions(request, response, ts.make_deps());
+        INFO(body.dump());
+        CHECK(response.status == 400);
+        CHECK(ts.coordinator.active_request_count() == 0);
+        CHECK(ts.metrics.total_requests() == 0);
+    }
 }
 
 TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering",

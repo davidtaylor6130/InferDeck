@@ -98,7 +98,11 @@ foundation::Result<void> parse_input_item(
                 foundation::ErrorCode::InvalidArgument,
                 "message status must be a string");
         }
-        return append_message(request, item);
+        auto message = item;
+        message.erase("type");
+        message.erase("id");
+        message.erase("status");
+        return append_message(request, message);
     }
     if (type == "function_call") {
         static const std::unordered_set<std::string> fields{

@@ -389,15 +389,15 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Chat Completions
 
-- [ ] Require and validate `model` and `messages`.
-- [ ] Preserve developer/system instruction precedence.
-- [ ] Validate all supported content, tools, tool choice, response format, stop,
+- [x] Require and validate `model` and `messages`.
+- [x] Preserve developer/system instruction precedence.
+- [x] Validate all supported content, tools, tool choice, response format, stop,
       token limits, temperature/top-p ranges, seed, streaming and stream options.
 - [x] Remove `:latest` normalization.
-- [ ] Remove public `priority`, `top_k`, repeat controls and template kwargs.
-- [ ] Define strict behavior for unsupported official fields.
-- [ ] Return canonical model identity consistently in stream and non-stream modes.
-- [ ] Keep derivative reasoning output outside strict mode.
+- [x] Remove public `priority`, `top_k`, repeat controls and template kwargs.
+- [x] Define strict behavior for unsupported official fields.
+- [x] Return canonical model identity consistently in stream and non-stream modes.
+- [x] Keep derivative reasoning output outside strict mode.
 
 ### Responses
 

@@ -1,5 +1,6 @@
 {
   "chat_request": {
+    "model": "adapter-model",
     "messages": [
       {"role": "developer", "content": "policy"},
       {"role": "user", "content": "answer"}

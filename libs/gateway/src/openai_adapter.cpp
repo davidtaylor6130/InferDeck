@@ -4,8 +4,10 @@
 
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <limits>
 #include <string_view>
+#include <unordered_set>
 
 namespace inferdeck::gateway {
 
@@ -14,6 +16,20 @@ namespace {
 foundation::Result<model::InferenceRequest> invalid(std::string message) {
     return foundation::Err<model::InferenceRequest>(
         foundation::ErrorCode::InvalidArgument, std::move(message));
+}
+
+foundation::Result<void> require_fields(
+    const nlohmann::json& value,
+    const std::unordered_set<std::string>& supported,
+    const std::string& context) {
+    for (const auto& field : value.items()) {
+        if (!supported.contains(field.key())) {
+            return foundation::Err<void>(
+                foundation::ErrorCode::InvalidArgument,
+                "unsupported " + context + " parameter: " + field.key());
+        }
+    }
+    return foundation::Ok();
 }
 
 foundation::Result<std::vector<std::byte>> decode_base64(
@@ -144,7 +160,8 @@ foundation::Result<inference::Content> parse_image(
 }
 
 foundation::Result<inference::Message> parse_message(
-    const nlohmann::json& value, bool allow_extensions) {
+    const nlohmann::json& value, bool allow_extensions,
+    bool responses_content_types) {
     if (!value.is_object() || !value.contains("role") ||
         !value["role"].is_string()) {
         return foundation::Err<inference::Message>(
@@ -158,12 +175,33 @@ foundation::Result<inference::Message> parse_message(
             foundation::ErrorCode::InvalidArgument,
             "messages role is unsupported");
     }
+    static const std::unordered_set<std::string> strict_fields{
+        "role", "content", "name", "tool_call_id", "tool_calls",
+    };
+    if (!allow_extensions) {
+        auto fields = require_fields(value, strict_fields, "message");
+        if (!fields) {
+            return foundation::Err<inference::Message>(
+                fields.error().code, fields.error().message);
+        }
+    }
     inference::Message message;
     message.role = inference::Message::parse_role(role);
-    if (value.contains("name") && value["name"].is_string()) {
+    if (value.contains("name") && !value["name"].is_string()) {
+        return foundation::Err<inference::Message>(
+            foundation::ErrorCode::InvalidArgument,
+            "message name must be a string");
+    }
+    if (value.contains("name")) {
         message.name = value["name"].get<std::string>();
     }
-    if (value.contains("tool_call_id") && value["tool_call_id"].is_string()) {
+    if (value.contains("tool_call_id") &&
+        !value["tool_call_id"].is_string()) {
+        return foundation::Err<inference::Message>(
+            foundation::ErrorCode::InvalidArgument,
+            "message tool_call_id must be a string");
+    }
+    if (value.contains("tool_call_id")) {
         message.tool_call_id = value["tool_call_id"].get<std::string>();
     }
     if (allow_extensions && value.contains("reasoning_content") &&
@@ -182,7 +220,27 @@ foundation::Result<inference::Message> parse_message(
                     "message content parts require a string type");
             }
             const std::string type = part["type"].get<std::string>();
-            if (type == "text" || type == "input_text") {
+            const bool text_type = allow_extensions
+                ? (type == "text" || type == "input_text")
+                : (responses_content_types ? type == "input_text"
+                                           : type == "text");
+            const bool image_type = allow_extensions
+                ? (type == "image" || type == "image_url" ||
+                   type == "input_image")
+                : (responses_content_types ? type == "input_image"
+                                           : type == "image_url");
+            if (text_type) {
+                if (!allow_extensions) {
+                    static const std::unordered_set<std::string> fields{
+                        "type", "text",
+                    };
+                    auto allowed = require_fields(
+                        part, fields, "message text content");
+                    if (!allowed) {
+                        return foundation::Err<inference::Message>(
+                            allowed.error().code, allowed.error().message);
+                    }
+                }
                 if (!part.contains("text") || !part["text"].is_string()) {
                     return foundation::Err<inference::Message>(
                         foundation::ErrorCode::InvalidArgument,
@@ -190,8 +248,21 @@ foundation::Result<inference::Message> parse_message(
                 }
                 message.content.emplace_back(inference::TextContent{
                     part["text"].get<std::string>()});
-            } else if (type == "image" || type == "image_url" ||
-                       type == "input_image") {
+            } else if (image_type) {
+                if (!allow_extensions) {
+                    const std::unordered_set<std::string> fields =
+                        responses_content_types
+                        ? std::unordered_set<std::string>{
+                              "type", "image_url", "detail"}
+                        : std::unordered_set<std::string>{
+                              "type", "image_url"};
+                    auto allowed = require_fields(
+                        part, fields, "message image content");
+                    if (!allowed) {
+                        return foundation::Err<inference::Message>(
+                            allowed.error().code, allowed.error().message);
+                    }
+                }
                 auto content = parse_image(part);
                 if (!content) {
                     return foundation::Err<inference::Message>(
@@ -209,6 +280,17 @@ foundation::Result<inference::Message> parse_message(
             foundation::ErrorCode::InvalidArgument,
             "message content must be a string, array, or null");
     }
+    if (!value.contains("content") &&
+        !(role == "assistant" && value.contains("tool_calls"))) {
+        return foundation::Err<inference::Message>(
+            foundation::ErrorCode::InvalidArgument,
+            "message content is required");
+    }
+    if (role == "tool" && message.tool_call_id.empty()) {
+        return foundation::Err<inference::Message>(
+            foundation::ErrorCode::InvalidArgument,
+            "tool messages require a non-empty tool_call_id");
+    }
     if (value.contains("tool_calls")) {
         if (!value["tool_calls"].is_array()) {
             return foundation::Err<inference::Message>(
@@ -216,6 +298,9 @@ foundation::Result<inference::Message> parse_message(
                 "message tool_calls must be an array");
         }
         for (const auto& item : value["tool_calls"]) {
+            static const std::unordered_set<std::string> item_fields{
+                "id", "type", "function",
+            };
             if (!item.is_object() || !item.contains("type") ||
                 !item["type"].is_string() ||
                 item["type"].get<std::string>() != "function" ||
@@ -225,12 +310,35 @@ foundation::Result<inference::Message> parse_message(
                     foundation::ErrorCode::InvalidArgument,
                     "message tool_calls entries require type function");
             }
+            if (!allow_extensions) {
+                auto allowed = require_fields(
+                    item, item_fields, "message tool call");
+                if (!allowed) {
+                    return foundation::Err<inference::Message>(
+                        allowed.error().code, allowed.error().message);
+                }
+            }
             const auto& function = item["function"];
-            if (!function.contains("name") || !function["name"].is_string() ||
-                !function.contains("arguments")) {
+            static const std::unordered_set<std::string> function_fields{
+                "name", "arguments",
+            };
+            if (!allow_extensions) {
+                auto allowed = require_fields(
+                    function, function_fields, "message tool call function");
+                if (!allowed) {
+                    return foundation::Err<inference::Message>(
+                        allowed.error().code, allowed.error().message);
+                }
+            }
+            if (!item.contains("id") || !item["id"].is_string() ||
+                item["id"].get_ref<const std::string&>().empty() ||
+                !function.contains("name") || !function["name"].is_string() ||
+                function["name"].get_ref<const std::string&>().empty() ||
+                !function.contains("arguments") ||
+                (!allow_extensions && !function["arguments"].is_string())) {
                 return foundation::Err<inference::Message>(
                     foundation::ErrorCode::InvalidArgument,
-                    "message tool call requires name and arguments");
+                    "message tool call requires non-empty string id and name and string arguments");
             }
             inference::FunctionCall call;
             if (item.contains("id") && item["id"].is_string()) {
@@ -259,14 +367,77 @@ inference::ReasoningFormat reasoning_format(const std::string& value) {
 
 foundation::Result<inference::Message> parse_openai_message(
     const nlohmann::json& value, bool allow_extensions) {
-    return parse_message(value, allow_extensions);
+    return parse_message(value, allow_extensions, true);
 }
 
 foundation::Result<model::InferenceRequest> parse_openai_chat_request(
     const nlohmann::json& body, bool allow_extensions) {
     if (!body.is_object()) return invalid("request body must be an object");
+    if (!body.contains("model") || !body["model"].is_string() ||
+        body["model"].get_ref<const std::string&>().empty()) {
+        return invalid("model must be a non-empty string");
+    }
     if (!body.contains("messages") || !body["messages"].is_array()) {
         return invalid("messages must be an array");
+    }
+    if (body["messages"].empty()) {
+        return invalid("messages must not be empty");
+    }
+    if (body.contains("max_tokens") &&
+        body.contains("max_completion_tokens")) {
+        return invalid(
+            "max_tokens and max_completion_tokens are mutually exclusive");
+    }
+    const auto positive_integer = [](const nlohmann::json& value) {
+        if (value.is_number_unsigned()) {
+            return value.get<std::uint64_t>() > 0 &&
+                   value.get<std::uint64_t>() <=
+                       static_cast<std::uint64_t>(
+                           std::numeric_limits<int>::max());
+        }
+        return value.is_number_integer() &&
+               value.get<std::int64_t>() > 0 &&
+               value.get<std::int64_t>() <=
+                   std::numeric_limits<int>::max();
+    };
+    for (const auto field : {"max_tokens", "max_completion_tokens"}) {
+        if (body.contains(field) && !body[field].is_null() &&
+            !positive_integer(body[field])) {
+            return invalid(std::string(field) +
+                           " must be a positive integer");
+        }
+    }
+    if (body.contains("temperature") && !body["temperature"].is_null()) {
+        if (!body["temperature"].is_number()) {
+            return invalid("temperature must be a number");
+        }
+        const double value = body["temperature"].get<double>();
+        if (!std::isfinite(value) || value < 0.0 || value > 2.0) {
+            return invalid("temperature must be between 0 and 2");
+        }
+    }
+    if (body.contains("top_p") && !body["top_p"].is_null()) {
+        if (!body["top_p"].is_number()) {
+            return invalid("top_p must be a number");
+        }
+        const double value = body["top_p"].get<double>();
+        if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
+            return invalid("top_p must be between 0 and 1");
+        }
+    }
+    if (body.contains("seed") && !body["seed"].is_null() &&
+        !(body["seed"].is_number_integer() ||
+          body["seed"].is_number_unsigned())) {
+        return invalid("seed must be an integer");
+    }
+    if (body.contains("parallel_tool_calls") &&
+        !body["parallel_tool_calls"].is_boolean()) {
+        return invalid("parallel_tool_calls must be a boolean");
+    }
+    if (body.contains("reasoning_effort") &&
+        !body["reasoning_effort"].is_null() &&
+        !body["reasoning_effort"].is_string()) {
+        return invalid("reasoning_effort must be a string");
     }
     model::InferenceRequest request;
     try {
@@ -324,20 +495,48 @@ foundation::Result<model::InferenceRequest> parse_openai_chat_request(
         return invalid(error.what());
     }
     for (const auto& value : body["messages"]) {
-        auto message = parse_message(value, allow_extensions);
+        auto message = parse_message(value, allow_extensions, false);
         if (!message) return invalid(message.error().message);
         request.messages.push_back(std::move(*message));
     }
     if (body.contains("tools")) {
         if (!body["tools"].is_array()) return invalid("tools must be an array");
         for (const auto& item : body["tools"]) {
+            static const std::unordered_set<std::string> tool_fields{
+                "type", "function",
+            };
             if (!item.is_object() || item.value("type", "") != "function" ||
                 !item.contains("function") || !item["function"].is_object()) {
                 return invalid("tools entries must be function tools");
             }
+            if (!allow_extensions) {
+                auto fields = require_fields(item, tool_fields, "tool");
+                if (!fields) return invalid(fields.error().message);
+            }
             const auto& function = item["function"];
-            if (!function.contains("name") || !function["name"].is_string()) {
+            static const std::unordered_set<std::string> function_fields{
+                "name", "description", "parameters", "strict",
+            };
+            if (!allow_extensions) {
+                auto fields = require_fields(
+                    function, function_fields, "function tool");
+                if (!fields) return invalid(fields.error().message);
+            }
+            if (!function.contains("name") || !function["name"].is_string() ||
+                function["name"].get_ref<const std::string&>().empty()) {
                 return invalid("function tools require a string name");
+            }
+            if (function.contains("description") &&
+                !function["description"].is_string()) {
+                return invalid("function tool description must be a string");
+            }
+            if (function.contains("parameters") &&
+                !function["parameters"].is_object()) {
+                return invalid("function tool parameters must be an object");
+            }
+            if (function.contains("strict") &&
+                !function["strict"].is_boolean()) {
+                return invalid("function tool strict must be a boolean");
             }
             inference::FunctionTool tool;
             tool.name = function["name"].get<std::string>();
@@ -362,6 +561,25 @@ foundation::Result<model::InferenceRequest> parse_openai_chat_request(
                    choice.contains("function") && choice["function"].is_object() &&
                    choice["function"].contains("name") &&
                    choice["function"]["name"].is_string()) {
+            static const std::unordered_set<std::string> choice_fields{
+                "type", "function",
+            };
+            static const std::unordered_set<std::string> function_fields{
+                "name",
+            };
+            if (!allow_extensions) {
+                auto fields = require_fields(
+                    choice, choice_fields, "tool_choice");
+                if (!fields) return invalid(fields.error().message);
+                fields = require_fields(
+                    choice["function"], function_fields,
+                    "tool_choice.function");
+                if (!fields) return invalid(fields.error().message);
+            }
+            if (choice["function"]["name"]
+                    .get_ref<const std::string&>().empty()) {
+                return invalid("tool_choice function name must not be empty");
+            }
             request.tool_choice.kind = inference::ToolChoiceKind::Function;
             request.tool_choice.function_name =
                 choice["function"]["name"].get<std::string>();
@@ -371,10 +589,19 @@ foundation::Result<model::InferenceRequest> parse_openai_chat_request(
     }
     if (body.contains("stop") && !body["stop"].is_null()) {
         if (body["stop"].is_string()) {
-            request.stop.push_back(body["stop"].get<std::string>());
+            const auto stop = body["stop"].get<std::string>();
+            if (stop.empty()) return invalid("stop must not be empty");
+            request.stop.push_back(stop);
         } else if (body["stop"].is_array()) {
+            if (body["stop"].empty() || body["stop"].size() > 4) {
+                return invalid("stop must contain 1 to 4 strings");
+            }
             for (const auto& stop : body["stop"]) {
-                if (!stop.is_string()) return invalid("stop entries must be strings");
+                if (!stop.is_string() ||
+                    stop.get_ref<const std::string&>().empty()) {
+                    return invalid(
+                        "stop entries must be non-empty strings");
+                }
                 request.stop.push_back(stop.get<std::string>());
             }
         } else {
@@ -386,19 +613,58 @@ foundation::Result<model::InferenceRequest> parse_openai_chat_request(
             return invalid("response_format must be an object");
         }
         const auto& format = body["response_format"];
+        static const std::unordered_set<std::string> format_fields{
+            "type", "json_schema",
+        };
+        if (!allow_extensions) {
+            auto fields = require_fields(
+                format, format_fields, "response_format");
+            if (!fields) return invalid(fields.error().message);
+        }
+        if (!format.contains("type") || !format["type"].is_string()) {
+            return invalid("response_format requires string type");
+        }
         const std::string type = format.value("type", "text");
         if (type == "json_object") {
+            if (format.size() != 1) {
+                return invalid("json_object response_format accepts only type");
+            }
             request.output.kind = inference::StructuredOutputKind::JsonObject;
-            request.output.schema = format.contains("schema")
-                ? format["schema"].dump() : "{}";
+            request.output.schema = "{}";
         } else if (type == "json_schema" && format.contains("json_schema") &&
                    format["json_schema"].is_object()) {
             const auto& schema = format["json_schema"];
+            static const std::unordered_set<std::string> schema_fields{
+                "name", "description", "schema", "strict",
+            };
+            auto fields = require_fields(
+                schema, schema_fields, "response_format.json_schema");
+            if (!fields) return invalid(fields.error().message);
+            if (!schema.contains("name") || !schema["name"].is_string() ||
+                schema["name"].get_ref<const std::string&>().empty() ||
+                !schema.contains("schema") ||
+                !schema["schema"].is_object()) {
+                return invalid(
+                    "json_schema requires non-empty name and object schema");
+            }
+            if (schema.contains("description") &&
+                !schema["description"].is_string()) {
+                return invalid("json_schema description must be a string");
+            }
+            if (schema.contains("strict") &&
+                !schema["strict"].is_boolean()) {
+                return invalid("json_schema strict must be a boolean");
+            }
             request.output.kind = inference::StructuredOutputKind::JsonSchema;
             request.output.name = schema.value("name", "");
             request.output.description = schema.value("description", "");
             request.output.strict = schema.value("strict", false);
-            if (schema.contains("schema")) request.output.schema = schema["schema"].dump();
+            request.output.schema = schema["schema"].dump();
+        } else if (type == "json_schema") {
+            return invalid(
+                "json_schema response_format requires json_schema object");
+        } else if (type == "text" && format.size() != 1) {
+            return invalid("text response_format accepts only type");
         } else if (type != "text") {
             return invalid("response_format type is unsupported");
         }
