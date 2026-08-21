@@ -17,6 +17,7 @@ set(GATEWAY_SOURCES
     src/media_routes.cpp
     src/profile_benchmark.cpp
     src/profile_benchmark_scheduler.cpp
+    src/config_repository.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})

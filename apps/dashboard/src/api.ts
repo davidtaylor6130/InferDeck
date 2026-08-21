@@ -46,11 +46,11 @@ async function putJson<T>(path: string, body: unknown, timeoutMs = 30_000): Prom
   return payload;
 }
 
-async function deleteJson<T>(path: string, timeoutMs = 30_000): Promise<T> {
+async function deleteJson<T>(path: string, timeoutMs = 30_000, headers?: Record<string, string>): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     method: 'DELETE',
     signal: AbortSignal.timeout(timeoutMs),
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...headers },
   });
   const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
   if (!response.ok) throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
@@ -443,8 +443,8 @@ export function getOptimizationSchedule(): Promise<{ timezone: string; schedules
   return getJson(`${CONTROL_API_BASE}/optimize/schedule`);
 }
 
-export function resetActiveConfig(): Promise<{ ok: boolean; removed: boolean; restartRequired: boolean; applyScheduled: boolean }> {
-  return deleteJson(`${CONTROL_API_BASE}/config/active`);
+export function resetActiveConfig(revision: string): Promise<{ ok: boolean; removed: boolean; restartRequired: boolean; applyScheduled: boolean }> {
+  return deleteJson(`${CONTROL_API_BASE}/config/active`, 30_000, { 'If-Match': revision });
 }
 
 const delay = (milliseconds: number) =>

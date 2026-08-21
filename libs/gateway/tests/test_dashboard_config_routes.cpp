@@ -2,6 +2,7 @@
 
 #include "foundation/result.hpp"
 #include "gateway/dashboard_routes.hpp"
+#include "gateway/config_repository.hpp"
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
 #include "gateway/profile_benchmark_scheduler.hpp"
@@ -31,6 +32,7 @@ using inferdeck::foundation::ErrorCode;
 using inferdeck::foundation::Ok;
 using inferdeck::gateway::DashboardDeps;
 using inferdeck::gateway::ComputeResource;
+using inferdeck::gateway::ConfigRepository;
 using inferdeck::gateway::GatewayDeps;
 using inferdeck::gateway::ProfileBenchmarkManager;
 using inferdeck::gateway::ProfileBenchmarkConcurrencyMetrics;
@@ -151,9 +153,17 @@ struct ConfigRouteServer {
     std::atomic<int> reloads{0};
     std::function<inferdeck::foundation::Result<void>(const std::string&)> validate =
         [](const std::string&) { return Ok(); };
+    std::shared_ptr<ConfigRepository> config_repository;
 
     explicit ConfigRouteServer(const TempConfig& config,
                                std::string pricing_file = {}) {
+        config_repository = std::make_shared<ConfigRepository>(
+            config.base, config.active,
+            [this](const std::string& text) { return validate(text); },
+            [this] {
+                reloads.fetch_add(1);
+                return Ok();
+            });
         GatewayDeps gateway_deps{
             coordinator, "15", true, {}, {}, 15000, nullptr, nullptr, nullptr,
             &swap_tracker, &maintenance_resource};
@@ -177,6 +187,8 @@ struct ConfigRouteServer {
             nullptr,
             [] { return std::int64_t{1}; },
             &profile_benchmark,
+            nullptr,
+            config_repository,
         };
         RouteWrapper direct = [](httplib::Server::Handler handler) { return handler; };
         inferdeck::gateway::register_dashboard_routes(server, deps, direct);
@@ -677,7 +689,11 @@ TEST_CASE("Resetting an active configuration applies the stable baseline",
     ConfigRouteServer routes(config);
     auto client = routes.client();
 
-    const auto response = client.Delete("/api/inferdeck/v1/config/active");
+    const auto current_response = client.Get("/api/inferdeck/v1/config");
+    REQUIRE(current_response);
+    const auto current = nlohmann::json::parse(current_response->body);
+    httplib::Headers headers{{"If-Match", current["activeRevision"].get<std::string>()}};
+    const auto response = client.Delete("/api/inferdeck/v1/config/active", headers);
 
     REQUIRE(response);
     REQUIRE(response->status == 200);

@@ -8,6 +8,7 @@ add_executable(route_tests
     test_routes.cpp
     test_model_store.cpp
     test_dashboard_config_routes.cpp
+    test_config_repository.cpp
 )
 
 add_executable(anthropic_route_tests

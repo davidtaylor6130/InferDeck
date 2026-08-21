@@ -37,6 +37,7 @@
 #include "gateway/cors.hpp"
 #include "gateway/deadline_server.hpp"
 #include "gateway/dashboard_routes.hpp"
+#include "gateway/config_repository.hpp"
 #include "gateway/metrics_builder.hpp"
 #include "gateway/media_routes.hpp"
 #include "gateway/model_store.hpp"
@@ -1093,21 +1094,27 @@ int run_gateway(const fs::path& config_path) {
                                         {"db_healthy", stats_db.healthy()}}.dump(),
                          "application/json");
     }));
+    auto request_config_reload = [] {
+        g_reload.store(true);
+        LOG_INFO("config_reload_requested", "validated active profile will be applied");
+        return foundation::Ok();
+    };
+    auto config_repository = std::make_shared<ConfigRepository>(
+        config_path, config_selection.active_path,
+        [](const std::string& text) { return validate_config_text(text); },
+        request_config_reload);
     DashboardDeps dash_deps{
         deps, gpu, cfg.log_file, "data/pricing.json", config_path.string(),
         config_selection.active_path.string(), running_config_revision,
         config_selection.using_active,
         config_selection.fallback_reason,
         [](const std::string& text) { return validate_config_text(text); },
-        [] {
-            g_reload.store(true);
-            LOG_INFO("config_reload_requested", "validated active profile will be applied");
-            return foundation::Ok();
-        },
+        request_config_reload,
         &model_store,
         uptime_seconds,
         &profile_benchmark,
-        &profile_benchmark_scheduler};
+        &profile_benchmark_scheduler,
+        std::move(config_repository)};
     register_dashboard_routes(server, dash_deps, wrap);
     if (data_cors.handles_options() || control_cors.handles_options()) {
         server.Options(".*", [](const httplib::Request&,

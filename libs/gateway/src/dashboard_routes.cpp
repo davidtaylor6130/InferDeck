@@ -1,4 +1,5 @@
 #include "gateway/dashboard_routes.hpp"
+#include "gateway/config_repository.hpp"
 
 #include "foundation/logging.hpp"
 #include "optimize/profile_optimizer.hpp"
@@ -1426,29 +1427,26 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
     server.Get(R"(^/api/inferdeck/v1/config$)", wrap([deps](const httplib::Request& req,
                                                httplib::Response& resp) {
         (void)req;
-        if (deps.base_config_file.empty()) {
+        if (!deps.config_repository) {
             write_error(resp, 503, "config_unavailable", "configuration path is unavailable");
             return;
         }
-        const std::string base = read_text(deps.base_config_file);
-        if (base.empty()) {
-            write_error(resp, 500, "config_read_failed", "configuration file is empty or unreadable");
+        const auto snapshot = deps.config_repository->snapshot();
+        if (!snapshot) {
+            write_error(resp, 500, "config_read_failed", snapshot.error().message);
             return;
         }
-        const std::string active = deps.active_config_file.empty()
-            ? std::string{}
-            : read_text(deps.active_config_file);
-        const std::string desired_revision = config_revision(active.empty() ? base : active);
+        const std::string& desired = snapshot->has_active ? snapshot->active : snapshot->base;
         write_json(resp, 200, {
-            {"yaml", mask_config_secret(base)},
-            {"revision", config_revision(base)},
-            {"activeYaml", mask_config_secret(active.empty() ? base : active)},
-            {"activeRevision", desired_revision},
+            {"yaml", mask_config_secret(snapshot->base)},
+            {"revision", snapshot->base_revision},
+            {"activeYaml", mask_config_secret(desired)},
+            {"activeRevision", snapshot->active_revision},
             {"runningRevision", deps.running_config_revision},
-            {"hasActiveProfile", !active.empty()},
+            {"hasActiveProfile", snapshot->has_active},
             {"usingActiveProfile", deps.using_active_config},
             {"fallbackReason", deps.config_fallback_reason},
-            {"restartRequired", deps.running_config_revision != desired_revision},
+            {"restartRequired", deps.running_config_revision != snapshot->active_revision},
             {"secretSentinel", "__INFERDECK_SECRET__"},
         });
     }));
@@ -1460,8 +1458,10 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                         "configuration cannot change during a measured benchmark");
             return;
         }
-        static std::mutex write_mutex;
-        std::lock_guard lock(write_mutex);
+        if (!deps.config_repository) {
+            write_error(resp, 503, "config_unavailable", "configuration repository is unavailable");
+            return;
+        }
         nlohmann::json body;
         try {
             body = nlohmann::json::parse(req.body);
@@ -1479,37 +1479,26 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             write_error(resp, 400, "invalid_config_update", "configuration size is invalid");
             return;
         }
-        const std::string current = read_text(deps.base_config_file);
-        if (current.empty()) {
-            write_error(resp, 500, "config_read_failed", "configuration file is empty or unreadable");
+        const auto current = deps.config_repository->snapshot();
+        if (!current) {
+            write_error(resp, 500, "config_read_failed", current.error().message);
             return;
         }
-        if (body["revision"].get<std::string>() != config_revision(current)) {
-            write_error(resp, 409, "config_conflict", "configuration changed; reload before saving");
-            return;
-        }
-        submitted = restore_config_secret(std::move(submitted), current);
-        if (!deps.validate_config) {
-            write_error(resp, 503, "config_validation_unavailable", "configuration validator is unavailable");
-            return;
-        }
-        if (!deps.request_config_reload) {
-            write_error(resp, 503, "config_reload_unavailable", "automatic configuration reload is unavailable");
-            return;
-        }
-        auto valid = deps.validate_config(submitted);
-        if (!valid) {
-            write_error(resp, 400, "invalid_configuration", valid.error().message);
-            return;
-        }
-        auto written = write_config_atomic(deps.base_config_file, submitted);
+        submitted = restore_config_secret(std::move(submitted), current->base);
+        auto written = deps.config_repository->write_base(
+            body["revision"].get<std::string>(), submitted);
         if (!written) {
-            write_error(resp, 500, "config_write_failed", written.error().message);
+            const int status = written.error().code == foundation::ErrorCode::AlreadyExists
+                ? 409 : written.error().code == foundation::ErrorCode::InvalidArgument ? 400 : 500;
+            write_error(resp, status,
+                        status == 409 ? "config_conflict" :
+                        status == 400 ? "invalid_configuration" : "config_write_failed",
+                        written.error().message);
             return;
         }
         write_json(resp, 200, {
             {"ok", true},
-            {"revision", config_revision(submitted)},
+            {"revision", written->revision},
             {"restartRequired", true},
         });
     }));
@@ -1521,9 +1510,7 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
                         "configuration cannot change during a measured benchmark");
             return;
         }
-        static std::mutex active_write_mutex;
-        std::lock_guard lock(active_write_mutex);
-        if (deps.base_config_file.empty() || deps.active_config_file.empty()) {
+        if (!deps.config_repository) {
             write_error(resp, 503, "config_unavailable", "configuration paths are unavailable");
             return;
         }
@@ -1544,80 +1531,67 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
             write_error(resp, 400, "invalid_config_update", "configuration size is invalid");
             return;
         }
-        const std::string base = read_text(deps.base_config_file);
-        const std::string saved_active = read_text(deps.active_config_file);
-        const std::string& current = saved_active.empty() ? base : saved_active;
-        if (current.empty()) {
-            write_error(resp, 500, "config_read_failed", "configuration file is empty or unreadable");
+        const auto current = deps.config_repository->snapshot();
+        if (!current) {
+            write_error(resp, 500, "config_read_failed", current.error().message);
             return;
         }
-        if (body["revision"].get<std::string>() != config_revision(current)) {
-            write_error(resp, 409, "config_conflict", "active configuration changed; reload before saving");
-            return;
-        }
-        submitted = restore_config_secret(std::move(submitted), current);
-        if (!deps.validate_config) {
-            write_error(resp, 503, "config_validation_unavailable", "configuration validator is unavailable");
-            return;
-        }
-        auto valid = deps.validate_config(submitted);
-        if (!valid) {
-            write_error(resp, 400, "invalid_configuration", valid.error().message);
-            return;
-        }
-        auto written = write_config_atomic(deps.active_config_file, submitted);
+        submitted = restore_config_secret(
+            std::move(submitted), current->has_active ? current->active : current->base);
+        auto written = deps.config_repository->write_active(
+            body["revision"].get<std::string>(), submitted);
         if (!written) {
-            write_error(resp, 500, "config_write_failed", written.error().message);
-            return;
-        }
-        auto reload = deps.request_config_reload();
-        if (!reload) {
-            write_error(resp, 503, "config_reload_failed", reload.error().message);
+            const int status = written.error().code == foundation::ErrorCode::AlreadyExists
+                ? 409 : written.error().code == foundation::ErrorCode::InvalidArgument ? 400 :
+                  written.error().code == foundation::ErrorCode::Unavailable ? 503 : 500;
+            write_error(resp, status,
+                        status == 409 ? "config_conflict" :
+                        status == 400 ? "invalid_configuration" :
+                        status == 503 ? "config_reload_failed" : "config_write_failed",
+                        written.error().message);
             return;
         }
         write_json(resp, 200, {
             {"ok", true},
-            {"activeRevision", config_revision(submitted)},
+            {"activeRevision", written->revision},
             {"hasActiveProfile", true},
             {"restartRequired", false},
             {"applyScheduled", true},
         });
     }));
 
-    server.Delete(R"(^/api/inferdeck/v1/config/active$)", wrap([deps](const httplib::Request&,
+    server.Delete(R"(^/api/inferdeck/v1/config/active$)", wrap([deps](const httplib::Request& req,
                                                          httplib::Response& resp) {
         if (maintenance_mode_active(deps.gw)) {
             write_error(resp, 503, "maintenance_mode",
                         "configuration cannot change during a measured benchmark");
             return;
         }
-        if (deps.active_config_file.empty()) {
-            write_error(resp, 503, "config_unavailable", "active configuration path is unavailable");
+        if (!deps.config_repository) {
+            write_error(resp, 503, "config_unavailable", "configuration repository is unavailable");
             return;
         }
-        if (!deps.request_config_reload) {
-            write_error(resp, 503, "config_reload_unavailable", "automatic configuration reload is unavailable");
+        if (!req.has_header("If-Match") || req.get_header_value("If-Match").empty()) {
+            write_error(resp, 400, "invalid_config_reset", "If-Match active revision is required");
             return;
         }
-        std::error_code error;
-        const bool removed = std::filesystem::remove(deps.active_config_file, error);
-        if (error) {
-            write_error(resp, 500, "config_reset_failed", error.message());
+        auto reset = deps.config_repository->reset_active(req.get_header_value("If-Match"));
+        if (!reset) {
+            const int status = reset.error().code == foundation::ErrorCode::AlreadyExists
+                ? 409 : reset.error().code == foundation::ErrorCode::Unavailable ? 503 : 500;
+            write_error(resp, status,
+                        status == 409 ? "config_conflict" :
+                        status == 503 ? "config_reload_failed" : "config_reset_failed",
+                        reset.error().message);
             return;
-        }
-        if (removed) {
-            auto reload = deps.request_config_reload();
-            if (!reload) {
-                write_error(resp, 503, "config_reload_failed", reload.error().message);
-                return;
-            }
         }
         write_json(resp, 200, {
             {"ok", true},
-            {"removed", removed},
+            {"removed", reset->changed},
+            {"activeRevision", reset->revision},
             {"hasActiveProfile", false},
             {"restartRequired", false},
-            {"applyScheduled", removed},
+            {"applyScheduled", reset->changed},
         });
     }));
 
