@@ -1,63 +1,86 @@
-# InferDeck — Deployment Guide
+# InferDeck Windows deployment
 
-InferDeck deploys as a **user-level Windows scheduled task**, not a service:
-the gateway needs a logged-on session for GPU access, and the host doubles as
-a desktop machine. The deployed copy lives outside the repo (default
-`C:\InferDeck`) so rebuilds never touch the running install.
+InferDeck deploys as one native executable plus a matched static dashboard.
+The live installation is outside the repository at `C:\InferDeck`.
 
-```
-C:\InferDeck\
-├── bin\              gateway exe + llama.cpp DLLs (copied from build\bin\Release\)
-├── config\           gateway.yml (paths rewritten to absolute)
-├── logs\             startup-task.out.log / .err.log, install results
-├── run\              startup lock file
-└── Start-InferDeck.ps1
-```
+## Authoritative boot target
 
-## Install / update
+The production boot mechanism is the automatic LocalSystem NSSM service
+`InferDeck`. Verify it before every activation:
 
 ```powershell
-# Build first (see README), then:
-powershell -ExecutionPolicy Bypass -File ops\Install-InferDeck-LogonStartup.ps1
+Get-CimInstance Win32_Service -Filter "Name='InferDeck'"
+Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\InferDeck\Parameters'
 ```
 
-The install script:
+Expected registry values are `Application=C:\InferDeck\inferdeck-gateway.exe`,
+`AppDirectory=C:\InferDeck`, and `AppParameters=-c config\gateway.yml`.
+Legacy InferDeck startup, logon, and watchdog tasks and the old
+`InferDeckGateway` service are disabled. Do not deploy through them. Reconfirm
+this state because boot configuration can drift independently of files.
 
-1. Copies `build\bin\Release\*` to `C:\InferDeck\bin\`, the startup script,
-   and `config\gateway.yml` (rewriting `~/.inferdeck/` paths to absolute).
-2. Registers the **"InferDeck Gateway Logon"** scheduled task (at-logon
-   trigger, no execution time limit, auto-restart ×3).
-3. Disables any competing Ollama startup task.
-4. Starts the task and verifies `/api/inferdeck/v1/health` before reporting success.
+## Matched artifacts
 
-> **Note:** the `ops\` scripts are written for this machine — they hardcode
-> the repo path and user profile. Adjust `$root`/`$repo` at the top of each
-> script for your own setup.
-
-## Startup script behaviour
-
-`Start-InferDeck.ps1` is idempotent and safe to fire from multiple triggers
-(logon task plus a periodic watchdog task):
-
-- Exits immediately if the gateway already answers `/api/inferdeck/v1/health` healthy.
-- Uses a PID lock file (`run\inferdeck-startup.lock`) so concurrent triggers
-  don't double-start.
-- Stops competing inference servers (`ollama`, `llama-server`) before
-  launching.
-- Starts the gateway hidden with stdout/stderr redirected to `logs\`, then
-  polls health for up to 20 s before reporting failure.
-
-## Watchdog
-
-Register `Start-InferDeck.ps1` on a repeating timer (e.g. every 15 minutes)
-as a second task. Because the script is a no-op while the gateway is healthy,
-this gives crash recovery for free. `ops\Repair-InferDeck-Startup.ps1`
-re-registers the tasks if they're lost.
-
-## Verify
+Build both artifacts from one source revision:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:11434/api/inferdeck/v1/health   # { ok: true, ... }
-Invoke-RestMethod http://127.0.0.1:11434/v1/models
-# Dashboard: http://<host>:11434/
+cmake --build build --target inferdeck-gateway --config Release --parallel
+pnpm --filter dashboard build
 ```
+
+Activate `build\bin\Release\inferdeck-gateway.exe` as
+`C:\InferDeck\inferdeck-gateway.exe` and
+`apps\inferdeck-gateway\static\` as `C:\InferDeck\static\`. The gateway
+resolves `static` relative to its executable. Never activate only one
+artifact. Remove stale hashed bundles from the staged static directory before
+the directory swap.
+
+## Backup and activation
+
+Explicit owner authorization is required before writing `C:\InferDeck` or
+restarting the service.
+
+1. Capture the source commit, artifact hashes, service registry values, running
+   service and child PIDs, configuration revision, and live endpoint behavior.
+2. Back up the active executable, complete static directory,
+   `config\gateway.yml`, StatsDb with WAL and SHM files, managed-model
+   manifests, and service registry values into one timestamped rollback set.
+3. Validate staged configuration and open a copy of StatsDb with the new build.
+4. Stop only the verified `InferDeck` service and confirm its NSSM parent and
+   gateway child exited.
+5. Replace the executable and complete static directory, then apply validated
+   configuration and state migrations.
+6. Start `InferDeck` and verify the service PID, gateway child, executable
+   hash, configuration revision, and static asset hashes.
+
+An on-disk replacement is not a deployment until the restarted process and
+live listener prove those exact artifacts are active.
+
+## Secure LAN and credentials
+
+The OpenAI bearer token authenticates only `/v1`. Rotate it through the
+versioned configuration transaction, verify the new token, and prove the old
+token returns 401.
+
+Remote administration is separately opt-in. Enable
+`control.allow_remote`, use a distinct control token with at least 32
+non-whitespace characters, configure exact HTTP or HTTPS origins, and carry
+traffic over an encrypted overlay because the listener has no TLS. Forwarded
+headers and reverse proxies never inherit loopback authority. After rotation,
+prove unauthenticated, data-token, wrong-origin, and stale-token control
+requests fail. The dashboard remains direct-loopback only.
+
+## Verification and rollback
+
+Verify the strict route manifest; official Python and JavaScript SDK clients;
+Chat and Responses stream and non-stream; linked media formats; control
+security; request correlation through logs, StatsDb, SSE, metrics, and the
+dashboard; and the absence of Python, FFmpeg, `llama-server`, proxy, or other
+runtime child processes. Verify reboot persistence through NSSM separately from
+the immediate restart.
+
+Rollback is a matched-pair operation. Stop the same verified service, restore
+the executable, complete static directory, configuration, StatsDb, and
+manifests from one rollback set, restart, and repeat health, model, dashboard,
+request, and boot-target probes. If a file is locked or a target differs, stop
+and request owner direction.

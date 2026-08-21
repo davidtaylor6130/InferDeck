@@ -118,8 +118,6 @@ control:
 compatibility:
   openai_derivative:
     enabled: false
-  anthropic:
-    enabled: false
 ```
 
 When `allow_remote` is false, non-loopback control requests and preflights return

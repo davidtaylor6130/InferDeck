@@ -1,5 +1,10 @@
 # InferDeck Alpha V2 handoff
 
+> Historical handoff for the alpha-v2 branch. Its route inventory, test counts,
+> and remaining-work statements are not current product documentation. See
+> [architecture.md](architecture.md), [openai-compatibility.md](openai-compatibility.md),
+> and [overhall_plan.md](../overhall_plan.md).
+
 Branch: `alpha-v2` from `main`/`origin/main` at `798b2ef` (`v0.4.0`).
 
 ## Status by issue

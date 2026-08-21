@@ -97,5 +97,6 @@ default-off OpenAI-derivative profile is enabled and its `/compat` base is used.
 
 ## Reference
 
-- [Full diagnostics](qwen36-opencode-diagnostics.md)
-- [Smoke test script](../scripts/test-qwen36-response.ps1)
+- [Strict OpenAI compatibility](openai-compatibility.md)
+- [Architecture](architecture.md)
+- [Streaming tool-call harness](../Testing/mini-ralph.mjs)

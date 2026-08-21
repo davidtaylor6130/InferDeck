@@ -45,7 +45,7 @@ Testing/                      mini-ralph.mjs streaming tool-call harness (untrac
                               do not delete)
 tests/integration/            Catch2 integration tests (mocked coordinator)
 tests/parity/                 Parity with raw llama-server
-tests/fixtures/               Realistic request payloads (opencode/openwebui/Anthropic)
+tests/fixtures/               Realistic OpenAI request payloads (opencode/openwebui)
 ```
 
 Deleted in the 2026-06 cleanup (see `docs/v2-cleanup-report.md`, history
@@ -90,19 +90,25 @@ bash tests/parity/run.sh
 
 ## Deployment
 
-The live server runs from `C:\InferDeck\bin\`, launched by
-`C:\InferDeck\Start-InferDeck.ps1` (scheduled tasks at startup/logon
-plus a 15-min watchdog). A deploy requires copying **both** artifacts —
-updating only one leaves a mismatched install:
+The authoritative live boot target is the automatic LocalSystem NSSM service
+`InferDeck`. Read
+`HKLM:\SYSTEM\CurrentControlSet\Services\InferDeck\Parameters` directly:
+`Application` is `C:\InferDeck\inferdeck-gateway.exe`, `AppDirectory` is
+`C:\InferDeck`, and `AppParameters` is `-c config\gateway.yml`. Legacy
+startup/logon/watchdog tasks and the old `InferDeckGateway` service are
+disabled and are not deployment targets.
 
-- `build/bin/Release/inferdeck-gateway.exe` → `C:\InferDeck\bin\gateway-service.exe`
-- `apps/inferdeck-gateway/static/` (index.html + assets) → `C:\InferDeck\bin\static/`
+A deploy requires copying **both** artifacts from the same revision:
+
+- `build/bin/Release/inferdeck-gateway.exe` → `C:\InferDeck\inferdeck-gateway.exe`
+- `apps/inferdeck-gateway/static/` → `C:\InferDeck\static/`
 
 The gateway serves the dashboard from `executable_dir()/static`, so the
 exe and its static dir must come from the same build. Replacing just the
 exe makes the new gateway serve the old dashboard. The exe can't be
-overwritten while running — stop the process (or rename the file aside)
-first. Clear stale hashed bundles in `bin/static/assets/` so only the
+overwritten while running. Obtain explicit authorization, verify the service
+and child PID, then stop only `InferDeck` before activation. Clear stale
+hashed bundles in `static/assets/` so only the
 current `index-*.js`/`index-*.css` remain.
 
 ## HTTP API
@@ -112,10 +118,10 @@ OpenAI-compatible (`/v1`):
   with SSE chunks ending in `data: [DONE]`.
 - `GET /v1/models`, `GET /api/inferdeck/v1/health`, `GET /api/inferdeck/v1/metrics`, `GET /api/inferdeck/v1/stats/history`
 
-Compatibility profiles are default-off. OpenAI-derivative chat, Responses,
-embeddings, and image generation use `/compat/openai-derivative/v1`; Anthropic Messages uses
-`/compat/anthropic/v1`. Neither profile may add routes or fields to strict
-`/v1`.
+The OpenAI-derivative compatibility profile is default-off. Its chat,
+Responses, embeddings, and image-generation routes use
+`/compat/openai-derivative/v1` and may never add routes or fields to strict
+`/v1`. InferDeck Core owns no non-OpenAI protocol.
 
 Swap control:
 - `POST /api/inferdeck/v1/swap/to/:name` — **async**: returns `202 {"status":"swapping"}`
@@ -164,7 +170,7 @@ Concurrency invariants:
   with a 30s timeout, so an IModel can't be destroyed mid-predict.
 - `StreamState` is shared_ptr-owned by both the inference thread and
   the chunked provider; `finish_once` is idempotent via CAS.
-- CPU STT/TTS sidecars bypass GPU preparation. A successful STT request
+- CPU STT/TTS native runtimes bypass GPU preparation. A successful STT request
   reserves the default chat model for that client through TTS; the bounded
   grace is configured by `gateway.voice_session_grace_ms`.
 
@@ -181,27 +187,9 @@ Concurrency invariants:
 
 ## Known open items
 
-- **qwen3.6-35b-a3b re-prefills the whole prompt every turn** (~60s at
-  80k ctx). It is a hybrid recurrent/linear-attention model: the
-  recurrent state cannot be rewound to an arbitrary position
-  (`llama_memory_seq_rm` mid-sequence fails, `pos_min==pos_max` in the
-  `llama_prompt_cache_fallback` log line), and thinking-model history
-  re-rendering always diverges just before the generation boundary, so
-  a rewind is always needed. Fix = llama-server-style recurrent-state
-  checkpoints (snapshot before each generation, restore on rewind).
-  Full-attention models reuse the cache fine, and follow-up turns that
-  strictly extend the cache skip the rewind entirely
-  (`llama_prompt_cache_extend`). `swa_full` does not help; keep false.
-
-- `config/gateway.yml` has `gateway.auto_swap: true` while the original
-  design said "no auto-swap, return 503". Both paths exist in
-  `handle_chat_completions`; the config flag decides. Owner decision on
-  the default is still pending (see docs/v2-cleanup-report.md §3.9).
-- Remaining report items not yet implemented: error-code enum on
-  foundation::Error instead of message substring matching (§3.3/3.4),
-  UTF-8 hold-back in the streaming path (§3.6), god-function splits
-  (§4.1/4.2), sampler magic numbers → sampler-profiles (§3.10),
-  Vulkan SDK path from env (§3.11).
+- Remaining owner decision: `gateway.auto_swap` defaults to enabled although
+  the original design returned 503 when a requested model was not resident.
+  Both behaviors are intentional and selected by configuration.
 
 ## Don'ts
 

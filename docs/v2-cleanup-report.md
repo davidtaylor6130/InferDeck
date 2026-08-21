@@ -2,7 +2,9 @@
 
 > Historical audit: route names in this report describe the pre-overhaul
 > implementation. Current control routes use `/api/inferdeck/v1`; the strict
-> OpenAI surface is pinned separately.
+> OpenAI surface is pinned separately. This report is not a current work list;
+> the completed replacement program and verification gates are recorded in
+> [`overhall_plan.md`](../overhall_plan.md).
 
 ## Context
 

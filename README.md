@@ -92,10 +92,10 @@ and the same dashboard. See the [roadmap](#roadmap).
 - **OpenAI Responses and embeddings APIs** at `POST /v1/responses` and
   `POST /v1/embeddings`. Responses is stateless; unsupported storage,
   background, and conversation fields are rejected explicitly.
-- **Isolated compatibility profiles.** OpenAI-derivative fields such as
-  `reasoning_content`, sampler extensions, and queue priority are available only
-  under `/compat/openai-derivative/v1` when explicitly enabled. The separately
-  named Anthropic compatibility profile is also disabled by default.
+- **Strict OpenAI Core.** OpenAI-derivative fields such as
+  `reasoning_content`, sampler extensions, and queue priority are isolated
+  under `/compat/openai-derivative/v1` when explicitly enabled. They never
+  extend the strict `/v1` contract.
 - **Experimental native audio APIs.** Code paths exist for CPU-only Parakeet
   TDT 0.6B v3 transcription at `POST /v1/audio/transcriptions` and in-process
   Supertonic 3 speech synthesis at `POST /v1/audio/speech`. These paths have
@@ -292,7 +292,6 @@ pwsh -File tests/parity/run.ps1 `
 | `POST /v1/responses` | Stateless OpenAI Responses compatibility; streaming, tools, reasoning, and structured output translation |
 | `POST /v1/embeddings` | OpenAI-compatible float or base64 embeddings for registered embedding models |
 | `POST /compat/openai-derivative/v1/chat/completions` · `POST /compat/openai-derivative/v1/responses` · `POST /compat/openai-derivative/v1/embeddings` · `POST /compat/openai-derivative/v1/images/generations` | default-off profile for explicitly enabled derivative fields |
-| `POST /compat/anthropic/v1/messages` · `POST /compat/anthropic/v1/messages/count_tokens` | default-off, separately named compatibility profile |
 | `POST /v1/audio/transcriptions` | Experimental, not yet fully tested; intended to provide request-scoped WAV-to-text via Parakeet TDT when sherpa-onnx is linked |
 | `POST /v1/audio/speech` | Experimental, not yet fully tested; intended to provide request-scoped WAV or PCM output via Supertonic 3 when sherpa-onnx is linked |
 | `POST /v1/images/generations` | Experimental, not yet fully tested; intended to provide base64 PNG generation when stable-diffusion.cpp is linked and an image model is registered |
@@ -321,8 +320,9 @@ completions today.
   models instead of re-prefilling every turn.
 - [x] **Structured error codes and UTF-8 hold-back** in the streaming paths for
   clean multi-byte output and consistent API errors.
-- [ ] **CI on every push.** The current GitHub Actions release workflow builds
-  and tests version tags and manual runs, but does not run on each push.
+- [x] **Required CI on every push and pull request.** Architecture policy,
+  dashboard/SDK contracts, and clean native build/security gates run separately
+  from release packaging.
 
 **Beyond text: the multimodal gateway**
 - [ ] **Speech-to-text** (`/v1/audio/transcriptions`, Parakeet TDT). The route
