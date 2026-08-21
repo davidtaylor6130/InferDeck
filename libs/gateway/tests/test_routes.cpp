@@ -31,6 +31,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 
 using namespace inferdeck;
@@ -277,6 +278,8 @@ public:
     std::atomic<int> speech_chunk_count{0};
     std::atomic<int> speech_chunks_emitted{0};
     std::atomic<bool> speech_should_fail{false};
+    std::atomic<bool> speech_should_cancel{false};
+    std::atomic<bool> transcription_should_cancel{false};
     std::atomic<int> transcription_delay_ms{0};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
@@ -517,6 +520,10 @@ public:
             return inferdeck::foundation::Err<AudioResult>(
                 ErrorCode::InvalidArgument, "mock speech failure");
         }
+        if (speech_should_cancel.load()) {
+            return inferdeck::foundation::Err<AudioResult>(
+                ErrorCode::Cancelled, "cancelled");
+        }
         AudioResult result;
         result.bytes = {std::byte{0x52}, std::byte{0x49}, std::byte{0x46}, std::byte{0x46}};
         result.content_type = request.format == "wav" ? "audio/wav" : "audio/mpeg";
@@ -553,6 +560,10 @@ public:
     Result<TranscriptionResult> transcribe(
         int, const TranscriptionRequest& request,
         const std::function<bool(int)>& progress = {}) override {
+        if (transcription_should_cancel.load()) {
+            return inferdeck::foundation::Err<TranscriptionResult>(
+                ErrorCode::Cancelled, "cancelled");
+        }
         if (const int delay = transcription_delay_ms.load(); delay > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds{delay});
         }
@@ -2136,7 +2147,10 @@ TEST_CASE("Image jobs can be cancelled through the shared tracker", "[routes][im
     REQUIRE(job_id > 0);
     REQUIRE(cancel_media_job(job_id));
     request.join();
-    CHECK(status.load() == 499);
+    CHECK(status.load() == 408);
+    const auto rows = ts.stats_db.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].status_code == 499);
     ts.stop();
 }
 
@@ -2251,7 +2265,13 @@ TEST_CASE("Routes: speech validates the OpenAI request contract before admission
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
                   {"stream_format", "events"}}, "unsupported_stream_format");
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
-                  {"stream_format", "sse"}}, "unsupported_stream_format");
+                   {"stream_format", "sse"}}, "unsupported_stream_format");
+    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
+                  {"response_format", "wav"}, {"priority", 1}},
+                 "unsupported_parameter");
+    expect_error({{"model", info.name}, {"input", "hello"},
+                  {"voice", {{"id", "voice_custom"}, {"ignored", true}}},
+                  {"response_format", "wav"}}, "invalid_speech_request");
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"}},
                  "unsupported_response_format");
     expect_error({{"model", info.name}, {"input", "hello"},
@@ -2305,12 +2325,17 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     REQUIRE(ts.start());
     httplib::Client client("127.0.0.1", ts.port);
     const auto transcribe = [&client](const std::string& format) {
-        return client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+        httplib::UploadFormDataItems items{
             {"file", test_wav(), "test.wav", "audio/wav"},
             {"model", "whisper-model", "", ""},
             {"language", "en", "", ""},
             {"response_format", format, "", ""},
-        });
+        };
+        if (format == "verbose_json") {
+            items.push_back(
+                {"timestamp_granularities[]", "segment", "", ""});
+        }
+        return client.Post("/v1/audio/transcriptions", items);
     };
     auto response = transcribe("json");
     REQUIRE(response);
@@ -2351,6 +2376,57 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     CHECK(usage[0].successful_requests == 5);
     CHECK(usage[0].input_audio_seconds == Catch::Approx(0.05));
     CHECK(usage[0].input_characters == 0);
+    ts.stop();
+}
+
+TEST_CASE("Audio cancellation separates HTTP and internal outcomes",
+          "[routes][audio][cancel]") {
+    TestServer ts;
+    auto speech_info = make_info("cancel-speech");
+    speech_info.runtime = "sherpa_onnx";
+    speech_info.capabilities = {"audio_speech"};
+    auto transcription_info = make_info("cancel-transcription");
+    transcription_info.runtime = "whisper_cpp";
+    transcription_info.capabilities = {"audio_transcription"};
+    ts.registry.register_model(speech_info);
+    ts.registry.register_model(transcription_info);
+    REQUIRE(ts.coordinator.load(speech_info.name));
+    REQUIRE(ts.coordinator.load(transcription_info.name));
+    auto* speech_backend = const_cast<IModelMock*>(dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend(speech_info.name)));
+    auto* transcription_backend = const_cast<IModelMock*>(
+        dynamic_cast<const IModelMock*>(
+            ts.coordinator.get_backend(transcription_info.name)));
+    REQUIRE(speech_backend);
+    REQUIRE(transcription_backend);
+    speech_backend->speech_should_cancel.store(true);
+    transcription_backend->transcription_should_cancel.store(true);
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+
+    const auto speech = client.Post(
+        "/v1/audio/speech",
+        nlohmann::json{{"model", speech_info.name}, {"input", "cancel"},
+                       {"voice", "default"}, {"response_format", "wav"}}.dump(),
+        "application/json");
+    REQUIRE(speech);
+    CHECK(speech->status == 408);
+    CHECK(nlohmann::json::parse(speech->body)["error"]["code"] ==
+          "speech_generation_failed");
+
+    const auto transcription = client.Post(
+        "/v1/audio/transcriptions", httplib::UploadFormDataItems{
+            {"file", test_wav(), "test.wav", "audio/wav"},
+            {"model", transcription_info.name, "", ""},
+        });
+    REQUIRE(transcription);
+    CHECK(transcription->status == 408);
+    CHECK(nlohmann::json::parse(transcription->body)["error"]["code"] ==
+          "transcription_failed");
+    const auto rows = ts.stats_db.recent_requests(2);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].status_code == 499);
+    CHECK(rows[1].status_code == 499);
     ts.stop();
 }
 
@@ -2474,7 +2550,36 @@ TEST_CASE("Media routes reject unsupported request shapes", "[routes][media]") {
     REQUIRE(transcription);
     CHECK(transcription->status == 400);
     CHECK(nlohmann::json::parse(transcription->body)["error"]["code"] ==
-          "invalid_audio");
+          "invalid_transcription_request");
+    const auto unsupported_transcription = [&client](
+        const std::string& name, const std::string& value,
+        const std::string& format = "json") {
+        return client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+            {"file", test_wav(), "test.wav", "audio/wav"},
+            {"model", "missing-model", "", ""},
+            {"response_format", format, "", ""},
+            {name, value, "", ""},
+        });
+    };
+    for (const auto& [name, value, format] :
+         std::vector<std::tuple<std::string, std::string, std::string>>{
+             {"stream", "true", "json"},
+             {"include[]", "logprobs", "json"},
+             {"chunking_strategy", "auto", "json"},
+             {"keywords[]", "InferDeck", "json"},
+             {"timestamp_granularities[]", "word", "verbose_json"},
+             {"timestamp_granularities[]", "segment", "json"},
+             {"future_field", "ignored", "json"},
+         }) {
+        auto invalid = unsupported_transcription(name, value, format);
+        INFO(name);
+        REQUIRE(invalid);
+        CHECK(invalid->status == 400);
+        CHECK(ts.coordinator.active_request_count() == 0);
+    }
+    auto harmless_stream = unsupported_transcription("stream", "false");
+    REQUIRE(harmless_stream);
+    CHECK(harmless_stream->status == 404);
     transcription = client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
         {"file", test_float_wav(std::numeric_limits<float>::quiet_NaN()),
          "test.wav", "audio/wav"},

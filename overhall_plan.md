@@ -428,11 +428,11 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Audio
 
-- [ ] Complete speech instructions and stream-format behavior.
-- [ ] Complete transcription response formats, timestamp granularities, includes,
+- [x] Complete speech instructions and stream-format behavior.
+- [x] Complete transcription response formats, timestamp granularities, includes,
       logprobs, chunking and streaming behavior for the supported baseline.
 - [x] Remove fabricated transcription metrics such as constant compression ratio.
-- [ ] Keep internal cancellation outcomes separate from client-visible HTTP status.
+- [x] Keep internal cancellation outcomes separate from client-visible HTTP status.
 
 ### Models
 

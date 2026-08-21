@@ -31,6 +31,26 @@ kwargs, and `reasoning_content` are not part of strict `/v1`. They remain
 available only through the explicitly enabled OpenAI-derivative profile, and
 strict output never emits derivative reasoning fields.
 
+## Native Audio contract
+
+POST /v1/audio/speech supports the pinned OpenAI request shape with native
+runtime limits. Input is capped at 4096 Unicode characters, speed must be from
+0.25 through 4.0, voice strings and `{ "id": ... }` references are validated,
+and `stream_format: audio` is supported. Empty instructions are a harmless
+default; non-empty instructions and SSE speech streaming are rejected because
+the linked native runtimes cannot preserve those semantics. Each runtime also
+rejects response formats it cannot encode before slot admission.
+
+POST /v1/audio/transcriptions accepts one file and one model plus language,
+prompt, temperature, response format, `stream: false`, and segment timestamp
+granularity for `verbose_json`. JSON, text, verbose JSON, SRT, and VTT outputs
+are supported. Streaming, word timestamps, logprob inclusion, diarized output,
+server-side chunking/VAD, keywords, language lists, and known-speaker fields are
+rejected before model resolution because the native Whisper contract cannot
+produce those semantics. Client-visible cancellation uses HTTP 408 with the
+OpenAI error envelope; internal request accounting retains status 499 and the
+media job retains its `cancelled` state.
+
 ## Native Images contract
 
 POST /v1/images/generations accepts the pinned OpenAI request field names.
