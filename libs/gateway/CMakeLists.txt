@@ -38,6 +38,7 @@ target_link_libraries(gateway
         optimize
         nlohmann_json::nlohmann_json
         httplib::httplib
+    PRIVATE
         yaml-cpp::yaml-cpp
 )
 

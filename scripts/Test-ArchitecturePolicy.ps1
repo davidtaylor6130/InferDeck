@@ -79,7 +79,7 @@ $scanRoots = @(
 foreach ($relativeRoot in $scanRoots) {
     $path = Join-Path $repoRoot $relativeRoot
     if (!(Test-Path -LiteralPath $path)) { continue }
-    Get-ChildItem -LiteralPath $path -Recurse -File | Where-Object Extension -in '.cpp', '.hpp' | ForEach-Object {
+    Get-ChildItem -LiteralPath $path -Recurse -File | Where-Object Extension -in '.cpp', '.hpp', '.ipp' | ForEach-Object {
         $relative = $_.FullName.Substring($repoRoot.Length).TrimStart('\', '/')
         Test-CoreText $relative (Get-Content -LiteralPath $_.FullName -Raw)
     }

@@ -42,7 +42,7 @@ else()
 endif()
 
 if(WIN32)
-    target_link_libraries(llama_cpp_wrapper PUBLIC psapi dxgi)
+    target_link_libraries(llama_cpp_wrapper PRIVATE psapi dxgi)
 endif()
 
 if(INFERDECK_BUILD_TESTS)
