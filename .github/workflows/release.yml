@@ -126,11 +126,10 @@ jobs:
 
           # Dashboard static assets (copied post-build by CMake)
           Copy-Item -Recurse build\bin\Release\static dist\
-          New-Item -ItemType Directory -Path dist\config\templates, dist\data, dist\ops -Force | Out-Null
+          New-Item -ItemType Directory -Path dist\config\templates, dist\data -Force | Out-Null
           Copy-Item config\gateway.yml dist\config\
           Copy-Item config\templates\* dist\config\templates\
           Copy-Item data\pricing.json dist\data\
-          Copy-Item ops\*.ps1 dist\ops\
 
           # llama.cpp + ggml DLLs built from source (live alongside the exe)
           Copy-Item build\bin\Release\*.dll dist\

@@ -66,6 +66,13 @@ function Test-SseTerminator([string]$Chunk) {
     }
 }
 
+function Test-ReleaseDefinition([string]$Text) {
+    if ($Text -match '(?im)^\s*Copy-Item\s+ops\\' -or
+        $Text -match '(?i)forced-aligner|apps/forced-aligner') {
+        Add-Failure 'release package includes a non-Core launcher or companion'
+    }
+}
+
 $scanRoots = @(
     'apps/inferdeck-gateway/src',
     'libs/foundation/include', 'libs/foundation/src',
@@ -104,6 +111,8 @@ if ($routeTests -notmatch 'Chat stream serializers preserve exact OpenAI event o
     Add-Failure 'strict SSE golden test is missing'
 }
 Test-SseTerminator "data: [DONE]`n`n"
+Test-ReleaseDefinition (Get-Content -LiteralPath (
+    Join-Path $repoRoot '.github/workflows/release.yml') -Raw)
 
 if ($SelfTest) {
     $before = $failures.Count
@@ -112,10 +121,11 @@ if ($SelfTest) {
     Test-StrictPath '/v1/vendor/messages'
     Test-ControlClassification '/api/inferdeck/v1/unprotected' 'PublicStatus'
     Test-SseTerminator "data: {}`n"
-    if ($failures.Count -ne $before + 5) {
-        throw "Architecture policy self-test expected five violations; observed $($failures.Count - $before)"
+    Test-ReleaseDefinition 'Copy-Item ops\*.ps1 dist\ops\'
+    if ($failures.Count -ne $before + 6) {
+        throw "Architecture policy self-test expected six violations; observed $($failures.Count - $before)"
     }
-    $failures.RemoveRange($before, 5)
+    $failures.RemoveRange($before, 6)
 }
 
 if ($failures.Count -gt 0) {
