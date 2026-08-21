@@ -76,6 +76,14 @@ function Test-ReleaseDefinition([string]$Text) {
     }
 }
 
+function Test-NativeBuildDefinition([string]$Text) {
+    if ($Text -notmatch [regex]::Escape('set(GGML_NATIVE OFF CACHE BOOL "" FORCE)') -or
+        $Text -notmatch [regex]::Escape('set(GGML_AVX2 ON CACHE BOOL "" FORCE)') -or
+        $Text -notmatch [regex]::Escape('set(GGML_AVX512 OFF CACHE BOOL "" FORCE)')) {
+        Add-Failure 'native release build is specialized for runner hardware'
+    }
+}
+
 $scanRoots = @(
     'apps/inferdeck-gateway/src',
     'libs/foundation/include', 'libs/foundation/src',
@@ -116,6 +124,8 @@ if ($routeTests -notmatch 'Chat stream serializers preserve exact OpenAI event o
 Test-SseTerminator "data: [DONE]`n`n"
 Test-ReleaseDefinition (Get-Content -LiteralPath (
     Join-Path $repoRoot '.github/workflows/release.yml') -Raw)
+Test-NativeBuildDefinition (Get-Content -LiteralPath (
+    Join-Path $repoRoot 'CMakeLists.txt') -Raw)
 
 if ($SelfTest) {
     $before = $failures.Count
@@ -129,10 +139,11 @@ Copy-Item ops\*.ps1 dist\ops\
 Where-Object Name -NotIn @('fmtd.dll', 'spdlogd.dll')
 "@
     Test-ReleaseDefinition 'Copy-Item build\bin\Release\*.dll dist\'
-    if ($failures.Count -ne $before + 7) {
-        throw "Architecture policy self-test expected seven violations; observed $($failures.Count - $before)"
+    Test-NativeBuildDefinition 'add_subdirectory(libs/third_party/llama.cpp)'
+    if ($failures.Count -ne $before + 8) {
+        throw "Architecture policy self-test expected eight violations; observed $($failures.Count - $before)"
     }
-    $failures.RemoveRange($before, 7)
+    $failures.RemoveRange($before, 8)
 }
 
 if ($failures.Count -gt 0) {
