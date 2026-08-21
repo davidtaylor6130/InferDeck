@@ -89,9 +89,8 @@ OpenAI-compatible routes:
 - `POST /v1/audio/transcriptions`
 - `GET /v1/models`
 
-`strict_openai` is the default profile. Optional OpenAI-derivative routes live
-under `/compat/openai-derivative/v1`. They are disabled by default and never
-add routes or fields to strict `/v1`. Core owns no non-OpenAI protocol.
+`strict_openai` is the only Core profile. OpenAI-derivative and non-OpenAI
+routes are not registered. Core owns no non-OpenAI protocol.
 
 InferDeck control routes cover model load/unload, swap status/cancellation, media job cancellation, metrics, history, configuration, model aliases, and the model store. Dashboard live state uses one SSE connection; there is no WebSocket layer.
 

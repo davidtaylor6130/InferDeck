@@ -114,10 +114,6 @@ control:
     - "http://127.0.0.1:11434"
     - "http://localhost:11434"
     - "http://[::1]:11434"
-
-compatibility:
-  openai_derivative:
-    enabled: false
 ```
 
 When `allow_remote` is false, non-loopback control requests and preflights return

@@ -138,14 +138,14 @@ modifying Core authentication, routing, scheduling, or schemas.
 
 Each phase must finish with:
 
-- [ ] focused unit tests;
-- [ ] applicable integration and contract tests;
-- [ ] Release build;
-- [ ] dashboard tests/build when affected;
-- [ ] source and documentation truth check;
-- [ ] reviewed diff with unrelated work excluded;
-- [ ] branch pushed and PR opened or updated;
-- [ ] required CI green;
+- [x] focused unit tests;
+- [x] applicable integration and contract tests;
+- [x] Release build;
+- [x] dashboard tests/build when affected;
+- [x] source and documentation truth check;
+- [x] reviewed diff with unrelated work excluded;
+- [x] branch pushed and PR opened or updated;
+- [x] required CI green;
 - [ ] linked GitHub issues updated with evidence.
 
 ## Phase 0 - Governance freeze and authoritative backlog
@@ -287,7 +287,7 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Verify legacy Qwen estimation is date-bounded, deterministic, and identical
       across overview and usage pages.
 - [x] Run dashboard, C++, forced historical fixture, build, and live-safe validation.
-- [ ] Merge the selected implementation before canonical config refactoring.
+- [x] Merge the selected implementation before canonical config refactoring.
 - [ ] Close #103 only after matching source, dashboard bundle, deployment artifact,
       and calculation evidence.
 
@@ -592,14 +592,14 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Run config concurrency, coordinator cancellation and shutdown tests.
 - [x] Run security matrices for control auth, origins, media types and size limits.
 - [x] Add static analysis and formatting checks that do not rewrite the worktree.
-- [ ] Make the checks required through repository branch protection.
+- [x] Make the checks required through repository branch protection.
 - [x] Keep the release workflow as an additional full packaging gate.
 
 ### Exit gate
 
 - [x] A deliberately broken API chunk, forbidden subprocess call, `/v1` vendor
       route, backend JSON parse and unauthenticated control route each fail CI.
-- [ ] Main cannot merge without required architecture and contract checks.
+- [x] Main cannot merge without required architecture and contract checks.
 
 ## Phase 12 - File and dependency decomposition
 
@@ -658,36 +658,61 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Produce a breaking-change and route-migration guide.
 - [x] Identify every local consumer: OpenCode, Open WebUI, dashboard, scripts,
       benchmarks, editor integrations and health monitors.
-- [ ] Update consumers to strict OpenAI or the new control-plane endpoints.
-- [ ] Back up configuration, StatsDb and managed-model manifests.
+- [x] Update consumers to strict OpenAI or the new control-plane endpoints.
+- [x] Back up configuration, StatsDb and managed-model manifests.
 - [x] Build matched gateway and dashboard artifacts from one revision.
-- [ ] Run the complete clean verification matrix.
+- [x] Run the complete clean verification matrix.
 
 ### Live activation
 
-- [ ] Obtain explicit authorization before modifying `C:\InferDeck` or restarting
+- [x] Obtain explicit authorization before modifying `C:\InferDeck` or restarting
       the live service.
-- [ ] Verify the authoritative boot mechanism and executable path.
-- [ ] Deploy both gateway executable and matched static assets.
-- [ ] Deploy config/schema migrations with rollback artifacts.
-- [ ] Restart the authorized service.
-- [ ] Verify the new process, binary hash, static bundle and configuration revision.
-- [ ] Probe `/v1/models`, Chat stream/non-stream, Responses stream/non-stream,
+- [x] Verify the authoritative boot mechanism and executable path.
+- [x] Deploy both gateway executable and matched static assets.
+- [x] Deploy config/schema migrations with rollback artifacts.
+- [x] Restart the authorized service.
+- [x] Verify the new process, binary hash, static bundle and configuration revision.
+- [x] Probe `/v1/models`, Chat stream/non-stream, Responses stream/non-stream,
       embeddings, supported media, control authentication, status, swap and SSE.
-- [ ] Verify official SDK clients against the live listener.
-- [ ] Verify unauthorized control access fails from loopback, LAN and a browser
+- [x] Verify official SDK clients against the live listener.
+- [x] Verify unauthorized control access fails from loopback, LAN and a browser
       origin as applicable.
-- [ ] Verify no sidecar, Python, FFmpeg, llama-server or orphan runtime process is
+- [x] Verify no sidecar, Python, FFmpeg, llama-server or orphan runtime process is
       required or launched.
-- [ ] Verify request IDs, metrics, StatsDb and dashboard values from real requests.
-- [ ] Exercise rollback and prove the service can return to the previous matched
+- [x] Verify request IDs, metrics, StatsDb and dashboard values from real requests.
+- [x] Exercise rollback and prove the service can return to the previous matched
       artifact/config set.
 
 ### Release and closure
 
+### Verified release-candidate evidence (2026-08-21)
+
+- Protected implementation merges: #136, #137 and #138; release candidate source
+  revision `96249fb54219ef394597319854e4e2e78046318f`.
+- Release dry run `32525060137` completed the clean dashboard, SDK contract,
+  required-sherpa, Release build, 130-test, loader and packaging gates.
+- Downloaded archive SHA-256:
+  `ea1bf0c5f736eca48b3c10f5c1d6d6d2394dfeb3ab24bb90ff3f5d4dc17891cb`;
+  packaged executable SHA-256:
+  `ed7fccac5f283be0ebe18880d709fd65303c1c75f8d32c376963a6c936948925`.
+- Live official Python and JavaScript SDK probes passed Chat and Responses in
+  streaming and non-streaming modes. Real tool, vision, TTS-to-STT, request-ID,
+  metrics, StatsDb and dashboard-aggregation probes passed.
+- Live control-plane probes rejected an untrusted browser origin and LAN access
+  with 403 while preserving permitted loopback behavior. Removed derivative and
+  Anthropic routes returned 404.
+- The LocalSystem NSSM service ran exactly one `inferdeck-gateway.exe`; no Python,
+  FFmpeg, forced-aligner, `llama-server` or other sidecar process was present.
+- Rollback was exercised before the corrected forward deployment. The stopped
+  StatsDb backup contained 13,065 rows and exact totals of 446,566,532 prompt,
+  121,948,123 cached and 10,348,428 completion tokens. File integrity and those
+  totals were preserved; the post-verification ledger increased monotonically to
+  13,084 rows, 446,568,471 prompt, 121,949,239 cached and 10,348,913 completion
+  tokens. Deployment backups remain under `C:\InferDeck\deploy-backups`.
+
 - [ ] Tag and publish the release with executable, static assets, config templates,
       checksums, SBOM and migration notes.
-- [ ] Confirm release CI and downloadable artifact integrity.
+- [x] Confirm release CI and downloadable artifact integrity.
 - [ ] Close linked issues only with source, test, artifact and live evidence.
 - [ ] Close the overhaul epic after every child issue is resolved.
 - [ ] Update this file so every completed checkbox reflects verified reality.
@@ -737,10 +762,10 @@ Additionally required:
 - [x] config transaction and concurrency suite;
 - [x] coordinator deadline/cancellation/shutdown suite;
 - [x] process-policy and dependency-direction suite;
-- [ ] real small-model Chat/Responses/tool/vision smoke suite;
+- [x] real small-model Chat/Responses/tool/vision smoke suite;
 - [x] media request/format/signature suite for linked native runtimes;
 - [x] matched dashboard artifact verification;
-- [ ] live deployment and rollback verification when authorized.
+- [x] live deployment and rollback verification when authorized.
 
 ## Final definition of done
 
@@ -748,27 +773,27 @@ The overhaul goal is complete only when all of the following are true:
 
 - [ ] Every checkbox in Phases 0 through 14 is complete or explicitly removed by
       an owner-approved amendment to this plan.
-- [ ] InferDeck Core builds and operates as one native executable.
-- [ ] No Core runtime or deployment path starts a subprocess or proxy service.
-- [ ] `/v1` contains only the pinned strict OpenAI surface.
-- [ ] Anthropic and forced alignment are absent from Core ownership.
-- [ ] All privileged administration is separately authenticated and safe by
+- [x] InferDeck Core builds and operates as one native executable.
+- [x] No Core runtime or deployment path starts a subprocess or proxy service.
+- [x] `/v1` contains only the pinned strict OpenAI surface.
+- [x] Anthropic and forced alignment are absent from Core ownership.
+- [x] All privileged administration is separately authenticated and safe by
       default on non-loopback hosts.
-- [ ] Backends receive only typed canonical requests and produce typed canonical
+- [x] Backends receive only typed canonical requests and produce typed canonical
       output events.
-- [ ] Chat, Responses, embeddings, images, speech, transcription and models pass
+- [x] Chat, Responses, embeddings, images, speech, transcription and models pass
       their declared OpenAI contract suites.
-- [ ] No validation failure can load, swap, queue or acquire a model.
-- [ ] Swap, cancellation and shutdown deadlines are real and tested.
-- [ ] Explicit resource roles support CPU helpers without conflating them with the
+- [x] No validation failure can load, swap, queue or acquire a model.
+- [x] Swap, cancellation and shutdown deadlines are real and tested.
+- [x] Explicit resource roles support CPU helpers without conflating them with the
       selected conversation model.
-- [ ] Configuration writes are transactional and schema-validated.
-- [ ] Observability is correlated, protocol-aware and mathematically correct.
-- [ ] Dependencies and release artifacts are reproducibly pinned and verifiable.
-- [ ] Required CI prevents every invariant regression listed in this plan.
+- [x] Configuration writes are transactional and schema-validated.
+- [x] Observability is correlated, protocol-aware and mathematically correct.
+- [x] Dependencies and release artifacts are reproducibly pinned and verifiable.
+- [x] Required CI prevents every invariant regression listed in this plan.
 - [ ] #99 and #103 are resolved with evidence or superseded by owner-approved
       decisions.
 - [ ] All new audit issues and the overhaul epic are closed with evidence.
-- [ ] Documentation matches source, tests, packaged artifacts and live behavior.
+- [x] Documentation matches source, tests, packaged artifacts and live behavior.
 - [ ] The matched release is built, published and live-verified when deployment is
       authorized.

@@ -8,8 +8,7 @@ The contract snapshot is pinned to 2026-08-20 and is tested with:
 
 Only routes listed in `gateway/route_manifest.hpp` belong to the strict data
 plane. InferDeck operational metadata and mutations use `/api/inferdeck/v1`.
-Optional OpenAI-derivative behavior is isolated under
-`/compat/openai-derivative/v1` and is disabled unless configured explicitly.
+OpenAI-derivative and non-OpenAI routes are not registered by Core.
 
 The pinned versions are compatibility fixtures, not floating minimums. A
 baseline update must change the manifest fixture, SDK contract locks, schema
