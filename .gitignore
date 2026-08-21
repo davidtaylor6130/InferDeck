@@ -24,6 +24,7 @@ apps/gateway-service/public/
 # Third-party deps are now proper git submodules — not ignored
 runtime/llama-*/
 build-asan/
+build-*/
 *.gguf
 runtime/whisper.cpp-*-src/
 runtime/whisper.cpp-src/

@@ -1,1 +1,3 @@
-export const INFERDECK_VERSION = '0.7.2';
+declare const __INFERDECK_VERSION__: string;
+
+export const INFERDECK_VERSION = __INFERDECK_VERSION__;

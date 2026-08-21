@@ -13,54 +13,68 @@ on:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2025
     permissions:
       contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: recursive
+
+      - name: Resolve product version
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid VERSION: $version" }
+          foreach ($manifest in @('package.json', 'apps/dashboard/package.json', 'vcpkg.json')) {
+            $declared = (Get-Content $manifest -Raw | ConvertFrom-Json).version
+            if ($declared -ne $version) { throw "$manifest version $declared does not match $version" }
+          }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match VERSION $version"
+          }
+          "INFERDECK_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "INFERDECK_ARCHIVE=InferDeck-$version-Windows.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Ensure Vulkan SDK
         shell: pwsh
         run: |
-          # Use whatever version the runner already has (VS2026 image ships with one)
-          $sdkRoot = "C:\VulkanSDK"
-          $existing = if (Test-Path $sdkRoot) {
-            Get-ChildItem $sdkRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          $version = "1.4.309.0"
+          $expected = "48b132169b64fe65cdb0f20970195335a65354e73f1ea5373032c2a8bbad4297"
+          $root = "C:\VulkanSDK\$version"
+          if (!(Test-Path "$root\Bin\glslc.exe")) {
+            $installer = "$env:RUNNER_TEMP\VulkanSDK-$version-Installer.exe"
+            Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/vulkan_sdk.exe" -OutFile $installer
+            $actual = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) { throw "Vulkan SDK checksum mismatch: $actual" }
+            $process = Start-Process $installer -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait -PassThru -WindowStyle Hidden
+            if ($process.ExitCode -ne 0) { throw "Vulkan SDK installer failed: $($process.ExitCode)" }
           }
-
-          if ($existing) {
-            Write-Host "Using pre-installed Vulkan SDK: $($existing.FullName)"
-            echo "VULKAN_SDK=$($existing.FullName)" >> $env:GITHUB_ENV
-          } else {
-            Write-Host "Vulkan SDK not found — installing via Chocolatey..."
-            choco install vulkan-sdk -y --no-progress
-            $installed = Get-ChildItem $sdkRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
-            Write-Host "Installed: $($installed.FullName)"
-            echo "VULKAN_SDK=$($installed.FullName)" >> $env:GITHUB_ENV
+          if (!(Test-Path "$root\Include\vulkan\vulkan.h") -or !(Test-Path "$root\Lib\vulkan-1.lib") -or !(Test-Path "$root\Bin\glslc.exe")) {
+            throw "Vulkan SDK $version is incomplete"
           }
+          "VULKAN_SDK=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Cache vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         id: vcpkg-cache
         with:
           path: ${{ github.workspace }}/build/vcpkg_installed
           key: vcpkg-x64-windows-${{ hashFiles('vcpkg.json') }}
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.13'
 
@@ -132,18 +146,44 @@ jobs:
           Write-Host "=== dist contents ==="
           Get-ChildItem dist -Recurse | Select-Object FullName
 
+      - name: Sign executable
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: .\scripts\Sign-ReleaseArtifacts.ps1 -Executable dist\inferdeck-gateway.exe -CertificateBase64 $env:SIGNING_CERTIFICATE_BASE64 -CertificatePassword $env:SIGNING_CERTIFICATE_PASSWORD
+
+      - name: Generate package metadata
+        shell: pwsh
+        run: .\scripts\New-ReleaseMetadata.ps1 -DistDir dist -OutputDir dist -VcpkgInstalledDir build\vcpkg_installed
+
       - name: Package
-        run: Compress-Archive -Path dist\* -DestinationPath InferDeck-Windows.zip
+        run: Compress-Archive -Path dist\* -DestinationPath $env:INFERDECK_ARCHIVE
+
+      - name: Generate release manifest
+        shell: pwsh
+        run: .\scripts\New-ReleaseMetadata.ps1 -DistDir dist -OutputDir release-metadata -VcpkgInstalledDir build\vcpkg_installed -Archive $env:INFERDECK_ARCHIVE
+
+      - name: Sign release manifest
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: .\scripts\Sign-ReleaseArtifacts.ps1 -Manifest release-metadata\release-manifest.json -CertificateBase64 $env:SIGNING_CERTIFICATE_BASE64 -CertificatePassword $env:SIGNING_CERTIFICATE_PASSWORD
 
       - name: Upload artifact (always, for inspection)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: InferDeck-Windows
-          path: InferDeck-Windows.zip
+          path: |
+            ${{ env.INFERDECK_ARCHIVE }}
+            release-metadata/*
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/') && github.event.inputs.dry_run != 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
-          files: InferDeck-Windows.zip
+          files: |
+            ${{ env.INFERDECK_ARCHIVE }}
+            release-metadata/*
           generate_release_notes: true

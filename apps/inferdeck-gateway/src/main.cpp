@@ -71,7 +71,7 @@ std::atomic<bool> g_default_model_loading{false};
 httplib::Server* g_server = nullptr;
 std::once_flag g_llama_init_once;
 constexpr int runtime_reload_result = 75;
-constexpr std::string_view gateway_version = "0.7.2";
+constexpr std::string_view gateway_version = INFERDECK_VERSION;
 
 std::string config_revision(const std::string& text) {
     std::uint64_t hash = 1469598103934665603ULL;
@@ -634,13 +634,10 @@ int run_gateway(const fs::path& config_path) {
     }
     std::call_once(g_llama_init_once, [] {
         LOG_INFO("vulkan_test", "About to initialize llama backend");
-        std::cerr << "DEBUG: About to call llama_backend_init()" << std::endl;
         llama_backend_init();
         const char* sys_info = llama_print_system_info();
-        std::cerr << "DEBUG: llama_print_system_info returned" << std::endl;
         if (sys_info) {
             LOG_INFO("llama_system_info", "{}", sys_info);
-            std::cerr << "DEBUG: sys_info = " << sys_info << std::endl;
         }
     });
 
