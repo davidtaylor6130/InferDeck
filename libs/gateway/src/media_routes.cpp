@@ -489,6 +489,7 @@ foundation::Result<void> cancel_media_job(std::uint64_t id) {
 
 void handle_image_generations(const httplib::Request& req, httplib::Response& resp,
                               const GatewayDeps& deps) {
+    if (!require_json_media_type(req, resp)) return;
     nlohmann::json body;
     try { body = nlohmann::json::parse(req.body); }
     catch (const std::exception& error) { write_error(resp, 400, "invalid_json", error.what()); return; }
@@ -554,6 +555,7 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
 
 void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                          const GatewayDeps& deps) {
+    if (!require_json_media_type(req, resp)) return;
     nlohmann::json body;
     try { body = nlohmann::json::parse(req.body); }
     catch (const std::exception& error) { write_error(resp, 400, "invalid_json", error.what()); return; }

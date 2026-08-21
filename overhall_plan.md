@@ -378,11 +378,11 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Common parsing and errors
 
-- [ ] Pin an OpenAI compatibility baseline date and supported SDK versions.
+- [x] Pin an OpenAI compatibility baseline date and supported SDK versions.
 - [ ] Create typed field decoders with field-specific errors and parameter names.
 - [ ] Validate complete request shape before resolution or resource work.
-- [ ] Centralize domain-error to OpenAI status/type/code/param mapping.
-- [ ] Enforce JSON media types and multipart requirements.
+- [x] Centralize domain-error to OpenAI status/type/code/param mapping.
+- [x] Enforce JSON media types and multipart requirements.
 - [ ] Explicitly reject unsupported semantic features; never silently ignore them.
 - [ ] Accept harmless standard values when their semantics can be preserved, such
       as `store: false` in a stateless implementation.
@@ -393,7 +393,7 @@ current implementation cannot satisfy the native single-process rule.
 - [ ] Preserve developer/system instruction precedence.
 - [ ] Validate all supported content, tools, tool choice, response format, stop,
       token limits, temperature/top-p ranges, seed, streaming and stream options.
-- [ ] Remove `:latest` normalization.
+- [x] Remove `:latest` normalization.
 - [ ] Remove public `priority`, `top_k`, repeat controls and template kwargs.
 - [ ] Define strict behavior for unsupported official fields.
 - [ ] Return canonical model identity consistently in stream and non-stream modes.
@@ -415,7 +415,7 @@ current implementation cannot satisfy the native single-process rule.
 
 - [ ] Support string, string-array, token-ID array and token-ID matrix input.
 - [ ] Validate dimensions, encoding format, user and input limits.
-- [ ] Encode base64 floats with explicit little-endian representation.
+- [x] Encode base64 floats with explicit little-endian representation.
 - [ ] Remove public priority and reject unknown unsupported fields explicitly.
 
 ### Images
@@ -436,8 +436,8 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Models
 
-- [ ] Make `/v1/models` return only the strict OpenAI discovery fields.
-- [ ] Move runtime, VRAM, slots, pricing, optimization, alias contracts and
+- [x] Make `/v1/models` return only the strict OpenAI discovery fields.
+- [x] Move runtime, VRAM, slots, pricing, optimization, alias contracts and
       residency detail to `/api/inferdeck/v1/models`.
 
 ### Exit gate

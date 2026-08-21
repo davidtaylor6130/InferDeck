@@ -8,6 +8,7 @@
 #include "gateway/openai_routes.hpp"
 #include "gateway/media_routes.hpp"
 #include "gateway/openai_adapter.hpp"
+#include "gateway/openai_error.hpp"
 #include "gateway/route_manifest.hpp"
 #include "gateway/routes.hpp"
 #include "httplib.h"
@@ -37,6 +38,19 @@ using namespace inferdeck::gateway;
 using inferdeck::foundation::ErrorCode;
 using inferdeck::foundation::Ok;
 using inferdeck::foundation::Result;
+
+TEST_CASE("OpenAI error mapping is centralized and typed",
+          "[routes][errors]") {
+    const auto context = map_openai_error(
+        ErrorCode::ContextLengthExceeded, "messages");
+    CHECK(context.status == 400);
+    CHECK(context.type == "invalid_request_error");
+    CHECK(context.code == "context_length_exceeded");
+    CHECK(context.parameter == "messages");
+    CHECK(map_openai_error(ErrorCode::NotFound).status == 404);
+    CHECK(map_openai_error(ErrorCode::Unavailable).status == 503);
+    CHECK(map_openai_error(ErrorCode::Timeout).status == 504);
+}
 
 TEST_CASE("OpenAI adapter produces canonical multimodal and tool inputs",
           "[routes][adapter]") {
@@ -667,6 +681,10 @@ TEST_CASE("Route manifest matches the pinned strict OpenAI snapshot",
             std::string(kOpenAICompatibilityBaseline));
     REQUIRE(fixture["profile"].get<std::string>() ==
             std::string(kDefaultCompatibilityProfile));
+    REQUIRE(fixture["sdk"]["python"].get<std::string>() ==
+            std::string(kOpenAIPythonSdkVersion));
+    REQUIRE(fixture["sdk"]["javascript"].get<std::string>() ==
+            std::string(kOpenAIJavaScriptSdkVersion));
     REQUIRE(fixture["routes"].size() == kStrictOpenAIRoutes.size());
     for (std::size_t index = 0; index < kStrictOpenAIRoutes.size(); ++index) {
         CHECK(fixture["routes"][index]["method"].get<std::string>() ==
@@ -691,6 +709,26 @@ TEST_CASE("Route manifest matches the pinned strict OpenAI snapshot",
     REQUIRE(main_stream.good());
     const std::string main_source(std::istreambuf_iterator<char>{main_stream}, {});
     CHECK(main_source.find("/v1/") == std::string::npos);
+}
+
+TEST_CASE("Strict JSON endpoints reject wrong media types before admission",
+          "[routes][media-type][strict]") {
+    TestServer server;
+    REQUIRE(server.start());
+    httplib::Client client("127.0.0.1", server.port);
+    for (const std::string path : {
+             "/v1/chat/completions", "/v1/responses", "/v1/embeddings",
+             "/v1/images/generations", "/v1/audio/speech"}) {
+        INFO(path);
+        auto response = client.Post(path, "{}", "text/plain");
+        REQUIRE(response);
+        CHECK(response->status == 415);
+        const auto error = nlohmann::json::parse(response->body)["error"];
+        CHECK(error["code"] == "unsupported_media_type");
+    }
+    CHECK(server.metrics.total_requests() == 0);
+    CHECK(server.coordinator.active_request_count() == 0);
+    server.stop();
 }
 
 TEST_CASE("Strict Chat rejects derivative fields before admission",
@@ -1107,7 +1145,8 @@ TEST_CASE("Routes: typed context errors map without message matching",
     ts.stop();
 }
 
-TEST_CASE("Routes: POST /v1/chat/completions strips :latest suffix", "[routes][chat]") {
+TEST_CASE("Routes: POST /v1/chat/completions rejects non-canonical latest alias",
+          "[routes][chat][strict]") {
     TestServer ts;
     ts.registry.register_model(make_info("qwen3.6-27b"));
     REQUIRE(ts.coordinator.load("qwen3.6-27b"));
@@ -1117,8 +1156,10 @@ TEST_CASE("Routes: POST /v1/chat/completions strips :latest suffix", "[routes][c
                         R"({"model":"qwen3.6-27b:latest","messages":[{"role":"user","content":"hi"}],"stream":false})",
                         "application/json");
     REQUIRE(res);
-    REQUIRE(res->status == 200);
-    REQUIRE(nlohmann::json::parse(res->body)["model"] == "qwen3.6-27b");
+    REQUIRE(res->status == 404);
+    REQUIRE(nlohmann::json::parse(res->body)["error"]["code"] ==
+            "model_not_found");
+    CHECK(ts.metrics.total_requests() == 0);
     ts.stop();
 }
 
@@ -1168,8 +1209,36 @@ TEST_CASE("Routes: POST /v1/embeddings supports base64 encoding", "[routes][embe
     REQUIRE(response->status == 200);
     const auto embedding = nlohmann::json::parse(response->body)["data"][0]["embedding"];
     REQUIRE(embedding.is_string());
-    REQUIRE_FALSE(embedding.get<std::string>().empty());
+    REQUIRE(embedding.get<std::string>() == "AACAPwAAgD8AAIA/");
     ts.stop();
+}
+
+TEST_CASE("Routes: embeddings validate strict fields before acquisition",
+          "[routes][embeddings][validation]") {
+    TestServer server;
+    auto info = make_info("embed-model");
+    info.modality = "embedding";
+    info.capabilities = {"embeddings"};
+    server.registry.register_model(info);
+    const std::vector<nlohmann::json> invalid{
+        {{"model", info.name}, {"input", "one"}, {"priority", 1}},
+        {{"model", info.name}, {"input", "one"}, {"unknown", true}},
+        {{"model", info.name}, {"input", "one"}, {"dimensions", 0}},
+        {{"model", info.name}, {"input", "one"}, {"dimensions", 65537}},
+        {{"model", info.name}, {"input", "one"}, {"user", 42}},
+        {{"model", info.name}, {"input", "one"},
+         {"encoding_format", "hex"}},
+    };
+    for (const auto& body : invalid) {
+        httplib::Request request;
+        request.body = body.dump();
+        httplib::Response response;
+        handle_embeddings(request, response, server.make_deps());
+        INFO(body.dump());
+        CHECK(response.status == 400);
+    }
+    CHECK(server.metrics.total_requests() == 0);
+    CHECK(server.coordinator.active_request_count() == 0);
 }
 
 TEST_CASE("Routes: POST /v1/embeddings rejects non-embedding model", "[routes][embeddings]") {

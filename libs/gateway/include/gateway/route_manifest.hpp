@@ -9,6 +9,8 @@ namespace inferdeck::gateway {
 
 inline constexpr std::string_view kOpenAICompatibilityBaseline =
     "2026-08-20";
+inline constexpr std::string_view kOpenAIPythonSdkVersion = "3.3.1";
+inline constexpr std::string_view kOpenAIJavaScriptSdkVersion = "7.5.0";
 inline constexpr std::string_view kControlApiBase =
     "/api/inferdeck/v1";
 inline constexpr std::string_view kOpenAIDerivativeBase =

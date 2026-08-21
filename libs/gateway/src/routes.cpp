@@ -1,6 +1,7 @@
 #include "gateway/routes.hpp"
 
 #include "gateway/openai_adapter.hpp"
+#include "gateway/openai_error.hpp"
 #include "gateway/generation_session.hpp"
 #include "gateway/streaming_sanitizer.hpp"
 #include "foundation/logging.hpp"
@@ -406,22 +407,6 @@ foundation::Result<std::optional<std::string>> normalize_reasoning_request(
     return foundation::Ok(std::optional<std::string>{std::move(resolved)});
 }
 
-struct ErrorClass {
-    int status;
-    std::string type;
-    std::string code;
-};
-
-ErrorClass classify_inference_error(foundation::ErrorCode code) {
-    if (code == foundation::ErrorCode::ContextLengthExceeded) {
-        return {400, "invalid_request_error", "context_length_exceeded"};
-    }
-    const bool invalid = code == foundation::ErrorCode::InvalidArgument ||
-                         code == foundation::ErrorCode::ParseError;
-    if (!invalid) return {500, "server_error", "inference_error"};
-    return {400, "invalid_request_error", "invalid_request_error"};
-}
-
 nlohmann::json delta_json(const model::InferenceDelta& delta,
                           bool include_reasoning_content) {
     nlohmann::json out = nlohmann::json::object();
@@ -529,6 +514,18 @@ std::string request_client_key(const httplib::Request& req) {
     const auto explicit_key = header_value(req, "X-InferDeck-Voice-Session");
     if (!explicit_key.empty()) return explicit_key;
     return req.remote_addr.empty() ? "local" : req.remote_addr;
+}
+
+bool require_json_media_type(const httplib::Request& req,
+                             httplib::Response& resp) {
+    const std::string value = req.get_header_value("Content-Type");
+    if (value.empty() && req.version.empty()) return true;
+    const auto separator = value.find(';');
+    const std::string media = value.substr(0, separator);
+    if (media == "application/json") return true;
+    write_error(resp, 415, "unsupported_media_type",
+                "Content-Type must be application/json");
+    return false;
 }
 
 void handle_models(const httplib::Request& req, httplib::Response& resp,
@@ -867,7 +864,7 @@ void handle_non_stream_chat(
     const model::InferenceRequest& inference_request) {
     auto predicted = session.run(inference_request);
     if (!predicted) {
-        const auto error = classify_inference_error(predicted.error().code);
+        const auto error = map_openai_error(predicted.error().code);
         LOG_ERROR("inference_failed",
                   "model={} slot_id={} status={} code={} error={}",
                   model_name, session.slot_id, error.status, error.code,
@@ -933,6 +930,7 @@ std::optional<AcquiredGenerationSlot> acquire_generation_slot(
 
 void handle_chat_completions(const httplib::Request& req, httplib::Response& resp,
                              const GatewayDeps& deps) {
+    if (!require_json_media_type(req, resp)) return;
     nlohmann::json body;
     try {
         body = nlohmann::json::parse(req.body);
@@ -973,10 +971,6 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         }
     }
     std::string requested_model = body["model"].get<std::string>();
-    if (requested_model.size() > 7 && requested_model.compare(requested_model.size() - 7, 7, ":latest") == 0) {
-        requested_model.resize(requested_model.size() - 7);
-    }
-
     const auto resolved_model = resolve_model_name(deps, requested_model);
     if (!resolved_model) {
         write_error(resp, 404, "model_not_found", resolved_model.error().message);
@@ -1145,7 +1139,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             }
 
             if (inference_error) {
-                const auto ec = classify_inference_error(error_code);
+                const auto ec = map_openai_error(error_code);
                 LOG_ERROR("inference_failed",
                           "model={} slot_id={} status={} code={} error={}",
                           state->model_name, state->slot_id, ec.status, ec.code, error_msg);

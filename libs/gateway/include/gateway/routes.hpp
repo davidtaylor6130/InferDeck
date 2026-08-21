@@ -96,6 +96,8 @@ std::string serialize_chat_stream_terminal(const std::string& id,
                                            bool include_usage);
 std::string header_value(const httplib::Request& req, const std::string& name);
 std::string request_client_key(const httplib::Request& req);
+bool require_json_media_type(const httplib::Request& req,
+                             httplib::Response& resp);
 
 struct AcquiredGenerationSlot {
     int slot_id{-1};

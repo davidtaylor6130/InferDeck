@@ -1,9 +1,11 @@
 #include "gateway/openai_routes.hpp"
 #include "gateway/generation_session.hpp"
 #include "gateway/openai_adapter.hpp"
+#include "gateway/openai_error.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -33,8 +35,16 @@ std::string make_id(const char* prefix) {
 std::string base64_floats(const std::vector<float>& values) {
     static constexpr char alphabet[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const auto* bytes = reinterpret_cast<const unsigned char*>(values.data());
-    const std::size_t size = values.size() * sizeof(float);
+    std::vector<unsigned char> bytes;
+    bytes.reserve(values.size() * sizeof(float));
+    for (const float value : values) {
+        const auto bits = std::bit_cast<std::uint32_t>(value);
+        bytes.push_back(static_cast<unsigned char>(bits & 0xff));
+        bytes.push_back(static_cast<unsigned char>((bits >> 8) & 0xff));
+        bytes.push_back(static_cast<unsigned char>((bits >> 16) & 0xff));
+        bytes.push_back(static_cast<unsigned char>((bits >> 24) & 0xff));
+    }
+    const std::size_t size = bytes.size();
     std::string output;
     output.reserve((size + 2) / 3 * 4);
     for (std::size_t i = 0; i < size; i += 3) {
@@ -990,6 +1000,7 @@ bool fail_response_stream(ResponsesStreamState& state, httplib::DataSink& sink,
 
 void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
                        const GatewayDeps& deps) {
+    if (!require_json_media_type(req, resp)) return;
     nlohmann::json body;
     try {
         body = nlohmann::json::parse(req.body);
@@ -997,13 +1008,25 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         write_error(resp, 400, "invalid_json", error.what());
         return;
     }
-    if (deps.compatibility_profile == CompatibilityProfile::StrictOpenAI &&
-        body.contains("priority")) {
-        write_error(resp, 400, "unsupported_parameter",
-                    "unsupported Embeddings parameter: priority");
+    if (!body.is_object()) {
+        write_error(resp, 400, "invalid_request_error",
+                    "request body must be an object");
         return;
     }
-    if (!body.contains("model") || !body["model"].is_string()) {
+    if (deps.compatibility_profile == CompatibilityProfile::StrictOpenAI) {
+        static const std::unordered_set<std::string> supported{
+            "model", "input", "encoding_format", "dimensions", "user",
+        };
+        for (const auto& field : body.items()) {
+            if (!supported.contains(field.key())) {
+                write_error(resp, 400, "unsupported_parameter",
+                            "unsupported Embeddings parameter: " + field.key());
+                return;
+            }
+        }
+    }
+    if (!body.contains("model") || !body["model"].is_string() ||
+        body["model"].get<std::string>().empty()) {
         write_error(resp, 400, "missing_model", "request body must include 'model'");
         return;
     }
@@ -1053,11 +1076,20 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         }
     }
     if (body.contains("dimensions")) {
-        if (!body["dimensions"].is_number_integer() || body["dimensions"].get<int>() <= 0) {
+        if (!body["dimensions"].is_number_integer() ||
+            body["dimensions"].get<int>() <= 0 ||
+            body["dimensions"].get<int>() > 65536) {
             write_error(resp, 400, "invalid_dimensions", "dimensions must be a positive integer");
             return;
         }
         embedding_request.dimensions = body["dimensions"].get<int>();
+    }
+    if (body.contains("user") &&
+        (!body["user"].is_string() ||
+         body["user"].get<std::string>().size() > 64)) {
+        write_error(resp, 400, "invalid_user",
+                    "user must be a string of at most 64 characters");
+        return;
     }
     const std::string encoding = body.value("encoding_format", "float");
     if (encoding != "float" && encoding != "base64") {
@@ -1117,6 +1149,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
 
 void handle_responses(const httplib::Request& req, httplib::Response& resp,
                       const GatewayDeps& deps) {
+    if (!require_json_media_type(req, resp)) return;
     nlohmann::json request;
     try {
         request = nlohmann::json::parse(req.body);
@@ -1180,17 +1213,9 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
             deps.voice_session_grace_ms);
         auto result = session.run(*inference_request);
         if (!result) {
-            const bool invalid =
-                result.error().code == foundation::ErrorCode::InvalidArgument ||
-                result.error().code == foundation::ErrorCode::ParseError ||
-                result.error().code == foundation::ErrorCode::ContextLengthExceeded;
-            const int status = invalid ? 400 : 500;
-            const std::string code =
-                result.error().code == foundation::ErrorCode::ContextLengthExceeded
-                    ? "context_length_exceeded"
-                    : (invalid ? "invalid_request_error" : "inference_error");
-            write_error(resp, status, code, result.error().message);
-            session.finish_once(false, status, "inference_error");
+            const auto error = map_openai_error(result.error().code);
+            write_error(resp, error.status, error.code, result.error().message);
+            session.finish_once(false, error.status, "inference_error");
             return;
         }
         write_json(resp, 200, result_to_response(
@@ -1280,24 +1305,16 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
                     return false;
                 }
                 if (inference_error) {
-                    const bool invalid =
-                        error_code == foundation::ErrorCode::InvalidArgument ||
-                        error_code == foundation::ErrorCode::ParseError ||
-                        error_code == foundation::ErrorCode::ContextLengthExceeded;
-                    const int status = invalid ? 400 : 500;
-                    const std::string code =
-                        error_code == foundation::ErrorCode::ContextLengthExceeded
-                            ? "context_length_exceeded"
-                            : (invalid ? "invalid_request_error" : "inference_error");
+                    const auto error = map_openai_error(error_code);
                     if (!fail_response_stream(*state, sink, {
-                        {"code", code}, {"message", error_message},
+                        {"code", error.code}, {"message", error_message},
                     })) {
                         state->session->finish_once(
                             true, 499, "error_write_failed");
                         return false;
                     }
                     state->session->finish_once(
-                        false, status, "inference_error");
+                        false, error.status, "inference_error");
                 } else {
                     if (result) {
                         state->usage = {
