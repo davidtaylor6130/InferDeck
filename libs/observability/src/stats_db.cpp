@@ -320,21 +320,36 @@ void StatsDb::record_swap(const SwapRow& row) {
   if (sqlite3_step(stmt) != SQLITE_DONE) healthy_ = false;
 }
 
-std::vector<RequestRow> StatsDb::recent_requests(int limit) const {
+std::vector<RequestRow> StatsDb::recent_requests(
+    int limit, const std::string& protocol_profile,
+    const std::string& endpoint) const {
   std::vector<RequestRow> out;
   if (!healthy_) return out;
   std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
-  const char* sql =
+  std::string sql =
     "SELECT ts, model, prompt_tokens, completion_tokens, duration_ms, tps, status_code, slot_id, "
     "input_audio_seconds, input_characters, cached_prompt_tokens, generation_duration_ms, "
     "prompt_duration_ms, prompt_tps, resolved_model, request_id, principal_class, endpoint, "
     "protocol_profile, modality, stream, finish_code, error_code, cache_write_tokens, "
     "reasoning_tokens, queue_duration_ms, swap_load_duration_ms, first_token_duration_ms, "
-    "output_audio_seconds, input_image_count, output_image_count "
-    "FROM requests ORDER BY id DESC LIMIT ?;";
-  if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
-  sqlite3_bind_int(stmt, 1, std::clamp(limit, 1, 10'000));
+    "output_audio_seconds, input_image_count, output_image_count FROM requests";
+  if (!protocol_profile.empty() || !endpoint.empty()) {
+    sql += " WHERE ";
+    if (!protocol_profile.empty()) sql += "protocol_profile=?";
+    if (!protocol_profile.empty() && !endpoint.empty()) sql += " AND ";
+    if (!endpoint.empty()) sql += "endpoint=?";
+  }
+  sql += " ORDER BY id DESC LIMIT ?;";
+  if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return out;
+  int parameter = 1;
+  if (!protocol_profile.empty()) {
+    sqlite3_bind_text(stmt, parameter++, protocol_profile.c_str(), -1, SQLITE_TRANSIENT);
+  }
+  if (!endpoint.empty()) {
+    sqlite3_bind_text(stmt, parameter++, endpoint.c_str(), -1, SQLITE_TRANSIENT);
+  }
+  sqlite3_bind_int(stmt, parameter, std::clamp(limit, 1, 10'000));
   while (sqlite3_step(stmt) == SQLITE_ROW) {
     RequestRow r;
     r.timestamp_unix_ms    = sqlite3_column_int64(stmt, 0);

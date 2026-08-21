@@ -184,21 +184,36 @@ export interface JobRecord {
   status: 'succeeded' | 'failed';
   model: string;
   resolvedModel?: string;
+  principalClass?: string;
+  endpoint?: string;
+  protocolProfile?: string;
+  modality?: string;
+  stream?: boolean;
+  finishCode?: string;
+  errorCode?: string;
   createdAt: string;
   timestampUnixMs: number;
   promptTokens: number;
   cachedPromptTokens?: number;
+  cacheWriteTokens?: number;
   completionTokens: number;
+  reasoningTokens?: number;
   totalTokens: number;
   tokensPerSecond: number;
   promptTokensPerSecond?: number;
   generationDurationMs?: number;
   promptDurationMs?: number;
+  queueDurationMs?: number;
+  swapLoadDurationMs?: number;
+  firstTokenDurationMs?: number;
   durationMs: number;
   httpStatus: number;
   slotId: number;
   inputAudioSeconds?: number;
+  outputAudioSeconds?: number;
   inputCharacters?: number;
+  inputImageCount?: number;
+  outputImageCount?: number;
 }
 
 export interface SwapHistoryRow {

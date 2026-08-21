@@ -408,3 +408,30 @@ TEST_CASE("StatsDb: failed schema migration rolls back",
   sqlite3_finalize(stmt);
   sqlite3_close(raw);
 }
+
+TEST_CASE("StatsDb: recent requests filter by profile and endpoint",
+          "[observability][stats][filters]") {
+  StatsDb db(":memory:");
+  RequestRow strict;
+  strict.timestamp_unix_ms = 1;
+  strict.model = "strict";
+  strict.protocol_profile = "strict_openai";
+  strict.endpoint = "/v1/chat/completions";
+  db.record_request(strict);
+  RequestRow derivative;
+  derivative.timestamp_unix_ms = 2;
+  derivative.model = "derivative";
+  derivative.protocol_profile = "openai_derivative";
+  derivative.endpoint = "/compat/openai-derivative/v1/responses";
+  db.record_request(derivative);
+
+  const auto strict_rows = db.recent_requests(10, "strict_openai", {});
+  REQUIRE(strict_rows.size() == 1);
+  CHECK(strict_rows[0].model == "strict");
+  const auto response_rows = db.recent_requests(
+      10, {}, "/compat/openai-derivative/v1/responses");
+  REQUIRE(response_rows.size() == 1);
+  CHECK(response_rows[0].model == "derivative");
+  CHECK(db.recent_requests(10, "strict_openai",
+      "/compat/openai-derivative/v1/responses").empty());
+}

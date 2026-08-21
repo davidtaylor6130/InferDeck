@@ -433,10 +433,14 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
     return {{"models", models}, {"running", running}, {"current", loaded.value_or("")}};
 }
 
-nlohmann::json build_dashboard_jobs(const observability::StatsDb& stats_db, int limit = 100) {
+nlohmann::json build_dashboard_jobs(const observability::StatsDb& stats_db,
+                                    int limit = 100,
+                                    const std::string& protocol_profile = {},
+                                    const std::string& endpoint = {}) {
     nlohmann::json jobs = nlohmann::json::array();
     int index = 0;
-    for (const auto& row : stats_db.recent_requests(limit)) {
+    for (const auto& row : stats_db.recent_requests(
+             limit, protocol_profile, endpoint)) {
         std::time_t seconds = static_cast<std::time_t>(row.timestamp_unix_ms / 1000);
         std::tm tm{};
 #ifdef _WIN32
@@ -447,26 +451,43 @@ nlohmann::json build_dashboard_jobs(const observability::StatsDb& stats_db, int 
         char timestamp[32]{};
         std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &tm);
         jobs.push_back({
-            {"id", "request-" + std::to_string(row.timestamp_unix_ms) + "-" + std::to_string(index++)},
-            {"type", "chat.completion"},
+            {"id", row.request_id.empty()
+                ? "request-" + std::to_string(row.timestamp_unix_ms) + "-" + std::to_string(index++)
+                : row.request_id},
+            {"type", row.endpoint.empty() ? "legacy" : row.endpoint},
             {"status", row.status_code >= 200 && row.status_code < 300 ? "succeeded" : "failed"},
             {"model", row.model},
             {"resolvedModel", row.resolved_model},
+            {"principalClass", row.principal_class},
+            {"endpoint", row.endpoint},
+            {"protocolProfile", row.protocol_profile},
+            {"modality", row.modality},
+            {"stream", row.stream},
+            {"finishCode", row.finish_code},
+            {"errorCode", row.error_code},
             {"createdAt", timestamp},
             {"timestampUnixMs", row.timestamp_unix_ms},
             {"promptTokens", row.prompt_tokens},
             {"cachedPromptTokens", row.cached_prompt_tokens},
+            {"cacheWriteTokens", row.cache_write_tokens},
             {"completionTokens", row.completion_tokens},
+            {"reasoningTokens", row.reasoning_tokens},
             {"totalTokens", row.prompt_tokens + row.completion_tokens},
             {"tokensPerSecond", row.tokens_per_second},
             {"promptTokensPerSecond", row.prompt_tokens_per_second},
             {"generationDurationMs", row.generation_duration_ms},
             {"promptDurationMs", row.prompt_duration_ms},
+            {"queueDurationMs", row.queue_duration_ms},
+            {"swapLoadDurationMs", row.swap_load_duration_ms},
+            {"firstTokenDurationMs", row.first_token_duration_ms},
             {"durationMs", row.duration_ms},
             {"httpStatus", row.status_code},
             {"slotId", row.slot_id},
             {"inputAudioSeconds", row.input_audio_seconds},
-            {"inputCharacters", row.input_characters}
+            {"outputAudioSeconds", row.output_audio_seconds},
+            {"inputCharacters", row.input_characters},
+            {"inputImageCount", row.input_image_count},
+            {"outputImageCount", row.output_image_count}
         });
     }
     return {{"jobs", jobs}};
@@ -1473,7 +1494,13 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         if (req.has_param("limit")) {
             try { limit = std::clamp(std::stoi(req.get_param_value("limit")), 1, 500); } catch (...) {}
         }
-        resp.set_content(build_dashboard_jobs(*deps.gw.stats_db, limit).dump(), "application/json");
+        const auto protocol_profile = req.has_param("protocol_profile")
+            ? req.get_param_value("protocol_profile") : std::string{};
+        const auto endpoint = req.has_param("endpoint")
+            ? req.get_param_value("endpoint") : std::string{};
+        resp.set_content(build_dashboard_jobs(
+            *deps.gw.stats_db, limit, protocol_profile, endpoint).dump(),
+            "application/json");
     }));
 
     server.Post(R"(^/api/inferdeck/v1/models/load$)", wrap([deps](const httplib::Request& req,

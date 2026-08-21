@@ -79,7 +79,10 @@ public:
   void record_request(const RequestRow& row);
   void record_swap(const SwapRow& row);
 
-  std::vector<RequestRow> recent_requests(int limit = 100) const;
+  std::vector<RequestRow> recent_requests(
+      int limit = 100,
+      const std::string& protocol_profile = {},
+      const std::string& endpoint = {}) const;
   std::vector<SwapRow>    recent_swaps(int limit = 100) const;
   std::vector<ModelUsageRow> model_usage() const;
   LifetimeTotals lifetime_totals() const;
