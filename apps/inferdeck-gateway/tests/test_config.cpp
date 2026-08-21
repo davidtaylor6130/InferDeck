@@ -58,6 +58,22 @@ TEST_CASE("Configuration schema versions extension ownership",
     CHECK(future.error().message == "unsupported schema_version: 2");
 }
 
+TEST_CASE("Runtime contracts reject undeclared capabilities",
+          "[config][runtime-contract]") {
+    const auto result = validate_config_text(R"(
+model_registry:
+  - name: invalid-capability
+    runtime: llama_cpp
+    modality: text
+    capabilities: [image_generation]
+    gguf_path: model.gguf
+)");
+    REQUIRE_FALSE(result);
+    CHECK(result.error().message.find(
+              "does not support capability image_generation") !=
+          std::string::npos);
+}
+
 TEST_CASE("Gateway configuration accepts native runtime artifacts", "[config]") {
     auto result = validate_config_text(R"(
 server:

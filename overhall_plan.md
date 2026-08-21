@@ -500,27 +500,27 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Work
 
-- [ ] Extract configuration structs, schema, validation, decoding, persistence and
+- [x] Extract configuration structs, schema, validation, decoding, persistence and
       reload coordination from `config.hpp`.
 - [x] Add include guards to all remaining headers.
-- [ ] Introduce one versioned configuration schema.
-- [ ] Reject unknown keys with precise paths unless an explicitly versioned
+- [x] Introduce one versioned configuration schema.
+- [x] Reject unknown keys with precise paths unless an explicitly versioned
       extension container owns them.
-- [ ] Replace hard-coded runtime/modality matrices with runtime registration and
+- [x] Replace hard-coded runtime/modality matrices with runtime registration and
       capability validation.
-- [ ] Implement one configuration repository with one transaction lock.
-- [ ] Apply optimistic revision checks to base, active, alias and reset operations.
-- [ ] Serialize deletion/reset with writes and reload scheduling.
-- [ ] Preserve atomic replacement, secret restoration, masking and validation.
-- [ ] Define rollback behavior when persistence succeeds but reload fails.
+- [x] Implement one configuration repository with one transaction lock.
+- [x] Apply optimistic revision checks to base, active, alias and reset operations.
+- [x] Serialize deletion/reset with writes and reload scheduling.
+- [x] Preserve atomic replacement, secret restoration, masking and validation.
+- [x] Define rollback behavior when persistence succeeds but reload fails.
 - [ ] Remove Anthropic and forced-aligner configuration from Core.
-- [ ] Update pricing configuration after the #103 schema is settled.
+- [x] Update pricing configuration after the #103 schema is settled.
 
 ### Exit gate
 
-- [ ] Concurrent config/alias/reset tests cannot lose updates.
-- [ ] Unknown-key, secret, revision-conflict, rollback and recovery matrices pass.
-- [ ] Configuration behavior is independent of route implementation files.
+- [x] Concurrent config/alias/reset tests cannot lose updates.
+- [x] Unknown-key, secret, revision-conflict, rollback and recovery matrices pass.
+- [x] Configuration behavior is independent of route implementation files.
 
 ## Phase 9 - Canonical observability and correct metrics
 
@@ -638,7 +638,7 @@ current implementation cannot satisfy the native single-process rule.
 - [ ] Document every explicit unsupported standard feature.
 - [ ] Document model identity, aliases, errors, cancellation and stream semantics.
 - [ ] Document secure LAN deployment and credential rotation.
-- [ ] Document config schema and migration.
+- [x] Document config schema and migration.
 - [ ] Document release reproducibility and verification.
 - [ ] Add an architecture-change checklist for future agents and developers.
 
