@@ -81,7 +81,8 @@ nlohmann::json make_error_json(int status, const std::string& code,
                                const std::string& message,
                                nlohmann::json param = nullptr);
 void write_error(httplib::Response& resp, int status, const std::string& code,
-                 const std::string& message);
+                 const std::string& message,
+                 nlohmann::json param = nullptr);
 std::string serialize_chat_stream_delta(const std::string& id,
                                         const std::string& model,
                                         std::int64_t created,

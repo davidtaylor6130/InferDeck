@@ -470,14 +470,16 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         for (const auto& field : body.items()) {
             if (!supported.contains(field.key())) {
                 write_error(resp, 400, "unsupported_parameter",
-                            "unsupported Embeddings parameter: " + field.key());
+                            "unsupported Embeddings parameter: " + field.key(),
+                            field.key());
                 return;
             }
         }
     }
     if (!body.contains("model") || !body["model"].is_string() ||
         body["model"].get<std::string>().empty()) {
-        write_error(resp, 400, "missing_model", "request body must include 'model'");
+        write_error(resp, 400, "missing_model",
+                    "request body must include 'model'", "model");
         return;
     }
     const std::string requested_model = body["model"].get<std::string>();
@@ -488,7 +490,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
             -> std::optional<model::EmbeddingTokenInput> {
         if (!value.is_array() || value.empty()) {
             write_error(resp, 400, "invalid_input",
-                        "token input must be a non-empty array");
+                        "token input must be a non-empty array", "input");
             return std::nullopt;
         }
         model::EmbeddingTokenInput token_input;
@@ -496,7 +498,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         for (const auto& token : value) {
             if (!(token.is_number_integer() || token.is_number_unsigned())) {
                 write_error(resp, 400, "invalid_input",
-                            "every token ID must be an integer");
+                            "every token ID must be an integer", "input");
                 return std::nullopt;
             }
             const bool out_of_range = token.is_number_unsigned()
@@ -508,7 +510,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
                         std::numeric_limits<std::int32_t>::max();
             if (out_of_range) {
                 write_error(resp, 400, "invalid_input",
-                            "token IDs must be non-negative 32-bit integers");
+                            "token IDs must be non-negative 32-bit integers",
+                            "input");
                 return std::nullopt;
             }
             token_input.tokens.push_back(token.get<std::int32_t>());
@@ -516,7 +519,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         return token_input;
     };
     if (!body.contains("input")) {
-        write_error(resp, 400, "invalid_input", "request body must include 'input'");
+        write_error(resp, 400, "invalid_input",
+                    "request body must include 'input'", "input");
         return;
     }
     const auto& input = body["input"];
@@ -526,14 +530,15 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
     } else if (input.is_array()) {
         if (input.empty() || input.size() > 256) {
             write_error(resp, 400, "invalid_input",
-                        "input must contain 1 to 256 items");
+                        "input must contain 1 to 256 items", "input");
             return;
         }
         if (input.front().is_string()) {
             for (const auto& item : input) {
                 if (!item.is_string()) {
                     write_error(resp, 400, "invalid_input",
-                                "input arrays cannot mix strings and token IDs");
+                                "input arrays cannot mix strings and token IDs",
+                                "input");
                     return;
                 }
                 embedding_request.inputs.push_back(
@@ -543,7 +548,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
             for (const auto& item : input) {
                 if (!item.is_array()) {
                     write_error(resp, 400, "invalid_input",
-                                "input arrays cannot mix token IDs and token arrays");
+                                "input arrays cannot mix token IDs and token arrays",
+                                "input");
                     return;
                 }
                 auto parsed = parse_token_array(item);
@@ -557,7 +563,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         }
     } else {
         write_error(resp, 400, "invalid_input",
-                    "input must be a string, string array, token array, or token matrix");
+                    "input must be a string, string array, token array, or token matrix",
+                    "input");
         return;
     }
     std::size_t total_size = 0;
@@ -577,7 +584,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         }, item);
         if (!valid) {
             write_error(resp, 400, "invalid_input",
-                        "embedding input is empty or too large");
+                        "embedding input is empty or too large", "input");
             return;
         }
     }
@@ -585,7 +592,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         if (!body["dimensions"].is_number_integer() ||
             body["dimensions"].get<int>() <= 0 ||
             body["dimensions"].get<int>() > 65536) {
-            write_error(resp, 400, "invalid_dimensions", "dimensions must be a positive integer");
+            write_error(resp, 400, "invalid_dimensions",
+                        "dimensions must be a positive integer", "dimensions");
             return;
         }
         embedding_request.dimensions = body["dimensions"].get<int>();
@@ -594,12 +602,14 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         (!body["user"].is_string() ||
          body["user"].get<std::string>().size() > 64)) {
         write_error(resp, 400, "invalid_user",
-                    "user must be a string of at most 64 characters");
+                    "user must be a string of at most 64 characters", "user");
         return;
     }
     const std::string encoding = body.value("encoding_format", "float");
     if (encoding != "float" && encoding != "base64") {
-        write_error(resp, 400, "unsupported_encoding", "encoding_format must be float or base64");
+        write_error(resp, 400, "unsupported_encoding",
+                    "encoding_format must be float or base64",
+                    "encoding_format");
         return;
     }
 
@@ -688,7 +698,10 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
         const std::string code =
             message.starts_with("unsupported Responses parameter:")
                 ? "unsupported_parameter" : "invalid_request_error";
-        write_error(resp, 400, code, message);
+        write_error(resp, 400, code, message,
+                    parsed.error().field.empty()
+                        ? nlohmann::json(nullptr)
+                        : nlohmann::json(parsed.error().field));
         return;
     }
     const std::string& requested_model = parsed->requested_model;

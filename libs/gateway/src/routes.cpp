@@ -500,8 +500,9 @@ nlohmann::json make_error_json(int status, const std::string& code,
 }
 
 void write_error(httplib::Response& resp, int status, const std::string& code,
-                 const std::string& message) {
-    write_json(resp, status, make_error_json(status, code, message));
+                 const std::string& message, nlohmann::json param) {
+    write_json(resp, status,
+               make_error_json(status, code, message, std::move(param)));
 }
 
 std::string header_value(const httplib::Request& req, const std::string& name) {
@@ -938,7 +939,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
     if (!body.contains("model") || !body["model"].is_string()) {
-        write_error(resp, 400, "missing_model", "request body must include 'model'");
+        write_error(resp, 400, "missing_model",
+                    "request body must include 'model'", "model");
         return;
     }
     const bool derivative =
@@ -955,7 +957,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                           field.key()) == supported_fields.end()) {
                 write_error(resp, 400, "unsupported_parameter",
                             "unsupported Chat Completions parameter: " +
-                                field.key());
+                                field.key(),
+                            field.key());
                 return;
             }
         }
@@ -963,7 +966,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             for (const auto& message : body["messages"]) {
                 if (message.is_object() && message.contains("reasoning_content")) {
                     write_error(resp, 400, "unsupported_parameter",
-                                "unsupported Chat Completions message parameter: reasoning_content");
+                                "unsupported Chat Completions message parameter: reasoning_content",
+                                "messages");
                     return;
                 }
             }
@@ -971,19 +975,20 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     }
     if (body.contains("stream") && !body["stream"].is_boolean()) {
         write_error(resp, 400, "invalid_request_error",
-                    "stream must be a boolean");
+                    "stream must be a boolean", "stream");
         return;
     }
     const bool stream = body.value("stream", false);
     if (body.contains("stream_options") &&
         !body["stream_options"].is_object()) {
         write_error(resp, 400, "invalid_request_error",
-                    "stream_options must be an object");
+                    "stream_options must be an object", "stream_options");
         return;
     }
     if (!stream && body.contains("stream_options")) {
         write_error(resp, 400, "invalid_request_error",
-                    "stream_options requires stream to be true");
+                    "stream_options requires stream to be true",
+                    "stream_options");
         return;
     }
     if (body.contains("stream_options")) {
@@ -995,14 +1000,16 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 stream_option_fields.end()) {
                 write_error(
                     resp, 400, "unsupported_parameter",
-                    "unsupported stream_options parameter: " + field.key());
+                    "unsupported stream_options parameter: " + field.key(),
+                    "stream_options");
                 return;
             }
         }
         if (body["stream_options"].contains("include_usage") &&
             !body["stream_options"]["include_usage"].is_boolean()) {
             write_error(resp, 400, "invalid_request_error",
-                        "stream_options.include_usage must be a boolean");
+                        "stream_options.include_usage must be a boolean",
+                        "stream_options");
             return;
         }
     }
@@ -1013,7 +1020,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         parse_openai_chat_request(body, derivative);
     if (!inference_request) {
         write_error(resp, 400, "invalid_request_error",
-                    inference_request.error().message);
+                    inference_request.error().message,
+                    inference_request.error().field.empty()
+                        ? nlohmann::json(nullptr)
+                        : nlohmann::json(inference_request.error().field));
         return;
     }
     std::string requested_model = body["model"].get<std::string>();

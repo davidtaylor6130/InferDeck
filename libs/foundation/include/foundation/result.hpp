@@ -28,9 +28,11 @@ enum class ErrorCode {
 struct Error {
     ErrorCode code{ErrorCode::Ok};
     std::string message{};
+    std::string field{};
 
     constexpr Error() = default;
-    constexpr Error(ErrorCode c, std::string m) : code(c), message(std::move(m)) {}
+    constexpr Error(ErrorCode c, std::string m, std::string f = {})
+        : code(c), message(std::move(m)), field(std::move(f)) {}
 
     [[nodiscard]] constexpr bool ok() const noexcept { return code == ErrorCode::Ok; }
     [[nodiscard]] constexpr explicit operator bool() const noexcept { return ok(); }
@@ -49,11 +51,16 @@ template <typename T = void>
 }
 
 template <typename T = void>
-[[nodiscard]] constexpr auto Err(ErrorCode code, std::string message) {
+[[nodiscard]] constexpr auto Err(ErrorCode code, std::string message,
+                                 std::string field = {}) {
     if constexpr (std::is_void_v<T>) {
-        return std::expected<void, Error>(std::unexpect, Error{code, std::move(message)});
+        return std::expected<void, Error>(
+            std::unexpect,
+            Error{code, std::move(message), std::move(field)});
     } else {
-        return std::expected<T, Error>(std::unexpect, Error{code, std::move(message)});
+        return std::expected<T, Error>(
+            std::unexpect,
+            Error{code, std::move(message), std::move(field)});
     }
 }
 

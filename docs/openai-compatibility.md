@@ -31,6 +31,9 @@ The C++ route suite locks every successful strict response shape to
 `tests/fixtures/openai_schema_snapshots.json`. It also sends malformed requests
 to every strict generation endpoint and verifies that jobs, queue depth, model
 residency, active requests, metrics, and request history remain unchanged.
+Typed request decoders attach the failing top-level field to the standard
+`error.param` member; transport and model-resolution failures keep it null when
+there is no request field to identify.
 
 ## Strict Chat Completions contract
 

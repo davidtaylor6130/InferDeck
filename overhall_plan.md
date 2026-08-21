@@ -379,12 +379,12 @@ current implementation cannot satisfy the native single-process rule.
 ### Common parsing and errors
 
 - [x] Pin an OpenAI compatibility baseline date and supported SDK versions.
-- [ ] Create typed field decoders with field-specific errors and parameter names.
-- [ ] Validate complete request shape before resolution or resource work.
+- [x] Create typed field decoders with field-specific errors and parameter names.
+- [x] Validate complete request shape before resolution or resource work.
 - [x] Centralize domain-error to OpenAI status/type/code/param mapping.
 - [x] Enforce JSON media types and multipart requirements.
-- [ ] Explicitly reject unsupported semantic features; never silently ignore them.
-- [ ] Accept harmless standard values when their semantics can be preserved, such
+- [x] Explicitly reject unsupported semantic features; never silently ignore them.
+- [x] Accept harmless standard values when their semantics can be preserved, such
       as `store: false` in a stateless implementation.
 
 ### Chat Completions

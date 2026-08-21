@@ -847,25 +847,28 @@ TEST_CASE("Malformed strict requests cannot mutate admission or residency state"
     const auto initial_jobs = media_jobs().size();
     const auto initial_loaded = server.coordinator.get_loaded_models();
 
-    const std::vector<std::pair<std::string, nlohmann::json>> malformed_json{
+    const std::vector<std::tuple<std::string, nlohmann::json, std::string>>
+        malformed_json{
         {"/v1/chat/completions",
-         {{"model", "missing"}, {"messages", 42}}},
+         {{"model", "missing"}, {"messages", 42}}, "messages"},
         {"/v1/responses",
-         {{"model", "missing"}, {"input", 42}}},
+         {{"model", "missing"}, {"input", 42}}, "input"},
         {"/v1/embeddings",
-         {{"model", "missing"}, {"input", nlohmann::json::object()}}},
+         {{"model", "missing"}, {"input", nlohmann::json::object()}}, "input"},
         {"/v1/images/generations",
-         {{"model", "missing"}, {"prompt", 42}}},
+         {{"model", "missing"}, {"prompt", 42}}, "prompt"},
         {"/v1/audio/speech",
          {{"model", "missing"}, {"input", 42}, {"voice", "default"},
-          {"response_format", "wav"}}},
+          {"response_format", "wav"}}, "input"},
     };
-    for (const auto& [path, body] : malformed_json) {
+    for (const auto& [path, body, parameter] : malformed_json) {
         INFO(path);
         const auto response =
             client.Post(path, body.dump(), "application/json");
         REQUIRE(response);
         CHECK(response->status == 400);
+        CHECK(nlohmann::json::parse(response->body)["error"]["param"] ==
+              parameter);
     }
 
     const auto transcription = client.Post(
@@ -876,6 +879,8 @@ TEST_CASE("Malformed strict requests cannot mutate admission or residency state"
         });
     REQUIRE(transcription);
     CHECK(transcription->status == 400);
+    CHECK(nlohmann::json::parse(transcription->body)["error"]["param"] ==
+          "response_format");
 
     CHECK(server.metrics.total_requests() == 0);
     CHECK(server.coordinator.active_request_count() == 0);
@@ -1138,7 +1143,7 @@ TEST_CASE("Routes: POST /v1/chat/completions missing model returns 400", "[route
     const auto error = nlohmann::json::parse(res->body)["error"];
     REQUIRE(error["message"] == "request body must include 'model'");
     REQUIRE(error["type"] == "invalid_request_error");
-    REQUIRE(error["param"].is_null());
+    REQUIRE(error["param"] == "model");
     REQUIRE(error["code"] == "missing_model");
     ts.stop();
 }

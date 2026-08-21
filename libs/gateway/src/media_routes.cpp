@@ -513,7 +513,8 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
                           field.key()) == supported_fields.end()) {
                 write_error(resp, 400, "unsupported_parameter",
                             "unsupported Images parameter: " +
-                                field.key());
+                                field.key(),
+                            field.key());
                 return;
             }
         }
@@ -523,7 +524,8 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
             if (!body[field].is_string() ||
                 body[field].get<std::string>() != value) {
                 write_error(resp, 400, "unsupported_parameter",
-                            std::string(field) + " is not supported by the native image runtime");
+                            std::string(field) + " is not supported by the native image runtime",
+                            std::string(field));
                 return false;
             }
             return true;
@@ -537,19 +539,22 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         }
         if (body.contains("style") && !body["style"].is_null()) {
             write_error(resp, 400, "unsupported_parameter",
-                        "style is not supported by the native image runtime");
+                        "style is not supported by the native image runtime",
+                        "style");
             return;
         }
         if (body.contains("output_compression") &&
             !body["output_compression"].is_null()) {
             write_error(resp, 400, "unsupported_parameter",
-                        "output_compression is not supported for PNG output");
+                        "output_compression is not supported for PNG output",
+                        "output_compression");
             return;
         }
         if (body.contains("stream") && !body["stream"].is_null() &&
             (!body["stream"].is_boolean() || body["stream"].get<bool>())) {
             write_error(resp, 400, "unsupported_parameter",
-                        "streaming image generation is not supported");
+                        "streaming image generation is not supported",
+                        "stream");
             return;
         }
         if (body.contains("partial_images") &&
@@ -557,27 +562,45 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
             (!body["partial_images"].is_number_integer() ||
              body["partial_images"].get<int>() != 0)) {
             write_error(resp, 400, "unsupported_parameter",
-                        "partial_images requires unsupported image streaming");
+                        "partial_images requires unsupported image streaming",
+                        "partial_images");
             return;
         }
         if (body.contains("user") &&
             (!body["user"].is_string() ||
              body["user"].get_ref<const std::string&>().size() > 64)) {
             write_error(resp, 400, "invalid_user",
-                        "user must be a string of at most 64 characters");
+                        "user must be a string of at most 64 characters",
+                        "user");
             return;
         }
     }
-    if (!body.is_object() || !body.contains("prompt") ||
-        !body["prompt"].is_string() ||
-        (body.contains("model") && !body["model"].is_null() &&
-         !body["model"].is_string()) ||
-        (body.contains("n") && !body["n"].is_null() &&
-         !body["n"].is_number_integer()) ||
-        (body.contains("size") && !body["size"].is_null() &&
-         !body["size"].is_string())) {
+    if (!body.is_object()) {
         write_error(resp, 400, "invalid_image_request",
-                    "prompt must be a string and model, n, and size must have valid types");
+                    "request body must be an object");
+        return;
+    }
+    if (!body.contains("prompt") || !body["prompt"].is_string()) {
+        write_error(resp, 400, "invalid_image_request",
+                    "prompt must be a string", "prompt");
+        return;
+    }
+    if (body.contains("model") && !body["model"].is_null() &&
+        !body["model"].is_string()) {
+        write_error(resp, 400, "invalid_image_request",
+                    "model must be a string", "model");
+        return;
+    }
+    if (body.contains("n") && !body["n"].is_null() &&
+        !body["n"].is_number_integer()) {
+        write_error(resp, 400, "invalid_image_request",
+                    "n must be an integer", "n");
+        return;
+    }
+    if (body.contains("size") && !body["size"].is_null() &&
+        !body["size"].is_string()) {
+        write_error(resp, 400, "invalid_image_request",
+                    "size must be a string", "size");
         return;
     }
     const std::string model_name =
@@ -666,18 +689,32 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
         for (const auto& field : body.items()) {
             if (!fields.contains(field.key())) {
                 write_error(resp, 400, "unsupported_parameter",
-                            "unsupported speech parameter: " + field.key());
+                            "unsupported speech parameter: " + field.key(),
+                            field.key());
                 return;
             }
         }
     }
-    if (!body.is_object() || !body.contains("model") || !body["model"].is_string() ||
-        body["model"].get_ref<const std::string&>().empty() ||
-        !body.contains("input") || !body["input"].is_string() ||
-        body["input"].get_ref<const std::string&>().empty() ||
-        !body.contains("voice")) {
+    if (!body.is_object()) {
         write_error(resp, 400, "invalid_speech_request",
-                    "model, input, and voice are required");
+                    "request body must be an object");
+        return;
+    }
+    if (!body.contains("model") || !body["model"].is_string() ||
+        body["model"].get_ref<const std::string&>().empty()) {
+        write_error(resp, 400, "invalid_speech_request",
+                    "model must be a non-empty string", "model");
+        return;
+    }
+    if (!body.contains("input") || !body["input"].is_string() ||
+        body["input"].get_ref<const std::string&>().empty()) {
+        write_error(resp, 400, "invalid_speech_request",
+                    "input must be a non-empty string", "input");
+        return;
+    }
+    if (!body.contains("voice")) {
+        write_error(resp, 400, "invalid_speech_request",
+                    "voice is required", "voice");
         return;
     }
     const std::string model_name = body["model"].get<std::string>();
@@ -692,19 +729,22 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     }
     if (request.voice.empty()) {
         write_error(resp, 400, "invalid_speech_request",
-                    "voice must be a non-empty string or voice ID object");
+                    "voice must be a non-empty string or voice ID object",
+                    "voice");
         return;
     }
     if (body.contains("speed")) {
         if (!body["speed"].is_number()) {
             write_error(resp, 400, "invalid_speech_request",
-                        "speed must be a number between 0.25 and 4.0");
+                        "speed must be a number between 0.25 and 4.0",
+                        "speed");
             return;
         }
         const double speed = body["speed"].get<double>();
         if (!std::isfinite(speed) || speed < 0.25 || speed > 4.0) {
             write_error(resp, 400, "invalid_speech_request",
-                        "speed must be a number between 0.25 and 4.0");
+                        "speed must be a number between 0.25 and 4.0",
+                        "speed");
             return;
         }
         request.speed = static_cast<float>(speed);
@@ -712,52 +752,56 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     if (body.contains("instructions")) {
         if (!body["instructions"].is_string()) {
             write_error(resp, 400, "invalid_speech_request",
-                        "instructions must be a string");
+                        "instructions must be a string", "instructions");
             return;
         }
         const auto instructions = body["instructions"].get<std::string>();
         if (utf8_character_count(instructions) > 4096) {
             write_error(resp, 400, "invalid_speech_request",
-                        "instructions must contain at most 4096 characters");
+                        "instructions must contain at most 4096 characters",
+                        "instructions");
             return;
         }
         if (!instructions.empty()) {
             write_error(resp, 400, "unsupported_parameter",
-                        "instructions are not supported by this native speech runtime");
+                        "instructions are not supported by this native speech runtime",
+                        "instructions");
             return;
         }
     }
     if (utf8_character_count(request.input) > 4096) {
         write_error(resp, 400, "invalid_speech_request",
-                    "input must contain at most 4096 characters");
+                    "input must contain at most 4096 characters", "input");
         return;
     }
     if (body.contains("response_format") && !body["response_format"].is_string()) {
         write_error(resp, 400, "invalid_speech_request",
-                    "response_format must be a string");
+                    "response_format must be a string", "response_format");
         return;
     }
     request.format = body.value("response_format", std::string{"mp3"});
     static const std::array formats{"mp3", "opus", "aac", "flac", "wav", "pcm"};
     if (std::find(formats.begin(), formats.end(), request.format) == formats.end()) {
         write_error(resp, 400, "unsupported_response_format",
-                    "response_format must be mp3, opus, aac, flac, wav, or pcm");
+                    "response_format must be mp3, opus, aac, flac, wav, or pcm",
+                    "response_format");
         return;
     }
     if (body.contains("stream_format") && !body["stream_format"].is_string()) {
         write_error(resp, 400, "invalid_speech_request",
-                    "stream_format must be a string");
+                    "stream_format must be a string", "stream_format");
         return;
     }
     const std::string stream_format = body.value("stream_format", std::string{"audio"});
     if (stream_format != "audio" && stream_format != "sse") {
         write_error(resp, 400, "unsupported_stream_format",
-                    "stream_format must be audio or sse");
+                    "stream_format must be audio or sse", "stream_format");
         return;
     }
     if (stream_format == "sse") {
         write_error(resp, 400, "unsupported_stream_format",
-                    "SSE speech streaming is not available for this native runtime");
+                    "SSE speech streaming is not available for this native runtime",
+                    "stream_format");
         return;
     }
     const auto resolved_model = resolve_model_name(deps, model_name);
@@ -988,18 +1032,22 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
 void handle_audio_transcriptions(const httplib::Request& req, httplib::Response& resp,
                                  const GatewayDeps& deps) {
     if (!req.is_multipart_form_data() || !req.form.has_file("file") || !req.form.has_field("model")) {
-        write_error(resp, 400, "invalid_transcription_request", "multipart file and model fields are required");
+        write_error(resp, 400, "invalid_transcription_request",
+                    "multipart file and model fields are required",
+                    !req.form.has_file("file") ? "file" : "model");
         return;
     }
     const auto& file = req.form.files.find("file")->second;
     if (file.content.empty() || file.content.size() > 25 * 1024 * 1024) {
-        write_error(resp, 400, "invalid_audio", "audio must be between 1 byte and 25 MB");
+        write_error(resp, 400, "invalid_audio",
+                    "audio must be between 1 byte and 25 MB", "file");
         return;
     }
     if (req.form.get_file_count("file") != 1 ||
         req.form.get_field_count("model") != 1) {
         write_error(resp, 400, "invalid_transcription_request",
-                    "file and model must each be supplied exactly once");
+                    "file and model must each be supplied exactly once",
+                    req.form.get_file_count("file") != 1 ? "file" : "model");
         return;
     }
     static const std::unordered_set<std::string> strict_fields{
@@ -1013,27 +1061,30 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         for (const auto& [name, _] : req.form.fields) {
             if (!strict_fields.contains(name)) {
                 write_error(resp, 400, "unsupported_parameter",
-                            "unsupported transcription parameter: " + name);
+                            "unsupported transcription parameter: " + name,
+                            name);
                 return;
             }
         }
         for (const auto& [name, _] : req.form.files) {
             if (name != "file") {
                 write_error(resp, 400, "unsupported_parameter",
-                            "unsupported transcription file parameter: " + name);
+                            "unsupported transcription file parameter: " + name,
+                            name);
                 return;
             }
         }
     }
     const std::string model_name = req.form.get_field("model");
     if (model_name.empty()) {
-        write_error(resp, 400, "invalid_transcription_request", "model must not be empty");
+        write_error(resp, 400, "invalid_transcription_request",
+                    "model must not be empty", "model");
         return;
     }
     const auto single_field = [&req, &resp](const std::string& name) {
         if (req.form.get_field_count(name) > 1) {
             write_error(resp, 400, "invalid_transcription_request",
-                        name + " must be supplied at most once");
+                        name + " must be supplied at most once", name);
             return false;
         }
         return true;
@@ -1046,19 +1097,21 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
     if (format != "json" && format != "text" && format != "verbose_json" &&
         format != "srt" && format != "vtt") {
         write_error(resp, 400, "unsupported_response_format",
-                    "response_format must be json, text, verbose_json, srt, or vtt");
+                    "response_format must be json, text, verbose_json, srt, or vtt",
+                    "response_format");
         return;
     }
     if (req.form.has_field("stream")) {
         const auto stream = req.form.get_field("stream");
         if (stream != "true" && stream != "false") {
             write_error(resp, 400, "invalid_transcription_request",
-                        "stream must be true or false");
+                        "stream must be true or false", "stream");
             return;
         }
         if (stream == "true") {
             write_error(resp, 400, "unsupported_parameter",
-                        "streaming transcription is not supported by this native runtime");
+                        "streaming transcription is not supported by this native runtime",
+                        "stream");
             return;
         }
     }
@@ -1070,7 +1123,8 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         if (req.form.has_field(name)) {
             write_error(resp, 400, "unsupported_parameter",
                         std::string{name} +
-                            " is not supported by this native transcription runtime");
+                            " is not supported by this native transcription runtime",
+                        name);
             return;
         }
     }
@@ -1083,12 +1137,14 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
     if (!granularities.empty()) {
         if (format != "verbose_json") {
             write_error(resp, 400, "invalid_transcription_request",
-                        "timestamp_granularities requires verbose_json");
+                        "timestamp_granularities requires verbose_json",
+                        "timestamp_granularities");
             return;
         }
         if (granularities.size() != 1 || granularities.front() != "segment") {
             write_error(resp, 400, "unsupported_parameter",
-                        "only segment timestamp granularity is supported");
+                        "only segment timestamp granularity is supported",
+                        "timestamp_granularities");
             return;
         }
     }

@@ -13,9 +13,11 @@ namespace inferdeck::gateway {
 
 namespace {
 
-foundation::Result<ParsedResponsesRequest> invalid(std::string message) {
+foundation::Result<ParsedResponsesRequest> invalid(
+    std::string message, std::string field = {}) {
     return foundation::Err<ParsedResponsesRequest>(
-        foundation::ErrorCode::InvalidArgument, std::move(message));
+        foundation::ErrorCode::InvalidArgument, std::move(message),
+        std::move(field));
 }
 
 foundation::Result<void> require_fields(
@@ -26,7 +28,8 @@ foundation::Result<void> require_fields(
         if (!supported.contains(field.key())) {
             return foundation::Err<void>(
                 foundation::ErrorCode::InvalidArgument,
-                "unsupported " + context + " parameter: " + field.key());
+                "unsupported " + context + " parameter: " + field.key(),
+                field.key());
         }
     }
     return foundation::Ok();
@@ -345,47 +348,49 @@ foundation::Result<void> validate_stateless_fields(
             return foundation::Err<void>(
                 foundation::ErrorCode::InvalidArgument,
                 std::string(field) +
-                    " is unsupported by the stateless Responses implementation");
+                    " is unsupported by the stateless Responses implementation",
+                field);
         }
     }
     if (body.contains("store") && !body["store"].is_null() &&
         (!body["store"].is_boolean() || body["store"].get<bool>())) {
         return foundation::Err<void>(
             foundation::ErrorCode::InvalidArgument,
-            "unsupported Responses parameter: store");
+            "unsupported Responses parameter: store", "store");
     }
     if (body.contains("background") && !body["background"].is_null() &&
         (!body["background"].is_boolean() ||
          body["background"].get<bool>())) {
         return foundation::Err<void>(
             foundation::ErrorCode::InvalidArgument,
-            "unsupported Responses parameter: background");
+            "unsupported Responses parameter: background", "background");
     }
     if (body.contains("include") &&
         (!body["include"].is_array() || !body["include"].empty())) {
         return foundation::Err<void>(
             foundation::ErrorCode::InvalidArgument,
-            "include must be an empty array because expansions are unsupported");
+            "include must be an empty array because expansions are unsupported",
+            "include");
     }
     if (body.contains("truncation") && !body["truncation"].is_null() &&
         (!body["truncation"].is_string() ||
          body["truncation"].get<std::string>() != "disabled")) {
         return foundation::Err<void>(
             foundation::ErrorCode::InvalidArgument,
-            "truncation must be disabled");
+            "truncation must be disabled", "truncation");
     }
     if (body.contains("service_tier") &&
         !body["service_tier"].is_null()) {
         if (!body["service_tier"].is_string()) {
             return foundation::Err<void>(
                 foundation::ErrorCode::InvalidArgument,
-                "service_tier must be a string");
+                "service_tier must be a string", "service_tier");
         }
         const auto tier = body["service_tier"].get<std::string>();
         if (tier != "auto" && tier != "default") {
             return foundation::Err<void>(
                 foundation::ErrorCode::InvalidArgument,
-                "service_tier must be auto or default");
+                "service_tier must be auto or default", "service_tier");
         }
     }
     return foundation::Ok();
@@ -405,32 +410,38 @@ foundation::Result<ParsedResponsesRequest> parse_openai_responses_request(
     };
     if (!body.is_object()) return invalid("request body must be an object");
     auto allowed = require_fields(body, fields, "Responses");
-    if (!allowed) return invalid(allowed.error().message);
+    if (!allowed) {
+        return invalid(allowed.error().message, allowed.error().field);
+    }
     if (!body.contains("model") || !body["model"].is_string() ||
         body["model"].get_ref<const std::string&>().empty()) {
         return invalid(
-            "request body must include non-empty string 'model'");
+            "request body must include non-empty string 'model'", "model");
     }
     if (!body.contains("input")) {
-        return invalid("request body must include 'input'");
+        return invalid("request body must include 'input'", "input");
     }
     if (!allow_extensions && body.contains("priority")) {
-        return invalid("unsupported Responses parameter: priority");
+        return invalid("unsupported Responses parameter: priority",
+                       "priority");
     }
     auto stateless = validate_stateless_fields(body);
-    if (!stateless) return invalid(stateless.error().message);
+    if (!stateless) {
+        return invalid(stateless.error().message, stateless.error().field);
+    }
 
     ParsedResponsesRequest parsed;
     parsed.requested_model = body["model"].get<std::string>();
     auto& request = parsed.generation;
     if (body.contains("stream") && !body["stream"].is_boolean()) {
-        return invalid("stream must be a boolean");
+        return invalid("stream must be a boolean", "stream");
     }
     parsed.stream = body.value("stream", false);
     if (body.contains("priority")) {
         if (!integer_in_range(body["priority"], -100, 100)) {
             return invalid(
-                "priority must be an integer between -100 and 100");
+                "priority must be an integer between -100 and 100",
+                "priority");
         }
         parsed.priority = body["priority"].get<int>();
     }
@@ -438,7 +449,8 @@ foundation::Result<ParsedResponsesRequest> parse_openai_responses_request(
         if (!integer_in_range(body["max_output_tokens"], 1,
                               std::numeric_limits<int>::max())) {
             return invalid(
-                "max_output_tokens must be a positive integer");
+                "max_output_tokens must be a positive integer",
+                "max_output_tokens");
         }
         request.max_output_tokens =
             body["max_output_tokens"].get<int>();
@@ -446,13 +458,13 @@ foundation::Result<ParsedResponsesRequest> parse_openai_responses_request(
     for (const auto field : {"temperature", "top_p"}) {
         if (!body.contains(field)) continue;
         if (!body[field].is_number()) {
-            return invalid(std::string(field) + " must be a number");
+            return invalid(std::string(field) + " must be a number", field);
         }
         const double value = body[field].get<double>();
         const double maximum =
             std::string_view(field) == "temperature" ? 2.0 : 1.0;
         if (!std::isfinite(value) || value < 0.0 || value > maximum) {
-            return invalid(std::string(field) + " is out of range");
+            return invalid(std::string(field) + " is out of range", field);
         }
         if (std::string_view(field) == "temperature") {
             request.sampling.temperature = static_cast<float>(value);
@@ -462,7 +474,8 @@ foundation::Result<ParsedResponsesRequest> parse_openai_responses_request(
     }
     if (body.contains("parallel_tool_calls")) {
         if (!body["parallel_tool_calls"].is_boolean()) {
-            return invalid("parallel_tool_calls must be a boolean");
+            return invalid("parallel_tool_calls must be a boolean",
+                           "parallel_tool_calls");
         }
         request.parallel_tool_calls =
             body["parallel_tool_calls"].get<bool>();
@@ -471,13 +484,15 @@ foundation::Result<ParsedResponsesRequest> parse_openai_responses_request(
         if (!body["metadata"].is_object() ||
             body["metadata"].size() > 16) {
             return invalid(
-                "metadata must be an object with at most 16 entries");
+                "metadata must be an object with at most 16 entries",
+                "metadata");
         }
         for (const auto& [key, value] : body["metadata"].items()) {
             if (key.size() > 64 || !value.is_string() ||
                 value.get_ref<const std::string&>().size() > 512) {
                 return invalid(
-                    "metadata keys and string values exceed their limits");
+                    "metadata keys and string values exceed their limits",
+                    "metadata");
             }
         }
     }
@@ -486,21 +501,22 @@ foundation::Result<ParsedResponsesRequest> parse_openai_responses_request(
             "effort", "summary",
         };
         if (!body["reasoning"].is_object()) {
-            return invalid("reasoning must be an object");
+            return invalid("reasoning must be an object", "reasoning");
         }
         auto reasoning_allowed = require_fields(
             body["reasoning"], reasoning_fields, "reasoning");
         if (!reasoning_allowed) {
-            return invalid(reasoning_allowed.error().message);
+            return invalid(reasoning_allowed.error().message, "reasoning");
         }
         if (body["reasoning"].contains("summary") &&
             !body["reasoning"]["summary"].is_null()) {
-            return invalid("reasoning.summary is unsupported");
+            return invalid("reasoning.summary is unsupported", "reasoning");
         }
         if (body["reasoning"].contains("effort") &&
             !body["reasoning"]["effort"].is_null()) {
             if (!body["reasoning"]["effort"].is_string()) {
-                return invalid("reasoning.effort must be a string");
+                return invalid("reasoning.effort must be a string",
+                               "reasoning");
             }
             request.reasoning_effort =
                 body["reasoning"]["effort"].get<std::string>();
@@ -508,7 +524,7 @@ foundation::Result<ParsedResponsesRequest> parse_openai_responses_request(
     }
     if (body.contains("instructions")) {
         if (!body["instructions"].is_string()) {
-            return invalid("instructions must be a string");
+            return invalid("instructions must be a string", "instructions");
         }
         request.messages.emplace_back(
             inference::MessageRole::Developer,
@@ -521,22 +537,22 @@ foundation::Result<ParsedResponsesRequest> parse_openai_responses_request(
     } else if (input.is_array() && !input.empty()) {
         for (const auto& item : input) {
             auto result = parse_input_item(request, item);
-            if (!result) return invalid(result.error().message);
+            if (!result) return invalid(result.error().message, "input");
         }
     } else {
-        return invalid("input must be a string or non-empty array");
+        return invalid("input must be a string or non-empty array", "input");
     }
     if (body.contains("tools")) {
         auto result = parse_tools(request, body["tools"]);
-        if (!result) return invalid(result.error().message);
+        if (!result) return invalid(result.error().message, "tools");
     }
     if (body.contains("tool_choice")) {
         auto result = parse_tool_choice(request, body["tool_choice"]);
-        if (!result) return invalid(result.error().message);
+        if (!result) return invalid(result.error().message, "tool_choice");
     }
     if (body.contains("text")) {
         auto result = parse_text(request, body["text"]);
-        if (!result) return invalid(result.error().message);
+        if (!result) return invalid(result.error().message, "text");
     }
     return foundation::Ok(std::move(parsed));
 }
