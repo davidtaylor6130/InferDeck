@@ -35,7 +35,8 @@ GenerationSession::GenerationSession(
     std::string resolved_model_value,
     std::string reservation_key_value,
     std::uint64_t voice_session_token_value,
-    int voice_session_grace_ms_value)
+    int voice_session_grace_ms_value,
+    RequestObservation observation_value)
     : slot_id(slot_id_value),
       model_name(std::move(resolved_model_value)),
       requested_model(std::move(requested_model_value)),
@@ -45,7 +46,8 @@ GenerationSession::GenerationSession(
       events(events_value),
       reservation_key(std::move(reservation_key_value)),
       voice_session_token(voice_session_token_value),
-      voice_session_grace_ms(voice_session_grace_ms_value) {}
+      voice_session_grace_ms(voice_session_grace_ms_value),
+      observation(std::move(observation_value)) {}
 
 GenerationSession::~GenerationSession() {
     finish_once(true, 499, "session_destroyed");
@@ -165,13 +167,13 @@ void GenerationSession::finish_once(bool aborted_stream, int fallback_status,
     if (result && !aborted_stream && !error) {
         status = 200;
         record_request(metrics, stats_db, events, requested_model, *result,
-                       status, slot_id, 0.0, 0, model_name);
+                       status, slot_id, 0.0, 0, model_name, observation);
     } else {
         status = aborted_stream ? 499
             : (error && fallback_status < 400 ? 500 : fallback_status);
         record_request(metrics, stats_db, events, requested_model,
                        model::InferenceResult{}, status, slot_id,
-                       0.0, 0, model_name);
+                       0.0, 0, model_name, observation);
     }
     LOG_INFO("stream_recorded", "model={} slot_id={} status={} reason={}",
              model_name, slot_id, status, reason);

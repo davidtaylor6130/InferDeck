@@ -3264,6 +3264,51 @@ TEST_CASE("ensure_model_loaded: caller deadline bounds a slow swap wait",
     tracker.join();
 }
 
+TEST_CASE("request observation uses one canonical record for every sink",
+          "[routes][observability][canonical]") {
+    observability::Metrics metrics;
+    observability::StatsDb stats(":memory:");
+    foundation::EventBus events;
+    auto subscription = events.subscribe();
+    model::InferenceResult result;
+    result.prompt_tokens = 100;
+    result.cached_prompt_tokens = 60;
+    result.completion_tokens = 20;
+    result.prompt_duration_ms = 20.0f;
+    result.generation_duration_ms = 10.0f;
+    result.duration_ms = 35.0f;
+    result.tokens_per_second = 1.0f;
+    result.finish_reason = "stop";
+    RequestObservation observation;
+    observation.request_id = "req-sink-agreement";
+    observation.principal_class = "openai_data_plane";
+    observation.endpoint = "/v1/chat/completions";
+    observation.protocol_profile = "strict_openai";
+    observation.modality = "text";
+    observation.stream = true;
+
+    record_request(&metrics, &stats, &events, "alias", result, 200, 2,
+                   0.0, 0, "real", observation);
+
+    const auto rows = stats.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    const auto event = subscription->wait_for(std::chrono::milliseconds{100});
+    REQUIRE(event);
+    const auto payload = nlohmann::json::parse(event->data);
+    const auto snapshot = metrics.snapshot_for("alias");
+    CHECK(rows[0].request_id == "req-sink-agreement");
+    CHECK(payload["requestId"] == rows[0].request_id);
+    CHECK(payload["endpoint"] == rows[0].endpoint);
+    CHECK(payload["protocolProfile"] == rows[0].protocol_profile);
+    CHECK(payload["cacheWriteTokens"] == rows[0].cache_write_tokens);
+    CHECK(rows[0].cache_write_tokens == 40);
+    CHECK(rows[0].tokens_per_second == Catch::Approx(2000.0));
+    CHECK(payload["tokensPerSecond"].get<double>() ==
+          Catch::Approx(rows[0].tokens_per_second));
+    CHECK(snapshot.last_tokens_per_second ==
+          Catch::Approx(rows[0].tokens_per_second));
+}
+
 TEST_CASE("ensure_model_loaded: caller cancellation interrupts a slow swap wait",
           "[routes][swap][deadline]") {
     ModelRegistry registry;

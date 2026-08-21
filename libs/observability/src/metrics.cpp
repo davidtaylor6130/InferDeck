@@ -20,20 +20,25 @@ void Metrics::restore_lifetime(std::int64_t requests,
 }
 
 void Metrics::record_request(const RequestRecord& rec) {
+  const bool text_generation = rec.modality.empty() || rec.modality == "text";
   total_requests_.fetch_add(1);
   total_prompt_tokens_.fetch_add(rec.prompt_tokens);
   total_completion_tokens_.fetch_add(rec.completion_tokens);
-  total_duration_ms_.fetch_add(rec.duration_ms);
+  if (text_generation) total_duration_ms_.fetch_add(rec.generation_duration_ms > 0.0
+      ? rec.generation_duration_ms : rec.duration_ms);
 
   std::lock_guard lk(mtx_);
   auto& s = by_model_[rec.model];
   s.requests += 1;
   s.prompt_tokens += rec.prompt_tokens;
   s.completion_tokens += rec.completion_tokens;
-  s.total_duration_ms += rec.duration_ms;
-  s.last_tokens_per_second = rec.tokens_per_second;
+  if (text_generation) {
+    s.total_duration_ms += rec.generation_duration_ms > 0.0
+        ? rec.generation_duration_ms : rec.duration_ms;
+    s.last_tokens_per_second = rec.tokens_per_second;
+    s.peak_tokens_per_second = std::max(s.peak_tokens_per_second, rec.tokens_per_second);
+  }
   s.last_timestamp_unix_ms = rec.timestamp_unix_ms;
-  s.peak_tokens_per_second = std::max(s.peak_tokens_per_second, rec.tokens_per_second);
 }
 
 void Metrics::record_swap(const SwapRecord& rec) {

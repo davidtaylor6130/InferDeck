@@ -43,6 +43,28 @@ struct GatewayDeps {
     CompatibilityProfile compatibility_profile{CompatibilityProfile::StrictOpenAI};
 };
 
+struct RequestObservation {
+    std::string request_id;
+    std::string principal_class;
+    std::string endpoint;
+    std::string protocol_profile;
+    std::string modality{"text"};
+    bool stream{false};
+    std::string error_code;
+    double queue_duration_ms{};
+    double swap_load_duration_ms{};
+    double first_token_duration_ms{};
+    double output_audio_seconds{};
+    int input_image_count{};
+    int output_image_count{};
+};
+
+RequestObservation observe_request(const httplib::Request& req,
+                                   const httplib::Response& resp,
+                                   const GatewayDeps& deps,
+                                   std::string modality,
+                                   bool stream);
+
 bool maintenance_mode_active(const GatewayDeps& deps) noexcept;
 ComputeResource model_compute_resource(const model::ModelInfo& info) noexcept;
 bool maintenance_blocks_model(const GatewayDeps& deps,
@@ -57,7 +79,8 @@ void record_request(observability::Metrics* metrics,
                     int slot_id,
                     double input_audio_seconds = 0.0,
                     std::int64_t input_characters = 0,
-                    const std::string& resolved_model_name = {});
+                    const std::string& resolved_model_name = {},
+                    const RequestObservation& observation = {});
 void record_request(const GatewayDeps& deps,
                     const std::string& model_name,
                     const model::InferenceResult& result,
@@ -65,7 +88,8 @@ void record_request(const GatewayDeps& deps,
                     int slot_id,
                     double input_audio_seconds = 0.0,
                     std::int64_t input_characters = 0,
-                    const std::string& resolved_model_name = {});
+                    const std::string& resolved_model_name = {},
+                    const RequestObservation& observation = {});
 
 struct ResolvedModelName {
     std::string requested;

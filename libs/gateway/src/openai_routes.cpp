@@ -650,7 +650,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
         const int status = result.error().code == foundation::ErrorCode::InvalidArgument ? 400
             : result.error().code == foundation::ErrorCode::Cancelled ? 499 : 500;
         record_request(deps, requested_model, model::InferenceResult{}, status, *slot,
-                       0.0, 0, model_name);
+                       0.0, 0, model_name,
+                       observe_request(req, resp, deps, "embedding", false));
         write_error(resp, status, "embedding_failed", result.error().message);
         return;
     }
@@ -668,7 +669,8 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& resp,
     metrics_result.prompt_tokens = result->prompt_tokens;
     metrics_result.duration_ms = result->duration_ms;
     record_request(deps, requested_model, metrics_result, 200, *slot,
-                   0.0, 0, model_name);
+                   0.0, 0, model_name,
+                   observe_request(req, resp, deps, "embedding", false));
     write_json(resp, 200, {
         {"object", "list"},
         {"data", data},
@@ -736,7 +738,8 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
             acquired->slot_id, requested_model, model_name,
             acquired->reservation_key,
             acquired->voice_session_token.value_or(0),
-            deps.voice_session_grace_ms);
+            deps.voice_session_grace_ms,
+            observe_request(req, resp, deps, "text", false));
         auto result = session.run(parsed->generation);
         if (!result) {
             const auto error = map_openai_error(result.error().code);
@@ -758,7 +761,8 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
         acquired->slot_id, requested_model, model_name,
         acquired->reservation_key,
         acquired->voice_session_token.value_or(0),
-        deps.voice_session_grace_ms);
+        deps.voice_session_grace_ms,
+        observe_request(req, resp, deps, "text", true));
     auto state = std::make_shared<ResponsesStreamState>();
     state->session = session;
     state->request = request;

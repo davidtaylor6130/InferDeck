@@ -95,3 +95,25 @@ TEST_CASE("Metrics reset clears all counters", "[observability][metrics]") {
   REQUIRE(m.total_prompt_tokens() == 0);
   REQUIRE(m.last_gpu_util_pct() == 0.0);
 }
+
+TEST_CASE("Metrics media duration cannot change text throughput",
+          "[observability][metrics][modality]") {
+  Metrics metrics;
+  RequestRecord text;
+  text.model = "llm";
+  text.modality = "text";
+  text.completion_tokens = 20;
+  text.generation_duration_ms = 1000.0;
+  text.duration_ms = 1500.0;
+  text.tokens_per_second = 20.0;
+  metrics.record_request(text);
+  RequestRecord media;
+  media.model = "tts";
+  media.modality = "media";
+  media.duration_ms = 9000.0;
+  metrics.record_request(media);
+  CHECK(metrics.avg_tokens_per_second() == Catch::Approx(20.0));
+  CHECK(metrics.snapshot_for("llm").last_tokens_per_second ==
+        Catch::Approx(20.0));
+  CHECK(metrics.snapshot_for("tts").last_tokens_per_second == 0.0);
+}

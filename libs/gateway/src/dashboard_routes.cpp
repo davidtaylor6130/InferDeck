@@ -13,9 +13,11 @@
 #include <cmath>
 #include <cstdint>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -246,6 +248,39 @@ std::string read_text(const std::filesystem::path& path) {
     std::ostringstream output;
     output << input.rdbuf();
     return output.str();
+}
+
+std::vector<std::string> bounded_log_tail(const std::filesystem::path& path,
+                                          std::size_t limit) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return {};
+    input.seekg(0, std::ios::end);
+    auto cursor = input.tellg();
+    constexpr std::streamoff block_size = 64 * 1024;
+    constexpr std::streamoff maximum_bytes = 4 * 1024 * 1024;
+    std::string data;
+    std::size_t newlines = 0;
+    while (cursor > 0 && static_cast<std::streamoff>(data.size()) < maximum_bytes &&
+           newlines <= limit) {
+        const auto read_size = std::min(
+            block_size, static_cast<std::streamoff>(cursor));
+        cursor -= read_size;
+        std::string block(static_cast<std::size_t>(read_size), '\0');
+        input.seekg(cursor);
+        input.read(block.data(), read_size);
+        newlines += static_cast<std::size_t>(std::count(
+            block.begin(), block.end(), '\n'));
+        data.insert(0, std::move(block));
+    }
+    std::deque<std::string> tail;
+    std::istringstream lines(data);
+    std::string line;
+    while (std::getline(lines, line)) {
+        tail.push_back(std::move(line));
+        if (tail.size() > limit) tail.pop_front();
+    }
+    return {std::make_move_iterator(tail.begin()),
+            std::make_move_iterator(tail.end())};
 }
 
 nlohmann::json gpu_hardware_json(const observability::GpuStats& gpu) {
@@ -1565,13 +1600,9 @@ void register_dashboard_routes(httplib::Server& server, const DashboardDeps& dep
         if (req.has_param("limit")) {
             try { limit = std::clamp<std::size_t>(std::stoul(req.get_param_value("limit")), 1, 1000); } catch (...) {}
         }
-        std::ifstream file(deps.log_file.empty() ? "logs/gateway.log" : deps.log_file);
-        std::vector<std::string> lines;
-        std::string line;
-        while (std::getline(file, line)) {
-            lines.push_back(line);
-            if (lines.size() > limit) lines.erase(lines.begin());
-        }
+        const auto lines = bounded_log_tail(
+            deps.log_file.empty() ? "logs/gateway.log" : deps.log_file,
+            limit);
         nlohmann::json logs = nlohmann::json::array();
         for (const auto& item : lines) {
             logs.push_back({{"message", item}});

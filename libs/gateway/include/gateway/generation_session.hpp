@@ -2,6 +2,7 @@
 
 #include "foundation/result.hpp"
 #include "gateway/streaming_sanitizer.hpp"
+#include "gateway/routes.hpp"
 #include "model/backend_coordinator.hpp"
 
 #include <atomic>
@@ -29,7 +30,8 @@ public:
                       std::string resolved_model,
                       std::string reservation_key,
                       std::uint64_t voice_session_token,
-                      int voice_session_grace_ms);
+                      int voice_session_grace_ms,
+                      RequestObservation observation);
     ~GenerationSession();
 
     GenerationSession(const GenerationSession&) = delete;
@@ -64,6 +66,7 @@ public:
     std::uint64_t voice_session_token{0};
     int voice_session_grace_ms{0};
     InferenceDeltaUtf8Buffer utf8;
+    RequestObservation observation;
 };
 
 }

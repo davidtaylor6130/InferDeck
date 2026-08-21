@@ -3,6 +3,7 @@
 #include "gateway/openai_adapter.hpp"
 #include "gateway/openai_error.hpp"
 #include "gateway/generation_session.hpp"
+#include "gateway/request_id.hpp"
 #include "gateway/streaming_sanitizer.hpp"
 #include "foundation/logging.hpp"
 
@@ -43,6 +44,28 @@ std::int64_t now_ms() {
 
 } // namespace
 
+RequestObservation observe_request(const httplib::Request& req,
+                                   const httplib::Response& resp,
+                                   const GatewayDeps& deps,
+                                   std::string modality,
+                                   bool stream) {
+    RequestObservation observation;
+    observation.request_id = resp.get_header_value("X-Request-Id");
+    if (observation.request_id.empty()) {
+        observation.request_id = request_id(header_value(req, "X-Request-Id"));
+    }
+    observation.principal_class = "openai_data_plane";
+    observation.endpoint = req.path;
+    observation.protocol_profile =
+        deps.compatibility_profile == CompatibilityProfile::StrictOpenAI
+            ? "strict_openai"
+            : deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative
+                ? "openai_derivative" : "anthropic";
+    observation.modality = std::move(modality);
+    observation.stream = stream;
+    return observation;
+}
+
 void record_request(observability::Metrics* metrics,
                     observability::StatsDb* stats_db,
                     foundation::EventBus* events,
@@ -52,72 +75,98 @@ void record_request(observability::Metrics* metrics,
                     int slot_id,
                     double input_audio_seconds,
                     std::int64_t input_characters,
-                    const std::string& resolved_model_name) {
+                    const std::string& resolved_model_name,
+                    const RequestObservation& observation) {
     observability::RequestRecord rec;
     rec.timestamp_unix_ms = now_ms();
     rec.model = model_name;
-    rec.prompt_tokens = result.prompt_tokens;
-    rec.completion_tokens = result.completion_tokens;
-    rec.duration_ms = result.duration_ms;
-    rec.tokens_per_second = result.tokens_per_second;
+    rec.resolved_model = resolved_model_name.empty() ? rec.model : resolved_model_name;
+    rec.request_id = observation.request_id;
+    rec.principal_class = observation.principal_class;
+    rec.endpoint = observation.endpoint;
+    rec.protocol_profile = observation.protocol_profile;
+    rec.modality = observation.modality;
+    rec.stream = observation.stream;
+    rec.finish_code = result.finish_reason;
+    rec.error_code = observation.error_code;
+    rec.prompt_tokens = std::max(0, result.prompt_tokens);
+    rec.cached_prompt_tokens = std::clamp(result.cached_prompt_tokens, 0, rec.prompt_tokens);
+    rec.cache_write_tokens = rec.prompt_tokens - rec.cached_prompt_tokens;
+    rec.completion_tokens = std::max(0, result.completion_tokens);
+    rec.duration_ms = std::max(0.0, static_cast<double>(result.duration_ms));
+    rec.generation_duration_ms = std::max(0.0, static_cast<double>(result.generation_duration_ms));
+    rec.tokens_per_second = rec.modality == "text" && rec.generation_duration_ms > 0.0
+        ? rec.completion_tokens * 1000.0 / rec.generation_duration_ms
+        : 0.0;
     rec.status_code = status_code;
     rec.slot_id = slot_id;
     const double prompt_duration_ms = result.prompt_duration_ms > 0.0f
         ? result.prompt_duration_ms
         : std::max(0.0, static_cast<double>(
               result.duration_ms - result.generation_duration_ms));
-    const int evaluated_prompt_tokens =
-        std::max(0, result.prompt_tokens - result.cached_prompt_tokens);
+    rec.prompt_duration_ms = prompt_duration_ms;
+    rec.prompt_tokens_per_second = rec.prompt_duration_ms > 0.0
+        ? rec.cache_write_tokens * 1000.0 / rec.prompt_duration_ms
+        : 0.0;
+    rec.queue_duration_ms = std::max(0.0, observation.queue_duration_ms);
+    rec.swap_load_duration_ms = std::max(0.0, observation.swap_load_duration_ms);
+    rec.first_token_duration_ms = std::max(0.0, observation.first_token_duration_ms);
+    rec.input_audio_seconds = std::max(0.0, input_audio_seconds);
+    rec.output_audio_seconds = std::max(0.0, observation.output_audio_seconds);
+    rec.input_characters = std::max<std::int64_t>(0, input_characters);
+    rec.input_image_count = std::max(0, observation.input_image_count);
+    rec.output_image_count = std::max(0, observation.output_image_count);
     if (metrics) metrics->record_request(rec);
     LOG_INFO("request_recorded",
-             "model={} status={} slot_id={} prompt_tokens={} cached_prompt_tokens={} completion_tokens={} duration_ms={} generation_duration_ms={} tps={}",
+             "request_id={} endpoint={} profile={} modality={} model={} resolved_model={} status={} finish_code={} error_code={} slot_id={} prompt_tokens={} cached_prompt_tokens={} completion_tokens={} duration_ms={} generation_duration_ms={} tps={}",
+             rec.request_id,
+             rec.endpoint,
+             rec.protocol_profile,
+             rec.modality,
              model_name,
+             rec.resolved_model,
              status_code,
+             rec.finish_code,
+             rec.error_code,
              slot_id,
              result.prompt_tokens,
              result.cached_prompt_tokens,
              result.completion_tokens,
              result.duration_ms,
              result.generation_duration_ms,
-             result.tokens_per_second);
-    if (stats_db) {
-        observability::RequestRow row;
-        row.timestamp_unix_ms = rec.timestamp_unix_ms;
-        row.model = rec.model;
-        row.resolved_model = resolved_model_name.empty() ? rec.model : resolved_model_name;
-        row.prompt_tokens = rec.prompt_tokens;
-        row.cached_prompt_tokens = result.cached_prompt_tokens;
-        row.completion_tokens = rec.completion_tokens;
-        row.duration_ms = rec.duration_ms;
-        row.generation_duration_ms = result.generation_duration_ms;
-        row.prompt_duration_ms = prompt_duration_ms;
-        row.tokens_per_second = rec.tokens_per_second;
-        row.prompt_tokens_per_second = row.prompt_duration_ms > 0.0
-            ? static_cast<double>(evaluated_prompt_tokens) / (row.prompt_duration_ms / 1000.0)
-            : 0.0;
-        row.status_code = rec.status_code;
-        row.slot_id = rec.slot_id;
-        row.input_audio_seconds = input_audio_seconds;
-        row.input_characters = input_characters;
-        stats_db->record_request(row);
-    }
+             rec.tokens_per_second);
+    if (stats_db) stats_db->record_request(rec);
     if (events) {
         events->publish("request", nlohmann::json{
             {"timestampUnixMs", rec.timestamp_unix_ms},
-            {"model", model_name},
-            {"resolvedModel", resolved_model_name.empty() ? model_name : resolved_model_name},
-            {"promptTokens", result.prompt_tokens},
-            {"completionTokens", result.completion_tokens},
-            {"durationMs", result.duration_ms},
-            {"generationDurationMs", result.generation_duration_ms},
-            {"tokensPerSecond", result.tokens_per_second},
-            {"promptTokensPerSecond", prompt_duration_ms > 0.0
-                ? static_cast<double>(evaluated_prompt_tokens) /
-                    (prompt_duration_ms / 1000.0)
-                : 0.0},
+            {"requestId", rec.request_id},
+            {"principalClass", rec.principal_class},
+            {"endpoint", rec.endpoint},
+            {"protocolProfile", rec.protocol_profile},
+            {"modality", rec.modality},
+            {"model", rec.model},
+            {"resolvedModel", rec.resolved_model},
+            {"stream", rec.stream},
+            {"finishCode", rec.finish_code},
+            {"errorCode", rec.error_code},
+            {"promptTokens", rec.prompt_tokens},
+            {"cachedPromptTokens", rec.cached_prompt_tokens},
+            {"cacheWriteTokens", rec.cache_write_tokens},
+            {"completionTokens", rec.completion_tokens},
+            {"durationMs", rec.duration_ms},
+            {"generationDurationMs", rec.generation_duration_ms},
+            {"promptDurationMs", rec.prompt_duration_ms},
+            {"firstTokenDurationMs", rec.first_token_duration_ms},
+            {"queueDurationMs", rec.queue_duration_ms},
+            {"swapLoadDurationMs", rec.swap_load_duration_ms},
+            {"tokensPerSecond", rec.tokens_per_second},
+            {"promptTokensPerSecond", rec.prompt_tokens_per_second},
             {"status", status_code},
-            {"inputAudioSeconds", input_audio_seconds},
-            {"inputCharacters", input_characters},
+            {"inputAudioSeconds", rec.input_audio_seconds},
+            {"outputAudioSeconds", rec.output_audio_seconds},
+            {"inputCharacters", rec.input_characters},
+            {"inputImageCount", rec.input_image_count},
+            {"outputImageCount", rec.output_image_count},
         }.dump());
     }
 }
@@ -129,10 +178,12 @@ void record_request(const GatewayDeps& deps,
                     int slot_id,
                     double input_audio_seconds,
                     std::int64_t input_characters,
-                    const std::string& resolved_model_name) {
+                    const std::string& resolved_model_name,
+                    const RequestObservation& observation) {
     record_request(deps.metrics, deps.stats_db, deps.events,
                    model_name, result, status_code, slot_id,
-                   input_audio_seconds, input_characters, resolved_model_name);
+                   input_audio_seconds, input_characters, resolved_model_name,
+                   observation);
 }
 
 foundation::Result<ResolvedModelName> resolve_model_name(
@@ -1097,7 +1148,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     auto state = std::make_shared<GenerationSession>(
         deps.coordinator, deps.metrics, deps.stats_db, deps.events,
         slot_id, requested_model, model_name, reservation_key,
-        voice_session_token.value_or(0), deps.voice_session_grace_ms);
+        voice_session_token.value_or(0), deps.voice_session_grace_ms,
+        observe_request(req, resp, deps, "text", stream));
 
     if (!stream) {
         handle_non_stream_chat(resp, deps, requested_model, model_name,
