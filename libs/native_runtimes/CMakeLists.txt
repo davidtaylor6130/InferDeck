@@ -17,6 +17,7 @@ set(INFERDECK_STABLE_DIFFUSION_ROOT "" CACHE PATH "stable-diffusion.cpp source t
 set(INFERDECK_WHISPER_ROOT "${CMAKE_SOURCE_DIR}/runtime/whisper.cpp-src" CACHE PATH "whisper.cpp source tree")
 option(INFERDECK_REQUIRE_WHISPER_CPP "Fail configuration when whisper.cpp is unavailable" OFF)
 set(INFERDECK_SHERPA_ONNX_ROOT "" CACHE PATH "sherpa-onnx install prefix")
+option(INFERDECK_REQUIRE_SHERPA_ONNX "Fail configuration when sherpa-onnx is unavailable" OFF)
 set(INFERDECK_SHERPA_ONNX_RUNTIME_DIR "${INFERDECK_SHERPA_ONNX_ROOT}/lib" CACHE PATH "sherpa-onnx runtime library directory")
 
 if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
@@ -54,6 +55,8 @@ if(INFERDECK_SHERPA_ONNX_INCLUDE AND INFERDECK_SHERPA_ONNX_LIBRARY)
     target_include_directories(native_runtimes PRIVATE ${INFERDECK_SHERPA_ONNX_INCLUDE})
     target_link_libraries(native_runtimes PRIVATE ${INFERDECK_SHERPA_ONNX_LIBRARY})
     target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_SHERPA_ONNX=1)
+elseif(INFERDECK_REQUIRE_SHERPA_ONNX)
+    message(FATAL_ERROR "sherpa-onnx is required but headers or libraries are unavailable under: ${INFERDECK_SHERPA_ONNX_ROOT}")
 endif()
 
 if(MSVC)

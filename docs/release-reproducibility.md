@@ -14,6 +14,10 @@ The Windows release environment is pinned to:
 - vcpkg baseline `77df67cfff9c12ccfdb52284e07c87c75092f723`;
 - llama.cpp submodule `adb55e5148dc93bcdca7212a2d1df3ccc422959a`;
 - Vulkan-Headers submodule `015e25c3c91b70eb1a754d36fb14c4ba6ad9b0b9`;
+- sherpa-onnx `v1.13.2` Windows shared runtime archive, SHA-256
+  `e1f9b7e6b17aec5a56ea1180ffd915a42eef86c7abf7a0749ddc530e0e0831e4`,
+  plus its pinned C API header, SHA-256
+  `437b1279047877167d8fadc74a60d47f3df514d703fdac1c1b6851da9bc2fdb4`;
 - immutable commit SHAs for every GitHub Action.
 
 `VULKAN_SDK` or `INFERDECK_VULKAN_SDK_ROOT` must identify the exact pinned SDK

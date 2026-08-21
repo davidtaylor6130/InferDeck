@@ -92,6 +92,12 @@ jobs:
         shell: pwsh
         run: .\scripts\setup-whisper-runtime.ps1 -RuntimeRoot runtime -SkipModel
 
+      - name: Provision sherpa-onnx runtime
+        shell: pwsh
+        run: |
+          $root = .\scripts\setup-sherpa-runtime.ps1 -RuntimeRoot runtime
+          "INFERDECK_SHERPA_ONNX_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Select Visual Studio generator
         shell: pwsh
         run: |
@@ -108,7 +114,9 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DINFERDECK_BUILD_TESTS=ON `
-            -DINFERDECK_REQUIRE_WHISPER_CPP=ON
+            -DINFERDECK_REQUIRE_WHISPER_CPP=ON `
+            -DINFERDECK_SHERPA_ONNX_ROOT="$env:INFERDECK_SHERPA_ONNX_ROOT" `
+            -DINFERDECK_REQUIRE_SHERPA_ONNX=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -142,6 +150,12 @@ jobs:
           $vcpkgBin = "build\vcpkg_installed\x64-windows\bin"
           if (Test-Path $vcpkgBin) {
             Copy-Item "$vcpkgBin\*.dll" dist\ -ErrorAction SilentlyContinue
+          }
+
+          foreach ($runtimeDll in @('sherpa-onnx-c-api.dll', 'onnxruntime.dll', 'onnxruntime_providers_shared.dll')) {
+            if (!(Test-Path "dist\$runtimeDll" -PathType Leaf)) {
+              throw "Required native speech runtime is missing from the package: $runtimeDll"
+            }
           }
 
           Write-Host "=== dist contents ==="
