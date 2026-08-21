@@ -46,6 +46,7 @@
 #include "gateway/request_security.hpp"
 #include "gateway/route_manifest.hpp"
 #include "gateway/routes.hpp"
+#include "gateway/shutdown_state.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "httplib.h"
 #include "llama.h"
@@ -1179,22 +1180,29 @@ int run_gateway(const fs::path& config_path) {
     }
     reload_monitor_stop.store(true);
     if (reload_monitor.joinable()) reload_monitor.join();
-    if (default_model_loader.joinable()) default_model_loader.join();
     g_server = nullptr;
 
-    if (g_reload.load()) {
-        coordinator.drain_active(std::chrono::seconds{120});
+    ShutdownStateMachine shutdown;
+    const auto shutdown_phase = shutdown.run(
+        [&] { coordinator.request_swap_cancel(); },
+        [&] {
+            return !g_default_model_loading.load() &&
+                !swap_tracker.snapshot().swapping &&
+                coordinator.active_request_count() == 0;
+        },
+        ShutdownStateMachine::Clock::now() + std::chrono::seconds{120});
+    if (shutdown_phase == ShutdownPhase::TimedOut) {
+        LOG_FATAL("shutdown_deadline_exceeded",
+                  "backend lifecycle did not quiesce within 120 seconds");
+        foundation::Logger::instance().shutdown();
+        std::quick_exit(2);
     }
+    if (default_model_loader.joinable()) default_model_loader.join();
+    swap_tracker.join();
 
     stats_stop.store(true);
     events.close_all();
     if (stats_thread.joinable()) stats_thread.join();
-
-    const auto swap_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{120};
-    while (swap_tracker.snapshot().swapping &&
-           std::chrono::steady_clock::now() < swap_deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{100});
-    }
 
     if (!listen_ok) {
         LOG_ERROR("server_failed", "could not bind {}:{}", cfg.host, cfg.port);

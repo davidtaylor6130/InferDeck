@@ -17,6 +17,7 @@ add_executable(anthropic_route_tests
 
 add_executable(auth_tests
     test_auth.cpp
+    test_shutdown_state.cpp
 )
 
 target_link_libraries(auth_tests
