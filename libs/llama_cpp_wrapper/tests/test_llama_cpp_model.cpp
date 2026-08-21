@@ -1,6 +1,4 @@
 #include <catch2/catch_test_macros.hpp>
-#include <nlohmann/json.hpp>
-
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -12,6 +10,7 @@
 #include <vector>
 
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
+#include "llama_cpp_wrapper/llama_chat_adapter.hpp"
 #include "llama_cpp_wrapper/streaming_tool_call_state.hpp"
 #include "foundation/logging.hpp"
 #include "model/imodel.hpp"
@@ -47,18 +46,14 @@ TEST_CASE("LlamaCppModel: reasoning effort reaches chat template inputs",
   info.reasoning.aliases = {{"high", "xhigh"}};
 
   common_chat_templates_inputs inputs;
-  nlohmann::ordered_json body = {
-      {"reasoning_effort", "medium"},
-      {"chat_template_kwargs", {{"reasoning_effort", "low"}}},
-  };
-  auto effort = apply_reasoning_effort(inputs, body, info);
+  auto effort = apply_reasoning_effort(inputs, std::string{"low"}, info);
   REQUIRE(effort);
   CHECK(*effort == "low");
   CHECK(inputs.chat_template_kwargs.at("reasoning_effort") == "\"low\"");
 
   common_chat_templates_inputs alias_inputs;
   effort = apply_reasoning_effort(
-      alias_inputs, nlohmann::ordered_json{{"reasoning_effort", "high"}}, info);
+      alias_inputs, std::string{"high"}, info);
   REQUIRE(effort);
   CHECK(*effort == "xhigh");
   CHECK(alias_inputs.chat_template_kwargs.at("reasoning_effort") == "\"xhigh\"");
@@ -66,7 +61,7 @@ TEST_CASE("LlamaCppModel: reasoning effort reaches chat template inputs",
   common_chat_templates_inputs disabled_inputs;
   disabled_inputs.enable_thinking = true;
   effort = apply_reasoning_effort(
-      disabled_inputs, nlohmann::ordered_json{{"reasoning_effort", "none"}}, info);
+      disabled_inputs, std::string{"none"}, info);
   REQUIRE(effort);
   CHECK(*effort == "none");
   CHECK_FALSE(disabled_inputs.enable_thinking);
@@ -79,9 +74,59 @@ TEST_CASE("LlamaCppModel: unsupported reasoning effort is rejected",
   info.name = "plain-model";
   common_chat_templates_inputs inputs;
   auto effort = apply_reasoning_effort(
-      inputs, nlohmann::ordered_json{{"reasoning_effort", "medium"}}, info);
+      inputs, std::string{"medium"}, info);
   REQUIRE_FALSE(effort);
   CHECK(effort.error().code == ErrorCode::InvalidArgument);
+}
+
+TEST_CASE("Llama chat adapter preserves typed roles and tool defaults",
+          "[llama][adapter]") {
+  inference::GenerationRequest request;
+  request.messages.emplace_back(inference::MessageRole::Developer, "policy");
+  request.messages.emplace_back(inference::MessageRole::System, "context");
+  request.messages.emplace_back(inference::MessageRole::User, "question");
+  request.tools.push_back(inference::FunctionTool{.name = "lookup"});
+  request.enable_reasoning = false;
+
+  ModelInfo info;
+  info.name = "typed-model";
+  LlamaChatAdapterOptions options;
+  options.supports_thinking = true;
+  const auto adapted = adapt_generation_request(request, info, options);
+  REQUIRE(adapted);
+  REQUIRE(adapted->inputs.messages.size() == 3);
+  CHECK(adapted->inputs.messages[0].role == "developer");
+  CHECK(adapted->inputs.messages[1].role == "system");
+  CHECK(adapted->inputs.messages[2].role == "user");
+  REQUIRE(adapted->inputs.tools.size() == 1);
+  CHECK(adapted->inputs.tools[0].parameters == "{}");
+  CHECK_FALSE(adapted->inputs.enable_thinking);
+}
+
+TEST_CASE("Llama chat adapter rejects unsupported or empty media",
+          "[llama][adapter][validation]") {
+  ModelInfo info;
+  info.name = "typed-model";
+  LlamaChatAdapterOptions options;
+
+  inference::GenerationRequest audio_request;
+  inference::Message audio_message;
+  audio_message.role = inference::MessageRole::User;
+  audio_message.content.emplace_back(inference::AudioContent{
+      {std::byte{0x01}}, "audio/wav"});
+  audio_request.messages.push_back(std::move(audio_message));
+  const auto audio = adapt_generation_request(audio_request, info, options);
+  REQUIRE_FALSE(audio);
+  CHECK(audio.error().code == ErrorCode::InvalidArgument);
+
+  inference::GenerationRequest image_request;
+  inference::Message image_message;
+  image_message.role = inference::MessageRole::User;
+  image_message.content.emplace_back(inference::ImageContent{});
+  image_request.messages.push_back(std::move(image_message));
+  const auto image = adapt_generation_request(image_request, info, options);
+  REQUIRE_FALSE(image);
+  CHECK(image.error().code == ErrorCode::InvalidArgument);
 }
 
 TEST_CASE("LlamaCppModel: backend init/shutdown do not throw", "[llama][backend]") {
@@ -431,7 +476,7 @@ TEST_CASE("recurrent checkpoint: second predict on same slot reuses cache",
 
   InferenceRequest req;
   req.messages = {ChatMessage{"user", "Say hello."}};
-  req.max_tokens = 4;
+  req.max_output_tokens = 4;
   auto r1 = lm.predict(slot_id, req);
   REQUIRE(r1.has_value());
 
@@ -469,7 +514,7 @@ TEST_CASE("recurrent checkpoint: multi-turn conversation reuses cache on second 
 
   InferenceRequest req1;
   req1.messages = {ChatMessage{"user", "Count to three."}};
-  req1.max_tokens = 8;
+  req1.max_output_tokens = 8;
   auto r1 = lm.predict(slot_id, req1);
   REQUIRE(r1.has_value());
 
@@ -482,7 +527,7 @@ TEST_CASE("recurrent checkpoint: multi-turn conversation reuses cache on second 
       ChatMessage{"assistant", r1->text},
       ChatMessage{"user",      "Now count to five."},
   };
-  req2.max_tokens = 8;
+  req2.max_output_tokens = 8;
   auto r2 = lm.predict(slot_id, req2);
   REQUIRE(r2.has_value());
   REQUIRE(r2->cached_prompt_tokens > 0);
@@ -522,7 +567,7 @@ TEST_CASE("MTP recurrent checkpoint reuses an identical prompt",
 
   InferenceRequest req;
   req.messages = {ChatMessage{"user", "Reply with only CACHE_OK."}};
-  req.max_tokens = 4;
+  req.max_output_tokens = 4;
   auto first = lm.predict(slot_id, req);
   REQUIRE(first.has_value());
   auto second = lm.predict(slot_id, req);
@@ -569,11 +614,11 @@ TEST_CASE("MTP cancellation is safe while another slot decodes",
   InferenceRequest first_request;
   first_request.messages = {
       ChatMessage{"user", "Write a long numbered list without stopping."}};
-  first_request.max_tokens = 1024;
+  first_request.max_output_tokens = 1024;
   InferenceRequest second_request;
   second_request.messages = {
       ChatMessage{"user", "Count from one to twenty, one number per line."}};
-  second_request.max_tokens = 64;
+  second_request.max_output_tokens = 64;
 
   auto first = std::async(std::launch::async, [&] {
     return lm.predict_stream(

@@ -7,6 +7,7 @@
 #include "gateway/cors.hpp"
 #include "gateway/openai_routes.hpp"
 #include "gateway/media_routes.hpp"
+#include "gateway/openai_adapter.hpp"
 #include "gateway/route_manifest.hpp"
 #include "gateway/routes.hpp"
 #include "httplib.h"
@@ -18,6 +19,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -35,6 +37,146 @@ using namespace inferdeck::gateway;
 using inferdeck::foundation::ErrorCode;
 using inferdeck::foundation::Ok;
 using inferdeck::foundation::Result;
+
+TEST_CASE("OpenAI adapter produces canonical multimodal and tool inputs",
+          "[routes][adapter]") {
+    const nlohmann::json body = {
+        {"messages", nlohmann::json::array({
+            {{"role", "developer"}, {"content", "policy"}},
+            {{"role", "user"},
+             {"content", nlohmann::json::array({
+                 {{"type", "text"}, {"text", "describe"}},
+                 {{"type", "image_url"},
+                  {"image_url", {{"url", "data:image/png;base64,AQID"},
+                                 {"detail", "high"}}}}
+             })}}
+        })},
+        {"tools", nlohmann::json::array({
+            {{"type", "function"},
+             {"function", {{"name", "lookup"}, {"description", "find"}}}}
+        })}
+    };
+
+    const auto parsed = parse_openai_chat_request(body, false);
+    REQUIRE(parsed);
+    REQUIRE(parsed->messages.size() == 2);
+    CHECK(parsed->messages[0].role == inference::MessageRole::Developer);
+    REQUIRE(parsed->messages[1].content.size() == 2);
+    const auto* text =
+        std::get_if<inference::TextContent>(&parsed->messages[1].content[0]);
+    REQUIRE(text != nullptr);
+    CHECK(text->text == "describe");
+    const auto* image =
+        std::get_if<inference::ImageContent>(&parsed->messages[1].content[1]);
+    REQUIRE(image != nullptr);
+    CHECK(image->media_type == "image/png");
+    CHECK(image->detail == "high");
+    REQUIRE(image->bytes.size() == 3);
+    CHECK(std::to_integer<unsigned char>(image->bytes[0]) == 1);
+    CHECK(std::to_integer<unsigned char>(image->bytes[1]) == 2);
+    CHECK(std::to_integer<unsigned char>(image->bytes[2]) == 3);
+    REQUIRE(parsed->tools.size() == 1);
+    CHECK(parsed->tools[0].parameters_schema == "{}");
+}
+
+TEST_CASE("OpenAI adapter rejects malformed image base64",
+          "[routes][adapter][validation]") {
+    for (const std::string encoded : {"A===", "AA==junk", "AB==", "AAB="}) {
+        const nlohmann::json body = {
+            {"messages", nlohmann::json::array({
+                {{"role", "user"},
+                 {"content", nlohmann::json::array({
+                     {{"type", "image_url"},
+                      {"image_url", "data:image/png;base64," + encoded}}
+                 })}}
+            })}
+        };
+        INFO(encoded);
+        CHECK_FALSE(parse_openai_chat_request(body, false));
+    }
+}
+
+TEST_CASE("OpenAI adapter validates assistant tool call type",
+          "[routes][adapter][validation]") {
+    const auto request_with = [](const nlohmann::json& tool_call) {
+        return nlohmann::json{
+            {"messages", nlohmann::json::array({
+                {{"role", "assistant"},
+                 {"content", nullptr},
+                 {"tool_calls", nlohmann::json::array({tool_call})}}
+            })}
+        };
+    };
+    const nlohmann::json function = {
+        {"id", "call_1"},
+        {"function", {{"name", "lookup"}, {"arguments", "{}"}}}
+    };
+    CHECK_FALSE(parse_openai_chat_request(request_with(function), false));
+    auto unsupported = function;
+    unsupported["type"] = "custom";
+    CHECK_FALSE(parse_openai_chat_request(request_with(unsupported), false));
+    auto valid = function;
+    valid["type"] = "function";
+    CHECK(parse_openai_chat_request(request_with(valid), false));
+}
+
+TEST_CASE("Derivative OpenAI adapter preserves reasoning toggle",
+          "[routes][adapter][reasoning]") {
+    const nlohmann::json body = {
+        {"messages", nlohmann::json::array({
+            {{"role", "user"}, {"content", "answer"}}
+        })},
+        {"chat_template_kwargs", {{"enable_thinking", false}}}
+    };
+    const auto derivative = parse_openai_chat_request(body, true);
+    REQUIRE(derivative);
+    REQUIRE(derivative->enable_reasoning.has_value());
+    CHECK_FALSE(*derivative->enable_reasoning);
+    const auto strict = parse_openai_chat_request(body, false);
+    REQUIRE(strict);
+    CHECK_FALSE(strict->enable_reasoning.has_value());
+}
+
+TEST_CASE("OpenAI adapter matches the canonical golden fixture",
+          "[routes][adapter][golden]") {
+    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "tests/fixtures/openai_adapter_golden.json";
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    const auto fixture = nlohmann::json::parse(input);
+    const auto parsed = parse_openai_chat_request(fixture["chat_request"], false);
+    REQUIRE(parsed);
+    const auto role_name = [](inference::MessageRole role) {
+        if (role == inference::MessageRole::Developer) return "developer";
+        if (role == inference::MessageRole::System) return "system";
+        if (role == inference::MessageRole::Assistant) return "assistant";
+        if (role == inference::MessageRole::Tool) return "tool";
+        return "user";
+    };
+    nlohmann::json actual;
+    actual["roles"] = nlohmann::json::array();
+    actual["texts"] = nlohmann::json::array();
+    for (const auto& message : parsed->messages) {
+        actual["roles"].push_back(role_name(message.role));
+        const auto* text = std::get_if<inference::TextContent>(&message.content[0]);
+        REQUIRE(text);
+        actual["texts"].push_back(text->text);
+    }
+    actual["max_output_tokens"] = parsed->max_output_tokens;
+    const auto snapshot_float = [](float value) {
+        return std::round(static_cast<double>(value) * 1'000'000.0) /
+               1'000'000.0;
+    };
+    actual["temperature"] = snapshot_float(*parsed->sampling.temperature);
+    actual["top_p"] = snapshot_float(*parsed->sampling.top_p);
+    actual["tool_name"] = parsed->tools[0].name;
+    actual["tool_schema"] = parsed->tools[0].parameters_schema;
+    actual["tool_choice"] = parsed->tool_choice.function_name;
+    actual["output_kind"] = "json_schema";
+    actual["output_name"] = parsed->output.name;
+    actual["output_strict"] = parsed->output.strict;
+    CHECK(actual == fixture["canonical"]);
+}
 
 namespace {
 
@@ -61,7 +203,7 @@ public:
     std::atomic<int> transcription_delay_ms{0};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
-    std::string last_request_json;
+    InferenceRequest last_request;
     ChatTemplateMeta chat_meta_{};
 
     explicit IModelMock(ModelInfo info) : model_info(std::move(info)) {
@@ -126,19 +268,17 @@ public:
     }
 
     Result<InferenceResult> predict(int, const InferenceRequest& request) override {
-        last_max_tokens.store(request.max_tokens);
+        last_max_tokens.store(request.max_output_tokens);
         {
             std::lock_guard<std::mutex> lock(mtx);
-            last_request_json = request.openai_body_json;
+            last_request = request;
         }
         if (context_error.load()) {
             return inferdeck::foundation::Err<InferenceResult>(
                 ErrorCode::ContextLengthExceeded, "prompt is too long");
         }
         InferenceResult r;
-        const auto body = request.openai_body_json.empty()
-            ? nlohmann::json::object() : nlohmann::json::parse(request.openai_body_json);
-        if (body.contains("tools") && !body["tools"].empty()) {
+        if (!request.tools.empty()) {
             r.reasoning_text = "need a tool";
             ToolCall call;
             call.id = "call_test";
@@ -159,7 +299,7 @@ public:
         const std::atomic<bool>* cancel = nullptr) override {
         {
             std::lock_guard<std::mutex> lock(mtx);
-            last_request_json = request.openai_body_json;
+            last_request = request;
         }
         if (context_error.load()) {
             return inferdeck::foundation::Err<InferenceResult>(
@@ -1097,9 +1237,7 @@ TEST_CASE("Routes: reasoning effort precedence and defaults reach inference",
     REQUIRE(response->status == 200);
     auto* model = dynamic_cast<const IModelMock*>(ts.coordinator.get_model(info.name));
     REQUIRE(model != nullptr);
-    auto request = nlohmann::json::parse(model->last_request_json);
-    CHECK(request["reasoning_effort"] == "low");
-    CHECK(request["chat_template_kwargs"]["reasoning_effort"] == "low");
+    CHECK(model->last_request.reasoning_effort == "low");
 
     response = client.Post("/v1/chat/completions", nlohmann::json{
         {"model", info.name},
@@ -1107,8 +1245,7 @@ TEST_CASE("Routes: reasoning effort precedence and defaults reach inference",
     }.dump(), "application/json");
     REQUIRE(response);
     REQUIRE(response->status == 200);
-    request = nlohmann::json::parse(model->last_request_json);
-    CHECK(request["reasoning_effort"] == "xhigh");
+    CHECK(model->last_request.reasoning_effort == "xhigh");
     ts.stop();
 }
 
@@ -1160,8 +1297,7 @@ TEST_CASE("Routes: Responses reasoning effort translates for streaming and non-s
     REQUIRE(response->status == 200);
     auto* model = dynamic_cast<const IModelMock*>(ts.coordinator.get_model(info.name));
     REQUIRE(model != nullptr);
-    CHECK(nlohmann::json::parse(model->last_request_json)["reasoning_effort"] ==
-          "medium");
+    CHECK(model->last_request.reasoning_effort == "medium");
 
     response = client.Post("/v1/responses", nlohmann::json{
         {"model", info.name}, {"input", "Hello"}, {"stream", true},
@@ -1169,8 +1305,7 @@ TEST_CASE("Routes: Responses reasoning effort translates for streaming and non-s
     }.dump(), "application/json");
     REQUIRE(response);
     REQUIRE(response->status == 200);
-    CHECK(nlohmann::json::parse(model->last_request_json)["reasoning_effort"] ==
-          "none");
+    CHECK(model->last_request.reasoning_effort == "none");
     ts.stop();
 }
 
@@ -1215,9 +1350,9 @@ TEST_CASE("Routes: POST /v1/responses maps structured output format", "[routes][
     REQUIRE(response->status == 200);
     auto* model = dynamic_cast<const IModelMock*>(ts.coordinator.get_model("chat-model"));
     REQUIRE(model != nullptr);
-    const auto translated = nlohmann::json::parse(model->last_request_json);
-    REQUIRE(translated["response_format"]["type"] == "json_schema");
-    REQUIRE(translated["response_format"]["json_schema"]["name"] == "answer");
+    REQUIRE(model->last_request.output.kind ==
+            inference::StructuredOutputKind::JsonSchema);
+    REQUIRE(model->last_request.output.name == "answer");
     ts.stop();
 }
 
@@ -1315,6 +1450,20 @@ TEST_CASE("Routes: POST /v1/responses streams typed reasoning and tool events", 
     REQUIRE(response->body.find("event: response.function_call_arguments.done") != std::string::npos);
     REQUIRE(response->body.find("event: response.completed") != std::string::npos);
     REQUIRE(response->body.find("data: [DONE]") == std::string::npos);
+    const auto fixture_path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "tests/fixtures/openai_adapter_golden.json";
+    std::ifstream fixture_input(fixture_path, std::ios::binary);
+    REQUIRE(fixture_input.good());
+    const auto fixture = nlohmann::json::parse(fixture_input);
+    nlohmann::json event_types = nlohmann::json::array();
+    std::size_t offset = 0;
+    while ((offset = response->body.find("event: ", offset)) != std::string::npos) {
+        const auto end = response->body.find('\n', offset);
+        REQUIRE(end != std::string::npos);
+        event_types.push_back(response->body.substr(offset + 7, end - offset - 7));
+        offset = end + 1;
+    }
+    CHECK(event_types == fixture["responses_event_types"]);
     ts.stop();
 }
 
@@ -2107,10 +2256,12 @@ TEST_CASE("Routes: vision models admit image input and preserve the payload",
     const auto* model = dynamic_cast<const IModelMock*>(
         ts.coordinator.get_backend("vision-model"));
     REQUIRE(model);
-    const auto body = nlohmann::json::parse(model->last_request_json);
-    CHECK(body["messages"][0]["content"][1]["type"] == "image_url");
-    CHECK(body["messages"][0]["content"][1]["image_url"]["url"] ==
-          "data:image/png;base64,AA==");
+    REQUIRE(model->last_request.messages.size() == 1);
+    REQUIRE(model->last_request.messages[0].content.size() == 2);
+    const auto* image = std::get_if<inference::ImageContent>(
+        &model->last_request.messages[0].content[1]);
+    REQUIRE(image);
+    CHECK(image->bytes == std::vector<std::byte>{std::byte{0}});
     CHECK(ts.metrics.total_requests() == 1);
     ts.stop();
 }

@@ -17,6 +17,7 @@ target_include_directories(model
 target_link_libraries(model
     PUBLIC
         foundation
+        inference
 )
 
 set_target_properties(model PROPERTIES

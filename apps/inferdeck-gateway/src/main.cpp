@@ -399,12 +399,12 @@ run_profile_benchmark_trial(
              "Answer directly and concisely. <|think_off|>"},
             {"user", prompts[index].prompt},
         };
-        request.max_tokens = prompts[index].max_tokens;
-        request.temperature = 0.0f;
-        request.top_p = 1.0f;
-        request.top_k = 0;
-        request.repeat_penalty = 1.0f;
-        request.seed = 4242 + static_cast<int>(index);
+        request.max_output_tokens = prompts[index].max_tokens;
+        request.sampling.temperature = 0.0f;
+        request.sampling.top_p = 1.0f;
+        request.sampling.top_k = 0;
+        request.sampling.repeat_penalty = 1.0f;
+        request.sampling.seed = 4242 + static_cast<int>(index);
         const auto started = std::chrono::steady_clock::now();
         std::atomic<bool> first_token{false};
         std::chrono::steady_clock::time_point first_token_at{};
@@ -478,12 +478,12 @@ run_profile_benchmark_trial(
          "separated by single spaces. Do not add punctuation or any "
          "other text."},
     };
-    speed_request.max_tokens = 192;
-    speed_request.temperature = 0.0f;
-    speed_request.top_p = 1.0f;
-    speed_request.top_k = 0;
-    speed_request.repeat_penalty = 1.0f;
-    speed_request.seed = 7001;
+    speed_request.max_output_tokens = 192;
+    speed_request.sampling.temperature = 0.0f;
+    speed_request.sampling.top_p = 1.0f;
+    speed_request.sampling.top_k = 0;
+    speed_request.sampling.repeat_penalty = 1.0f;
+    speed_request.sampling.seed = 7001;
     auto speed_result = runtime->predict_stream(
         *speed_slot, speed_request,
         [&](const model::InferenceDelta&) {
@@ -542,12 +542,12 @@ run_profile_benchmark_trial(
                              std::to_string(parallel_slots) + " request " +
                              std::to_string(index + 1) + "."},
                     };
-                    request.max_tokens = 144;
-                    request.temperature = 0.0f;
-                    request.top_p = 1.0f;
-                    request.top_k = 0;
-                    request.repeat_penalty = 1.0f;
-                    request.seed = 9000 + parallel_slots * 10 + index;
+                    request.max_output_tokens = 144;
+                    request.sampling.temperature = 0.0f;
+                    request.sampling.top_p = 1.0f;
+                    request.sampling.top_k = 0;
+                    request.sampling.repeat_penalty = 1.0f;
+                    request.sampling.seed = 9000 + parallel_slots * 10 + index;
                     auto result = runtime->predict_stream(
                         *slot, request,
                         [&](const model::InferenceDelta&) {

@@ -3,7 +3,9 @@ project(gateway LANGUAGES CXX)
 
 set(GATEWAY_SOURCES
     src/streaming_sanitizer.cpp
+    src/generation_session.cpp
     src/routes.cpp
+    src/openai_adapter.cpp
     src/openai_routes.cpp
     src/anthropic_routes.cpp
     src/dashboard_routes.cpp

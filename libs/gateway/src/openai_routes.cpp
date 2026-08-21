@@ -1,4 +1,6 @@
 #include "gateway/openai_routes.hpp"
+#include "gateway/generation_session.hpp"
+#include "gateway/openai_adapter.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -671,57 +673,60 @@ nlohmann::json response_usage(const nlohmann::json& chat_usage) {
     };
 }
 
-nlohmann::json chat_to_response(const nlohmann::json& chat,
-                                const nlohmann::json& request,
-                                const std::string& response_id) {
-    const auto message = chat["choices"][0]["message"];
+
+nlohmann::json result_to_response(const model::InferenceResult& result,
+                                  const nlohmann::json& request,
+                                  const std::string& response_id,
+                                  const std::string& model_name) {
     nlohmann::json output = nlohmann::json::array();
-    if (message.contains("reasoning_content") && message["reasoning_content"].is_string() &&
-        !message["reasoning_content"].get<std::string>().empty()) {
+    if (!result.reasoning_text.empty()) {
         output.push_back({
-            {"id", make_id("rs_")}, {"type", "reasoning"}, {"status", "completed"},
-            {"summary", nlohmann::json::array()},
-            {"content", nlohmann::json::array({{{"type", "reasoning_text"},
-                                                  {"text", message["reasoning_content"]}}})},
+            {"id", make_id("rs_")}, {"type", "reasoning"},
+            {"status", "completed"}, {"summary", nlohmann::json::array()},
+            {"content", nlohmann::json::array({{
+                {"type", "reasoning_text"}, {"text", result.reasoning_text},
+            }})},
         });
     }
-    if (message.contains("content") && message["content"].is_string() &&
-        !message["content"].get<std::string>().empty()) {
+    if (!result.text.empty()) {
         output.push_back({
-            {"id", make_id("msg_")}, {"type", "message"}, {"status", "completed"},
-            {"role", "assistant"},
-            {"content", nlohmann::json::array({{{"type", "output_text"},
-                                                  {"text", message["content"]},
-                                                  {"annotations", nlohmann::json::array()}}})},
+            {"id", make_id("msg_")}, {"type", "message"},
+            {"status", "completed"}, {"role", "assistant"},
+            {"content", nlohmann::json::array({{
+                {"type", "output_text"}, {"text", result.text},
+                {"annotations", nlohmann::json::array()},
+            }})},
         });
     }
-    for (const auto& tool : message.value("tool_calls", nlohmann::json::array())) {
-        const std::string call_id = tool.value("id", make_id("call_"));
-        const auto function = tool.value("function", nlohmann::json::object());
+    for (const auto& tool : result.tool_calls) {
         output.push_back({
-            {"id", make_id("fc_")}, {"type", "function_call"}, {"status", "completed"},
-            {"call_id", call_id}, {"name", function.value("name", "")},
-            {"arguments", function.value("arguments", "")},
+            {"id", make_id("fc_")}, {"type", "function_call"},
+            {"status", "completed"},
+            {"call_id", tool.id.empty() ? make_id("call_") : tool.id},
+            {"name", tool.function_name},
+            {"arguments", tool.function_arguments},
         });
     }
     return {
-        {"id", response_id},
-        {"object", "response"},
-        {"created_at", std::time(nullptr)},
-        {"status", "completed"},
-        {"error", nullptr},
-        {"incomplete_details", nullptr},
+        {"id", response_id}, {"object", "response"},
+        {"created_at", std::time(nullptr)}, {"status", "completed"},
+        {"error", nullptr}, {"incomplete_details", nullptr},
         {"instructions", request.value("instructions", nlohmann::json(nullptr))},
         {"max_output_tokens", request.value("max_output_tokens", nlohmann::json(nullptr))},
-        {"model", chat.value("model", request.value("model", ""))},
-        {"output", output},
+        {"model", model_name}, {"output", output},
         {"parallel_tool_calls", request.value("parallel_tool_calls", true)},
         {"metadata", request.value("metadata", nlohmann::json::object())},
         {"temperature", request.value("temperature", 1.0)},
         {"top_p", request.value("top_p", 1.0)},
         {"tools", request.value("tools", nlohmann::json::array())},
         {"tool_choice", request.value("tool_choice", nlohmann::json("auto"))},
-        {"usage", response_usage(chat.value("usage", nlohmann::json::object()))},
+        {"usage", {
+            {"input_tokens", result.prompt_tokens},
+            {"input_tokens_details", {{"cached_tokens", result.cached_prompt_tokens}}},
+            {"output_tokens", result.completion_tokens},
+            {"output_tokens_details", {{"reasoning_tokens", 0}}},
+            {"total_tokens", result.prompt_tokens + result.completion_tokens},
+        }},
     };
 }
 
@@ -735,7 +740,7 @@ struct ToolStreamState {
 };
 
 struct ResponsesStreamState {
-    std::shared_ptr<httplib::Response> inner;
+    std::shared_ptr<GenerationSession> session;
     nlohmann::json request;
     std::string response_id;
     std::string model;
@@ -751,7 +756,6 @@ struct ResponsesStreamState {
     std::string reasoning;
     std::map<std::size_t, ToolStreamState> tools;
     nlohmann::json usage = nlohmann::json::object();
-    std::string pending;
 };
 
 nlohmann::json stream_response_object(const ResponsesStreamState& state,
@@ -829,66 +833,69 @@ bool ensure_reasoning_stream(ResponsesStreamState& state, httplib::DataSink& sin
     });
 }
 
-bool apply_chat_delta(ResponsesStreamState& state, httplib::DataSink& sink,
-                      const nlohmann::json& chunk) {
-    if (chunk.contains("usage") && chunk["usage"].is_object()) state.usage = chunk["usage"];
-    if (!chunk.contains("choices") || chunk["choices"].empty()) return true;
-    const auto delta = chunk["choices"][0].value("delta", nlohmann::json::object());
-    if (delta.contains("reasoning_content") && delta["reasoning_content"].is_string()) {
+bool apply_sanitized_generation_delta(ResponsesStreamState& state,
+                                      httplib::DataSink& sink,
+                                      const model::InferenceDelta& delta) {
+    if (!delta.reasoning_text.empty()) {
         if (!ensure_reasoning_stream(state, sink)) return false;
-        const std::string text = delta["reasoning_content"].get<std::string>();
-        state.reasoning += text;
+        state.reasoning += delta.reasoning_text;
         if (!emit_response_event(state, sink, {
-            {"type", "response.reasoning_text.delta"}, {"item_id", state.reasoning_id},
-            {"output_index", *state.reasoning_index}, {"content_index", 0}, {"delta", text},
+            {"type", "response.reasoning_text.delta"},
+            {"item_id", state.reasoning_id},
+            {"output_index", *state.reasoning_index}, {"content_index", 0},
+            {"delta", delta.reasoning_text},
         })) return false;
     }
-    if (delta.contains("content") && delta["content"].is_string()) {
+    if (!delta.content.empty()) {
         if (!ensure_message_stream(state, sink)) return false;
-        const std::string text = delta["content"].get<std::string>();
-        state.text += text;
+        state.text += delta.content;
         if (!emit_response_event(state, sink, {
-            {"type", "response.output_text.delta"}, {"item_id", state.message_id},
-            {"output_index", *state.message_index}, {"content_index", 0}, {"delta", text},
+            {"type", "response.output_text.delta"},
+            {"item_id", state.message_id},
+            {"output_index", *state.message_index}, {"content_index", 0},
+            {"delta", delta.content},
         })) return false;
     }
-    for (const auto& tool_delta : delta.value("tool_calls", nlohmann::json::array())) {
-        const std::size_t source_index = tool_delta.value("index", 0U);
-        const auto function = tool_delta.value("function", nlohmann::json::object());
-        auto [iterator, inserted] = state.tools.try_emplace(source_index);
+    for (const auto& source : delta.tool_calls) {
+        auto [iterator, inserted] = state.tools.try_emplace(source.index);
         auto& tool = iterator->second;
         if (inserted) {
-            tool.source_index = source_index;
+            tool.source_index = source.index;
             tool.output_index = state.next_output_index++;
             tool.item_id = make_id("fc_");
-            tool.call_id = tool_delta.value("id", make_id("call_"));
-            tool.name = function.value("name", "");
+            tool.call_id = source.id.empty() ? make_id("call_") : source.id;
+            tool.name = source.function_name;
             const nlohmann::json item = {
-                {"id", tool.item_id}, {"type", "function_call"}, {"status", "in_progress"},
-                {"call_id", tool.call_id}, {"name", tool.name}, {"arguments", ""},
+                {"id", tool.item_id}, {"type", "function_call"},
+                {"status", "in_progress"}, {"call_id", tool.call_id},
+                {"name", tool.name}, {"arguments", ""},
             };
             if (!emit_response_event(state, sink, {
-                {"type", "response.output_item.added"}, {"output_index", tool.output_index},
-                {"item", item},
+                {"type", "response.output_item.added"},
+                {"output_index", tool.output_index}, {"item", item},
             })) return false;
+        } else {
+            if (!source.id.empty()) tool.call_id = source.id;
+            if (!source.function_name.empty()) tool.name += source.function_name;
         }
-        if (tool_delta.contains("id") && tool_delta["id"].is_string()) {
-            tool.call_id = tool_delta["id"].get<std::string>();
-        }
-        if (!inserted && function.contains("name") && function["name"].is_string()) {
-            tool.name += function["name"].get<std::string>();
-        }
-        if (function.contains("arguments") && function["arguments"].is_string()) {
-            const std::string arguments = function["arguments"].get<std::string>();
-            tool.arguments += arguments;
+        if (!source.function_arguments.empty()) {
+            tool.arguments += source.function_arguments;
             if (!emit_response_event(state, sink, {
                 {"type", "response.function_call_arguments.delta"},
-                {"item_id", tool.item_id}, {"output_index", tool.output_index},
-                {"delta", arguments},
+                {"item_id", tool.item_id},
+                {"output_index", tool.output_index},
+                {"delta", source.function_arguments},
             })) return false;
         }
     }
     return true;
+}
+
+bool apply_generation_delta(ResponsesStreamState& state,
+                            httplib::DataSink& sink,
+                            const model::InferenceDelta& source) {
+    return apply_sanitized_generation_delta(
+        state, sink, state.session->utf8.on_delta(source));
 }
 
 nlohmann::json completed_stream_output(const ResponsesStreamState& state) {
@@ -978,48 +985,6 @@ bool fail_response_stream(ResponsesStreamState& state, httplib::DataSink& sink,
     return emit_response_event(state, sink, {{"type", "response.failed"}, {"response", response}});
 }
 
-bool consume_chat_sse(ResponsesStreamState& state, httplib::DataSink& sink,
-                      std::string_view bytes) {
-    state.pending.append(bytes);
-    std::size_t boundary = 0;
-    while ((boundary = state.pending.find("\n\n")) != std::string::npos) {
-        std::string frame = state.pending.substr(0, boundary);
-        state.pending.erase(0, boundary + 2);
-        if (frame.starts_with(':')) {
-            const std::string heartbeat = frame + "\n\n";
-            if (!sink.write(heartbeat.data(), heartbeat.size())) return false;
-            continue;
-        }
-        std::string data;
-        std::size_t line_start = 0;
-        while (line_start <= frame.size()) {
-            const auto line_end = frame.find('\n', line_start);
-            const std::string_view line(frame.data() + line_start,
-                (line_end == std::string::npos ? frame.size() : line_end) - line_start);
-            if (line.starts_with("data: ")) data.append(line.substr(6));
-            if (line_end == std::string::npos) break;
-            line_start = line_end + 1;
-        }
-        if (data.empty()) continue;
-        if (data == "[DONE]") {
-            if (!finish_response_stream(state, sink)) return false;
-            continue;
-        }
-        nlohmann::json chunk;
-        try {
-            chunk = nlohmann::json::parse(data);
-        } catch (const std::exception& error) {
-            return fail_response_stream(state, sink,
-                {{"code", "stream_parse_error"}, {"message", error.what()}});
-        }
-        if (chunk.contains("error")) {
-            if (!fail_response_stream(state, sink, chunk["error"])) return false;
-            continue;
-        }
-        if (!apply_chat_delta(state, sink, chunk)) return false;
-    }
-    return true;
-}
 
 } // namespace
 
@@ -1196,66 +1161,172 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
                     "model does not support Responses API: " + model_name);
         return;
     }
-    httplib::Request chat_request = req;
-    chat_request.body = chat_body->dump();
-    httplib::Response chat_response;
-    auto chat_deps = deps;
-    chat_deps.compatibility_profile = CompatibilityProfile::OpenAIDerivative;
-    handle_chat_completions(chat_request, chat_response, chat_deps);
-    if (chat_response.status >= 400 ||
-        (!request.value("stream", false) && chat_response.body.empty())) {
-        resp = std::move(chat_response);
+    const bool stream = request.value("stream", false);
+    auto inference_request = parse_openai_chat_request(*chat_body, true);
+    if (!inference_request) {
+        write_error(resp, 400, "invalid_request_error",
+                    inference_request.error().message);
         return;
     }
-
-    const std::string response_id = make_id("resp_");
-    if (!request.value("stream", false)) {
-        try {
-            const auto chat = nlohmann::json::parse(chat_response.body);
-            write_json(resp, 200, chat_to_response(chat, request, response_id));
-        } catch (const std::exception&) {
-            write_error(resp, 500, "response_translation_failed",
-                        "invalid Chat Completions response");
+    if (!stream) {
+        auto acquired = acquire_generation_slot(
+            req, resp, deps, *chat_body, requested_model, model_name);
+        if (!acquired) return;
+        GenerationSession session(
+            deps.coordinator, deps.metrics, deps.stats_db, deps.events,
+            acquired->slot_id, requested_model, model_name,
+            acquired->reservation_key,
+            acquired->voice_session_token.value_or(0),
+            deps.voice_session_grace_ms);
+        auto result = session.run(*inference_request);
+        if (!result) {
+            const bool invalid =
+                result.error().code == foundation::ErrorCode::InvalidArgument ||
+                result.error().code == foundation::ErrorCode::ParseError ||
+                result.error().code == foundation::ErrorCode::ContextLengthExceeded;
+            const int status = invalid ? 400 : 500;
+            const std::string code =
+                result.error().code == foundation::ErrorCode::ContextLengthExceeded
+                    ? "context_length_exceeded"
+                    : (invalid ? "invalid_request_error" : "inference_error");
+            write_error(resp, status, code, result.error().message);
+            session.finish_once(false, status, "inference_error");
+            return;
         }
+        write_json(resp, 200, result_to_response(
+            *result, request, make_id("resp_"), requested_model));
+        session.finish_once(false, 200, "completed");
         return;
     }
-
-    if (!chat_response.content_provider_) {
-        resp = std::move(chat_response);
-        return;
-    }
+    auto acquired = acquire_generation_slot(
+        req, resp, deps, *chat_body, requested_model, model_name);
+    if (!acquired) return;
+    auto session = std::make_shared<GenerationSession>(
+        deps.coordinator, deps.metrics, deps.stats_db, deps.events,
+        acquired->slot_id, requested_model, model_name,
+        acquired->reservation_key,
+        acquired->voice_session_token.value_or(0),
+        deps.voice_session_grace_ms);
     auto state = std::make_shared<ResponsesStreamState>();
-    state->inner = std::make_shared<httplib::Response>(std::move(chat_response));
+    state->session = session;
     state->request = request;
-    state->response_id = response_id;
+    state->response_id = make_id("resp_");
     state->model = model_name;
+    session->start(std::move(*inference_request));
 
     resp.status = 200;
     resp.set_header("Cache-Control", "no-cache");
     resp.set_header("Connection", "keep-alive");
     resp.set_chunked_content_provider(
         "text/event-stream",
-        [state](std::size_t offset, httplib::DataSink& sink) {
-            if (!start_response_stream(*state, sink)) return false;
-            httplib::DataSink proxy;
-            proxy.write = [state, &sink](const char* data, std::size_t size) {
-                return consume_chat_sse(*state, sink, std::string_view(data, size));
-            };
-            proxy.is_writable = [&sink] { return sink.is_writable(); };
-            proxy.done = [] {};
-            proxy.done_with_trailer = [](const httplib::Headers&) {};
-            const bool more = state->inner->content_provider_(offset, 0, proxy);
-            if (!more && !state->completed) {
-                if (!finish_response_stream(*state, sink)) return false;
-            }
-            if (!more) {
+        [state](std::size_t, httplib::DataSink& sink) {
+            try {
+                if (!start_response_stream(*state, sink)) {
+                    state->session->finish_once(true, 499, "start_write_failed");
+                    return false;
+                }
+                std::unique_lock lock(state->session->mtx);
+                while (!state->session->cv.wait_for(
+                    lock, std::chrono::seconds{2}, [&] {
+                        return !state->session->delta_queue.empty() ||
+                               state->session->inference_done ||
+                               state->session->aborted.load();
+                    })) {
+                    lock.unlock();
+                    if (!sink.write(": \n\n", 4)) {
+                        state->session->finish_once(
+                            true, 499, "heartbeat_write_failed");
+                        return false;
+                    }
+                    lock.lock();
+                }
+                if (state->session->aborted.load() &&
+                    !state->session->inference_done &&
+                    state->session->delta_queue.empty()) {
+                    lock.unlock();
+                    state->session->finish_once(true, 499, "aborted");
+                    return false;
+                }
+                if (!state->session->delta_queue.empty()) {
+                    std::deque<model::InferenceDelta> deltas;
+                    deltas.swap(state->session->delta_queue);
+                    state->session->pending_bytes = 0;
+                    lock.unlock();
+                    state->session->cv.notify_all();
+                    if (!sink.is_writable()) {
+                        state->session->finish_once(
+                            true, 499, "sink_not_writable");
+                        return false;
+                    }
+                    for (const auto& delta : deltas) {
+                        if (!apply_generation_delta(*state, sink, delta)) {
+                            state->session->finish_once(
+                                true, 499, "chunk_write_failed");
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                const bool inference_error = state->session->inference_error;
+                const auto error_code = state->session->error_code;
+                const auto error_message = state->session->error_msg;
+                const auto result = state->session->final_result;
+                lock.unlock();
+
+                const auto trailing = state->session->utf8.finish();
+                if (!apply_sanitized_generation_delta(*state, sink, trailing)) {
+                    state->session->finish_once(
+                        true, 499, "trailing_chunk_write_failed");
+                    return false;
+                }
+                if (inference_error) {
+                    const bool invalid =
+                        error_code == foundation::ErrorCode::InvalidArgument ||
+                        error_code == foundation::ErrorCode::ParseError ||
+                        error_code == foundation::ErrorCode::ContextLengthExceeded;
+                    const int status = invalid ? 400 : 500;
+                    const std::string code =
+                        error_code == foundation::ErrorCode::ContextLengthExceeded
+                            ? "context_length_exceeded"
+                            : (invalid ? "invalid_request_error" : "inference_error");
+                    if (!fail_response_stream(*state, sink, {
+                        {"code", code}, {"message", error_message},
+                    })) {
+                        state->session->finish_once(
+                            true, 499, "error_write_failed");
+                        return false;
+                    }
+                    state->session->finish_once(
+                        false, status, "inference_error");
+                } else {
+                    if (result) {
+                        state->usage = {
+                            {"prompt_tokens", result->prompt_tokens},
+                            {"prompt_tokens_details", {
+                                {"cached_tokens", result->cached_prompt_tokens},
+                            }},
+                            {"completion_tokens", result->completion_tokens},
+                        };
+                    }
+                    if (!finish_response_stream(*state, sink)) {
+                        state->session->finish_once(
+                            true, 499, "done_write_failed");
+                        return false;
+                    }
+                    state->session->finish_once(false, 200, "completed");
+                }
                 sink.done();
                 return false;
+            } catch (...) {
+                state->session->finish_once(
+                    true, 500, "provider_exception");
+                return false;
             }
-            return true;
         },
         [state](bool success) {
-            state->inner->content_provider_success_ = success;
+            state->session->finish_once(
+                !success, success ? 200 : 499,
+                success ? "resource_releaser_success" : "resource_releaser");
         });
 }
 

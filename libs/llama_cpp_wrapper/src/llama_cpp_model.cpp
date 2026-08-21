@@ -1,4 +1,5 @@
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
+#include "llama_cpp_wrapper/llama_chat_adapter.hpp"
 #include "llama_cpp_wrapper/streaming_tool_call_state.hpp"
 #include "llama_cpp_wrapper/continuous_batch_scheduler.hpp"
 
@@ -326,161 +327,6 @@ std::string normalize_path(const std::string& p) {
   return p;
 }
 
-template <typename Json>
-std::vector<std::vector<uint8_t>> extract_image_media(Json& messages) {
-  std::vector<std::vector<uint8_t>> media;
-  for (auto& message : messages) {
-    if (!message.is_object() || !message.contains("content") ||
-        !message["content"].is_array()) {
-      continue;
-    }
-    for (auto& part : message["content"]) {
-      if (!part.is_object()) continue;
-      const auto type = part.value("type", std::string{});
-      if (type != "image_url" && type != "image" && type != "input_image") {
-        continue;
-      }
-      if (!part.contains("image_url")) {
-        throw std::invalid_argument("image input requires image_url");
-      }
-      const auto& value = part["image_url"];
-      std::string url;
-      if (value.is_string()) {
-        url = value.template get<std::string>();
-      } else if (value.is_object() && value.contains("url") && value["url"].is_string()) {
-        url = value["url"].template get<std::string>();
-      } else {
-        throw std::invalid_argument("image_url must be a string or an object with a string url");
-      }
-      const auto comma = url.find(',');
-      if (comma == std::string::npos ||
-          !url.starts_with("data:image/") ||
-          url.substr(0, comma).find(";base64") == std::string::npos) {
-        throw std::invalid_argument("image_url must be a base64 data:image URL");
-      }
-      const auto encoded = url.substr(comma + 1);
-      if (encoded.empty() || encoded.size() > 32U * 1024U * 1024U) {
-        throw std::invalid_argument("image payload is empty or exceeds 32 MiB encoded");
-      }
-      const auto decoded = base64::decode(encoded);
-      if (decoded.empty()) {
-        throw std::invalid_argument("image payload decoded to empty data");
-      }
-      media.emplace_back(decoded.begin(), decoded.end());
-      part = Json{
-          {"type", "media_marker"},
-          {"text", mtmd_default_marker()},
-      };
-    }
-  }
-  return media;
-}
-
-std::string role_to_template_role(const std::string& role) {
-  if (role == "system") return "system";
-  if (role == "assistant") return "assistant";
-  if (role == "tool") return "tool";
-  return "user";
-}
-
-common_chat_msg to_common_chat_msg(const ChatMessage& msg) {
-  common_chat_msg cmsg;
-  cmsg.role = role_to_template_role(msg.role).c_str();
-  cmsg.content = msg.content.c_str();
-  cmsg.tool_call_id = msg.tool_call_id.c_str();
-
-  if (msg.role == "assistant" && !msg.content.empty()) {
-    try {
-      auto calls = nlohmann::json::parse(msg.content);
-      if (calls.is_array()) {
-        for (const auto& call : calls) {
-          common_chat_tool_call tc;
-          if (call.contains("function")) {
-            const auto& fn = call["function"];
-            tc.name = fn.value("name", "").c_str();
-            if (fn.contains("arguments")) {
-              const auto& a = fn["arguments"];
-              tc.arguments = a.is_string() ? a.get<std::string>().c_str() : a.dump().c_str();
-            }
-          } else if (call.contains("name")) {
-            tc.name = call.value("name", "").c_str();
-            if (call.contains("arguments")) {
-              const auto& a = call["arguments"];
-              tc.arguments = a.is_string() ? a.get<std::string>().c_str() : a.dump().c_str();
-            }
-          }
-          tc.id = call.value("id", "").c_str();
-          if (!tc.name.empty()) cmsg.tool_calls.push_back(std::move(tc));
-        }
-      }
-    } catch (...) {}
-  }
-
-  if (msg.role == "tool") {
-    cmsg.content = msg.content.c_str();
-    cmsg.tool_call_id = msg.tool_call_id.c_str();
-  }
-
-  return cmsg;
-}
-
-std::vector<common_chat_tool> parse_tools_json(const std::string& tools_json) {
-  std::vector<common_chat_tool> tools;
-  if (tools_json.empty()) return tools;
-  try {
-    auto j = nlohmann::json::parse(tools_json);
-    if (!j.is_array()) return tools;
-    for (const auto& item : j) {
-      common_chat_tool tool;
-      if (item.contains("function")) {
-        const auto& fn = item["function"];
-        tool.name = fn.value("name", "").c_str();
-        tool.description = fn.value("description", "").c_str();
-        if (fn.contains("parameters")) {
-          tool.parameters = fn["parameters"].dump().c_str();
-        }
-      } else {
-        tool.name = item.value("name", "").c_str();
-        tool.description = item.value("description", "").c_str();
-        if (item.contains("parameters")) {
-          tool.parameters = item["parameters"].dump().c_str();
-        }
-      }
-      if (!tool.name.empty()) tools.push_back(std::move(tool));
-    }
-  } catch (...) {}
-  return tools;
-}
-
-common_reasoning_format parse_reasoning_format(const std::string& value) {
-  if (value.empty()) return COMMON_REASONING_FORMAT_AUTO;
-  std::string lower = value;
-  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-  std::replace(lower.begin(), lower.end(), '-', '_');
-  if (lower == "none") return COMMON_REASONING_FORMAT_NONE;
-  if (lower == "deepseek") return COMMON_REASONING_FORMAT_DEEPSEEK;
-  if (lower == "deepseek_legacy") return COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY;
-  if (lower == "auto") return COMMON_REASONING_FORMAT_AUTO;
-  return COMMON_REASONING_FORMAT_AUTO;
-}
-
-common_chat_tool_choice parse_tool_choice(const nlohmann::ordered_json& body) {
-  if (!body.contains("tool_choice") || body["tool_choice"].is_null()) {
-    return COMMON_CHAT_TOOL_CHOICE_AUTO;
-  }
-  const auto& tc = body["tool_choice"];
-  if (tc.is_string()) {
-    return common_chat_tool_choice_parse_oaicompat(tc.get<std::string>());
-  }
-  if (tc.is_object()) {
-    const auto type = tc.value("type", std::string{"auto"});
-    if (type == "none") return COMMON_CHAT_TOOL_CHOICE_NONE;
-    if (type == "required" || type == "any") return COMMON_CHAT_TOOL_CHOICE_REQUIRED;
-    return COMMON_CHAT_TOOL_CHOICE_AUTO;
-  }
-  return COMMON_CHAT_TOOL_CHOICE_AUTO;
-}
-
 std::vector<llama_token> tokenize_stop_strings(
     const llama_vocab* vocab, const std::vector<std::string>& stops) {
   std::vector<llama_token> tokens;
@@ -516,18 +362,6 @@ std::string token_to_piece(const llama_vocab* vocab, llama_token token) {
     if (required <= buffer.size()) return {};
     buffer.resize(required);
   }
-}
-
-std::string tool_call_json(const common_chat_tool_call& tc) {
-  nlohmann::json j = {
-      {"type", "function"},
-      {"function", {
-          {"name", tc.name},
-          {"arguments", tc.arguments},
-      }},
-  };
-  if (!tc.id.empty()) j["id"] = tc.id;
-  return j.dump();
 }
 
 ToolCall to_tool_call(const common_chat_tool_call& tc) {
@@ -722,10 +556,8 @@ void apply_parsed_message(InferenceResult& out, const common_chat_msg& msg) {
   out.text = msg.content;
   out.reasoning_text = msg.reasoning_content;
   out.tool_calls.clear();
-  out.tool_calls_json.clear();
   for (const auto& tc : msg.tool_calls) {
     out.tool_calls.push_back(to_tool_call(tc));
-    out.tool_calls_json.push_back(tool_call_json(tc));
   }
 }
 
@@ -743,18 +575,6 @@ void apply_fallback_tool_calls(InferenceResult& out, const std::string& generate
   if (!calls || calls->empty()) return;
   out.text.clear();
   out.tool_calls = std::move(*calls);
-  out.tool_calls_json.clear();
-  for (const auto& tc : out.tool_calls) {
-    nlohmann::json j = {
-        {"type", "function"},
-        {"function", {
-            {"name", tc.function_name},
-            {"arguments", tc.function_arguments},
-        }},
-    };
-    if (!tc.id.empty()) j["id"] = tc.id;
-    out.tool_calls_json.push_back(j.dump());
-  }
 }
 
 bool fallback_tool_call_complete(const std::string& generated) {
@@ -762,66 +582,6 @@ bool fallback_tool_call_complete(const std::string& generated) {
 }
 
 } // namespace
-
-foundation::Result<std::string> apply_reasoning_effort(
-    common_chat_templates_inputs& inputs,
-    const nlohmann::ordered_json& body,
-    const model::ModelInfo& info) {
-  std::optional<std::string> requested;
-  if (body.contains("chat_template_kwargs") &&
-      body["chat_template_kwargs"].is_object() &&
-      body["chat_template_kwargs"].contains("reasoning_effort")) {
-    if (!body["chat_template_kwargs"]["reasoning_effort"].is_string()) {
-      return foundation::Err<std::string>(
-          foundation::ErrorCode::InvalidArgument,
-          "chat_template_kwargs.reasoning_effort must be a string");
-    }
-    requested =
-        body["chat_template_kwargs"]["reasoning_effort"].get<std::string>();
-  } else if (body.contains("reasoning_effort")) {
-    if (!body["reasoning_effort"].is_string()) {
-      return foundation::Err<std::string>(
-          foundation::ErrorCode::InvalidArgument,
-          "reasoning_effort must be a string");
-    }
-    requested = body["reasoning_effort"].get<std::string>();
-  } else if (info.reasoning.supported &&
-             !info.reasoning.default_effort.empty()) {
-    requested = info.reasoning.default_effort;
-  }
-  if (!requested) return foundation::Ok(std::string{});
-  if (!info.reasoning.supported) {
-    return foundation::Err<std::string>(
-        foundation::ErrorCode::InvalidArgument,
-        "model does not support reasoning effort: " + info.name);
-  }
-
-  std::string resolved = *requested;
-  if (const auto alias = info.reasoning.aliases.find(resolved);
-      alias != info.reasoning.aliases.end()) {
-    resolved = alias->second;
-  }
-  if (resolved == "none") {
-    if (!info.reasoning.none_disables) {
-      return foundation::Err<std::string>(
-          foundation::ErrorCode::InvalidArgument,
-          "reasoning effort 'none' is not supported by model: " + info.name);
-    }
-    inputs.enable_thinking = false;
-    inputs.chat_template_kwargs.erase("reasoning_effort");
-  } else {
-    if (std::find(info.reasoning.efforts.begin(), info.reasoning.efforts.end(),
-                  resolved) == info.reasoning.efforts.end()) {
-      return foundation::Err<std::string>(
-          foundation::ErrorCode::InvalidArgument,
-          "unsupported reasoning effort '" + *requested + "' for model: " +
-              info.name);
-    }
-    inputs.chat_template_kwargs["reasoning_effort"] =
-        nlohmann::json(resolved).dump();
-  }
-  return foundation::Ok(std::move(resolved));
-}
 
 std::string LlamaCppModel::version() {
   const char* info = llama_print_system_info();
@@ -1375,69 +1135,27 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
     return Result<ChatTemplateResult>(std::unexpect, make_error(ErrorCode::Internal, "chat templates not initialized"));
   }
 
-  common_chat_templates_inputs inputs;
-  nlohmann::ordered_json body = nlohmann::ordered_json::object();
-  if (!req.openai_body_json.empty()) {
-    try {
-      body = nlohmann::ordered_json::parse(req.openai_body_json);
-    } catch (const std::exception& e) {
-      return Result<ChatTemplateResult>(std::unexpect,
-          make_error(ErrorCode::ParseError, std::string("invalid OpenAI request JSON: ") + e.what()));
-    }
-  }
-  std::vector<std::vector<uint8_t>> media;
-  if (body.contains("messages") && body["messages"].is_array()) {
-    try {
-      media = extract_image_media(body["messages"]);
-    } catch (const std::exception& e) {
-      return Result<ChatTemplateResult>(std::unexpect,
-          make_error(ErrorCode::InvalidArgument, e.what()));
-    }
-    if (!media.empty() && mtmd_ == nullptr) {
-      return Result<ChatTemplateResult>(std::unexpect,
-          make_error(ErrorCode::InvalidArgument,
-                     "image input requires a loaded vision projector"));
-    }
-  }
-
-  inputs.reasoning_format = parse_reasoning_format(info_.reasoning_format.empty() ? cfg_.reasoning_format : info_.reasoning_format);
-  if (body.contains("reasoning_format") && body["reasoning_format"].is_string()) {
-    inputs.reasoning_format = parse_reasoning_format(body["reasoning_format"].get<std::string>());
-  }
-  inputs.add_generation_prompt = true;
-  if (body.contains("add_generation_prompt") && body["add_generation_prompt"].is_boolean()) {
-    inputs.add_generation_prompt = body["add_generation_prompt"].get<bool>();
-  }
-  inputs.use_jinja = true;
-  inputs.enable_thinking = common_chat_templates_support_enable_thinking(chat_templates_);
   auto caps = common_chat_templates_get_caps(chat_templates_);
-  inputs.parallel_tool_calls = caps["supports_parallel_tool_calls"];
-
-  if (body.contains("messages") && body["messages"].is_array()) {
-    for (auto& m : body["messages"]) {
-      if (m.is_object() && !m.contains("content") && !m.contains("tool_calls")) {
-        m["content"] = "";
-      }
-    }
-    try {
-      inputs.messages = common_chat_msgs_parse_oaicompat(body["messages"]);
-    } catch (const std::exception& e) {
-      return Result<ChatTemplateResult>(std::unexpect,
-          make_error(ErrorCode::ParseError, std::string("invalid OpenAI messages: ") + e.what()));
-    }
-  } else {
-    for (const auto& m : req.messages) {
-      inputs.messages.push_back(to_common_chat_msg(m));
-    }
-    if (inputs.messages.empty()) {
-      common_chat_msg msg;
-      msg.role = "user";
-      msg.content = req.prompt;
-      inputs.messages.push_back(std::move(msg));
-    }
+  LlamaChatAdapterOptions adapter_options;
+  adapter_options.supports_thinking =
+      common_chat_templates_support_enable_thinking(chat_templates_);
+  adapter_options.supports_parallel_tool_calls =
+      caps["supports_parallel_tool_calls"];
+  adapter_options.default_reasoning_format = info_.reasoning_format.empty()
+      ? cfg_.reasoning_format : info_.reasoning_format;
+  auto adapted = adapt_generation_request(req, info_, adapter_options);
+  if (!adapted) {
+    return Result<ChatTemplateResult>(std::unexpect,
+        make_error(adapted.error().code, adapted.error().message));
+  }
+  auto inputs = std::move(adapted->inputs);
+  auto media = std::move(adapted->media);
+  if (!media.empty() && mtmd_ == nullptr) {
+    return Result<ChatTemplateResult>(std::unexpect,
+        make_error(ErrorCode::InvalidArgument,
+                   "image input requires a loaded vision projector"));
   }
 
-  // DEBUG: log incoming request shape so we can compare OpenCode vs direct Ollama.
   {
     std::size_t sys_chars = 0, user_chars = 0, tool_result_chars = 0;
     int n_sys = 0, n_user = 0, n_assistant = 0, n_tool = 0;
@@ -1448,75 +1166,17 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
       else if (m.role == "assistant") { ++n_assistant; }
       else if (m.role == "tool") { ++n_tool; tool_result_chars += len; }
     }
-    const int n_tools_defined = body.contains("tools") && body["tools"].is_array()
-                                  ? static_cast<int>(body["tools"].size()) : 0;
-    const int max_tok = body.value(
-        "max_tokens", inferdeck::model::k_max_tokens_use_context_budget);
     LOG_INFO("request_shape",
              "model={} msgs={} [sys={} sys_chars={} user={} asst={} tool_results={} tool_result_chars={}] "
              "tools_defined={} max_tokens={}",
              info_.name, inputs.messages.size(),
              n_sys, sys_chars, n_user, n_assistant, n_tool, tool_result_chars,
-             n_tools_defined, max_tok);
+             req.tools.size(), req.max_output_tokens);
   }
 
-  if (body.contains("tools") && body["tools"].is_array()) {
-    try {
-      inputs.tools = common_chat_tools_parse_oaicompat(body["tools"]);
-    } catch (const std::exception& e) {
-      return Result<ChatTemplateResult>(std::unexpect,
-          make_error(ErrorCode::ParseError, std::string("invalid OpenAI tools: ") + e.what()));
-    }
-    inputs.tool_choice = parse_tool_choice(body);
-  } else if (!req.tools_json.empty()) {
-    inputs.tools = parse_tools_json(req.tools_json);
-    inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
-  }
-  if (!inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE &&
-      body.contains("grammar")) {
-    return Result<ChatTemplateResult>(std::unexpect,
-        make_error(ErrorCode::InvalidArgument, "Cannot use custom grammar constraints with tools."));
-  }
-  if (body.contains("parallel_tool_calls") && body["parallel_tool_calls"].is_boolean()) {
-    inputs.parallel_tool_calls = body["parallel_tool_calls"].get<bool>();
-  }
-  if (body.contains("chat_template_kwargs") && body["chat_template_kwargs"].is_object()) {
-    for (const auto& item : body["chat_template_kwargs"].items()) {
-      inputs.chat_template_kwargs[item.key()] = item.value().dump();
-    }
-    const auto it = inputs.chat_template_kwargs.find("enable_thinking");
-    if (it != inputs.chat_template_kwargs.end()) {
-      if (it->second == "true") inputs.enable_thinking = true;
-      if (it->second == "false") inputs.enable_thinking = false;
-    }
-  }
-  auto reasoning_effort = apply_reasoning_effort(inputs, body, info_);
-  if (!reasoning_effort) {
-    return Result<ChatTemplateResult>(std::unexpect,
-        make_error(reasoning_effort.error().code, reasoning_effort.error().message));
-  }
-  if (!reasoning_effort->empty()) {
+  if (req.reasoning_effort) {
     LOG_INFO("reasoning_effort_applied", "model={} effort={}",
-             info_.name, *reasoning_effort);
-  }
-  if (body.contains("grammar") && body["grammar"].is_string()) {
-    inputs.grammar = body["grammar"].get<std::string>();
-  }
-  if (body.contains("json_schema")) {
-    inputs.json_schema = body["json_schema"].is_null() ? "" : body["json_schema"].dump();
-  }
-  if (body.contains("response_format") && body["response_format"].is_object()) {
-    const auto& rf = body["response_format"];
-    const auto type = rf.value("type", std::string{});
-    if (type == "json_object") {
-      if (rf.contains("schema")) inputs.json_schema = rf["schema"].dump();
-      else if (inputs.json_schema.empty()) inputs.json_schema = nlohmann::ordered_json::object().dump();
-    } else if (type == "json_schema" && rf.contains("json_schema")) {
-      const auto& wrapper = rf["json_schema"];
-      if (wrapper.is_object() && wrapper.contains("schema")) {
-        inputs.json_schema = wrapper["schema"].dump();
-      }
-    }
+             info_.name, *req.reasoning_effort);
   }
 
   try {
@@ -1575,31 +1235,25 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
   if (!chat_params.parser.empty()) {
     result.parser_params.parser.load(chat_params.parser);
   }
-  if (body.contains("stop")) {
-    if (body["stop"].is_string()) {
-      result.stop_strings.push_back(body["stop"].get<std::string>());
-    } else if (body["stop"].is_array()) {
-      for (const auto& stop : body["stop"]) {
-        if (stop.is_string()) result.stop_strings.push_back(stop.get<std::string>());
-      }
-    }
-  }
-  // Sampler params: explicit per-request (OpenAI body) values win; otherwise
+  result.stop_strings.insert(result.stop_strings.end(), req.stop.begin(),
+                             req.stop.end());
+  // Sampler params: explicit per-request values win; otherwise
   // fall back to the server-side SamplingConfig defaults (issue #42), which
   // mirror stock llama-server (DRY off, repeat_penalty neutral).
   const auto& sc = cfg_.sampling;
-  result.sampling_params.temp          = req.temperature.value_or(sc.temperature);
-  result.sampling_params.top_p         = req.top_p.value_or(sc.top_p);
-  result.sampling_params.top_k         = req.top_k.value_or(sc.top_k);
-  result.sampling_params.min_p         = sc.min_p;
-  result.sampling_params.penalty_repeat = req.repeat_penalty.value_or(sc.repeat_penalty);
-  result.sampling_params.penalty_last_n = req.repeat_last_n.value_or(sc.repeat_last_n);
+  result.sampling_params.temp          = req.sampling.temperature.value_or(sc.temperature);
+  result.sampling_params.top_p         = req.sampling.top_p.value_or(sc.top_p);
+  result.sampling_params.top_k         = req.sampling.top_k.value_or(sc.top_k);
+  result.sampling_params.min_p         = req.sampling.min_p.value_or(sc.min_p);
+  result.sampling_params.penalty_repeat = req.sampling.repeat_penalty.value_or(sc.repeat_penalty);
+  result.sampling_params.penalty_last_n = req.sampling.repeat_last_n.value_or(sc.repeat_last_n);
   result.sampling_params.dry_multiplier     = sc.dry_multiplier;
   result.sampling_params.dry_base           = sc.dry_base;
   result.sampling_params.dry_allowed_length = sc.dry_allowed_length;
   result.sampling_params.dry_penalty_last_n = sc.dry_penalty_last_n;
   result.sampling_params.dry_sequence_breakers = sc.dry_seq_breakers;
-  result.sampling_params.seed = req.seed >= 0 ? static_cast<std::uint32_t>(req.seed) : LLAMA_DEFAULT_SEED;
+  result.sampling_params.seed = req.sampling.seed >= 0
+      ? static_cast<std::uint32_t>(req.sampling.seed) : LLAMA_DEFAULT_SEED;
 
   // DEBUG (issue #42 diagnosis): log what the client sent vs what was resolved,
   // so we can see whether OpenCode/Claude Code override the server-side config.
@@ -1613,8 +1267,9 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
            "model={} client[temp={} top_p={} top_k={} repeat_penalty={} repeat_last_n={}] "
            "resolved[temp={:.3f} top_p={:.3f} top_k={} min_p={:.3f} repeat_penalty={:.3f} "
            "repeat_last_n={} dry_mult={:.3f}]",
-           info_.name, opt_f(req.temperature), opt_f(req.top_p), opt_i(req.top_k),
-           opt_f(req.repeat_penalty), opt_i(req.repeat_last_n),
+           info_.name, opt_f(req.sampling.temperature), opt_f(req.sampling.top_p),
+           opt_i(req.sampling.top_k), opt_f(req.sampling.repeat_penalty),
+           opt_i(req.sampling.repeat_last_n),
            result.sampling_params.temp, result.sampling_params.top_p,
            result.sampling_params.top_k, result.sampling_params.min_p,
            result.sampling_params.penalty_repeat, result.sampling_params.penalty_last_n,
@@ -1662,7 +1317,7 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
     // See maybe_truncate_prompt: clamp bounds must satisfy lo <= hi (UB
     // otherwise) when n_ctx_seq < 1024.
     const int reserve_hi = n_ctx_seq / 4;
-    const int reserve = std::clamp(req.max_tokens > 0 ? req.max_tokens : 1024,
+    const int reserve = std::clamp(req.max_output_tokens > 0 ? req.max_output_tokens : 1024,
                                    std::min(256, reserve_hi), reserve_hi);
     budget = n_ctx_seq - reserve - 1;
   }
@@ -1840,14 +1495,15 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
                      "This model's maximum context length is " + std::to_string(s.n_ctx_seq) +
                      " tokens. However, your messages resulted in " + std::to_string(prompt_context) +
                      " tokens. Please reduce the length of the messages."));
-    maybe_truncate_prompt(s.prompt_tokens, s.n_ctx_seq, req.max_tokens, info_.name);
+    maybe_truncate_prompt(s.prompt_tokens, s.n_ctx_seq, req.max_output_tokens, info_.name);
     n_tokens = static_cast<int>(s.prompt_tokens.size());
     s.prompt_position_count = n_tokens;
   }
 
   const int ctx_budget = std::max(
       1, s.n_ctx_seq - s.prompt_position_count - 1);
-  s.max_tokens = req.max_tokens > 0 ? std::min(req.max_tokens, ctx_budget) : ctx_budget;
+  s.max_tokens = req.max_output_tokens > 0
+      ? std::min(req.max_output_tokens, ctx_budget) : ctx_budget;
 
   // Snapshot per-slot KV state under the mutex (scheduler may touch these after submit)
   {

@@ -1,5 +1,7 @@
 #include "gateway/routes.hpp"
 
+#include "gateway/openai_adapter.hpp"
+#include "gateway/generation_session.hpp"
 #include "gateway/streaming_sanitizer.hpp"
 #include "foundation/logging.hpp"
 
@@ -328,31 +330,6 @@ nlohmann::json tool_call_delta_json(const model::ToolCallDelta& tc) {
         out["function"] = fn;
     }
     return out;
-}
-
-foundation::Result<model::InferenceRequest> make_inference_request(
-    const nlohmann::json& body, bool allow_extensions) {
-    try {
-        model::InferenceRequest ir;
-        ir.openai_body_json = body.dump();
-        ir.max_tokens = body.value("max_tokens", body.value(
-            "max_completion_tokens", model::k_max_tokens_use_context_budget));
-        if (body.contains("temperature") && !body["temperature"].is_null())
-            ir.temperature = body["temperature"].get<float>();
-        if (body.contains("top_p") && !body["top_p"].is_null())
-            ir.top_p = body["top_p"].get<float>();
-        if (allow_extensions && body.contains("top_k") && !body["top_k"].is_null())
-            ir.top_k = body["top_k"].get<int>();
-        if (allow_extensions && body.contains("repeat_penalty") && !body["repeat_penalty"].is_null())
-            ir.repeat_penalty = body["repeat_penalty"].get<float>();
-        if (allow_extensions && body.contains("repeat_last_n") && !body["repeat_last_n"].is_null())
-            ir.repeat_last_n = body["repeat_last_n"].get<int>();
-        ir.seed = body.value("seed", -1);
-        return foundation::Ok(std::move(ir));
-    } catch (const nlohmann::json::exception& error) {
-        return foundation::Err<model::InferenceRequest>(
-            foundation::ErrorCode::InvalidArgument, error.what());
-    }
 }
 
 foundation::Result<std::optional<std::string>> normalize_reasoning_request(
@@ -886,43 +863,20 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
 void handle_non_stream_chat(
     httplib::Response& resp, const GatewayDeps& deps,
     const std::string& requested_model, const std::string& model_name,
-    int slot_id, const std::string& id,
+    const std::string& id, GenerationSession& session,
     const model::InferenceRequest& inference_request) {
-    model::InferenceResult result;
-    try {
-        auto predicted = deps.coordinator.predict(
-            model_name, slot_id, inference_request);
-        if (!predicted) {
-            const auto error = classify_inference_error(predicted.error().code);
-            LOG_ERROR("inference_failed",
-                      "model={} slot_id={} status={} code={} error={}",
-                      model_name, slot_id, error.status, error.code,
-                      predicted.error().message);
-            model::InferenceResult failed;
-            record_request(deps, requested_model, failed, error.status,
-                           slot_id, 0.0, 0, model_name);
-            write_error(resp, error.status, error.code,
-                        predicted.error().message);
-            return;
-        }
-        result = std::move(*predicted);
-    } catch (const std::exception& error) {
-        LOG_ERROR("predict_exception", "what={}", error.what());
-        model::InferenceResult failed;
-        record_request(deps, requested_model, failed, 500, slot_id,
-                       0.0, 0, model_name);
-        write_error(resp, 500, "inference_exception", error.what());
-        return;
-    } catch (...) {
-        LOG_ERROR("predict_unknown_exception", "");
-        model::InferenceResult failed;
-        record_request(deps, requested_model, failed, 500, slot_id,
-                       0.0, 0, model_name);
-        write_error(resp, 500, "inference_exception", "unknown exception");
+    auto predicted = session.run(inference_request);
+    if (!predicted) {
+        const auto error = classify_inference_error(predicted.error().code);
+        LOG_ERROR("inference_failed",
+                  "model={} slot_id={} status={} code={} error={}",
+                  model_name, session.slot_id, error.status, error.code,
+                  predicted.error().message);
+        write_error(resp, error.status, error.code, predicted.error().message);
+        session.finish_once(false, error.status, "inference_error");
         return;
     }
-    record_request(deps, requested_model, result, 200, slot_id,
-                   0.0, 0, model_name);
+    const auto& result = *predicted;
     nlohmann::json message = {
         {"role", "assistant"},
         {"content", result.text},
@@ -958,9 +912,24 @@ void handle_non_stream_chat(
             {"total_tokens", result.prompt_tokens + result.completion_tokens},
         }},
     });
+    session.finish_once(false, 200, "completed");
 }
 
 } // namespace
+
+std::optional<AcquiredGenerationSlot> acquire_generation_slot(
+    const httplib::Request& req, httplib::Response& resp,
+    const GatewayDeps& deps, const nlohmann::json& body,
+    const std::string& requested_model, const std::string& resolved_model) {
+    auto acquired = acquire_chat_slot(req, resp, deps, body,
+                                      requested_model, resolved_model);
+    if (!acquired) return std::nullopt;
+    return AcquiredGenerationSlot{
+        acquired->slot_id,
+        std::move(acquired->reservation_key),
+        std::move(acquired->voice_session_token),
+    };
+}
 
 void handle_chat_completions(const httplib::Request& req, httplib::Response& resp,
                              const GatewayDeps& deps) {
@@ -1060,14 +1029,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     const bool include_stream_usage = body.contains("stream_options") &&
         body["stream_options"].is_object() &&
         body["stream_options"].value("include_usage", false);
-    auto inference_request = make_inference_request(body, derivative);
+    auto inference_request = parse_openai_chat_request(body, derivative);
     if (!inference_request) {
         write_error(resp, 400, "invalid_request_error",
                     inference_request.error().message);
         return;
     }
 
-    auto acquired = acquire_chat_slot(
+    auto acquired = acquire_generation_slot(
         req, resp, deps, body, requested_model, model_name);
     if (!acquired) return;
     const int slot_id = acquired->slot_id;
@@ -1078,187 +1047,21 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     const std::string stream_model = requested_model;
     const auto stream_created = static_cast<std::int64_t>(std::time(nullptr));
 
-    std::function<void()> release_slot = [slot_id, &deps, model_name,
-                                          reservation_key,
-                                          voice_session_token]() noexcept {
-        if (slot_id >= 0) {
-            (void)deps.coordinator.release_slot(model_name, slot_id);
-        }
-        if (voice_session_token) {
-            deps.coordinator.complete_priority_session_hold(
-                reservation_key, *voice_session_token,
-                std::chrono::milliseconds{deps.voice_session_grace_ms});
-        }
-    };
-    struct ReleaseGuard {
-        std::function<void()>* fn;
-        bool armed{true};
-        void disarm() { armed = false; }
-        ~ReleaseGuard() { if (armed && fn) (*fn)(); }
-    } guard{&release_slot};
+    auto state = std::make_shared<GenerationSession>(
+        deps.coordinator, deps.metrics, deps.stats_db, deps.events,
+        slot_id, requested_model, model_name, reservation_key,
+        voice_session_token.value_or(0), deps.voice_session_grace_ms);
 
     if (!stream) {
         handle_non_stream_chat(resp, deps, requested_model, model_name,
-                               slot_id, id, *inference_request);
+                               id, *state, *inference_request);
         return;
     }
 
     resp.set_header("Content-Type", "text/event-stream");
     resp.set_header("Cache-Control", "no-cache");
     resp.set_header("Connection", "keep-alive");
-
-    struct StreamState {
-        std::mutex mtx;
-        std::condition_variable cv;
-        std::deque<model::InferenceDelta> delta_queue;
-        std::size_t pending_bytes{0};
-        bool inference_done{false};
-        bool inference_error{false};
-        foundation::ErrorCode error_code{foundation::ErrorCode::Internal};
-        std::string error_msg;
-        std::shared_ptr<model::InferenceResult> final_result;
-        std::atomic<bool> aborted{false};
-        std::thread inference_thread;
-        int slot_id{-1};
-        std::string model_name;
-        std::string requested_model;
-        model::BackendCoordinator* coordinator{nullptr};
-        observability::Metrics* metrics{nullptr};
-        observability::StatsDb* stats_db{nullptr};
-        foundation::EventBus* events{nullptr};
-        std::atomic<bool> cleanup_done{false};
-        std::string reservation_key;
-        std::uint64_t voice_session_token{0};
-        int voice_session_grace_ms{0};
-        InferenceDeltaUtf8Buffer utf8;
-
-        void finish_once(bool aborted_stream, int fallback_status, const std::string& reason) {
-            bool expected = false;
-            if (!cleanup_done.compare_exchange_strong(expected, true)) return;
-            if (aborted_stream) {
-                aborted.store(true);
-            }
-            cv.notify_all();
-            if (inference_thread.joinable()) {
-                if (inference_thread.get_id() == std::this_thread::get_id()) {
-                    inference_thread.detach();
-                } else {
-                    inference_thread.join();
-                }
-            }
-
-            std::shared_ptr<model::InferenceResult> result;
-            bool error = false;
-            {
-                std::lock_guard<std::mutex> lk(mtx);
-                result = final_result;
-                error = inference_error;
-            }
-
-            int status = fallback_status;
-            if (result && !aborted_stream && !error) {
-                status = 200;
-                record_request(metrics, stats_db, events, requested_model, *result, status, slot_id,
-                               0.0, 0, model_name);
-            } else {
-                model::InferenceResult failed;
-                status = aborted_stream ? 499
-                       : (error && fallback_status < 400 ? 500 : fallback_status);
-                record_request(metrics, stats_db, events, requested_model, failed, status, slot_id,
-                               0.0, 0, model_name);
-            }
-
-            LOG_INFO("stream_recorded", "model={} slot_id={} status={} reason={}",
-                     model_name, slot_id, status, reason);
-            if (coordinator) {
-                auto released = coordinator->release_slot(model_name, slot_id);
-                if (!released) {
-                    LOG_WARN("stream_cleanup_release_failed", "model={} slot_id={} reason={}",
-                             model_name, slot_id, released.error().message);
-                }
-                if (voice_session_token != 0) {
-                    coordinator->complete_priority_session_hold(
-                        reservation_key, voice_session_token,
-                        std::chrono::milliseconds{voice_session_grace_ms});
-                }
-            }
-            LOG_INFO("stream_cleanup", "model={} slot_id={} aborted={} reason={}",
-                     model_name, slot_id, aborted_stream, reason);
-        }
-    };
-
-    auto state = std::make_shared<StreamState>();
-    state->slot_id = slot_id;
-    state->model_name = model_name;
-    state->requested_model = requested_model;
-    state->coordinator = &deps.coordinator;
-    state->metrics = deps.metrics;
-    state->stats_db = deps.stats_db;
-    state->events = deps.events;
-    state->reservation_key = reservation_key;
-    state->voice_session_token = voice_session_token.value_or(0);
-    state->voice_session_grace_ms = deps.voice_session_grace_ms;
-
-    state->inference_thread = std::thread(
-        [state, ir = std::move(*inference_request)]() {
-        try {
-            auto result = state->coordinator->predict_stream(
-                state->model_name, state->slot_id, ir,
-                [state](const model::InferenceDelta& delta) -> bool {
-                    if (state->aborted.load()) return false;
-                    {
-                        const auto bytes = delta_size(delta);
-                        std::unique_lock<std::mutex> lk(state->mtx);
-                        state->cv.wait(lk, [state, bytes] {
-                            const bool byte_capacity =
-                                state->delta_queue.empty() ||
-                                (bytes <= max_pending_stream_bytes &&
-                                 state->pending_bytes <=
-                                     max_pending_stream_bytes - bytes);
-                            return state->aborted.load() ||
-                                   (state->delta_queue.size() <
-                                        max_pending_stream_deltas &&
-                                    byte_capacity);
-                        });
-                        if (state->aborted.load()) return false;
-                        state->delta_queue.push_back(delta);
-                        state->pending_bytes += bytes;
-                    }
-                    state->cv.notify_one();
-                    return !state->aborted.load();
-                },
-            &state->aborted);
-            {
-                std::lock_guard<std::mutex> lk(state->mtx);
-                if (result) {
-                    state->final_result = std::make_shared<model::InferenceResult>(std::move(*result));
-                } else {
-                    state->inference_error = true;
-                    state->error_code = result.error().code;
-                    state->error_msg = result.error().message;
-                }
-                state->inference_done = true;
-            }
-            state->cv.notify_all();
-        } catch (const std::exception& e) {
-            LOG_ERROR("inference_thread_exception", "model={} slot_id={} what={}",
-                      state->model_name, state->slot_id, e.what());
-            std::lock_guard<std::mutex> lk(state->mtx);
-            state->inference_error = true;
-            state->error_msg = e.what();
-            state->inference_done = true;
-            state->cv.notify_all();
-        } catch (...) {
-            LOG_ERROR("inference_thread_exception", "model={} slot_id={} what=unknown",
-                      state->model_name, state->slot_id);
-            std::lock_guard<std::mutex> lk(state->mtx);
-            state->inference_error = true;
-            state->error_msg = "unknown exception";
-            state->inference_done = true;
-            state->cv.notify_all();
-        }
-    });
-    guard.disarm();
+    state->start(std::move(*inference_request));
 
     resp.set_chunked_content_provider(
         "text/event-stream",

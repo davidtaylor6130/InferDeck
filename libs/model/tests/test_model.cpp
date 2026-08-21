@@ -916,7 +916,7 @@ TEST_CASE("BackendCoordinator: predict routes to model", "[model][coordinator]")
     REQUIRE(s.has_value());
     InferenceRequest req;
     req.prompt = "hi";
-    req.max_tokens = 8;
+    req.max_output_tokens = 8;
     auto r = c.predict("a", s.value(), req);
     REQUIRE(r.has_value());
     REQUIRE(r.value().text == "hello world");

@@ -1,6 +1,7 @@
 #include "gateway/anthropic_routes.hpp"
 
 #include "foundation/logging.hpp"
+#include "gateway/openai_adapter.hpp"
 #include "gateway/streaming_sanitizer.hpp"
 
 #include <algorithm>
@@ -669,22 +670,6 @@ nlohmann::json tool_use_block(const model::ToolCall& tc) {
     };
 }
 
-model::InferenceRequest make_inference_request_from(const nlohmann::json& openai_body) {
-    model::InferenceRequest ir;
-    ir.openai_body_json = openai_body.dump();
-    ir.max_tokens = openai_body.value(
-        "max_tokens", model::k_max_tokens_use_context_budget);
-    // Only carry sampler params the client explicitly set; unset ones fall back
-    // to the server-side SamplingConfig defaults downstream (issue #42).
-    if (openai_body.contains("temperature") && !openai_body["temperature"].is_null())
-        ir.temperature = openai_body["temperature"].get<float>();
-    if (openai_body.contains("top_p") && !openai_body["top_p"].is_null())
-        ir.top_p = openai_body["top_p"].get<float>();
-    if (openai_body.contains("top_k") && !openai_body["top_k"].is_null())
-        ir.top_k = openai_body["top_k"].get<int>();
-    return ir;
-}
-
 struct ErrorClass {
     int status;
     std::string type;
@@ -952,13 +937,13 @@ void handle_anthropic_messages(const httplib::Request& req, httplib::Response& r
         write_anthropic_error(resp, 400, "invalid_request_error", e.what());
         return;
     }
-    model::InferenceRequest ir;
-    try {
-        ir = make_inference_request_from(openai_body);
-    } catch (const std::exception& error) {
-        write_anthropic_error(resp, 400, "invalid_request_error", error.what());
+    auto inference_request = parse_openai_chat_request(openai_body, true);
+    if (!inference_request) {
+        write_anthropic_error(resp, 400, "invalid_request_error",
+                              inference_request.error().message);
         return;
     }
+    auto ir = std::move(*inference_request);
 
     const bool stream = body.value("stream", false);
 

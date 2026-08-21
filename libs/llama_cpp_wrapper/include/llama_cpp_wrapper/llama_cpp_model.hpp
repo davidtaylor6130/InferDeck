@@ -9,8 +9,6 @@
 #include <string>
 #include <vector>
 
-#include <nlohmann/json_fwd.hpp>
-
 #include "chat.h"
 #include "common.h"
 #include "model/imodel.hpp"
@@ -60,11 +58,6 @@ struct LlamaCppConfig {
   std::string reasoning_format{};  // "auto", "deepseek", "deepseek_legacy", "none"
   inferdeck::model::SamplingConfig sampling{};  // server-side sampler defaults (issue #42)
 };
-
-inferdeck::foundation::Result<std::string> apply_reasoning_effort(
-    common_chat_templates_inputs& inputs,
-    const nlohmann::ordered_json& body,
-    const inferdeck::model::ModelInfo& info);
 
 class LlamaCppModel final : public inferdeck::model::IModel,
                             public inferdeck::model::IEmbeddingBackend {

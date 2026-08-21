@@ -249,8 +249,8 @@ TEST_CASE("Mocked Tier B: predict routes to correct model and returns text", "[i
 
     InferenceRequest req;
     req.prompt = "What is 2+2?";
-    req.max_tokens = 16;
-    req.temperature = 0.0f;
+    req.max_output_tokens = 16;
+    req.sampling.temperature = 0.0f;
     auto r = c.predict("qwen3.6-27b", s.value(), req);
     REQUIRE(r.has_value());
     REQUIRE(r.value().text == "hello world");
@@ -308,9 +308,9 @@ TEST_CASE("Mocked Tier B: opencode coding fixture flows through coordinator", "[
 
     InferenceRequest req;
     req.prompt = j.value("model", std::string{"qwen3.6-27b"});
-    if (j.contains("max_tokens")) req.max_tokens = j["max_tokens"].get<int>();
-    if (j.contains("temperature")) req.temperature = j["temperature"].get<float>();
-    if (j.contains("top_p")) req.top_p = j["top_p"].get<float>();
+    if (j.contains("max_tokens")) req.max_output_tokens = j["max_tokens"].get<int>();
+    if (j.contains("temperature")) req.sampling.temperature = j["temperature"].get<float>();
+    if (j.contains("top_p")) req.sampling.top_p = j["top_p"].get<float>();
 
     auto r = c.predict("qwen3.6-27b", slot.value(), req);
     REQUIRE(r.has_value());

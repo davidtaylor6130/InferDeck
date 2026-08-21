@@ -341,37 +341,37 @@ current implementation cannot satisfy the native single-process rule.
 
 ### New domain boundary
 
-- [ ] Introduce a focused library for protocol-neutral inference contracts.
-- [ ] Define typed `RequestContext` with request ID, principal, endpoint, deadline,
+- [x] Introduce a focused library for protocol-neutral inference contracts.
+- [x] Define typed `RequestContext` with request ID, principal, endpoint, deadline,
       cancellation, requested model, resolved model, stream mode and compatibility
       profile.
-- [ ] Define typed instructions, messages/input items, text/image/audio content,
+- [x] Define typed instructions, messages/input items, text/image/audio content,
       function tools, tool choice, structured-output constraints and sampling.
-- [ ] Define typed `OutputEvent` variants for text, reasoning, tool calls, usage,
+- [x] Define typed `OutputEvent` variants for text, reasoning, tool calls, usage,
       finish, refusal, and error.
-- [ ] Define canonical `RequestOutcome` and `DomainError` taxonomies.
-- [ ] Define capability declarations independently of HTTP fields.
-- [ ] Remove `openai_body_json` from `InferenceRequest`.
-- [ ] Remove protocol parsing from `LlamaCppModel` and every runtime backend.
-- [ ] Move prompt-template conversion into a typed llama adapter layer.
-- [ ] Prohibit `httplib`, route headers, OpenAI field names, and protocol response
+- [x] Define canonical `RequestOutcome` and `DomainError` taxonomies.
+- [x] Define capability declarations independently of HTTP fields.
+- [x] Remove `openai_body_json` from `InferenceRequest`.
+- [x] Remove protocol parsing from `LlamaCppModel` and every runtime backend.
+- [x] Move prompt-template conversion into a typed llama adapter layer.
+- [x] Prohibit `httplib`, route headers, OpenAI field names, and protocol response
       objects from model and runtime libraries.
 
 ### Generation session
 
-- [ ] Extract one `GenerationSession` service shared by Chat and Responses.
-- [ ] Centralize slot ownership, cancellation, backpressure, inference-thread
+- [x] Extract one `GenerationSession` service shared by Chat and Responses.
+- [x] Centralize slot ownership, cancellation, backpressure, inference-thread
       lifetime, finish-once behavior and request recording.
-- [ ] Preserve bounded queues, UTF-8 holdback, cursor sanitization and idempotent
+- [x] Preserve bounded queues, UTF-8 holdback, cursor sanitization and idempotent
       release semantics.
 
 ### Exit gate
 
-- [ ] Dependency tests prove model/runtime libraries contain no HTTP or protocol
+- [x] Dependency tests prove model/runtime libraries contain no HTTP or protocol
       JSON dependency.
-- [ ] Golden adapter tests convert OpenAI requests to canonical objects and
+- [x] Golden adapter tests convert OpenAI requests to canonical objects and
       canonical events back to wire output.
-- [ ] Chat and Responses share execution lifecycle without calling one another's
+- [x] Chat and Responses share execution lifecycle without calling one another's
       HTTP handlers.
 
 ## Phase 6 - Complete strict OpenAI adapters

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 
 namespace inferdeck::gateway {
@@ -25,11 +26,7 @@ enum class ComputeResource : std::uint8_t {
     Gpu,
 };
 
-enum class CompatibilityProfile : std::uint8_t {
-    StrictOpenAI,
-    OpenAIDerivative,
-    Anthropic,
-};
+using CompatibilityProfile = inference::CompatibilityProfile;
 
 struct GatewayDeps {
     model::BackendCoordinator& coordinator;
@@ -99,6 +96,17 @@ std::string serialize_chat_stream_terminal(const std::string& id,
                                            bool include_usage);
 std::string header_value(const httplib::Request& req, const std::string& name);
 std::string request_client_key(const httplib::Request& req);
+
+struct AcquiredGenerationSlot {
+    int slot_id{-1};
+    std::string reservation_key;
+    std::optional<std::uint64_t> voice_session_token;
+};
+
+std::optional<AcquiredGenerationSlot> acquire_generation_slot(
+    const httplib::Request& req, httplib::Response& resp,
+    const GatewayDeps& deps, const nlohmann::json& body,
+    const std::string& requested_model, const std::string& resolved_model);
 
 struct SwapStartResult {
     int status{200};
