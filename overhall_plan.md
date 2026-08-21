@@ -401,14 +401,14 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Responses
 
-- [ ] Implement Responses directly over the canonical domain.
-- [ ] Support string and item-array input forms required by the pinned baseline.
-- [ ] Preserve developer messages and function-call/output pairing.
-- [ ] Support current function-call output content forms.
-- [ ] Generate one immutable response timestamp and model identity.
+- [x] Implement Responses directly over the canonical domain.
+- [x] Support string and item-array input forms required by the pinned baseline.
+- [x] Preserve developer messages and function-call/output pairing.
+- [x] Support current function-call output content forms.
+- [x] Generate one immutable response timestamp and model identity.
 - [ ] Produce complete, internally consistent Response objects.
-- [ ] Produce typed Responses SSE events directly from canonical output events.
-- [ ] Define explicit behavior for storage, background, conversation,
+- [x] Produce typed Responses SSE events directly from canonical output events.
+- [x] Define explicit behavior for storage, background, conversation,
       previous-response, include, truncation, service-tier and cache fields.
 
 ### Embeddings

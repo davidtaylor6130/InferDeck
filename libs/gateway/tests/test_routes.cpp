@@ -10,6 +10,7 @@
 #include "gateway/openai_adapter.hpp"
 #include "gateway/openai_error.hpp"
 #include "gateway/route_manifest.hpp"
+#include "gateway/responses_adapter.hpp"
 #include "gateway/routes.hpp"
 #include "httplib.h"
 #include "model/backend_coordinator.hpp"
@@ -133,6 +134,64 @@ TEST_CASE("OpenAI adapter validates assistant tool call type",
     auto valid = function;
     valid["type"] = "function";
     CHECK(parse_openai_chat_request(request_with(valid), false));
+}
+
+TEST_CASE("Responses adapter builds canonical messages directly",
+          "[routes][responses][adapter]") {
+    const auto parsed = parse_openai_responses_request(nlohmann::json{
+        {"model", "test-model"},
+        {"instructions", "top-level policy"},
+        {"input", nlohmann::json::array({
+            {{"type", "message"}, {"role", "developer"},
+             {"content", "item policy"}},
+            {{"type", "function_call"}, {"call_id", "call_1"},
+             {"name", "lookup"}, {"arguments", "{}"}},
+            {{"type", "function_call_output"}, {"call_id", "call_1"},
+             {"output", nlohmann::json::array({
+                 {{"type", "input_text"}, {"text", "result"}},
+             })}},
+        })},
+        {"store", false},
+        {"background", false},
+        {"conversation", nullptr},
+        {"previous_response_id", nullptr},
+        {"include", nlohmann::json::array()},
+        {"truncation", "disabled"},
+        {"service_tier", "default"},
+        {"prompt_cache_key", nullptr},
+    }, false);
+    REQUIRE(parsed);
+    CHECK(parsed->requested_model == "test-model");
+    REQUIRE(parsed->generation.messages.size() == 4);
+    CHECK(parsed->generation.messages[0].role ==
+          inference::MessageRole::Developer);
+    CHECK(parsed->generation.messages[1].role ==
+          inference::MessageRole::Developer);
+    CHECK(parsed->generation.messages[2].role ==
+          inference::MessageRole::Assistant);
+    REQUIRE(parsed->generation.messages[2].tool_calls.size() == 1);
+    CHECK(parsed->generation.messages[2].tool_calls[0].id == "call_1");
+    CHECK(parsed->generation.messages[3].role ==
+          inference::MessageRole::Tool);
+    CHECK(parsed->generation.messages[3].tool_call_id == "call_1");
+    const auto* output = std::get_if<inference::TextContent>(
+        &parsed->generation.messages[3].content[0]);
+    REQUIRE(output);
+    CHECK(output->text == "result");
+}
+
+TEST_CASE("Responses route contains no Chat translation shim",
+          "[routes][responses][dependency]") {
+    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "libs/gateway/src/openai_routes.cpp";
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    const std::string source{
+        std::istreambuf_iterator<char>{input},
+        std::istreambuf_iterator<char>{}};
+    CHECK(source.find("responses_to_chat") == std::string::npos);
+    CHECK(source.find("chat_body") == std::string::npos);
+    CHECK(source.find("parse_openai_chat_request") == std::string::npos);
 }
 
 TEST_CASE("Derivative OpenAI adapter preserves reasoning toggle",
@@ -1355,6 +1414,13 @@ TEST_CASE("Routes: POST /v1/responses translates string input and output", "[rou
     REQUIRE(body["object"] == "response");
     REQUIRE(body["status"] == "completed");
     REQUIRE(body["model"] == "chat-model");
+    REQUIRE(body["created_at"].is_number_integer());
+    CHECK(body["background"] == false);
+    CHECK(body["conversation"].is_null());
+    CHECK(body["previous_response_id"].is_null());
+    CHECK(body["service_tier"] == "default");
+    CHECK(body["store"] == false);
+    CHECK(body["truncation"] == "disabled");
     REQUIRE(body["output"].size() == 1);
     REQUIRE(body["output"][0]["type"] == "message");
     REQUIRE(body["output"][0]["content"][0]["type"] == "output_text");
@@ -1616,6 +1682,26 @@ TEST_CASE("Routes: POST /v1/responses streams typed reasoning and tool events", 
         offset = end + 1;
     }
     CHECK(event_types == fixture["responses_event_types"]);
+    std::optional<std::int64_t> created_at;
+    offset = 0;
+    while ((offset = response->body.find("data: ", offset)) !=
+           std::string::npos) {
+        const auto end = response->body.find('\n', offset);
+        REQUIRE(end != std::string::npos);
+        const auto data = response->body.substr(
+            offset + 6, end - offset - 6);
+        offset = end + 1;
+        const auto event = nlohmann::json::parse(data);
+        if (!event.contains("response")) continue;
+        CHECK(event["response"]["model"] == "chat-model");
+        const auto event_created =
+            event["response"]["created_at"].get<std::int64_t>();
+        if (!created_at) created_at = event_created;
+        CHECK(event_created == *created_at);
+        CHECK(event["response"]["store"] == false);
+        CHECK(event["response"]["truncation"] == "disabled");
+    }
+    REQUIRE(created_at.has_value());
     ts.stop();
 }
 

@@ -2,6 +2,7 @@
 #include "gateway/generation_session.hpp"
 #include "gateway/openai_adapter.hpp"
 #include "gateway/openai_error.hpp"
+#include "gateway/responses_adapter.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -81,97 +82,6 @@ foundation::Result<int> acquire_for_request(
     return deps.coordinator.acquire_slot(model_name, options);
 }
 
-foundation::Result<void> require_fields(
-    const nlohmann::json& value,
-    const std::unordered_set<std::string>& supported,
-    const std::string& context);
-
-foundation::Result<nlohmann::json> response_content_to_chat(const nlohmann::json& content) {
-    if (content.is_string()) return foundation::Ok(content);
-    if (!content.is_array()) {
-        return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                               "message content must be a string or array");
-    }
-    if (content.empty()) {
-        return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                               "message content must not be empty");
-    }
-    nlohmann::json parts = nlohmann::json::array();
-    for (const auto& part : content) {
-        if (!part.is_object()) {
-            return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                   "input content part must be an object");
-        }
-        if (!part.contains("type") || !part["type"].is_string()) {
-            return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                   "input content part requires string type");
-        }
-        const std::string type = part["type"].get<std::string>();
-        if (type == "input_text" || type == "output_text") {
-            const std::unordered_set<std::string> fields =
-                type == "output_text"
-                    ? std::unordered_set<std::string>{
-                          "type", "text", "annotations",
-                      }
-                    : std::unordered_set<std::string>{"type", "text"};
-            auto allowed = require_fields(part, fields, type);
-            if (!allowed) {
-                return foundation::Err<nlohmann::json>(
-                    allowed.error().code, allowed.error().message);
-            }
-            if (!part.contains("text") || !part["text"].is_string()) {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       type + " requires string text");
-            }
-            if (part.contains("annotations") &&
-                !part["annotations"].is_array()) {
-                return foundation::Err<nlohmann::json>(
-                    foundation::ErrorCode::InvalidArgument,
-                    "output_text annotations must be an array");
-            }
-            parts.push_back({{"type", "text"}, {"text", part["text"]}});
-        } else if (type == "input_image") {
-            static const std::unordered_set<std::string> fields = {
-                "type", "image_url", "detail",
-            };
-            auto allowed = require_fields(part, fields, "input_image");
-            if (!allowed) {
-                return foundation::Err<nlohmann::json>(
-                    allowed.error().code, allowed.error().message);
-            }
-            if (!part.contains("image_url") || !part["image_url"].is_string()) {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       "input_image requires string image_url");
-            }
-            const std::string url = part["image_url"].get<std::string>();
-            if (url.empty()) {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       "input_image requires image_url");
-            }
-            nlohmann::json image_url = {{"url", url}};
-            if (part.contains("detail")) {
-                if (!part["detail"].is_string()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "input_image detail must be a string");
-                }
-                const std::string detail = part["detail"].get<std::string>();
-                if (detail != "auto" && detail != "low" && detail != "high") {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "input_image detail must be auto, low, or high");
-                }
-                image_url["detail"] = detail;
-            }
-            parts.push_back({{"type", "image_url"}, {"image_url", std::move(image_url)}});
-        } else {
-            return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                   "unsupported input content type: " + type);
-        }
-    }
-    return foundation::Ok(std::move(parts));
-}
-
 bool response_input_uses_vision(const nlohmann::json& input) {
     if (input.is_array()) {
         return std::any_of(input.begin(), input.end(), [](const auto& item) {
@@ -184,490 +94,6 @@ bool response_input_uses_vision(const nlohmann::json& input) {
     if (type == "image" || type == "image_url" || type == "input_image") return true;
     return input.contains("content") &&
            response_input_uses_vision(input["content"]);
-}
-
-bool integer_in_range(const nlohmann::json& value, std::int64_t minimum,
-                      std::int64_t maximum) {
-    if (value.is_number_unsigned()) {
-        const auto number = value.get<std::uint64_t>();
-        const auto unsigned_minimum =
-            minimum <= 0 ? std::uint64_t{0}
-                         : static_cast<std::uint64_t>(minimum);
-        return number >= unsigned_minimum &&
-               number <= static_cast<std::uint64_t>(maximum);
-    }
-    if (value.is_number_integer()) {
-        const auto number = value.get<std::int64_t>();
-        return number >= minimum && number <= maximum;
-    }
-    return false;
-}
-
-foundation::Result<void> require_fields(
-    const nlohmann::json& value,
-    const std::unordered_set<std::string>& supported,
-    const std::string& context) {
-    for (auto iterator = value.begin(); iterator != value.end(); ++iterator) {
-        if (!supported.contains(iterator.key())) {
-            return foundation::Err<void>(
-                foundation::ErrorCode::InvalidArgument,
-                "unsupported " + context + " parameter: " + iterator.key());
-        }
-    }
-    return foundation::Ok();
-}
-
-foundation::Result<nlohmann::json> responses_to_chat(const nlohmann::json& body) {
-    static const std::unordered_set<std::string> supported = {
-        "model", "input", "instructions", "max_output_tokens", "temperature", "top_p",
-        "tools", "tool_choice", "text", "stream", "priority", "metadata",
-        "parallel_tool_calls", "reasoning",
-    };
-    if (!body.is_object()) {
-        return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                               "request body must be an object");
-    }
-    for (auto it = body.begin(); it != body.end(); ++it) {
-        if (!supported.contains(it.key())) {
-            return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                   "unsupported Responses parameter: " + it.key());
-        }
-    }
-    if (!body.contains("model") || !body["model"].is_string() ||
-        body["model"].get<std::string>().empty()) {
-        return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                               "request body must include non-empty string 'model'");
-    }
-    if (!body.contains("input")) {
-        return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                               "request body must include 'input'");
-    }
-
-    nlohmann::json chat = {{"model", body["model"]}};
-    nlohmann::json messages = nlohmann::json::array();
-    if (body.contains("instructions")) {
-        if (!body["instructions"].is_string()) {
-            return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                   "instructions must be a string");
-        }
-        messages.push_back({{"role", "system"}, {"content", body["instructions"]}});
-    }
-    if (body.contains("max_output_tokens") &&
-        !integer_in_range(body["max_output_tokens"], 1,
-                          std::numeric_limits<int>::max())) {
-        return foundation::Err<nlohmann::json>(
-            foundation::ErrorCode::InvalidArgument,
-            "max_output_tokens must be a positive integer");
-    }
-    if (body.contains("temperature")) {
-        if (!body["temperature"].is_number()) {
-            return foundation::Err<nlohmann::json>(
-                foundation::ErrorCode::InvalidArgument,
-                "temperature must be a number");
-        }
-        const double temperature = body["temperature"].get<double>();
-        if (!std::isfinite(temperature) || temperature < 0.0 ||
-            temperature > 2.0) {
-            return foundation::Err<nlohmann::json>(
-                foundation::ErrorCode::InvalidArgument,
-                "temperature must be between 0 and 2");
-        }
-    }
-    if (body.contains("top_p")) {
-        if (!body["top_p"].is_number()) {
-            return foundation::Err<nlohmann::json>(
-                foundation::ErrorCode::InvalidArgument,
-                "top_p must be a number");
-        }
-        const double top_p = body["top_p"].get<double>();
-        if (!std::isfinite(top_p) || top_p < 0.0 || top_p > 1.0) {
-            return foundation::Err<nlohmann::json>(
-                foundation::ErrorCode::InvalidArgument,
-                "top_p must be between 0 and 1");
-        }
-    }
-    if (body.contains("stream") && !body["stream"].is_boolean()) {
-        return foundation::Err<nlohmann::json>(
-            foundation::ErrorCode::InvalidArgument,
-            "stream must be a boolean");
-    }
-    if (body.contains("priority") &&
-        !integer_in_range(body["priority"], -100, 100)) {
-        return foundation::Err<nlohmann::json>(
-            foundation::ErrorCode::InvalidArgument,
-            "priority must be an integer between -100 and 100");
-    }
-    if (body.contains("parallel_tool_calls") &&
-        !body["parallel_tool_calls"].is_boolean()) {
-        return foundation::Err<nlohmann::json>(
-            foundation::ErrorCode::InvalidArgument,
-            "parallel_tool_calls must be a boolean");
-    }
-    if (body.contains("reasoning")) {
-        if (!body["reasoning"].is_object()) {
-            return foundation::Err<nlohmann::json>(
-                foundation::ErrorCode::InvalidArgument,
-                "reasoning must be an object");
-        }
-        static const std::unordered_set<std::string> reasoning_fields = {
-            "effort",
-        };
-        auto fields = require_fields(body["reasoning"], reasoning_fields,
-                                     "reasoning");
-        if (!fields) {
-            return foundation::Err<nlohmann::json>(
-                fields.error().code, fields.error().message);
-        }
-        if (!body["reasoning"].contains("effort") ||
-            !body["reasoning"]["effort"].is_string()) {
-            return foundation::Err<nlohmann::json>(
-                foundation::ErrorCode::InvalidArgument,
-                "reasoning.effort must be a string");
-        }
-    }
-    if (body.contains("metadata") && !body["metadata"].is_object()) {
-        return foundation::Err<nlohmann::json>(
-            foundation::ErrorCode::InvalidArgument,
-            "metadata must be an object");
-    }
-    if (body["input"].is_string()) {
-        messages.push_back({{"role", "user"}, {"content", body["input"]}});
-    } else if (body["input"].is_array()) {
-        if (body["input"].empty()) {
-            return foundation::Err<nlohmann::json>(
-                foundation::ErrorCode::InvalidArgument,
-                "input array must not be empty");
-        }
-        for (const auto& item : body["input"]) {
-            if (!item.is_object()) {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       "each input item must be an object");
-            }
-            if (item.contains("type") && !item["type"].is_string()) {
-                return foundation::Err<nlohmann::json>(
-                    foundation::ErrorCode::InvalidArgument,
-                    "input item type must be a string");
-            }
-            const std::string type = item.value("type", "message");
-            if (type == "message") {
-                static const std::unordered_set<std::string> message_fields = {
-                    "type", "role", "content", "id", "status",
-                };
-                auto fields = require_fields(item, message_fields, "message");
-                if (!fields) {
-                    return foundation::Err<nlohmann::json>(
-                        fields.error().code, fields.error().message);
-                }
-                if (!item.contains("role") || !item["role"].is_string()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "message requires string role");
-                }
-                std::string role = item["role"].get<std::string>();
-                if (role != "user" && role != "assistant" &&
-                    role != "system" && role != "developer") {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "unsupported message role: " + role);
-                }
-                if (!item.contains("content")) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "message requires content");
-                }
-                if (item.contains("id") && !item["id"].is_string()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "message id must be a string");
-                }
-                if (item.contains("status") && !item["status"].is_string()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "message status must be a string");
-                }
-                auto content = response_content_to_chat(item["content"]);
-                if (!content) return foundation::Err<nlohmann::json>(content.error().code, content.error().message);
-                if (role == "developer") role = "system";
-                messages.push_back({{"role", role}, {"content", std::move(*content)}});
-            } else if (type == "function_call_output") {
-                static const std::unordered_set<std::string> output_fields = {
-                    "type", "call_id", "output", "id", "status",
-                };
-                auto fields = require_fields(item, output_fields,
-                                             "function_call_output");
-                if (!fields) {
-                    return foundation::Err<nlohmann::json>(
-                        fields.error().code, fields.error().message);
-                }
-                if (!item.contains("call_id") || !item["call_id"].is_string() ||
-                    item["call_id"].get<std::string>().empty()) {
-                    return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                           "function_call_output requires non-empty string call_id");
-                }
-                if (!item.contains("output") || !item["output"].is_string()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "function_call_output requires string output");
-                }
-                if (item.contains("id") && !item["id"].is_string()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "function_call_output id must be a string");
-                }
-                if (item.contains("status") && !item["status"].is_string()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "function_call_output status must be a string");
-                }
-                messages.push_back({
-                    {"role", "tool"},
-                    {"tool_call_id", item["call_id"]},
-                    {"content", item["output"]},
-                });
-            } else if (type == "function_call") {
-                static const std::unordered_set<std::string> call_fields = {
-                    "type", "call_id", "id", "name", "arguments", "status",
-                };
-                auto fields = require_fields(item, call_fields, "function_call");
-                if (!fields) {
-                    return foundation::Err<nlohmann::json>(
-                        fields.error().code, fields.error().message);
-                }
-                if (!item.contains("name") || !item["name"].is_string() ||
-                    item["name"].get<std::string>().empty() ||
-                    !item.contains("arguments") ||
-                    !item["arguments"].is_string()) {
-                    return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                           "function_call requires string name and arguments");
-                }
-                if (item.contains("id") && !item["id"].is_string()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "function_call id must be a string");
-                }
-                if (item.contains("status") && !item["status"].is_string()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "function_call status must be a string");
-                }
-                std::string call_id;
-                if (item.contains("call_id")) {
-                    if (!item["call_id"].is_string()) {
-                        return foundation::Err<nlohmann::json>(
-                            foundation::ErrorCode::InvalidArgument,
-                            "function_call call_id must be a string");
-                    }
-                    call_id = item["call_id"].get<std::string>();
-                } else if (item.contains("id") && item["id"].is_string()) {
-                    call_id = item["id"].get<std::string>();
-                }
-                if (call_id.empty()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "function_call requires non-empty call_id");
-                }
-                messages.push_back({
-                    {"role", "assistant"},
-                    {"content", ""},
-                    {"tool_calls", nlohmann::json::array({{{"id", call_id},
-                        {"type", "function"},
-                        {"function", {{"name", item["name"]},
-                                      {"arguments", item["arguments"]}}}}})},
-                });
-            } else {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       "unsupported input item type: " + type);
-            }
-        }
-    } else {
-        return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                               "input must be a string or array");
-    }
-    if (messages.empty()) {
-        return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                               "input must contain at least one message");
-    }
-    chat["messages"] = std::move(messages);
-
-    if (body.contains("max_output_tokens")) chat["max_tokens"] = body["max_output_tokens"];
-    if (body.contains("temperature")) chat["temperature"] = body["temperature"];
-    if (body.contains("top_p")) chat["top_p"] = body["top_p"];
-    if (body.contains("priority")) chat["priority"] = body["priority"];
-    if (body.contains("parallel_tool_calls")) chat["parallel_tool_calls"] = body["parallel_tool_calls"];
-    if (body.contains("reasoning")) chat["reasoning_effort"] = body["reasoning"]["effort"];
-    chat["stream"] = body.value("stream", false);
-    if (chat["stream"].get<bool>()) chat["stream_options"] = {{"include_usage", true}};
-
-    if (body.contains("tools")) {
-        if (!body["tools"].is_array()) {
-            return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                   "tools must be an array");
-        }
-        chat["tools"] = nlohmann::json::array();
-        for (const auto& tool : body["tools"]) {
-            if (!tool.is_object() || !tool.contains("type") ||
-                !tool["type"].is_string() ||
-                tool["type"].get<std::string>() != "function") {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       "only function tools are supported");
-            }
-            if (!tool.contains("name") || !tool["name"].is_string()) {
-                return foundation::Err<nlohmann::json>(
-                    foundation::ErrorCode::InvalidArgument,
-                    "function tool requires string name");
-            }
-            const std::string name = tool["name"].get<std::string>();
-            if (name.empty()) {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       "function tool requires name");
-            }
-            static const std::unordered_set<std::string> tool_fields = {
-                "type", "name", "description", "parameters", "strict",
-            };
-            auto fields = require_fields(tool, tool_fields, "function tool");
-            if (!fields) {
-                return foundation::Err<nlohmann::json>(
-                    fields.error().code, fields.error().message);
-            }
-            if (tool.contains("description") && !tool["description"].is_string()) {
-                return foundation::Err<nlohmann::json>(
-                    foundation::ErrorCode::InvalidArgument,
-                    "function tool description must be a string");
-            }
-            if (tool.contains("parameters") && !tool["parameters"].is_object()) {
-                return foundation::Err<nlohmann::json>(
-                    foundation::ErrorCode::InvalidArgument,
-                    "function tool parameters must be an object");
-            }
-            if (tool.contains("strict") && !tool["strict"].is_boolean()) {
-                return foundation::Err<nlohmann::json>(
-                    foundation::ErrorCode::InvalidArgument,
-                    "function tool strict must be a boolean");
-            }
-            chat["tools"].push_back({
-                {"type", "function"},
-                {"function", {
-                    {"name", name},
-                    {"description", tool.value("description", "")},
-                    {"parameters", tool.value("parameters", nlohmann::json::object())},
-                    {"strict", tool.value("strict", false)},
-                }},
-            });
-        }
-    }
-    if (body.contains("tool_choice")) {
-        if (body["tool_choice"].is_string()) {
-            const std::string choice = body["tool_choice"].get<std::string>();
-            if (choice != "auto" && choice != "none" && choice != "required") {
-                return foundation::Err<nlohmann::json>(
-                    foundation::ErrorCode::InvalidArgument,
-                    "tool_choice must be auto, none, or required");
-            }
-            chat["tool_choice"] = choice;
-        } else if (body["tool_choice"].is_object() &&
-                   body["tool_choice"].contains("type") &&
-                   body["tool_choice"]["type"].is_string() &&
-                   body["tool_choice"]["type"].get<std::string>() == "function") {
-            static const std::unordered_set<std::string> choice_fields = {
-                "type", "name",
-            };
-            auto fields = require_fields(body["tool_choice"], choice_fields,
-                                         "tool_choice");
-            if (!fields) {
-                return foundation::Err<nlohmann::json>(
-                    fields.error().code, fields.error().message);
-            }
-            if (!body["tool_choice"].contains("name") ||
-                !body["tool_choice"]["name"].is_string() ||
-                body["tool_choice"]["name"].get<std::string>().empty()) {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       "function tool_choice requires name");
-            }
-            const std::string name =
-                body["tool_choice"]["name"].get<std::string>();
-            chat["tool_choice"] = {{"type", "function"}, {"function", {{"name", name}}}};
-        } else {
-            return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                   "unsupported tool_choice");
-        }
-    }
-    if (body.contains("text")) {
-        if (!body["text"].is_object()) {
-            return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                   "text must be an object");
-        }
-        for (auto it = body["text"].begin(); it != body["text"].end(); ++it) {
-            if (it.key() != "format") {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       "unsupported text parameter: " + it.key());
-            }
-        }
-        if (body["text"].contains("format")) {
-            const auto& format = body["text"]["format"];
-            if (!format.is_object()) {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       "text.format must be an object");
-            }
-            if (format.contains("type") && !format["type"].is_string()) {
-                return foundation::Err<nlohmann::json>(
-                    foundation::ErrorCode::InvalidArgument,
-                    "text.format.type must be a string");
-            }
-            const std::string type = format.value("type", "text");
-            if (type == "json_schema") {
-                static const std::unordered_set<std::string> schema_fields = {
-                    "type", "name", "description", "schema", "strict",
-                };
-                auto fields = require_fields(format, schema_fields,
-                                             "text.format");
-                if (!fields) {
-                    return foundation::Err<nlohmann::json>(
-                        fields.error().code, fields.error().message);
-                }
-                if (!format.contains("name") || !format["name"].is_string() ||
-                    format["name"].get<std::string>().empty() ||
-                    !format.contains("schema") || !format["schema"].is_object()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "json_schema format requires string name and object schema");
-                }
-                if (format.contains("description") &&
-                    !format["description"].is_string()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "json_schema description must be a string");
-                }
-                if (format.contains("strict") && !format["strict"].is_boolean()) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "json_schema strict must be a boolean");
-                }
-                auto schema = format;
-                schema.erase("type");
-                chat["response_format"] = {
-                    {"type", "json_schema"},
-                    {"json_schema", std::move(schema)},
-                };
-            } else if (type == "json_object") {
-                if (format.size() != 1) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "json_object format accepts only type");
-                }
-                chat["response_format"] = {{"type", "json_object"}};
-            } else if (type == "text") {
-                if (format.size() != 1) {
-                    return foundation::Err<nlohmann::json>(
-                        foundation::ErrorCode::InvalidArgument,
-                        "text format accepts only type");
-                }
-            } else {
-                return foundation::Err<nlohmann::json>(foundation::ErrorCode::InvalidArgument,
-                                                       "unsupported text format: " + type);
-            }
-        }
-    }
-    return foundation::Ok(std::move(chat));
 }
 
 nlohmann::json response_usage(const nlohmann::json& chat_usage) {
@@ -688,7 +114,8 @@ nlohmann::json response_usage(const nlohmann::json& chat_usage) {
 nlohmann::json result_to_response(const model::InferenceResult& result,
                                   const nlohmann::json& request,
                                   const std::string& response_id,
-                                  const std::string& model_name) {
+                                  const std::string& model_name,
+                                  std::int64_t created_at) {
     nlohmann::json output = nlohmann::json::array();
     if (!result.reasoning_text.empty()) {
         output.push_back({
@@ -720,17 +147,23 @@ nlohmann::json result_to_response(const model::InferenceResult& result,
     }
     return {
         {"id", response_id}, {"object", "response"},
-        {"created_at", std::time(nullptr)}, {"status", "completed"},
+        {"created_at", created_at}, {"status", "completed"},
+        {"background", false}, {"conversation", nullptr},
         {"error", nullptr}, {"incomplete_details", nullptr},
         {"instructions", request.value("instructions", nlohmann::json(nullptr))},
         {"max_output_tokens", request.value("max_output_tokens", nlohmann::json(nullptr))},
         {"model", model_name}, {"output", output},
         {"parallel_tool_calls", request.value("parallel_tool_calls", true)},
+        {"previous_response_id", nullptr},
+        {"reasoning", request.value("reasoning", nlohmann::json::object())},
+        {"service_tier", "default"}, {"store", false},
+        {"text", request.value("text", nlohmann::json{{"format", {{"type", "text"}}}})},
         {"metadata", request.value("metadata", nlohmann::json::object())},
         {"temperature", request.value("temperature", 1.0)},
         {"top_p", request.value("top_p", 1.0)},
         {"tools", request.value("tools", nlohmann::json::array())},
         {"tool_choice", request.value("tool_choice", nlohmann::json("auto"))},
+        {"truncation", "disabled"},
         {"usage", {
             {"input_tokens", result.prompt_tokens},
             {"input_tokens_details", {{"cached_tokens", result.cached_prompt_tokens}}},
@@ -755,6 +188,7 @@ struct ResponsesStreamState {
     nlohmann::json request;
     std::string response_id;
     std::string model;
+    std::int64_t created_at{0};
     std::string message_id;
     std::string reasoning_id;
     std::optional<int> message_index;
@@ -775,17 +209,23 @@ nlohmann::json stream_response_object(const ResponsesStreamState& state,
                                       nlohmann::json error = nullptr) {
     return {
         {"id", state.response_id}, {"object", "response"},
-        {"created_at", std::time(nullptr)}, {"status", status},
+        {"created_at", state.created_at}, {"status", status},
+        {"background", false}, {"conversation", nullptr},
         {"error", error}, {"incomplete_details", nullptr},
         {"instructions", state.request.value("instructions", nlohmann::json(nullptr))},
         {"max_output_tokens", state.request.value("max_output_tokens", nlohmann::json(nullptr))},
         {"model", state.model}, {"output", std::move(output)},
         {"parallel_tool_calls", state.request.value("parallel_tool_calls", true)},
+        {"previous_response_id", nullptr},
+        {"reasoning", state.request.value("reasoning", nlohmann::json::object())},
+        {"service_tier", "default"}, {"store", false},
+        {"text", state.request.value("text", nlohmann::json{{"format", {{"type", "text"}}}})},
         {"metadata", state.request.value("metadata", nlohmann::json::object())},
         {"temperature", state.request.value("temperature", 1.0)},
         {"top_p", state.request.value("top_p", 1.0)},
         {"tools", state.request.value("tools", nlohmann::json::array())},
         {"tool_choice", state.request.value("tool_choice", nlohmann::json("auto"))},
+        {"truncation", "disabled"},
         {"usage", response_usage(state.usage)},
     };
 }
@@ -1231,22 +671,18 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
         write_error(resp, 400, "invalid_json", "invalid JSON");
         return;
     }
-    if (deps.compatibility_profile == CompatibilityProfile::StrictOpenAI &&
-        request.contains("priority")) {
-        write_error(resp, 400, "unsupported_parameter",
-                    "unsupported Responses parameter: priority");
-        return;
-    }
-    auto chat_body = responses_to_chat(request);
-    if (!chat_body) {
-        const std::string& message = chat_body.error().message;
+    const bool derivative =
+        deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative;
+    auto parsed = parse_openai_responses_request(request, derivative);
+    if (!parsed) {
+        const std::string& message = parsed.error().message;
         const std::string code =
             message.starts_with("unsupported Responses parameter:")
                 ? "unsupported_parameter" : "invalid_request_error";
         write_error(resp, 400, code, message);
         return;
     }
-    const std::string requested_model = (*chat_body)["model"].get<std::string>();
+    const std::string& requested_model = parsed->requested_model;
     const auto resolved_model = resolve_model_name(deps, requested_model);
     if (!resolved_model) {
         write_error(resp, 404, "model_not_found", resolved_model.error().message);
@@ -1268,16 +704,10 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
                     "model does not support Responses API: " + model_name);
         return;
     }
-    const bool stream = request.value("stream", false);
-    auto inference_request = parse_openai_chat_request(*chat_body, true);
-    if (!inference_request) {
-        write_error(resp, 400, "invalid_request_error",
-                    inference_request.error().message);
-        return;
-    }
+    const bool stream = parsed->stream;
     if (!stream) {
         auto acquired = acquire_generation_slot(
-            req, resp, deps, *chat_body, requested_model, model_name);
+            req, resp, deps, parsed->priority, requested_model, model_name);
         if (!acquired) return;
         GenerationSession session(
             deps.coordinator, deps.metrics, deps.stats_db, deps.events,
@@ -1285,7 +715,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
             acquired->reservation_key,
             acquired->voice_session_token.value_or(0),
             deps.voice_session_grace_ms);
-        auto result = session.run(*inference_request);
+        auto result = session.run(parsed->generation);
         if (!result) {
             const auto error = map_openai_error(result.error().code);
             write_error(resp, error.status, error.code, result.error().message);
@@ -1293,12 +723,13 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
             return;
         }
         write_json(resp, 200, result_to_response(
-            *result, request, make_id("resp_"), requested_model));
+            *result, request, make_id("resp_"), requested_model,
+            static_cast<std::int64_t>(std::time(nullptr))));
         session.finish_once(false, 200, "completed");
         return;
     }
     auto acquired = acquire_generation_slot(
-        req, resp, deps, *chat_body, requested_model, model_name);
+        req, resp, deps, parsed->priority, requested_model, model_name);
     if (!acquired) return;
     auto session = std::make_shared<GenerationSession>(
         deps.coordinator, deps.metrics, deps.stats_db, deps.events,
@@ -1310,8 +741,9 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
     state->session = session;
     state->request = request;
     state->response_id = make_id("resp_");
-    state->model = model_name;
-    session->start(std::move(*inference_request));
+    state->model = requested_model;
+    state->created_at = static_cast<std::int64_t>(std::time(nullptr));
+    session->start(std::move(parsed->generation));
 
     resp.status = 200;
     resp.set_header("Cache-Control", "no-cache");

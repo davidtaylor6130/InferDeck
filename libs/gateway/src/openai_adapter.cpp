@@ -105,6 +105,9 @@ foundation::Result<inference::Content> parse_image(
     std::string detail;
     if (value.is_string()) {
         url = value.get<std::string>();
+        if (part.contains("detail") && part["detail"].is_string()) {
+            detail = part["detail"].get<std::string>();
+        }
     } else if (value.is_object() && value.contains("url") &&
                value["url"].is_string()) {
         url = value["url"].get<std::string>();
@@ -252,6 +255,11 @@ inference::ReasoningFormat reasoning_format(const std::string& value) {
     return inference::ReasoningFormat::Automatic;
 }
 
+}
+
+foundation::Result<inference::Message> parse_openai_message(
+    const nlohmann::json& value, bool allow_extensions) {
+    return parse_message(value, allow_extensions);
 }
 
 foundation::Result<model::InferenceRequest> parse_openai_chat_request(

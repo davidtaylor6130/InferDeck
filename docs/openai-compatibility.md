@@ -25,3 +25,18 @@ false). It rejects requests for another format, quality/style/background
 semantics, compression, URL output, or image streaming before model resolution
 or admission. Native-only sampler controls remain available only in the
 explicitly enabled derivative profile.
+
+## Stateless Responses contract
+
+POST /v1/responses decodes directly into the canonical inference domain. It
+does not construct a Chat Completions request or call the Chat adapter.
+String and item-array inputs preserve developer/system roles, function calls,
+function-call outputs, text/image content, tools, sampling, reasoning effort,
+and structured-output configuration.
+
+InferDeck is stateless: store and background are accepted only as false;
+conversation, previous_response_id, and cache-control objects must be null;
+include must be empty; truncation must be disabled; and service_tier accepts
+only auto or default. Unsupported stateful semantics fail before model
+resolution or admission. One response ID, requested model identity, and
+creation timestamp are reused throughout each streaming response.

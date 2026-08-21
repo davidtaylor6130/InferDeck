@@ -107,7 +107,7 @@ struct AcquiredGenerationSlot {
 
 std::optional<AcquiredGenerationSlot> acquire_generation_slot(
     const httplib::Request& req, httplib::Response& resp,
-    const GatewayDeps& deps, const nlohmann::json& body,
+    const GatewayDeps& deps, int priority,
     const std::string& requested_model, const std::string& resolved_model);
 
 struct SwapStartResult {

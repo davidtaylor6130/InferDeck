@@ -6,6 +6,7 @@ set(GATEWAY_SOURCES
     src/generation_session.cpp
     src/routes.cpp
     src/openai_adapter.cpp
+    src/responses_adapter.cpp
     src/openai_error.cpp
     src/openai_routes.cpp
     src/anthropic_routes.cpp

@@ -802,7 +802,7 @@ struct AcquiredChatSlot {
 
 std::optional<AcquiredChatSlot> acquire_chat_slot(
     const httplib::Request& req, httplib::Response& resp,
-    const GatewayDeps& deps, const nlohmann::json& body,
+    const GatewayDeps& deps, int priority,
     const std::string& requested_model, const std::string& model_name) {
     AcquiredChatSlot acquired;
     acquired.reservation_key = request_client_key(req);
@@ -816,8 +816,7 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     model::AcquireSlotOptions opts;
     opts.timeout = std::chrono::minutes{5};
     opts.block = true;
-    opts.priority = body.contains("priority") && body["priority"].is_number_integer()
-        ? std::clamp(body["priority"].get<int>(), -100, 100) : 0;
+    opts.priority = std::clamp(priority, -100, 100);
     opts.reservation_key = acquired.reservation_key;
     if (acquired.voice_session_token) opts.priority = 100;
     opts.cancelled = cancelled;
@@ -916,9 +915,9 @@ void handle_non_stream_chat(
 
 std::optional<AcquiredGenerationSlot> acquire_generation_slot(
     const httplib::Request& req, httplib::Response& resp,
-    const GatewayDeps& deps, const nlohmann::json& body,
+    const GatewayDeps& deps, int priority,
     const std::string& requested_model, const std::string& resolved_model) {
-    auto acquired = acquire_chat_slot(req, resp, deps, body,
+    auto acquired = acquire_chat_slot(req, resp, deps, priority,
                                       requested_model, resolved_model);
     if (!acquired) return std::nullopt;
     return AcquiredGenerationSlot{
@@ -1030,8 +1029,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
 
+    const int priority = derivative && body.contains("priority") &&
+            body["priority"].is_number_integer()
+        ? body["priority"].get<int>() : 0;
     auto acquired = acquire_generation_slot(
-        req, resp, deps, body, requested_model, model_name);
+        req, resp, deps, priority, requested_model, model_name);
     if (!acquired) return;
     const int slot_id = acquired->slot_id;
     const auto& reservation_key = acquired->reservation_key;
