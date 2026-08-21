@@ -467,9 +467,9 @@ current implementation cannot satisfy the native single-process rule.
       load, inference and stream delivery.
 - [x] Make residency changes transactional and restore the last usable state after
       failure where possible.
-- [ ] Replace polling plus unconditional join with a bounded shutdown state machine.
-- [ ] Add fake backends that block each lifecycle stage for deterministic tests.
-- [ ] Preserve the invariant that inference never holds the coordinator mutex.
+- [x] Replace polling plus unconditional join with a bounded shutdown state machine.
+- [x] Add fake backends that block each lifecycle stage for deterministic tests.
+- [x] Preserve the invariant that inference never holds the coordinator mutex.
 
 ### Voice reservations
 
@@ -491,7 +491,7 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Exit gate
 
-- [ ] Cancellation and shutdown remain bounded with deliberately hung fake backends.
+- [x] Cancellation and shutdown remain bounded with deliberately hung fake backends.
 - [x] CPU helpers and media runtimes cannot evict or redefine conversation models.
 - [x] Requested, resolved, selected, resident and executing identities are testable
       and unambiguous.
@@ -526,45 +526,45 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Work
 
-- [ ] Record request ID, principal class, endpoint, protocol/profile, modality,
+- [x] Record request ID, principal class, endpoint, protocol/profile, modality,
       requested model, resolved model, stream mode and finish/error code.
-- [ ] Record queue, swap/load, prefill, generation, total and first-token durations
+- [x] Record queue, swap/load, prefill, generation, total and first-token durations
       separately.
-- [ ] Record prompt, cached prompt, cache-write, completion and reasoning tokens.
-- [ ] Record audio input/output duration, speech characters and image counts using
+- [x] Record prompt, cached prompt, cache-write, completion and reasoning tokens.
+- [x] Record audio input/output duration, speech characters and image counts using
       modality-specific fields.
-- [ ] Calculate generation TPS only from text completion tokens and generation time.
-- [ ] Ensure media activity cannot change LLM TPS.
-- [ ] Preserve StatsDb WAL, prepared statements and cached-token persistence.
-- [ ] Migrate the SQLite schema with backup, versioning and rollback tests.
-- [ ] Update SSE request events and dashboard consumers.
-- [ ] Replace full-file/O(n) log tailing with bounded tail reading or a ring buffer.
-- [ ] Add protocol/endpoint filters to diagnostic views.
+- [x] Calculate generation TPS only from text completion tokens and generation time.
+- [x] Ensure media activity cannot change LLM TPS.
+- [x] Preserve StatsDb WAL, prepared statements and cached-token persistence.
+- [x] Migrate the SQLite schema with backup, versioning and rollback tests.
+- [x] Update SSE request events and dashboard consumers.
+- [x] Replace full-file/O(n) log tailing with bounded tail reading or a ring buffer.
+- [x] Add protocol/endpoint filters to diagnostic views.
 
 ### Exit gate
 
-- [ ] Metrics agree across memory, SQLite, SSE and dashboard aggregation.
-- [ ] Usage and cost totals use one canonical bucket source.
-- [ ] Request IDs correlate access logs, inference logs, DB records and client
+- [x] Metrics agree across memory, SQLite, SSE and dashboard aggregation.
+- [x] Usage and cost totals use one canonical bucket source.
+- [x] Request IDs correlate access logs, inference logs, DB records and client
       responses.
 
 ## Phase 10 - Dependency and release reproducibility
 
 ### Work
 
-- [ ] Add a vcpkg `builtin-baseline` and repository configuration.
-- [ ] Pin GitHub Actions by immutable commit SHA.
-- [ ] Pin Vulkan SDK/toolchain versions and verify installer checksums.
-- [ ] Remove the developer-machine Vulkan path fallback or make it an explicit,
+- [x] Add a vcpkg `builtin-baseline` and repository configuration.
+- [x] Pin GitHub Actions by immutable commit SHA.
+- [x] Pin Vulkan SDK/toolchain versions and verify installer checksums.
+- [x] Remove the developer-machine Vulkan path fallback or make it an explicit,
       validated user override.
-- [ ] Keep llama.cpp and Vulkan-Headers submodules pinned and record update policy.
-- [ ] Establish one authoritative product version consumed by CMake, dashboard,
+- [x] Keep llama.cpp and Vulkan-Headers submodules pinned and record update policy.
+- [x] Establish one authoritative product version consumed by CMake, dashboard,
       packaging and API metadata.
-- [ ] Generate dependency manifests and an SBOM.
-- [ ] Generate SHA-256 checksums for release artifacts.
-- [ ] Sign the executable and release manifest when signing credentials are
+- [x] Generate dependency manifests and an SBOM.
+- [x] Generate SHA-256 checksums for release artifacts.
+- [x] Sign the executable and release manifest when signing credentials are
       available.
-- [ ] Remove ad-hoc startup `DEBUG:` stderr output in favor of structured logs.
+- [x] Remove ad-hoc startup `DEBUG:` stderr output in favor of structured logs.
 - [ ] Reproduce a clean build from documented prerequisites on a fresh Windows
       runner.
 
@@ -573,29 +573,29 @@ current implementation cannot satisfy the native single-process rule.
 - [ ] Two clean builds from the same revision produce an explained, minimized
       artifact difference or reproducible output.
 - [ ] Release archives include version, checksums, dependency manifest and SBOM.
-- [ ] No dependency resolution relies on an unspecified latest version.
+- [x] No dependency resolution relies on an unspecified latest version.
 
 ## Phase 11 - Required CI and architecture enforcement
 
 ### Work
 
-- [ ] Add a pull-request and normal-push workflow separate from release publishing.
-- [ ] Run dashboard install, tests and production build.
-- [ ] Configure and build the native gateway with tests enabled.
-- [ ] Run only InferDeck unit/integration labels, excluding vendored test noise.
-- [ ] Run strict OpenAI Python SDK contract tests.
-- [ ] Run strict OpenAI JavaScript SDK contract tests.
-- [ ] Run route-manifest, schema snapshot and SSE golden tests.
-- [ ] Run forbidden-process, dependency-direction and protocol-leak checks.
-- [ ] Run config concurrency, coordinator cancellation and shutdown tests.
-- [ ] Run security matrices for control auth, origins, media types and size limits.
-- [ ] Add static analysis and formatting checks that do not rewrite the worktree.
+- [x] Add a pull-request and normal-push workflow separate from release publishing.
+- [x] Run dashboard install, tests and production build.
+- [x] Configure and build the native gateway with tests enabled.
+- [x] Run only InferDeck unit/integration labels, excluding vendored test noise.
+- [x] Run strict OpenAI Python SDK contract tests.
+- [x] Run strict OpenAI JavaScript SDK contract tests.
+- [x] Run route-manifest, schema snapshot and SSE golden tests.
+- [x] Run forbidden-process, dependency-direction and protocol-leak checks.
+- [x] Run config concurrency, coordinator cancellation and shutdown tests.
+- [x] Run security matrices for control auth, origins, media types and size limits.
+- [x] Add static analysis and formatting checks that do not rewrite the worktree.
 - [ ] Make the checks required through repository branch protection.
-- [ ] Keep the release workflow as an additional full packaging gate.
+- [x] Keep the release workflow as an additional full packaging gate.
 
 ### Exit gate
 
-- [ ] A deliberately broken API chunk, forbidden subprocess call, `/v1` vendor
+- [x] A deliberately broken API chunk, forbidden subprocess call, `/v1` vendor
       route, backend JSON parse and unauthenticated control route each fail CI.
 - [ ] Main cannot merge without required architecture and contract checks.
 
@@ -603,58 +603,58 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Work
 
-- [ ] Split OpenAI parsing, validation and serialization by endpoint.
-- [ ] Split control-plane status, configuration, model store, aliases, jobs, logs and
+- [x] Split OpenAI parsing, validation and serialization by endpoint.
+- [x] Split control-plane status, configuration, model store, aliases, jobs, logs and
       events into focused modules.
-- [ ] Split coordinator queueing, residency planning, lifecycle transactions and
+- [x] Split coordinator queueing, residency planning, lifecycle transactions and
       voice reservations.
-- [ ] Split llama prompt construction, cache management, decoding, sampling,
+- [x] Split llama prompt construction, cache management, decoding, sampling,
       streaming/tool parsing and runtime lifecycle.
-- [ ] Reduce CMake public dependencies to the smallest necessary surfaces.
-- [ ] Keep foundation and the canonical inference domain dependency-light.
-- [ ] Remove duplicate stream orchestration after Chat and Responses share
+- [x] Reduce CMake public dependencies to the smallest necessary surfaces.
+- [x] Keep foundation and the canonical inference domain dependency-light.
+- [x] Remove duplicate stream orchestration after Chat and Responses share
       `GenerationSession`.
 - [ ] Remove obsolete Anthropic and forced-aligner test targets after approved
       extraction.
-- [ ] Preserve existing hardening tests while moving them with their owners.
+- [x] Preserve existing hardening tests while moving them with their owners.
 
 ### Exit gate
 
-- [ ] Module boundaries match the target architecture.
-- [ ] No protocol or administration god-file remains.
-- [ ] CMake dependency graph has no cycle or backend-to-gateway dependency.
+- [x] Module boundaries match the target architecture.
+- [x] No protocol or administration god-file remains.
+- [x] CMake dependency graph has no cycle or backend-to-gateway dependency.
 
 ## Phase 13 - Documentation and compatibility truth pass
 
 ### Work
 
-- [ ] Rewrite AGENTS.md around the completed architecture and current invariants.
-- [ ] Rewrite `docs/architecture.md` with the strict OpenAI and control-plane
+- [x] Rewrite AGENTS.md around the completed architecture and current invariants.
+- [x] Rewrite `docs/architecture.md` with the strict OpenAI and control-plane
       boundaries.
-- [ ] Update README API claims and remove Anthropic/Core sidecar claims.
-- [ ] Mark `docs/v2-cleanup-report.md` historical and link to this completed plan.
-- [ ] Remove recurrent-cache work from known-open items because checkpoints exist.
-- [ ] Document the exact supported OpenAI baseline and capability subset.
-- [ ] Document every explicit unsupported standard feature.
-- [ ] Document model identity, aliases, errors, cancellation and stream semantics.
-- [ ] Document secure LAN deployment and credential rotation.
+- [x] Update README API claims and remove Anthropic/Core sidecar claims.
+- [x] Mark `docs/v2-cleanup-report.md` historical and link to this completed plan.
+- [x] Remove recurrent-cache work from known-open items because checkpoints exist.
+- [x] Document the exact supported OpenAI baseline and capability subset.
+- [x] Document every explicit unsupported standard feature.
+- [x] Document model identity, aliases, errors, cancellation and stream semantics.
+- [x] Document secure LAN deployment and credential rotation.
 - [x] Document config schema and migration.
-- [ ] Document release reproducibility and verification.
-- [ ] Add an architecture-change checklist for future agents and developers.
+- [x] Document release reproducibility and verification.
+- [x] Add an architecture-change checklist for future agents and developers.
 
 ### Exit gate
 
-- [ ] Documentation claims are verified against route manifests, registered
+- [x] Documentation claims are verified against route manifests, registered
       capabilities, configuration schema and tests.
-- [ ] No document calls an external service native or OpenAI-compatible without a
+- [x] No document calls an external service native or OpenAI-compatible without a
       matching contract.
 
 ## Phase 14 - Migration, deployment and release
 
 ### Pre-deployment
 
-- [ ] Produce a breaking-change and route-migration guide.
-- [ ] Identify every local consumer: OpenCode, Open WebUI, dashboard, scripts,
+- [x] Produce a breaking-change and route-migration guide.
+- [x] Identify every local consumer: OpenCode, Open WebUI, dashboard, scripts,
       benchmarks, editor integrations and health monitors.
 - [ ] Update consumers to strict OpenAI or the new control-plane endpoints.
 - [ ] Back up configuration, StatsDb and managed-model manifests.
