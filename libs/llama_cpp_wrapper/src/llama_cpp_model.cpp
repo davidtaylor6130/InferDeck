@@ -80,6 +80,15 @@ inline Error make_error(ErrorCode code, std::string msg) {
   return Error{code, std::move(msg)};
 }
 
+int count_output_tokens(const llama_vocab* vocab, const std::string& text) {
+  if (!vocab || text.empty()) return 0;
+  try {
+    return static_cast<int>(common_tokenize(vocab, text, false, true).size());
+  } catch (...) {
+    return 0;
+  }
+}
+
 std::string random_string(std::size_t n = 32) {
   static constexpr char chars[] =
       "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -1676,6 +1685,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   out.completion_tokens     = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
   out.prompt_duration_ms = task.out_prompt_duration_ms;
+  out.first_token_duration_ms = task.out_first_token_duration_ms;
   out.generation_duration_ms = task.out_generation_duration_ms > 0.0f
       ? task.out_generation_duration_ms
       : out.duration_ms;
@@ -1697,6 +1707,7 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
     if (setup.parser_params.parse_tool_calls)
       apply_fallback_tool_calls(out, out.text);
   }
+  out.reasoning_tokens = count_output_tokens(vocab_, out.reasoning_text);
   return Result<InferenceResult>(std::move(out));
 }
 
@@ -1816,6 +1827,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   out.completion_tokens    = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
   out.prompt_duration_ms = task.out_prompt_duration_ms;
+  out.first_token_duration_ms = task.out_first_token_duration_ms;
   out.generation_duration_ms = task.out_generation_duration_ms > 0.0f
       ? task.out_generation_duration_ms
       : out.duration_ms;
@@ -1866,6 +1878,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       if (!callback(delta)) break;
     }
   }
+  out.reasoning_tokens = count_output_tokens(vocab_, out.reasoning_text);
   return Result<InferenceResult>(std::move(out));
 }
 

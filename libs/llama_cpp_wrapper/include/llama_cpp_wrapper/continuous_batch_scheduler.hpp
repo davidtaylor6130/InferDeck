@@ -150,6 +150,7 @@ struct SlotTask {
     bool out_mtp_cache_synced{true};
     float out_prompt_duration_ms{0.0f};
     float out_generation_duration_ms{0.0f};
+    float out_first_token_duration_ms{0.0f};
 
     // ---- Async token channel ----
     std::mutex out_mtx;

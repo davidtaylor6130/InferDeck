@@ -266,9 +266,11 @@ struct GenerationResult {
     int prompt_tokens{0};
     int cached_prompt_tokens{0};
     int completion_tokens{0};
+    int reasoning_tokens{0};
     float duration_ms{0.0f};
     float generation_duration_ms{0.0f};
     float prompt_duration_ms{0.0f};
+    float first_token_duration_ms{0.0f};
     float tokens_per_second{0.0f};
     int mtp_drafted_tokens{0};
     int mtp_accepted_tokens{0};

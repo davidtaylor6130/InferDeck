@@ -93,6 +93,7 @@ void record_request(observability::Metrics* metrics,
     rec.cached_prompt_tokens = std::clamp(result.cached_prompt_tokens, 0, rec.prompt_tokens);
     rec.cache_write_tokens = rec.prompt_tokens - rec.cached_prompt_tokens;
     rec.completion_tokens = std::max(0, result.completion_tokens);
+    rec.reasoning_tokens = std::max(0, result.reasoning_tokens);
     rec.duration_ms = std::max(0.0, static_cast<double>(result.duration_ms));
     rec.generation_duration_ms = std::max(0.0, static_cast<double>(result.generation_duration_ms));
     rec.tokens_per_second = rec.modality == "text" && rec.generation_duration_ms > 0.0
@@ -110,7 +111,9 @@ void record_request(observability::Metrics* metrics,
         : 0.0;
     rec.queue_duration_ms = std::max(0.0, observation.queue_duration_ms);
     rec.swap_load_duration_ms = std::max(0.0, observation.swap_load_duration_ms);
-    rec.first_token_duration_ms = std::max(0.0, observation.first_token_duration_ms);
+    rec.first_token_duration_ms = result.first_token_duration_ms > 0.0f
+        ? result.first_token_duration_ms
+        : std::max(0.0, observation.first_token_duration_ms);
     rec.input_audio_seconds = std::max(0.0, input_audio_seconds);
     rec.output_audio_seconds = std::max(0.0, observation.output_audio_seconds);
     rec.input_characters = std::max<std::int64_t>(0, input_characters);
@@ -872,6 +875,8 @@ struct AcquiredChatSlot {
     int slot_id{-1};
     std::string reservation_key;
     std::optional<std::uint64_t> voice_session_token;
+    double queue_duration_ms{};
+    double swap_load_duration_ms{};
 };
 
 std::optional<AcquiredChatSlot> acquire_chat_slot(
@@ -879,6 +884,7 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     const GatewayDeps& deps, int priority,
     const std::string& requested_model, const std::string& model_name) {
     AcquiredChatSlot acquired;
+    const auto acquisition_started = std::chrono::steady_clock::now();
     acquired.reservation_key = request_client_key(req);
     if (!acquired.reservation_key.empty()) {
         acquired.voice_session_token = deps.coordinator.hold_priority_session(
@@ -896,14 +902,21 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     opts.reservation_key = acquired.reservation_key;
     if (acquired.voice_session_token) opts.priority = 100;
     opts.cancelled = cancelled;
-    opts.prepare = [&deps, &model_name, deadline, cancelled] {
+    opts.prepare = [&deps, &model_name, deadline, cancelled, &acquired] {
+        const auto started = std::chrono::steady_clock::now();
         auto loaded = ensure_model_loaded(deps, model_name, deadline, cancelled);
+        acquired.swap_load_duration_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
         if (loaded.ok) return foundation::Ok();
         return foundation::Err<void>(loaded.error_code, loaded.message);
     };
     auto slot = deps.coordinator.acquire_slot(model_name, opts);
     if (slot) {
         acquired.slot_id = *slot;
+        const auto total = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - acquisition_started).count();
+        acquired.queue_duration_ms = std::max(
+            0.0, total - acquired.swap_load_duration_ms);
         return acquired;
     }
     if (acquired.voice_session_token) {
@@ -1000,6 +1013,8 @@ std::optional<AcquiredGenerationSlot> acquire_generation_slot(
         acquired->slot_id,
         std::move(acquired->reservation_key),
         std::move(acquired->voice_session_token),
+        acquired->queue_duration_ms,
+        acquired->swap_load_duration_ms,
     };
 }
 
@@ -1145,11 +1160,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     const std::string stream_model = requested_model;
     const auto stream_created = static_cast<std::int64_t>(std::time(nullptr));
 
+    auto observation = observe_request(req, resp, deps, "text", stream);
+    observation.queue_duration_ms = acquired->queue_duration_ms;
+    observation.swap_load_duration_ms = acquired->swap_load_duration_ms;
     auto state = std::make_shared<GenerationSession>(
         deps.coordinator, deps.metrics, deps.stats_db, deps.events,
         slot_id, requested_model, model_name, reservation_key,
         voice_session_token.value_or(0), deps.voice_session_grace_ms,
-        observe_request(req, resp, deps, "text", stream));
+        std::move(observation));
 
     if (!stream) {
         handle_non_stream_chat(resp, deps, requested_model, model_name,

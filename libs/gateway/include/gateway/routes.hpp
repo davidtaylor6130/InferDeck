@@ -128,6 +128,8 @@ struct AcquiredGenerationSlot {
     int slot_id{-1};
     std::string reservation_key;
     std::optional<std::uint64_t> voice_session_token;
+    double queue_duration_ms{};
+    double swap_load_duration_ms{};
 };
 
 std::optional<AcquiredGenerationSlot> acquire_generation_slot(

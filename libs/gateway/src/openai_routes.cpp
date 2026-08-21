@@ -733,13 +733,15 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
         auto acquired = acquire_generation_slot(
             req, resp, deps, parsed->priority, requested_model, model_name);
         if (!acquired) return;
+        auto observation = observe_request(req, resp, deps, "text", false);
+        observation.queue_duration_ms = acquired->queue_duration_ms;
+        observation.swap_load_duration_ms = acquired->swap_load_duration_ms;
         GenerationSession session(
             deps.coordinator, deps.metrics, deps.stats_db, deps.events,
             acquired->slot_id, requested_model, model_name,
             acquired->reservation_key,
             acquired->voice_session_token.value_or(0),
-            deps.voice_session_grace_ms,
-            observe_request(req, resp, deps, "text", false));
+            deps.voice_session_grace_ms, std::move(observation));
         auto result = session.run(parsed->generation);
         if (!result) {
             const auto error = map_openai_error(result.error().code);
@@ -756,13 +758,15 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
     auto acquired = acquire_generation_slot(
         req, resp, deps, parsed->priority, requested_model, model_name);
     if (!acquired) return;
+    auto observation = observe_request(req, resp, deps, "text", true);
+    observation.queue_duration_ms = acquired->queue_duration_ms;
+    observation.swap_load_duration_ms = acquired->swap_load_duration_ms;
     auto session = std::make_shared<GenerationSession>(
         deps.coordinator, deps.metrics, deps.stats_db, deps.events,
         acquired->slot_id, requested_model, model_name,
         acquired->reservation_key,
         acquired->voice_session_token.value_or(0),
-        deps.voice_session_grace_ms,
-        observe_request(req, resp, deps, "text", true));
+        deps.voice_session_grace_ms, std::move(observation));
     auto state = std::make_shared<ResponsesStreamState>();
     state->session = session;
     state->request = request;
