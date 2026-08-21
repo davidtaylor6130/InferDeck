@@ -1125,6 +1125,9 @@ TEST_CASE("Routes: GET control swap status returns model info", "[routes][swap]"
     auto body = nlohmann::json::parse(res->body);
     REQUIRE(body["loaded_model"] == "qwen3.6-27b");
     REQUIRE(body["loaded_models"] == nlohmann::json::array({"qwen3.6-27b"}));
+    REQUIRE(body["identities"]["selected"] == "qwen3.6-27b");
+    REQUIRE(body["identities"]["resident"] == nlohmann::json::array({"qwen3.6-27b"}));
+    REQUIRE(body["identities"]["executing"] == nlohmann::json::array());
     REQUIRE(body["residency"].size() == 1);
     REQUIRE(body["residency"][0]["runtime"] == "llama_cpp");
     REQUIRE(body["active_requests"] == 0);

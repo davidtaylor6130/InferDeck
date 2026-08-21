@@ -47,6 +47,79 @@ model_registry:
     REQUIRE(result);
 }
 
+TEST_CASE("Gateway configuration decodes explicit model resource metadata",
+          "[config][resources]") {
+    const auto path = std::filesystem::temp_directory_path() /
+        "inferdeck-explicit-resource-config.yml";
+    {
+        std::ofstream output(path);
+        output << R"(model_registry:
+  - name: helper
+    runtime: windows_sapi
+    modality: audio_speech
+    capabilities: [audio_speech]
+    n_slots: 1
+    role: media
+    compute: cpu
+    residency: always
+    admission_pool: audio
+    concurrency_limit: 1
+    memory_required_mb: 32
+    eviction_eligible: false
+)";
+    }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    const auto& info = config.models.front();
+    CHECK(info.resource_metadata_explicit);
+    CHECK(info.role == inferdeck::model::ModelRole::Media);
+    CHECK(info.compute == inferdeck::model::ModelCompute::Cpu);
+    CHECK(info.residency == inferdeck::model::ResidencyPolicy::Always);
+    CHECK(info.admission_pool == "audio");
+    CHECK(info.concurrency_limit == 1);
+    CHECK(info.memory_required_mb == 32);
+    CHECK_FALSE(info.eviction_eligible);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
+
+TEST_CASE("Gateway configuration rejects partial and impossible resources",
+          "[config][resources]") {
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: partial
+    gguf_path: model.gguf
+    role: conversation
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: gpu-helper
+    gguf_path: model.gguf
+    n_slots: 1
+    role: helper
+    compute: vulkan_gpu
+    residency: always
+    admission_pool: helper
+    concurrency_limit: 1
+    memory_required_mb: 64
+    eviction_eligible: false
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: evict-always
+    runtime: windows_sapi
+    modality: audio_speech
+    n_slots: 1
+    role: media
+    compute: cpu
+    residency: always
+    admission_pool: audio
+    concurrency_limit: 1
+    memory_required_mb: 32
+    eviction_eligible: true
+)"));
+}
+
 TEST_CASE("Compatibility profiles are explicit and default off", "[config]") {
     const auto valid = validate_config_text(R"(
 compatibility:

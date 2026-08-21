@@ -42,12 +42,27 @@ struct ResidencyInfo {
     std::string name;
     std::string runtime;
     std::string modality;
+    std::string role;
+    std::string compute;
+    std::string residency;
+    std::string admission_pool;
+    int concurrency_limit{0};
+    int memory_required_mb{0};
+    bool eviction_eligible{false};
     int slots{0};
     int free_slots{0};
     int active_requests{0};
     int estimated_vram_mb{0};
     bool primary{false};
     bool resizing{false};
+};
+
+struct ModelIdentitySnapshot {
+    std::string requested;
+    std::string resolved;
+    std::optional<std::string> selected;
+    std::vector<std::string> resident;
+    std::vector<std::string> executing;
 };
 
 class BackendCoordinator {
@@ -70,6 +85,9 @@ public:
 
     [[nodiscard]] bool is_loaded(const std::string& name) const;
     [[nodiscard]] std::optional<std::string> get_loaded_model() const;
+    [[nodiscard]] std::optional<std::string> selected_model() const;
+    [[nodiscard]] ModelIdentitySnapshot identity_snapshot(
+        std::string requested = {}, std::string resolved = {}) const;
     [[nodiscard]] std::vector<std::string> get_loaded_models() const;
     [[nodiscard]] std::vector<ResidencyInfo> residency() const;
     [[nodiscard]] int get_vram_usage() const;
@@ -165,6 +183,7 @@ private:
     bool model_is_primary_locked(const std::string& name) const;
     bool model_is_priority_media_locked(const std::string& name) const;
     bool model_is_independent_sidecar_locked(const std::string& name) const;
+    bool admission_pool_allows_locked(const std::string& name) const;
     bool request_waits_for_priority_media_locked(
         const std::string& name, const std::string& reservation_key) const;
     bool waiter_is_actionable_locked(const SlotWaiter& waiter) const;

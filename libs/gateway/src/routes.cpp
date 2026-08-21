@@ -562,9 +562,8 @@ bool maintenance_mode_active(const GatewayDeps& deps) noexcept {
 }
 
 ComputeResource model_compute_resource(const model::ModelInfo& info) noexcept {
-    return info.modality != "text" && info.vram_required_mb <= 0
-        ? ComputeResource::Cpu
-        : ComputeResource::Gpu;
+    return info.compute == model::ModelCompute::Cpu
+        ? ComputeResource::Cpu : ComputeResource::Gpu;
 }
 
 bool maintenance_blocks_model(const GatewayDeps& deps,
@@ -663,7 +662,8 @@ EnsureLoadedResult ensure_model_loaded(
     }
 
     const auto info = deps.coordinator.registry().get_info_result(model_name);
-    if (info && info->modality != "text" && info->vram_required_mb <= 0) {
+    if (info && info->role != model::ModelRole::Conversation &&
+        info->compute == model::ModelCompute::Cpu) {
         if (!deps.coordinator.registry().has_factory(info->runtime)) {
             return {false, 503, "runtime_unavailable",
                     "runtime is not linked: " + info->runtime,
@@ -759,10 +759,16 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
                         const GatewayDeps& deps) {
     (void)req;
     auto current = deps.coordinator.get_loaded_model();
+    const auto identities = deps.coordinator.identity_snapshot();
     const auto snap = deps.swap_tracker ? deps.swap_tracker->snapshot() : SwapSnapshot{};
     nlohmann::json body = {
         {"loaded_model", current ? *current : ""},
         {"loaded_models", deps.coordinator.get_loaded_models()},
+        {"identities", {
+            {"selected", identities.selected ? *identities.selected : ""},
+            {"resident", identities.resident},
+            {"executing", identities.executing},
+        }},
         {"residency", nlohmann::json::array()},
         {"vram_usage_mb", deps.coordinator.get_vram_usage()},
         {"vram_budget_mb", deps.coordinator.vram_budget_mb()},
@@ -782,6 +788,13 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
             {"name", resident.name},
             {"runtime", resident.runtime},
             {"modality", resident.modality},
+            {"role", resident.role},
+            {"compute", resident.compute},
+            {"residency_policy", resident.residency},
+            {"admission_pool", resident.admission_pool},
+            {"concurrency_limit", resident.concurrency_limit},
+            {"memory_required_mb", resident.memory_required_mb},
+            {"eviction_eligible", resident.eviction_eligible},
             {"slots", resident.slots},
             {"free_slots", resident.free_slots},
             {"active_requests", resident.active_requests},

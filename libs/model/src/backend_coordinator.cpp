@@ -13,16 +13,17 @@ namespace inferdeck::model {
 namespace {
 
 bool is_primary_model(const ModelInfo& info) {
-    return info.modality == "text";
+    return info.role == ModelRole::Conversation;
 }
 
 bool is_priority_media_model(const ModelInfo& info) {
-    return info.modality == "audio_speech" ||
-        info.modality == "audio_transcription";
+    return info.role == ModelRole::Media &&
+        (info.supports("audio_speech") ||
+         info.supports("audio_transcription"));
 }
 
 bool is_independent_sidecar(const ModelInfo& info) {
-    return !is_primary_model(info) && info.vram_required_mb <= 0;
+    return !is_primary_model(info) && info.compute == ModelCompute::Cpu;
 }
 
 }
@@ -282,6 +283,28 @@ std::optional<std::string> BackendCoordinator::get_loaded_model() const {
     return current_loaded_;
 }
 
+std::optional<std::string> BackendCoordinator::selected_model() const {
+    return get_loaded_model();
+}
+
+ModelIdentitySnapshot BackendCoordinator::identity_snapshot(
+    std::string requested, std::string resolved) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ModelIdentitySnapshot snapshot;
+    snapshot.requested = std::move(requested);
+    snapshot.resolved = std::move(resolved);
+    snapshot.selected = current_loaded_;
+    for (const auto& [name, backend] : instances_) {
+        if (backend && backend->is_loaded()) snapshot.resident.push_back(name);
+    }
+    for (const auto& [name, active] : active_requests_by_model_) {
+        if (active > 0) snapshot.executing.push_back(name);
+    }
+    std::sort(snapshot.resident.begin(), snapshot.resident.end());
+    std::sort(snapshot.executing.begin(), snapshot.executing.end());
+    return snapshot;
+}
+
 std::vector<std::string> BackendCoordinator::get_loaded_models() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::string> loaded;
@@ -298,7 +321,12 @@ std::vector<ResidencyInfo> BackendCoordinator::residency() const {
     for (const auto& [name, backend] : instances_) {
         if (!backend || !backend->is_loaded()) continue;
         const auto active = active_requests_by_model_.find(name);
-        out.push_back({name, backend->info().runtime, backend->info().modality,
+        const auto& info = backend->info();
+        out.push_back({name, info.runtime, info.modality,
+                       to_string(info.role), to_string(info.compute),
+                       to_string(info.residency), info.admission_pool,
+                       info.concurrency_limit, info.memory_required_mb,
+                       info.eviction_eligible,
                        backend->n_slots(), backend->n_free_slots(),
                        active == active_requests_by_model_.end() ? 0 : active->second,
                        backend->estimate_vram_mb(backend->n_slots()),
@@ -377,7 +405,8 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
                                          "model not loaded: " + name);
         }
         if (!waiters_.empty() || resizing_models_.contains(name) ||
-            request_waits_for_priority_media_locked(name, opts.reservation_key)) {
+            request_waits_for_priority_media_locked(name, opts.reservation_key) ||
+            !admission_pool_allows_locked(name)) {
             return foundation::Err<int>(foundation::ErrorCode::Unavailable,
                                          "request queue is busy: " + name);
         }
@@ -683,6 +712,31 @@ bool BackendCoordinator::model_is_independent_sidecar_locked(
     return info && is_independent_sidecar(*info);
 }
 
+bool BackendCoordinator::admission_pool_allows_locked(
+    const std::string& name) const {
+    const auto find_info = [this](const std::string& model_name)
+        -> std::optional<ModelInfo> {
+        const auto backend = instances_.find(model_name);
+        if (backend != instances_.end() && backend->second) {
+            return backend->second->info();
+        }
+        const auto registered = registry_.get_info_result(model_name);
+        if (registered) return *registered;
+        return std::nullopt;
+    };
+    const auto target_info = find_info(name);
+    if (!target_info) return false;
+    int active = 0;
+    for (const auto& [model_name, count] : active_requests_by_model_) {
+        if (count <= 0) continue;
+        const auto info = find_info(model_name);
+        if (info && info->admission_pool == target_info->admission_pool) {
+            active += count;
+        }
+    }
+    return active < target_info->concurrency_limit;
+}
+
 bool BackendCoordinator::request_waits_for_priority_media_locked(
     const std::string& name, const std::string& reservation_key) const {
     const bool primary = model_is_primary_locked(name);
@@ -716,6 +770,7 @@ bool BackendCoordinator::waiter_is_actionable_locked(
     }
     if (request_waits_for_priority_media_locked(
             waiter.model, waiter.reservation_key)) return false;
+    if (!admission_pool_allows_locked(waiter.model)) return false;
     const auto backend = instances_.find(waiter.model);
     if (backend == instances_.end() || !backend->second ||
         !backend->second->is_loaded()) {
@@ -763,6 +818,11 @@ void BackendCoordinator::erase_waiter_locked(std::uint64_t id) {
 
 foundation::Result<int> BackendCoordinator::issue_lease_locked(
     const std::string& name, int backend_slot) {
+    if (!admission_pool_allows_locked(name)) {
+        return foundation::Err<int>(
+            foundation::ErrorCode::ResourceBusy,
+            "admission pool concurrency limit reached: " + name);
+    }
     if (next_lease_id_ > std::numeric_limits<int>::max()) {
         return foundation::Err<int>(foundation::ErrorCode::Internal,
                                      "slot lease id space exhausted");
@@ -1037,6 +1097,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::str
                 if (loaded_name == name || !backend || !backend->is_loaded() ||
                     (active != active_requests_by_model_.end() && active->second > 0) ||
                     backend->estimate_vram_mb(backend->n_slots()) <= 0 ||
+                    backend->info().residency == ResidencyPolicy::Always ||
                     !backend->can_resize_slots() || backend->n_slots() <= backend->min_slots()) continue;
                 candidate = loaded_name;
                 next_slots = backend->n_slots() - 1;
@@ -1082,6 +1143,8 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(const std::str
                     ? backend->estimate_vram_mb(backend->n_slots()) : 0;
                 if (loaded_name != name && backend && backend->is_loaded() &&
                     estimated > candidate_vram &&
+                    backend->info().eviction_eligible &&
+                    backend->info().residency != ResidencyPolicy::Always &&
                     (active == active_requests_by_model_.end() || active->second == 0)) {
                     candidate = loaded_name;
                     candidate_vram = estimated;

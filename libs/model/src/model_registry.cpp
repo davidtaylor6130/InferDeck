@@ -40,6 +40,11 @@ bool ModelRegistry::has_factory(const std::string& runtime) const {
 
 void ModelRegistry::register_model(ModelInfo info) {
     std::lock_guard<std::mutex> lock(mutex_);
+    normalize_model_resources(info);
+    if (const auto error = validate_model_resources(info)) {
+        throw std::invalid_argument(
+            "ModelRegistry::register_model: " + info.name + ": " + *error);
+    }
     if (info.name.empty()) {
         throw std::invalid_argument("ModelRegistry::register_model: name is empty");
     }

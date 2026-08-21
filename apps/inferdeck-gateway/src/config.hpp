@@ -1,5 +1,7 @@
 #include <yaml-cpp/yaml.h>
 
+#include <algorithm>
+#include <array>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -10,6 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "foundation/logging.hpp"
@@ -300,6 +303,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                                          "model_store.archive_root cannot be empty");
         }
         std::unordered_set<std::string> names;
+        std::unordered_map<std::string, int> admission_pool_limits;
         if (root["model_registry"]) {
             if (!root["model_registry"].IsSequence()) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
@@ -346,6 +350,95 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 if (minimum < 1 || slots < minimum) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "invalid slot bounds for model: " + name);
+                }
+                const std::array resource_keys{
+                    "role", "compute", "residency", "admission_pool",
+                    "concurrency_limit", "memory_required_mb",
+                    "eviction_eligible"};
+                const bool has_resource_metadata = std::any_of(
+                    resource_keys.begin(), resource_keys.end(),
+                    [&entry](const char* key) {
+                        return static_cast<bool>(entry[key]);
+                    });
+                if (has_resource_metadata &&
+                    !std::all_of(resource_keys.begin(), resource_keys.end(),
+                                 [&entry](const char* key) {
+                                     return static_cast<bool>(entry[key]);
+                                 })) {
+                    return foundation::Err<void>(
+                        foundation::ErrorCode::InvalidArgument,
+                        "model resource metadata must define role, compute, "
+                        "residency, admission_pool, concurrency_limit, "
+                        "memory_required_mb, and eviction_eligible: " + name);
+                }
+                if (has_resource_metadata) {
+                    model::ModelInfo resource;
+                    resource.name = name;
+                    resource.modality = modality;
+                    resource.runtime = runtime;
+                    resource.n_slots = slots;
+                    resource.capabilities.clear();
+                    if (entry["capabilities"] &&
+                        entry["capabilities"].IsSequence()) {
+                        for (const auto& capability : entry["capabilities"]) {
+                            resource.capabilities.push_back(
+                                capability.as<std::string>());
+                        }
+                    } else if (modality == "embedding") {
+                        resource.capabilities = {"embeddings"};
+                    } else if (modality == "image") {
+                        resource.capabilities = {"image_generation"};
+                    } else if (modality == "audio_speech") {
+                        resource.capabilities = {"audio_speech"};
+                    } else if (modality == "audio_transcription") {
+                        resource.capabilities = {"audio_transcription"};
+                    } else {
+                        resource.capabilities = {
+                            "chat_completions", "responses"};
+                    }
+                    const auto role = model::parse_model_role(
+                        entry["role"].as<std::string>());
+                    const auto compute = model::parse_model_compute(
+                        entry["compute"].as<std::string>());
+                    const auto residency = model::parse_residency_policy(
+                        entry["residency"].as<std::string>());
+                    if (!role || !compute || !residency) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "unsupported model role, compute, or residency: " +
+                                name);
+                    }
+                    resource.role = *role;
+                    resource.compute = *compute;
+                    resource.residency = *residency;
+                    resource.admission_pool =
+                        entry["admission_pool"].as<std::string>();
+                    resource.concurrency_limit =
+                        entry["concurrency_limit"].as<int>();
+                    resource.memory_required_mb =
+                        entry["memory_required_mb"].as<int>();
+                    resource.eviction_eligible =
+                        entry["eviction_eligible"].as<bool>();
+                    resource.resource_metadata_explicit = true;
+                    if (const auto error =
+                            model::validate_model_resources(resource)) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "invalid model resource metadata for " + name +
+                                ": " + *error);
+                    }
+                    const auto [pool, inserted] =
+                        admission_pool_limits.emplace(
+                            resource.admission_pool,
+                            resource.concurrency_limit);
+                    if (!inserted &&
+                        pool->second != resource.concurrency_limit) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "models in admission_pool " +
+                                resource.admission_pool +
+                                " must use the same concurrency_limit");
+                    }
                 }
                 if (entry["context_size"] && entry["context_size"].as<int>() < 1) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
@@ -772,6 +865,23 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             }
             info.n_slots = m["n_slots"] ? m["n_slots"].as<int>() : 2;
             info.min_slots = m["min_slots"] ? m["min_slots"].as<int>() : 1;
+            if (m["role"]) {
+                info.role = *model::parse_model_role(
+                    m["role"].as<std::string>());
+                info.compute = *model::parse_model_compute(
+                    m["compute"].as<std::string>());
+                info.residency = *model::parse_residency_policy(
+                    m["residency"].as<std::string>());
+                info.admission_pool =
+                    m["admission_pool"].as<std::string>();
+                info.concurrency_limit =
+                    m["concurrency_limit"].as<int>();
+                info.memory_required_mb =
+                    m["memory_required_mb"].as<int>();
+                info.eviction_eligible =
+                    m["eviction_eligible"].as<bool>();
+                info.resource_metadata_explicit = true;
+            }
             info.vram_required_mb =
                 m["vram_required_mb"] ? m["vram_required_mb"].as<int>() : 0;
             info.vram_fixed_mb = m["vram_fixed_mb"] ? m["vram_fixed_mb"].as<int>() : 0;
