@@ -304,7 +304,6 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
 
-    resp.set_header("Content-Type", "text/event-stream");
     resp.set_header("Cache-Control", "no-cache");
     resp.set_header("Connection", "keep-alive");
     state->start(std::move(*inference_request));

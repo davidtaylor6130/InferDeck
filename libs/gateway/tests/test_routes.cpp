@@ -1030,6 +1030,8 @@ TEST_CASE("Routes: stable aliases resolve while preserving request attribution",
         "application/json");
     REQUIRE(stream_response);
     REQUIRE(stream_response->status == 200);
+    REQUIRE(stream_response->get_header_value_count("Content-Type") == 1);
+    CHECK(stream_response->get_header_value("Content-Type") == "text/event-stream");
     std::size_t position = 0;
     while (position < stream_response->body.size()) {
         auto newline = stream_response->body.find('\n', position);
@@ -1949,6 +1951,8 @@ TEST_CASE("Routes: POST /v1/responses streams typed reasoning and tool events", 
     }.dump(), "application/json");
     REQUIRE(response);
     REQUIRE(response->status == 200);
+    REQUIRE(response->get_header_value_count("Content-Type") == 1);
+    CHECK(response->get_header_value("Content-Type") == "text/event-stream");
     REQUIRE(response->body.find("event: response.created") != std::string::npos);
     REQUIRE(response->body.find("event: response.reasoning_text.delta") != std::string::npos);
     REQUIRE(response->body.find("event: response.function_call_arguments.delta") != std::string::npos);
