@@ -15,8 +15,6 @@ inline constexpr std::string_view kControlApiBase =
     "/api/inferdeck/v1";
 inline constexpr std::string_view kOpenAIDerivativeBase =
     "/compat/openai-derivative/v1";
-inline constexpr std::string_view kAnthropicCompatibilityBase =
-    "/compat/anthropic/v1";
 inline constexpr std::string_view kDefaultCompatibilityProfile =
     "strict_openai";
 

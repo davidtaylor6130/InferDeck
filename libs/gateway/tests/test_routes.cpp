@@ -2,7 +2,6 @@
 #include <catch2/catch_approx.hpp>
 
 #include "foundation/result.hpp"
-#include "gateway/anthropic_routes.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
 #include "gateway/openai_routes.hpp"
@@ -721,10 +720,6 @@ struct TestServer {
         server.Post("/v1/responses",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_responses(req, resp, make_deps());
-                    });
-        server.Post("/v1/messages",
-                    [this](const httplib::Request& req, httplib::Response& resp) {
-                        handle_anthropic_messages(req, resp, make_deps());
                     });
         server.Post("/v1/images/generations",
                     [this](const httplib::Request& req, httplib::Response& resp) {
@@ -2006,135 +2001,6 @@ TEST_CASE("Routes: POST /v1/responses streams typed reasoning and tool events", 
     ts.stop();
 }
 
-TEST_CASE("Routes: Anthropic rejects unknown model instead of default fallback",
-          "[routes][anthropic][validation]") {
-    TestServer ts;
-    ts.registry.register_model(make_info("local-model"));
-    REQUIRE(ts.coordinator.load("local-model"));
-    auto deps = ts.make_deps();
-    deps.default_model = "local-model";
-
-    httplib::Request request;
-    request.body =
-        R"({"model":"claude-unknown","max_tokens":16,"messages":[{"role":"user","content":"test"}]})";
-    httplib::Response response;
-    handle_anthropic_messages(request, response, deps);
-    REQUIRE(response.status == 404);
-    CHECK(nlohmann::json::parse(response.body)["error"]["type"] ==
-          "not_found_error");
-    CHECK(ts.metrics.total_requests() == 0);
-}
-
-TEST_CASE("Routes: Anthropic explicit aliases remain compatible",
-          "[routes][anthropic][validation]") {
-    TestServer ts;
-    ts.registry.register_model(make_info("local-model"));
-    REQUIRE(ts.coordinator.load("local-model"));
-    auto deps = ts.make_deps();
-    deps.anthropic_model_aliases.emplace("claude-local", "local-model");
-
-    httplib::Request request;
-    request.is_connection_closed = [] { return false; };
-    request.body =
-        R"({"model":"claude-local","max_tokens":16,"messages":[{"role":"user","content":"test"}]})";
-    httplib::Response response;
-    handle_anthropic_messages(request, response, deps);
-    REQUIRE(response.status == 200);
-    CHECK(nlohmann::json::parse(response.body)["model"] == "claude-local");
-}
-
-TEST_CASE("Routes: Anthropic validates contract before acquisition",
-          "[routes][anthropic][validation]") {
-    TestServer ts;
-    ts.registry.register_model(make_info("local-model"));
-
-    const std::vector<nlohmann::json> invalid = {
-        {{"max_tokens", 16},
-         {"messages", nlohmann::json::array({
-             {{"role", "user"}, {"content", "test"}},
-         })}},
-        {{"model", "local-model"}, {"max_tokens", 0},
-         {"messages", nlohmann::json::array({
-             {{"role", "user"}, {"content", "test"}},
-         })}},
-        {{"model", "local-model"}, {"max_tokens", 16}, {"stream", "yes"},
-         {"messages", nlohmann::json::array({
-             {{"role", "user"}, {"content", "test"}},
-         })}},
-        {{"model", "local-model"}, {"max_tokens", 16},
-         {"temperature", 1.1},
-         {"messages", nlohmann::json::array({
-             {{"role", "user"}, {"content", "test"}},
-         })}},
-        {{"model", "local-model"}, {"max_tokens", 16},
-         {"messages", nlohmann::json::array({
-             {{"role", "system"}, {"content", "test"}},
-         })}},
-        {{"model", "local-model"}, {"max_tokens", 16},
-         {"messages", nlohmann::json::array({
-             {{"role", "user"},
-              {"content", nlohmann::json::array({
-                  {{"type", "tool_use"}, {"id", "t1"}, {"name", "run"},
-                   {"input", nlohmann::json::object()}},
-              })}},
-         })}},
-        {{"model", "local-model"}, {"max_tokens", 16},
-         {"thinking", {{"type", "enabled"}, {"budget_tokens", 1024}}},
-         {"messages", nlohmann::json::array({
-             {{"role", "user"}, {"content", "test"}},
-         })}},
-    };
-
-    for (const auto& body : invalid) {
-        httplib::Request request;
-        request.body = body.dump();
-        httplib::Response response;
-        handle_anthropic_messages(request, response, ts.make_deps());
-        CHECK(response.status == 400);
-    }
-    CHECK(ts.metrics.total_requests() == 0);
-}
-
-TEST_CASE("Routes: Anthropic streaming holds split UTF-8", "[routes][anthropic][stream][utf8]") {
-    TestServer ts;
-    ts.registry.register_model(make_info("utf8-model"));
-    REQUIRE(ts.coordinator.load("utf8-model"));
-    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("utf8-model"));
-    REQUIRE(backend);
-    const_cast<IModelMock*>(backend)->split_utf8.store(true);
-    REQUIRE(ts.start());
-
-    httplib::Client client("127.0.0.1", ts.port);
-    auto response = client.Post("/v1/messages", nlohmann::json{
-        {"model", "utf8-model"}, {"max_tokens", 32}, {"stream", true},
-        {"messages", nlohmann::json::array({{{"role", "user"}, {"content", "test"}}})},
-    }.dump(), "application/json");
-    REQUIRE(response);
-    REQUIRE(response->status == 200);
-
-    std::string content;
-    std::string arguments;
-    std::size_t position = 0;
-    while (position < response->body.size()) {
-        auto newline = response->body.find('\n', position);
-        if (newline == std::string::npos) newline = response->body.size();
-        const std::string line = response->body.substr(position, newline - position);
-        position = newline + 1;
-        if (line.rfind("data: ", 0) != 0) continue;
-        const auto event = nlohmann::json::parse(line.substr(6));
-        if (event.value("type", "") != "content_block_delta") continue;
-        const auto delta = event.value("delta", nlohmann::json::object());
-        if (delta.value("type", "") == "text_delta") content += delta.value("text", "");
-        if (delta.value("type", "") == "input_json_delta") {
-            arguments += delta.value("partial_json", "");
-        }
-    }
-
-    REQUIRE(content == std::string("cost \xe2\x82\xac", 8) + "5\xef\xbf\xbd");
-    REQUIRE(arguments == std::string("{\"city\":\"M\xc3\xbcnchen\"}", 19));
-    ts.stop();
-}
-
 TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes][images]") {
     TestServer ts;
     auto info = make_info("image-model");
@@ -2942,14 +2808,6 @@ TEST_CASE("Routes: text models reject image input before inference",
     CHECK(nlohmann::json::parse(responses->body)["error"]["code"] ==
           "unsupported_capability");
 
-    auto anthropic = client.Post(
-        "/v1/messages",
-        R"({"model":"text-only","max_tokens":16,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]})",
-        "application/json");
-    REQUIRE(anthropic);
-    REQUIRE(anthropic->status == 400);
-    CHECK(nlohmann::json::parse(anthropic->body)["error"]["type"] ==
-          "invalid_request_error");
     CHECK(ts.metrics.total_requests() == 0);
     ts.stop();
 }
@@ -3027,34 +2885,6 @@ TEST_CASE("Routes: chat stream applies producer backpressure until disconnect",
     CHECK(emitted.find("finish_reason\":\"stop") == std::string::npos);
     CHECK(emitted.find("\"usage\"") == std::string::npos);
     CHECK(emitted.find("[DONE]") == std::string::npos);
-    REQUIRE(response.content_provider_resource_releaser_);
-    response.content_provider_resource_releaser_(false);
-    CHECK(backend->stream_deltas_emitted.load() < 1000);
-    CHECK(ts.coordinator.active_request_count() == 0);
-}
-
-TEST_CASE("Routes: Anthropic stream applies producer backpressure until disconnect",
-          "[routes][anthropic][stream][backpressure]") {
-    TestServer ts;
-    ts.registry.register_model(make_info("anthropic-pressure"));
-    REQUIRE(ts.coordinator.load("anthropic-pressure"));
-    auto* backend = const_cast<IModelMock*>(
-        dynamic_cast<const IModelMock*>(
-            ts.coordinator.get_backend("anthropic-pressure")));
-    REQUIRE(backend);
-    backend->stream_delta_count.store(1000);
-
-    httplib::Request request;
-    request.is_connection_closed = [] { return false; };
-    request.body =
-        R"({"model":"anthropic-pressure","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"test"}]})";
-    httplib::Response response;
-    handle_anthropic_messages(request, response, ts.make_deps());
-    REQUIRE(response.content_provider_);
-    REQUIRE(wait_for_count(backend->stream_deltas_emitted, 8));
-    std::this_thread::sleep_for(std::chrono::milliseconds{50});
-    CHECK(backend->stream_deltas_emitted.load() < 1000);
-
     REQUIRE(response.content_provider_resource_releaser_);
     response.content_provider_resource_releaser_(false);
     CHECK(backend->stream_deltas_emitted.load() < 1000);

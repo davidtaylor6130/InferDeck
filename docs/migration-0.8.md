@@ -45,8 +45,8 @@ fields. A zero-result search is part of pre-deployment evidence.
   `/v1/health`, and `/v1/models`; deploying the matched 0.8 static directory
   migrates it.
 - Repository smoke and lifecycle scripts already use
-  `/api/inferdeck/v1`. Legacy and Anthropic paths in the security fixture are
-  deliberate negative tests.
+  `/api/inferdeck/v1`. The legacy `/v1/messages` path in the security fixture is
+  a deliberate negative test.
 - No Open WebUI process or local container was running, and the local Docker
   engine was unavailable. Any remote Open WebUI instance must be verified from
   its own configuration before activation.

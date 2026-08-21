@@ -118,20 +118,8 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["voice_session_grace_ms"]) cfg.voice_session_grace_ms = g["voice_session_grace_ms"].as<int>();
         if (g["sampling"]) parse_sampling(g["sampling"], cfg.sampling);
     }
-    if (root["anthropic"] && root["anthropic"]["model_aliases"] &&
-        root["anthropic"]["model_aliases"].IsMap()) {
-        for (const auto& kv : root["anthropic"]["model_aliases"]) {
-            cfg.anthropic_model_aliases[kv.first.as<std::string>()] =
-                kv.second.as<std::string>();
-        }
-    }
     if (root["compatibility"]) {
         const auto& compatibility = root["compatibility"];
-        if (compatibility["anthropic"] &&
-            compatibility["anthropic"]["enabled"]) {
-            cfg.anthropic_compatibility_enabled =
-                compatibility["anthropic"]["enabled"].as<bool>();
-        }
         if (compatibility["openai_derivative"] &&
             compatibility["openai_derivative"]["enabled"]) {
             cfg.openai_derivative_compatibility_enabled =

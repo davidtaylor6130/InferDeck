@@ -9,7 +9,6 @@ set(GATEWAY_SOURCES
     src/responses_adapter.cpp
     src/openai_error.cpp
     src/openai_routes.cpp
-    src/anthropic_routes.cpp
     src/dashboard_routes.cpp
     src/metrics_builder.cpp
     src/model_store.cpp

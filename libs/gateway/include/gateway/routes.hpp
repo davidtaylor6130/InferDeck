@@ -14,7 +14,6 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <optional>
 #include <string>
 
@@ -33,7 +32,6 @@ struct GatewayDeps {
     std::string default_swap_timeout_s{"15"};
     bool auto_swap{true};
     std::string default_model{};
-    std::map<std::string, std::string> anthropic_model_aliases{};
     int voice_session_grace_ms{15000};
     observability::Metrics* metrics{nullptr};
     observability::StatsDb* stats_db{nullptr};

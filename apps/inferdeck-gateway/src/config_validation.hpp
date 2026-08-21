@@ -136,7 +136,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
             }
             for (const auto& profile : compatibility) {
                 const auto name = profile.first.as<std::string>();
-                if (name != "openai_derivative" && name != "anthropic") {
+                if (name != "openai_derivative") {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "unsupported compatibility profile: " + name);
                 }

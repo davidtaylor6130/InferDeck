@@ -57,10 +57,8 @@ RequestObservation observe_request(const httplib::Request& req,
     observation.principal_class = "openai_data_plane";
     observation.endpoint = req.path;
     observation.protocol_profile =
-        deps.compatibility_profile == CompatibilityProfile::StrictOpenAI
-            ? "strict_openai"
-            : deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative
-                ? "openai_derivative" : "anthropic";
+        deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative
+            ? "openai_derivative" : "strict_openai";
     observation.modality = std::move(modality);
     observation.stream = stream;
     return observation;

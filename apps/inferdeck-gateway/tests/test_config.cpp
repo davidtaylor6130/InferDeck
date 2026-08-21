@@ -42,6 +42,12 @@ TEST_CASE("Configuration schema rejects unknown keys with precise paths",
     REQUIRE_FALSE(model);
     CHECK(model.error().message ==
           "unknown configuration key: model_registry[0].runtme");
+
+    const auto removed_profile = validate_config_text(
+        "schema_version: 1\nanthropic:\n  model_aliases: {}\n");
+    REQUIRE_FALSE(removed_profile);
+    CHECK(removed_profile.error().message ==
+          "unknown configuration key: anthropic");
 }
 
 TEST_CASE("Configuration schema versions extension ownership",
@@ -182,8 +188,6 @@ TEST_CASE("Compatibility profiles are explicit and default off", "[config]") {
 compatibility:
   openai_derivative:
     enabled: true
-  anthropic:
-    enabled: false
 )");
     REQUIRE(valid);
     CHECK_FALSE(validate_config_text(R"(
@@ -212,7 +216,6 @@ TEST_CASE("Repository gateway configuration keeps remote control disabled", "[co
     CHECK(config.cors_origins.front() == "*");
     CHECK_FALSE(config.control_allow_remote);
     CHECK_FALSE(config.control_allow_data_plane_token);
-    CHECK_FALSE(config.anthropic_compatibility_enabled);
     CHECK_FALSE(config.openai_derivative_compatibility_enabled);
     CHECK(config.control_token.empty());
     REQUIRE(config.control_origins.size() == 3);

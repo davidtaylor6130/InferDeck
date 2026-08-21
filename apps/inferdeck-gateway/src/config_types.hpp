@@ -45,8 +45,6 @@ struct GatewayConfig {
     int max_queue_size{128};
     int voice_session_grace_ms{15000};
     model::SamplingConfig sampling{};
-    std::map<std::string, std::string> anthropic_model_aliases{};
-    bool anthropic_compatibility_enabled{false};
     bool openai_derivative_compatibility_enabled{false};
     std::vector<model::ModelAlias> model_aliases{};
     std::string model_store_root{"models/store"};

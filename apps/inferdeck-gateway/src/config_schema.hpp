@@ -51,7 +51,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
     auto result = reject_unknown_config_keys(root, "", {
         "schema_version", "server", "logging", "auth", "control", "cors",
         "state", "model_store", "default_model", "observability", "gateway",
-        "compatibility", "anthropic", "model_aliases", "model_registry",
+        "compatibility", "model_aliases", "model_registry",
         "extensions"});
     if (!result) return result;
     const auto check = [&](std::string_view name,
@@ -75,11 +75,10 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
             "vram_budget_mb", "vram_safety_margin_mb", "max_queue_size",
             "voice_session_grace_ms", "sampling"}))) return result;
     if (!(result = check("compatibility", {
-            "openai_derivative", "anthropic"}))) return result;
-    if (!(result = check("anthropic", {"model_aliases"}))) return result;
+            "openai_derivative"}))) return result;
     const auto compatibility = root["compatibility"];
     if (compatibility && compatibility.IsMap()) {
-        for (const auto* name : {"openai_derivative", "anthropic"}) {
+        for (const auto* name : {"openai_derivative"}) {
             if (!(result = reject_unknown_config_keys(
                     compatibility[name], "compatibility." + std::string(name),
                     {"enabled"}))) return result;

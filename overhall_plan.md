@@ -199,26 +199,26 @@ current implementation cannot satisfy the native single-process rule.
       status without presenting `/v1/audio/alignments` as OpenAI.
 - [x] Preserve the complete feature history in a tag, archive, or companion
       repository before removing Core ownership.
-- [ ] Obtain explicit owner approval before moving or deleting tracked files.
-- [ ] Remove `apps/forced-aligner` from InferDeck Core after the preservation gate.
-- [ ] Remove forced-aligner service YAML and Windows launcher/watchdog/install
+- [x] Obtain explicit owner approval before moving or deleting tracked files.
+- [x] Remove `apps/forced-aligner` from InferDeck Core after the preservation gate.
+- [x] Remove forced-aligner service YAML and Windows launcher/watchdog/install
       scripts from Core after the preservation gate.
-- [ ] Remove Core documentation and tests that imply the sidecar is a native
+- [x] Remove Core documentation and tests that imply the sidecar is a native
       InferDeck runtime.
-- [ ] Remove live-deployment assumptions from the Core release and support matrix.
-- [ ] Prove that Core contains no Python service, FFmpeg subprocess, watchdog, or
+- [x] Remove live-deployment assumptions from the Core release and support matrix.
+- [x] Prove that Core contains no Python service, FFmpeg subprocess, watchdog, or
       secondary inference listener.
-- [ ] Add a source-policy test that fails on secondary runtime/inference
+- [x] Add a source-policy test that fails on secondary runtime/inference
       process-launch primitives in Core source and feature-specific service
       scripts. Explicitly allow only the documented boot launcher that starts the
       single gateway executable.
 
 ### Exit gate
 
-- [ ] `rg` finds no Core process-launch path.
-- [ ] Core build and tests do not require Python, PyTorch, ROCm, FFmpeg, FastAPI,
+- [x] `rg` finds no Core process-launch path.
+- [x] Core build and tests do not require Python, PyTorch, ROCm, FFmpeg, FastAPI,
       Uvicorn, Docker, NSSM sidecars, or watchdog scripts.
-- [ ] Any retained companion is clearly outside the Core product and repository
+- [x] Any retained companion is clearly outside the Core product and repository
       contract.
 
 ## Phase 2 - Control-plane security boundary
@@ -316,8 +316,8 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Remove `/v1/swap/*`, `/v1/metrics`, `/v1/stats/history`, and `/v1/health`
       after the migration window.
 - [x] Remove `/v1/messages` and `/v1/messages/count_tokens` from Core.
-- [ ] Remove Anthropic aliases and `x-api-key` behavior from Core configuration.
-- [ ] Preserve Anthropic source history before deletion and obtain explicit owner
+- [x] Remove Anthropic aliases and `x-api-key` behavior from Core configuration.
+- [x] Preserve Anthropic source history before deletion and obtain explicit owner
       approval for destructive removal.
 
 ### Derivative OpenAI profiles
@@ -513,7 +513,7 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Serialize deletion/reset with writes and reload scheduling.
 - [x] Preserve atomic replacement, secret restoration, masking and validation.
 - [x] Define rollback behavior when persistence succeeds but reload fails.
-- [ ] Remove Anthropic and forced-aligner configuration from Core.
+- [x] Remove Anthropic and forced-aligner configuration from Core.
 - [x] Update pricing configuration after the #103 schema is settled.
 
 ### Exit gate
@@ -614,7 +614,7 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Keep foundation and the canonical inference domain dependency-light.
 - [x] Remove duplicate stream orchestration after Chat and Responses share
       `GenerationSession`.
-- [ ] Remove obsolete Anthropic and forced-aligner test targets after approved
+- [x] Remove obsolete Anthropic and forced-aligner test targets after approved
       extraction.
 - [x] Preserve existing hardening tests while moving them with their owners.
 

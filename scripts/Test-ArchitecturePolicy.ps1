@@ -17,6 +17,9 @@ function Test-CoreText([string]$RelativePath, [string]$Text) {
         $Text -match '(?i)llama-server\.exe|subprocess\.') {
         Add-Failure "${normalized}: forbidden process or proxy launch"
     }
+    if ($Text -match '(?i)anthropic|x-api-key') {
+        Add-Failure "${normalized}: non-OpenAI protocol leaked into Core"
+    }
     if ($normalized -match '^libs/(model|llama_cpp_wrapper|native_runtimes)/' -and
         $Text -match '(?i)httplib|openai_body_json|chat\.completion|stream_options') {
         Add-Failure "${normalized}: protocol leaked below the gateway adapter"
@@ -36,6 +39,24 @@ function Test-CoreText([string]$RelativePath, [string]$Text) {
     if ($normalized -match '^libs/model/' -and
         $Text -match '#include\s*[<\"](?:llama_cpp_wrapper|native_runtimes|observability|gateway)/') {
         Add-Failure "${normalized}: model dependency points upward"
+    }
+}
+
+function Test-CoreOwnership([string]$RepositoryRoot) {
+    $forbidden = @(
+        'apps/forced-aligner',
+        'config/services/forced-aligner.yml',
+        'libs/gateway/include/gateway/anthropic_routes.hpp',
+        'libs/gateway/src/anthropic_routes.cpp',
+        'scripts/windows/Enable-ForcedAlignerRemote.ps1',
+        'scripts/windows/Install-ForcedAlignerService.ps1',
+        'scripts/windows/Start-ForcedAligner.ps1',
+        'scripts/windows/Watch-ForcedAligner.ps1'
+    )
+    foreach ($relative in $forbidden) {
+        if (Test-Path -LiteralPath (Join-Path $RepositoryRoot $relative)) {
+            Add-Failure "${relative}: secondary runtime remains in Core"
+        }
     }
 }
 
@@ -126,11 +147,13 @@ Test-ReleaseDefinition (Get-Content -LiteralPath (
     Join-Path $repoRoot '.github/workflows/release.yml') -Raw)
 Test-NativeBuildDefinition (Get-Content -LiteralPath (
     Join-Path $repoRoot 'CMakeLists.txt') -Raw)
+Test-CoreOwnership $repoRoot
 
 if ($SelfTest) {
     $before = $failures.Count
     Test-CoreText 'libs/model/src/broken.cpp' 'CreateProcessW(nullptr, command, nullptr, nullptr, false, 0, nullptr, nullptr, nullptr, nullptr);'
     Test-CoreText 'libs/model/src/broken.cpp' 'auto body = nlohmann::json::parse(request.body);'
+    Test-CoreText 'libs/gateway/src/broken.cpp' 'x-api-key enables Anthropic compatibility'
     Test-StrictPath '/v1/vendor/messages'
     Test-ControlClassification '/api/inferdeck/v1/unprotected' 'PublicStatus'
     Test-SseTerminator "data: {}`n"
@@ -140,10 +163,10 @@ Where-Object Name -NotIn @('fmtd.dll', 'spdlogd.dll')
 "@
     Test-ReleaseDefinition 'Copy-Item build\bin\Release\*.dll dist\'
     Test-NativeBuildDefinition 'add_subdirectory(libs/third_party/llama.cpp)'
-    if ($failures.Count -ne $before + 8) {
-        throw "Architecture policy self-test expected eight violations; observed $($failures.Count - $before)"
+    if ($failures.Count -ne $before + 9) {
+        throw "Architecture policy self-test expected nine violations; observed $($failures.Count - $before)"
     }
-    $failures.RemoveRange($before, 8)
+    $failures.RemoveRange($before, 9)
 }
 
 if ($failures.Count -gt 0) {

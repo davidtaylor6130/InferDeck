@@ -27,9 +27,9 @@ to sharing that token with `control.allow_data_plane_token: true`, but the remot
 control token must still be non-empty and the configuration must explicitly
 acknowledge the shared principal.
 
-The global `x-api-key` promotion has been removed. It cannot authenticate either
-plane. Optional compatibility profiles use separate `/compat/*` paths and the
-same data-plane bearer authentication; they are disabled by default.
+Legacy alternate API-key promotion has been removed and cannot authenticate either
+plane. The optional OpenAI-derivative profile uses a separate `/compat/*` path and
+the same data-plane bearer authentication; it is disabled by default.
 
 ## Route inventory
 
@@ -147,7 +147,7 @@ authority.
 
 Control CORS returns only an exact configured HTTP(S) origin. Empty, wildcard,
 `null`, credential-bearing, and path-bearing origins are invalid in every mode,
-and `X-Api-Key` is no longer advertised. Ambient loopback authority is treated as
+and legacy alternate API-key headers are no longer advertised. Ambient loopback authority is treated as
 a CSRF credential: every control mutation rejects an unallowlisted `Origin` or
 `Sec-Fetch-Site: cross-site`, and even empty mutations require
 `Content-Type: application/json`. Cross-origin mutation attempts therefore fail

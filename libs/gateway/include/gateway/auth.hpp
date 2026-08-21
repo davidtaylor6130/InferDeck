@@ -176,8 +176,7 @@ inline RoutePrincipal classify_route(std::string_view method,
     if (path.starts_with("/v1/")) {
         return RoutePrincipal::OpenAIDataPlane;
     }
-    if (path.starts_with("/compat/anthropic/v1/") ||
-        path.starts_with("/compat/openai-derivative/v1/")) {
+    if (path.starts_with("/compat/openai-derivative/v1/")) {
         return RoutePrincipal::OpenAIDataPlane;
     }
     if (path == "/api/inferdeck/v1/status" ||

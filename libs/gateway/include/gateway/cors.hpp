@@ -28,8 +28,7 @@ public:
         resp.set_header("Access-Control-Allow-Methods",
                         "GET, POST, PUT, DELETE, OPTIONS");
         resp.set_header("Access-Control-Allow-Headers",
-                        "Authorization, Content-Type, X-Request-Id, "
-                        "Anthropic-Version, Anthropic-Beta, OpenAI-Beta");
+                        "Authorization, Content-Type, X-Request-Id, OpenAI-Beta");
     }
 
     [[nodiscard]] bool handles_options() const noexcept { return !origins_.empty(); }

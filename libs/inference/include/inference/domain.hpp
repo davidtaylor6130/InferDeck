@@ -36,7 +36,6 @@ enum class Endpoint : std::uint8_t {
 enum class CompatibilityProfile : std::uint8_t {
     StrictOpenAI,
     OpenAIDerivative,
-    Anthropic,
     Internal,
 };
 

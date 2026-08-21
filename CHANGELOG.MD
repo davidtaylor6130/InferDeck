@@ -6,9 +6,9 @@
 - Pinned the strict OpenAI `/v1` surface to seven supported endpoints and moved
   all InferDeck operations and enriched model metadata to
   `/api/inferdeck/v1`.
-- Made `strict_openai` the default compatibility profile. OpenAI-derivative and
-  Anthropic compatibility routes now use separate `/compat` bases and remain
-  disabled unless explicitly configured.
+- Made `strict_openai` the default compatibility profile. The optional
+  OpenAI-derivative routes use a separate `/compat` base and remain disabled
+  unless explicitly configured. Removed the former non-OpenAI protocol adapter.
 - Removed InferDeck-only model fields, queue priority, sampler extensions, and
   `reasoning_content` from strict OpenAI responses and requests.
 

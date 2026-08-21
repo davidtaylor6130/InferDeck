@@ -165,7 +165,7 @@ struct ConfigRouteServer {
                 return Ok();
             });
         GatewayDeps gateway_deps{
-            coordinator, "15", true, {}, {}, 15000, nullptr, nullptr, nullptr,
+            coordinator, "15", true, {}, 15000, nullptr, nullptr, nullptr,
             &swap_tracker, &maintenance_resource};
         gateway_deps.metrics = &metrics;
         gateway_deps.stats_db = &stats_db;
@@ -956,7 +956,7 @@ TEST_CASE("Measured benchmark blocks model changes and can be cancelled",
     cpu_model.vram_required_mb = 0;
     routes.registry.register_model(cpu_model);
     GatewayDeps resource_deps{
-        routes.coordinator, "15", true, {}, {}, 15000, nullptr, nullptr,
+        routes.coordinator, "15", true, {}, 15000, nullptr, nullptr,
         nullptr, &routes.swap_tracker, &routes.maintenance_resource};
     CHECK(inferdeck::gateway::maintenance_blocks_model(resource_deps, "test-27b"));
     CHECK_FALSE(inferdeck::gateway::maintenance_blocks_model(resource_deps, "whisper-test"));

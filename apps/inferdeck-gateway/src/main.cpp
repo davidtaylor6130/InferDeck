@@ -32,7 +32,6 @@
 #include "foundation/json_utils.hpp"
 #include "foundation/logging.hpp"
 #include "foundation/path_utils.hpp"
-#include "gateway/anthropic_routes.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
 #include "gateway/deadline_server.hpp"
@@ -697,15 +696,13 @@ int run_gateway(const fs::path& config_path) {
     SwapTracker swap_tracker;
     std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     GatewayDeps deps{coordinator, "15", cfg.auto_swap,
-                     cfg.default_model, cfg.anthropic_model_aliases,
+                     cfg.default_model,
                      cfg.voice_session_grace_ms,
                      &metrics, &stats_db, &events, &swap_tracker,
                      &maintenance_resource};
     auto derivative_deps = deps;
     derivative_deps.compatibility_profile =
         CompatibilityProfile::OpenAIDerivative;
-    auto anthropic_deps = deps;
-    anthropic_deps.compatibility_profile = CompatibilityProfile::Anthropic;
     ProfileBenchmarkManager profile_benchmark{
         coordinator,
         &swap_tracker,
@@ -861,10 +858,7 @@ int run_gateway(const fs::path& config_path) {
         const bool disabled_derivative =
             req.path.starts_with(kOpenAIDerivativeBase) &&
             !cfg.openai_derivative_compatibility_enabled;
-        const bool disabled_anthropic =
-            req.path.starts_with(kAnthropicCompatibilityBase) &&
-            !cfg.anthropic_compatibility_enabled;
-        if (disabled_derivative || disabled_anthropic) {
+        if (disabled_derivative) {
             write_error(resp, 404, "not_found",
                         "compatibility profile is disabled");
             return httplib::Server::HandlerResponse::Handled;
@@ -1058,20 +1052,6 @@ int run_gateway(const fs::path& config_path) {
         }
         write_json(resp, 200, {{"ok", true}});
     }));
-    if (cfg.anthropic_compatibility_enabled) {
-        server.Post(std::string("^") + std::string(kAnthropicCompatibilityBase) +
-                        R"(/messages$)",
-                    wrap([&](const httplib::Request& req,
-                             httplib::Response& resp) {
-            handle_anthropic_messages(req, resp, anthropic_deps);
-        }));
-        server.Post(std::string("^") + std::string(kAnthropicCompatibilityBase) +
-                        R"(/messages/count_tokens$)",
-                    wrap([&](const httplib::Request& req,
-                             httplib::Response& resp) {
-            handle_anthropic_count_tokens(req, resp, anthropic_deps);
-        }));
-    }
     server.Get(control_api_pattern("/metrics"),
                wrap([&](const httplib::Request&,
                         httplib::Response& resp) {

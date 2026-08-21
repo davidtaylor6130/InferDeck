@@ -227,8 +227,6 @@ try {
             -Body '{"model":"legacy","messages":[],"max_tokens":1}'
         disabled_derivative = Invoke-Status `
             "$loopback/compat/openai-derivative/v1/chat/completions"
-        disabled_anthropic = Invoke-Status `
-            "$loopback/compat/anthropic/v1/messages"
         control_health_lan = Invoke-Status "$lan/api/inferdeck/v1/health"
         control_loopback = Invoke-Status "$loopback/api/inferdeck/v1/config"
         control_lan_without_token = Invoke-Status "$lan/api/inferdeck/v1/config"
@@ -286,7 +284,6 @@ try {
         legacy_swap = 404
         legacy_messages = 404
         disabled_derivative = 404
-        disabled_anthropic = 404
         control_health_lan = if ($RemoteControl) { 401 } else { 403 }
         control_loopback = 200
         control_loopback_cross_origin = 403
