@@ -146,7 +146,7 @@ Each phase must finish with:
 - [x] reviewed diff with unrelated work excluded;
 - [x] branch pushed and PR opened or updated;
 - [x] required CI green;
-- [ ] linked GitHub issues updated with evidence.
+- [x] linked GitHub issues updated with evidence.
 
 ## Phase 0 - Governance freeze and authoritative backlog
 
@@ -288,14 +288,14 @@ current implementation cannot satisfy the native single-process rule.
       across overview and usage pages.
 - [x] Run dashboard, C++, forced historical fixture, build, and live-safe validation.
 - [x] Merge the selected implementation before canonical config refactoring.
-- [ ] Close #103 only after matching source, dashboard bundle, deployment artifact,
+- [x] Close #103 only after matching source, dashboard bundle, deployment artifact,
       and calculation evidence.
 
 ### Exit gate
 
 - [x] Official OpenAI SDK consumers parse the corrected Chat stream.
 - [x] No requested audio format is silently substituted.
-- [ ] #103 has one canonical merged implementation and no duplicate active PR.
+- [x] #103 has one canonical merged implementation and no duplicate active PR.
 
 ## Phase 4 - Clean API namespaces and compatibility profiles
 
@@ -709,13 +709,24 @@ current implementation cannot satisfy the native single-process rule.
   totals were preserved; the post-verification ledger increased monotonically to
   13,084 rows, 446,568,471 prompt, 121,949,239 cached and 10,348,913 completion
   tokens. Deployment backups remain under `C:\InferDeck\deploy-backups`.
+- The final protected tag `v0.8.0` points to
+  `1a3421619ea62301b5a9a96a1b16043f88e9d3da`. Publishing workflow
+  `32529339107` passed and produced archive SHA-256
+  `dc3b00f48ffa91bcd93181fe0defb491ca22d017161605273e11628db51c126c`.
+  All 35 manifest entries, the SBOM and dependency metadata verified after
+  download. The exact tagged executable is live with SHA-256
+  `4bc4d34be27647951ca263c5aaaac8d0d33b1b336a8cd865a262fd8c80fa7882`.
+- The tag deployment retained a stopped StatsDb backup with identical SHA-256
+  `52d0870394a226487ce959f4236132b6038320ba50e54ad6fa1129a7fd50ec8d`.
+  Post-deployment totals increased to 446,722,132 prompt, 121,949,271 cached
+  and 10,353,144 completion tokens.
 
-- [ ] Tag and publish the release with executable, static assets, config templates,
+- [x] Tag and publish the release with executable, static assets, config templates,
       checksums, SBOM and migration notes.
 - [x] Confirm release CI and downloadable artifact integrity.
-- [ ] Close linked issues only with source, test, artifact and live evidence.
-- [ ] Close the overhaul epic after every child issue is resolved.
-- [ ] Update this file so every completed checkbox reflects verified reality.
+- [x] Close linked issues only with source, test, artifact and live evidence.
+- [x] Close the overhaul epic after every child issue is resolved.
+- [x] Update this file so every completed checkbox reflects verified reality.
 
 ## Audit finding coverage matrix
 
@@ -771,7 +782,7 @@ Additionally required:
 
 The overhaul goal is complete only when all of the following are true:
 
-- [ ] Every checkbox in Phases 0 through 14 is complete or explicitly removed by
+- [x] Every checkbox in Phases 0 through 14 is complete or explicitly removed by
       an owner-approved amendment to this plan.
 - [x] InferDeck Core builds and operates as one native executable.
 - [x] No Core runtime or deployment path starts a subprocess or proxy service.
@@ -791,9 +802,9 @@ The overhaul goal is complete only when all of the following are true:
 - [x] Observability is correlated, protocol-aware and mathematically correct.
 - [x] Dependencies and release artifacts are reproducibly pinned and verifiable.
 - [x] Required CI prevents every invariant regression listed in this plan.
-- [ ] #99 and #103 are resolved with evidence or superseded by owner-approved
+- [x] #99 and #103 are resolved with evidence or superseded by owner-approved
       decisions.
-- [ ] All new audit issues and the overhaul epic are closed with evidence.
+- [x] All new audit issues and the overhaul epic are closed with evidence.
 - [x] Documentation matches source, tests, packaged artifacts and live behavior.
-- [ ] The matched release is built, published and live-verified when deployment is
+- [x] The matched release is built, published and live-verified when deployment is
       authorized.
