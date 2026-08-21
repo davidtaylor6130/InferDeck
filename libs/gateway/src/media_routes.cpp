@@ -495,9 +495,16 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     const bool derivative =
         deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative;
     if (!derivative) {
-        static constexpr std::array<std::string_view, 4> supported_fields{
-            "model", "prompt", "n", "size",
+        static constexpr std::array<std::string_view, 14> supported_fields{
+            "model", "prompt", "background", "moderation", "n",
+            "output_compression", "output_format", "partial_images",
+            "quality", "response_format", "size", "stream", "style", "user",
         };
+        if (!body.is_object()) {
+            write_error(resp, 400, "invalid_request_error",
+                        "request body must be an object");
+            return;
+        }
         for (const auto& field : body.items()) {
             if (std::find(supported_fields.begin(), supported_fields.end(),
                           field.key()) == supported_fields.end()) {
@@ -507,25 +514,96 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
                 return;
             }
         }
+        const auto compatible_default =
+            [&body, &resp](std::string_view field, std::string_view value) {
+            if (!body.contains(field) || body[field].is_null()) return true;
+            if (!body[field].is_string() ||
+                body[field].get<std::string>() != value) {
+                write_error(resp, 400, "unsupported_parameter",
+                            std::string(field) + " is not supported by the native image runtime");
+                return false;
+            }
+            return true;
+        };
+        if (!compatible_default("background", "auto") ||
+            !compatible_default("moderation", "auto") ||
+            !compatible_default("output_format", "png") ||
+            !compatible_default("quality", "auto") ||
+            !compatible_default("response_format", "b64_json")) {
+            return;
+        }
+        if (body.contains("style") && !body["style"].is_null()) {
+            write_error(resp, 400, "unsupported_parameter",
+                        "style is not supported by the native image runtime");
+            return;
+        }
+        if (body.contains("output_compression") &&
+            !body["output_compression"].is_null()) {
+            write_error(resp, 400, "unsupported_parameter",
+                        "output_compression is not supported for PNG output");
+            return;
+        }
+        if (body.contains("stream") && !body["stream"].is_null() &&
+            (!body["stream"].is_boolean() || body["stream"].get<bool>())) {
+            write_error(resp, 400, "unsupported_parameter",
+                        "streaming image generation is not supported");
+            return;
+        }
+        if (body.contains("partial_images") &&
+            !body["partial_images"].is_null() &&
+            (!body["partial_images"].is_number_integer() ||
+             body["partial_images"].get<int>() != 0)) {
+            write_error(resp, 400, "unsupported_parameter",
+                        "partial_images requires unsupported image streaming");
+            return;
+        }
+        if (body.contains("user") &&
+            (!body["user"].is_string() ||
+             body["user"].get_ref<const std::string&>().size() > 64)) {
+            write_error(resp, 400, "invalid_user",
+                        "user must be a string of at most 64 characters");
+            return;
+        }
     }
-    const std::string model_name = body.value("model", deps.default_model);
-    const auto resolved_model = resolve_model_name(deps, model_name);
+    if (!body.is_object() || !body.contains("prompt") ||
+        !body["prompt"].is_string() ||
+        (body.contains("model") && !body["model"].is_null() &&
+         !body["model"].is_string()) ||
+        (body.contains("n") && !body["n"].is_null() &&
+         !body["n"].is_number_integer()) ||
+        (body.contains("size") && !body["size"].is_null() &&
+         !body["size"].is_string())) {
+        write_error(resp, 400, "invalid_image_request",
+                    "prompt must be a string and model, n, and size must have valid types");
+        return;
+    }
+    const std::string model_name =
+        body.contains("model") && !body["model"].is_null()
+            ? body["model"].get<std::string>() : deps.default_model;
     model::ImageGenerationRequest request;
-    request.prompt = body.value("prompt", "");
+    request.prompt = body["prompt"].get<std::string>();
     request.negative_prompt = body.value("negative_prompt", "");
-    request.count = body.value("n", 1);
+    request.count = body.contains("n") && !body["n"].is_null()
+        ? body["n"].get<int>() : 1;
     request.seed = body.value("seed", std::int64_t{-1});
     request.steps = body.value("steps", 20);
     request.guidance_scale = body.value("guidance_scale", 7.0f);
-    const std::string size = body.value("size", "1024x1024");
+    const std::string size =
+        body.contains("size") && !body["size"].is_null()
+            ? body["size"].get<std::string>() : "1024x1024";
     char trailing = '\0';
     if (std::sscanf(size.c_str(), "%dx%d%c", &request.width, &request.height, &trailing) != 2 ||
-        model_name.empty() || !resolved_model || request.prompt.empty() || request.prompt.size() > 32768 ||
+        model_name.empty() || request.prompt.empty() || request.prompt.size() > 32000 ||
         request.negative_prompt.size() > 32768 || request.count < 1 || request.count > 4 ||
         request.width < 256 || request.height < 256 || request.width > 2048 || request.height > 2048 ||
         request.width % 64 != 0 || request.height % 64 != 0 || request.steps < 1 || request.steps > 200 ||
         !std::isfinite(request.guidance_scale) || request.guidance_scale < 0.0f || request.guidance_scale > 50.0f) {
         write_error(resp, 400, "invalid_image_request", "invalid model, prompt, size, count, seed, steps, or guidance scale");
+        return;
+    }
+    const auto resolved_model = resolve_model_name(deps, model_name);
+    if (!resolved_model) {
+        write_error(resp, 404, "model_not_found", resolved_model.error().message);
         return;
     }
     auto job = begin_job(model_name, "image");
@@ -547,6 +625,7 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     for (const auto& image : result->png_images) data.push_back({{"b64_json", base64(image)}});
     write_json(resp, 200, {{"created", std::chrono::duration_cast<std::chrono::seconds>(
                                 std::chrono::system_clock::now().time_since_epoch()).count()},
+                           {"output_format", "png"},
                            {"data", std::move(data)}});
     record_media(deps, model_name, result->duration_ms, 200, *slot);
     finish_job(job, "completed");

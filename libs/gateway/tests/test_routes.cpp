@@ -1767,6 +1767,7 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     CHECK_FALSE(response->has_header("X-InferDeck-Job-Id"));
     const auto body = nlohmann::json::parse(response->body);
     REQUIRE(body["data"].size() == 2);
+    CHECK(body["output_format"] == "png");
     CHECK(body["data"][0]["b64_json"] == "iVBORw==");
     ts.stop();
 }
@@ -1787,6 +1788,15 @@ TEST_CASE("Strict Images rejects derivative fields before admission",
         {"steps", 10},
         {"guidance_scale", 5.0},
         {"future_extension", true},
+        {"background", "transparent"},
+        {"moderation", "low"},
+        {"output_compression", 90},
+        {"output_format", "jpeg"},
+        {"partial_images", 1},
+        {"quality", "high"},
+        {"response_format", "url"},
+        {"stream", true},
+        {"style", "natural"},
     };
     for (const auto& [field, value] : extensions) {
         httplib::Request request;
@@ -1801,6 +1811,48 @@ TEST_CASE("Strict Images rejects derivative fields before admission",
         REQUIRE(response.status == 400);
         CHECK(nlohmann::json::parse(response.body)["error"]["code"] ==
               "unsupported_parameter");
+        CHECK(ts.coordinator.active_request_count() == 0);
+    }
+
+    httplib::Request compatible_request;
+    compatible_request.is_connection_closed = [] { return false; };
+    compatible_request.body = nlohmann::json{
+        {"model", "image-profile-model"},
+        {"prompt", "a lighthouse"},
+        {"size", "512x512"},
+        {"background", "auto"},
+        {"moderation", "auto"},
+        {"output_format", "png"},
+        {"partial_images", 0},
+        {"quality", "auto"},
+        {"response_format", "b64_json"},
+        {"stream", false},
+        {"user", "local-user"},
+    }.dump();
+    httplib::Response compatible_response;
+    handle_image_generations(compatible_request, compatible_response,
+                             strict_deps);
+    REQUIRE(compatible_response.status == 200);
+    CHECK(nlohmann::json::parse(compatible_response.body)["output_format"] ==
+          "png");
+    CHECK(ts.coordinator.active_request_count() == 0);
+
+    const std::vector<nlohmann::json> malformed{
+        nlohmann::json::array(),
+        {{"model", "missing"}, {"prompt", 42}},
+        {{"model", "missing"}, {"prompt", "valid"}, {"n", "two"}},
+        {{"model", "missing"}, {"prompt", "valid"}, {"size", 512}},
+        {{"model", "missing"}, {"prompt", "valid"}, {"stream", "false"}},
+        {{"model", "missing"}, {"prompt", "valid"}, {"user", 42}},
+    };
+    for (const auto& body : malformed) {
+        httplib::Request invalid_request;
+        invalid_request.body = body.dump();
+        httplib::Response invalid_response;
+        handle_image_generations(invalid_request, invalid_response,
+                                 strict_deps);
+        INFO(body.dump());
+        CHECK(invalid_response.status == 400);
         CHECK(ts.coordinator.active_request_count() == 0);
     }
 

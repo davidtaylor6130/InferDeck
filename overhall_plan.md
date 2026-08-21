@@ -420,11 +420,11 @@ current implementation cannot satisfy the native single-process rule.
 
 ### Images
 
-- [ ] Validate the pinned official image request schema.
-- [ ] Remove proprietary top-level generation controls from strict mode.
-- [ ] Support or explicitly reject quality, style, background, output format,
+- [x] Validate the pinned official image request schema.
+- [x] Remove proprietary top-level generation controls from strict mode.
+- [x] Support or explicitly reject quality, style, background, output format,
       moderation, user and streaming-related fields.
-- [ ] Ensure response encoding and MIME behavior match the requested contract.
+- [x] Ensure response encoding and MIME behavior match the requested contract.
 
 ### Audio
 
