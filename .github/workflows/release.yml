@@ -154,6 +154,15 @@ jobs:
           SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
         run: .\scripts\Sign-ReleaseArtifacts.ps1 -Executable dist\inferdeck-gateway.exe -CertificateBase64 $env:SIGNING_CERTIFICATE_BASE64 -CertificatePassword $env:SIGNING_CERTIFICATE_PASSWORD
 
+      - name: Verify packaged executable loads
+        shell: pwsh
+        run: |
+          $output = & .\dist\inferdeck-gateway.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "Packaged executable failed to load: exit $LASTEXITCODE" }
+          if ($output -ne "inferdeck-gateway $env:INFERDECK_VERSION") {
+            throw "Unexpected packaged executable version output: $output"
+          }
+
       - name: Generate package metadata
         shell: pwsh
         run: .\scripts\New-ReleaseMetadata.ps1 -DistDir dist -OutputDir dist -VcpkgInstalledDir build\vcpkg_installed
