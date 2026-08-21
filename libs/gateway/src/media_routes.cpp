@@ -25,7 +25,8 @@ namespace {
 void record_media(const GatewayDeps& deps, const std::string& model_name,
                   float duration_ms, int status, int slot,
                   double input_audio_seconds = 0.0,
-                  std::int64_t input_characters = 0);
+                  std::int64_t input_characters = 0,
+                  RequestObservation observation = {});
 
 struct MediaJob {
     std::uint64_t id{0};
@@ -183,6 +184,8 @@ struct SpeechStreamState {
     int slot{-1};
     float duration_ms{0};
     std::int64_t input_characters{0};
+    double output_audio_seconds{0.0};
+    RequestObservation observation;
     std::atomic<bool> failed{false};
     std::shared_ptr<MediaJob> job;
     std::string session_key;
@@ -198,7 +201,14 @@ struct SpeechStreamState {
         if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) worker.join();
         record_media(deps, requested_model.empty() ? model : requested_model,
                      duration_ms, status, slot, 0.0,
-                     status == 200 ? input_characters : 0);
+                     status == 200 ? input_characters : 0,
+                     [&] {
+                         auto value = observation;
+                         if (status == 200) {
+                             value.output_audio_seconds = output_audio_seconds;
+                         }
+                         return value;
+                     }());
         finish_job(job, status == 200 ? "completed" : status == 499 ? "cancelled" : "failed");
         if (coordinator) {
             (void)coordinator->release_slot(model, slot);
@@ -247,12 +257,12 @@ int internal_status_for(foundation::ErrorCode code) {
 void record_media(const GatewayDeps& deps, const std::string& model_name,
                   float duration_ms, int status, int slot,
                   double input_audio_seconds,
-                  std::int64_t input_characters) {
+                  std::int64_t input_characters,
+                  RequestObservation observation) {
     model::InferenceResult metrics;
     metrics.duration_ms = duration_ms;
     const auto resolved = deps.coordinator.registry().resolve(model_name);
-    RequestObservation observation;
-    observation.modality = "media";
+    if (observation.modality.empty()) observation.modality = "media";
     record_request(deps, model_name, metrics, status, slot,
                    input_audio_seconds, input_characters,
                    resolved ? *resolved : model_name, observation);
@@ -494,6 +504,8 @@ foundation::Result<void> cancel_media_job(std::uint64_t id) {
 
 void handle_image_generations(const httplib::Request& req, httplib::Response& resp,
                               const GatewayDeps& deps) {
+    const auto observation = observe_request(
+        req, resp, deps, "image_generation", false);
     if (!require_json_media_type(req, resp)) return;
     nlohmann::json body;
     try { body = nlohmann::json::parse(req.body); }
@@ -645,7 +657,8 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         const int status = status_for(slot.error().code);
         const int internal_status = internal_status_for(slot.error().code);
         write_error(resp, status, "image_admission_failed", slot.error().message);
-        record_media(deps, model_name, 0, internal_status, -1);
+        record_media(deps, model_name, 0, internal_status, -1,
+                     0.0, 0, observation);
         finish_job(job, internal_status == 499 ? "cancelled" : "failed");
         return;
     }
@@ -662,7 +675,8 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         const int status = cancelled ? 408 : status_for(result.error().code);
         const int internal_status = cancelled ? 499 : status;
         write_error(resp, status, "image_generation_failed", result.error().message);
-        record_media(deps, model_name, 0, internal_status, *slot);
+        record_media(deps, model_name, 0, internal_status, *slot,
+                     0.0, 0, observation);
         finish_job(job, cancelled ? "cancelled" : "failed");
         return;
     }
@@ -672,7 +686,11 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
                                 std::chrono::system_clock::now().time_since_epoch()).count()},
                            {"output_format", "png"},
                            {"data", std::move(data)}});
-    record_media(deps, model_name, result->duration_ms, 200, *slot);
+    auto completed_observation = observation;
+    completed_observation.output_image_count =
+        static_cast<int>(result->png_images.size());
+    record_media(deps, model_name, result->duration_ms, 200, *slot,
+                 0.0, 0, completed_observation);
     finish_job(job, "completed");
 }
 
@@ -822,6 +840,8 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
         info && (info->runtime == "sherpa_onnx" ||
                  info->runtime == "windows_sapi");
     const auto input_characters = utf8_character_count(request.input);
+    const auto observation = observe_request(
+        req, resp, deps, "audio_speech", request.format != "wav");
     if (wav_runtime && request.format != "wav" && request.format != "pcm") {
         write_error(resp, 400, "unsupported_response_format",
                     "this native speech runtime supports wav and pcm responses");
@@ -860,7 +880,8 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
         const int status = status_for(slot.error().code);
         const int internal_status = internal_status_for(slot.error().code);
         write_error(resp, status, "speech_admission_failed", slot.error().message);
-        record_media(deps, model_name, 0, internal_status, -1);
+        record_media(deps, model_name, 0, internal_status, -1,
+                     0.0, 0, observation);
         finish_job(job, internal_status == 499 ? "cancelled" : "failed");
         return;
     }
@@ -882,14 +903,16 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                 write_error(resp, status, "speech_generation_failed",
                             result.error().message);
                 record_media(deps, model_name, 0,
-                             was_cancelled ? 499 : status, *slot);
+                             was_cancelled ? 499 : status, *slot,
+                             0.0, 0, observation);
                 finish_job(job, was_cancelled ? "cancelled" : "failed");
                 return;
             }
             if (result->bytes.empty()) {
                 write_error(resp, 500, "speech_generation_failed",
                             "speech runtime returned no audio");
-                record_media(deps, model_name, result->duration_ms, 500, *slot);
+                record_media(deps, model_name, result->duration_ms, 500, *slot,
+                             0.0, 0, observation);
                 finish_job(job, "failed");
                 return;
             }
@@ -899,13 +922,17 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                     result->bytes.size()),
                 result->content_type.empty() ? "audio/wav"
                                              : result->content_type);
+            auto completed_observation = observation;
+            completed_observation.output_audio_seconds =
+                result->output_audio_seconds;
             record_media(deps, model_name, result->duration_ms, 200, *slot,
-                         0.0, input_characters);
+                         0.0, input_characters, completed_observation);
             finish_job(job, "completed");
             return;
         } catch (const std::exception& error) {
             write_error(resp, 500, "speech_generation_failed", error.what());
-            record_media(deps, model_name, 0, 500, *slot);
+            record_media(deps, model_name, 0, 500, *slot,
+                         0.0, 0, observation);
             finish_job(job, "failed");
             return;
         }
@@ -917,6 +944,7 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     state->slot = *slot;
     state->job = job;
     state->input_characters = input_characters;
+    state->observation = observation;
     state->session_key = voice_session.key();
     state->session_token = voice_session.token();
     try {
@@ -969,6 +997,7 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                     if (state->job->cancelled->load()) state->aborted.store(true);
                 } else {
                     state->duration_ms = result->duration_ms;
+                    state->output_audio_seconds = result->output_audio_seconds;
                     std::lock_guard lock(state->mutex);
                     if (!state->streamed_bytes && !result->bytes.empty()) {
                         state->chunks.emplace_back(
@@ -985,7 +1014,8 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
         });
     } catch (const std::exception& error) {
         write_error(resp, 500, "speech_generation_failed", error.what());
-        record_media(deps, model_name, 0, 500, *slot);
+        record_media(deps, model_name, 0, 500, *slot,
+                     0.0, 0, observation);
         finish_job(job, "failed");
         return;
     }
@@ -1034,6 +1064,8 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
 
 void handle_audio_transcriptions(const httplib::Request& req, httplib::Response& resp,
                                  const GatewayDeps& deps) {
+    const auto observation = observe_request(
+        req, resp, deps, "audio_transcription", false);
     if (!req.is_multipart_form_data() || !req.form.has_file("file") || !req.form.has_field("model")) {
         write_error(resp, 400, "invalid_transcription_request",
                     "multipart file and model fields are required",
@@ -1175,7 +1207,8 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         const int internal_status = internal_status_for(decode_permit.error().code);
         write_error(resp, status, "transcription_admission_failed",
                     decode_permit.error().message);
-        record_media(deps, model_name, 0, internal_status, -1);
+        record_media(deps, model_name, 0, internal_status, -1,
+                     0.0, 0, observation);
         finish_job(job, internal_status == 499 ? "cancelled" : "failed");
         return;
     }
@@ -1185,14 +1218,15 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         const int internal_status = internal_status_for(slot.error().code);
         write_error(resp, status, "transcription_admission_failed",
                     slot.error().message);
-        record_media(deps, model_name, 0, internal_status, -1);
+        record_media(deps, model_name, 0, internal_status, -1,
+                     0.0, 0, observation);
         finish_job(job, internal_status == 499 ? "cancelled" : "failed");
         return;
     }
     SlotGuard guard{&deps.coordinator, runtime_model, *slot};
     auto decoded = decode_audio(file.content);
     decode_permit->release();
-    if (!decoded) { write_error(resp, 400, "invalid_audio", decoded.error().message); record_media(deps, model_name, 0, 400, *slot); finish_job(job, "failed"); return; }
+    if (!decoded) { write_error(resp, 400, "invalid_audio", decoded.error().message); record_media(deps, model_name, 0, 400, *slot, 0.0, 0, observation); finish_job(job, "failed"); return; }
     decoded->language = std::move(parameters->language);
     decoded->prompt = std::move(parameters->prompt);
     decoded->temperature = parameters->temperature;
@@ -1210,7 +1244,8 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
             result.error().code == foundation::ErrorCode::Cancelled;
         const int status = cancelled ? 408 : status_for(result.error().code);
         write_error(resp, status, "transcription_failed", result.error().message);
-        record_media(deps, model_name, 0, cancelled ? 499 : status, *slot);
+        record_media(deps, model_name, 0, cancelled ? 499 : status, *slot,
+                     input_audio_seconds, 0, observation);
         finish_job(job, cancelled ? "cancelled" : "failed");
         return;
     }
@@ -1229,7 +1264,7 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         write_json(resp, 200, {{"text", result->text}});
     }
     record_media(deps, model_name, result->inference_ms, 200, *slot,
-                 input_audio_seconds, 0);
+                 input_audio_seconds, 0, observation);
     finish_job(job, "completed");
     voice_session.refresh_and_keep();
 }

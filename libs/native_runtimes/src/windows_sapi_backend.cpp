@@ -373,6 +373,10 @@ public:
         result.content_type = request.format == "wav" ? "audio/wav" : "audio/pcm";
         result.duration_ms = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - started).count();
+        result.output_audio_seconds = sample_rate > 0
+            ? static_cast<double>(stats.cbSize.QuadPart) /
+                (sample_rate * sizeof(std::int16_t))
+            : 0.0;
         foundation::LOG_INFO("windows_sapi_audio_ready",
                              "bytes={} duration_ms={:.2f}",
                              result.bytes.size(), result.duration_ms);

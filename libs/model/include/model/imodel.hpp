@@ -82,6 +82,7 @@ struct AudioResult {
     std::vector<std::byte> bytes;
     std::string content_type;
     float duration_ms{0.0f};
+    double output_audio_seconds{0.0};
 };
 
 struct TranscriptionRequest {

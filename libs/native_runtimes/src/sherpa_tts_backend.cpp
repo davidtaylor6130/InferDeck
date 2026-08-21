@@ -361,6 +361,8 @@ public:
         result.content_type = request.format == "wav" ? "audio/wav" : "audio/pcm";
         result.duration_ms = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - started).count();
+        result.output_audio_seconds = audio->sample_rate > 0
+            ? static_cast<double>(audio->n) / audio->sample_rate : 0.0;
         SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
         return foundation::Ok(std::move(result));
     }

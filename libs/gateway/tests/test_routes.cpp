@@ -554,6 +554,7 @@ public:
         result.bytes = {std::byte{0x52}, std::byte{0x49}, std::byte{0x46}, std::byte{0x46}};
         result.content_type = request.format == "wav" ? "audio/wav" : "audio/mpeg";
         result.duration_ms = 8;
+        result.output_audio_seconds = 1.25;
         const int chunks = speech_chunk_count.load();
         if (stream && chunks > 0) {
             std::vector<std::byte> chunk(128 * 1024, std::byte{0x41});
@@ -2153,6 +2154,13 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     CHECK(body["output_format"] == "png");
     CHECK(body["data"][0]["b64_json"] == "iVBORw==");
     check_schema(body["data"][0], "image");
+    const auto rows = ts.stats_db.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].endpoint == "/v1/images/generations");
+    CHECK(rows[0].protocol_profile == "strict_openai");
+    CHECK(rows[0].modality == "image_generation");
+    CHECK(rows[0].output_image_count == 2);
+    CHECK_FALSE(rows[0].request_id.empty());
     ts.stop();
 }
 
@@ -2349,6 +2357,15 @@ TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speec
     CHECK(usage[0].successful_requests == 1);
     CHECK(usage[0].input_characters == 5);
     CHECK(usage[0].input_audio_seconds == 0.0);
+    const auto rows = ts.stats_db.recent_requests(10);
+    const auto successful = std::find_if(rows.begin(), rows.end(),
+        [](const auto& row) { return row.status_code == 200; });
+    REQUIRE(successful != rows.end());
+    CHECK(successful->endpoint == "/v1/audio/speech");
+    CHECK(successful->modality == "audio_speech");
+    CHECK(successful->input_characters == 5);
+    CHECK(successful->output_audio_seconds == Catch::Approx(1.25));
+    CHECK_FALSE(successful->request_id.empty());
     ts.stop();
 }
 
@@ -2523,6 +2540,12 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     CHECK(usage[0].successful_requests == 5);
     CHECK(usage[0].input_audio_seconds == Catch::Approx(0.05));
     CHECK(usage[0].input_characters == 0);
+    const auto rows = ts.stats_db.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].endpoint == "/v1/audio/transcriptions");
+    CHECK(rows[0].modality == "audio_transcription");
+    CHECK(rows[0].input_audio_seconds == Catch::Approx(0.01));
+    CHECK_FALSE(rows[0].request_id.empty());
     ts.stop();
 }
 
