@@ -8,6 +8,7 @@
     "spdlog",
     "catch2",
     "nlohmann-json",
+    "openssl",
     "fmt",
     "yaml-cpp",
     "sqlite3",
