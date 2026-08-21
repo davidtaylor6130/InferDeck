@@ -565,14 +565,14 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Sign the executable and release manifest when signing credentials are
       available.
 - [x] Remove ad-hoc startup `DEBUG:` stderr output in favor of structured logs.
-- [ ] Reproduce a clean build from documented prerequisites on a fresh Windows
+- [x] Reproduce a clean build from documented prerequisites on a fresh Windows
       runner.
 
 ### Exit gate
 
 - [ ] Two clean builds from the same revision produce an explained, minimized
       artifact difference or reproducible output.
-- [ ] Release archives include version, checksums, dependency manifest and SBOM.
+- [x] Release archives include version, checksums, dependency manifest and SBOM.
 - [x] No dependency resolution relies on an unspecified latest version.
 
 ## Phase 11 - Required CI and architecture enforcement
@@ -658,7 +658,7 @@ current implementation cannot satisfy the native single-process rule.
       benchmarks, editor integrations and health monitors.
 - [ ] Update consumers to strict OpenAI or the new control-plane endpoints.
 - [ ] Back up configuration, StatsDb and managed-model manifests.
-- [ ] Build matched gateway and dashboard artifacts from one revision.
+- [x] Build matched gateway and dashboard artifacts from one revision.
 - [ ] Run the complete clean verification matrix.
 
 ### Live activation
@@ -728,16 +728,16 @@ pnpm --filter dashboard build
 
 Additionally required:
 
-- [ ] strict OpenAI Python SDK contract suite;
-- [ ] strict OpenAI JavaScript SDK contract suite;
-- [ ] exact Chat and Responses SSE golden suite;
-- [ ] security/auth/origin/body-limit/deadline suite;
-- [ ] config transaction and concurrency suite;
-- [ ] coordinator deadline/cancellation/shutdown suite;
-- [ ] process-policy and dependency-direction suite;
+- [x] strict OpenAI Python SDK contract suite;
+- [x] strict OpenAI JavaScript SDK contract suite;
+- [x] exact Chat and Responses SSE golden suite;
+- [x] security/auth/origin/body-limit/deadline suite;
+- [x] config transaction and concurrency suite;
+- [x] coordinator deadline/cancellation/shutdown suite;
+- [x] process-policy and dependency-direction suite;
 - [ ] real small-model Chat/Responses/tool/vision smoke suite;
-- [ ] media request/format/signature suite for linked native runtimes;
-- [ ] matched dashboard artifact verification;
+- [x] media request/format/signature suite for linked native runtimes;
+- [x] matched dashboard artifact verification;
 - [ ] live deployment and rollback verification when authorized.
 
 ## Final definition of done
