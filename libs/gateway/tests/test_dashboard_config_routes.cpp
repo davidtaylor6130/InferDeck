@@ -569,6 +569,10 @@ TEST_CASE("Control model inventory retains InferDeck runtime fields",
     info.context_size = 65536;
     info.vram_required_mb = 8192;
     info.n_slots = 2;
+    info.reasoning.supported = true;
+    info.reasoning.efforts = {"low", "high"};
+    info.reasoning.default_effort = "high";
+    info.reasoning.none_disables = true;
     routes.registry.register_model(info);
 
     auto client = routes.client();
@@ -581,6 +585,11 @@ TEST_CASE("Control model inventory retains InferDeck runtime fields",
     CHECK(body["models"][0]["runtime"] == "llama_cpp");
     CHECK(body["models"][0]["context_size"] == 65536);
     CHECK(body["models"][0]["vram_required_mb"] == 8192);
+    CHECK(body["models"][0]["reasoning"]["supported"] == true);
+    CHECK(body["models"][0]["reasoning"]["efforts"] ==
+          nlohmann::json::array({"low", "high"}));
+    CHECK(body["models"][0]["reasoning"]["default"] == "high");
+    CHECK(body["models"][0]["reasoning"]["none_disables"] == true);
     CHECK(body["models"][0]["loaded"] == false);
 }
 

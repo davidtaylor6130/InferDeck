@@ -9,7 +9,9 @@
   "scripts": {
     "dev:dashboard": "pnpm --filter dashboard dev",
     "build:dashboard": "pnpm --filter dashboard build",
-    "test:openai-contract": "node --test Testing/openai-sdk-stream-contract.test.mjs"
+    "test:openai-contract": "node --test Testing/openai-sdk-stream-contract.test.mjs",
+    "test:opencode-export": "node --test Testing/export-opencode-config.test.mjs",
+    "export:opencode": "node scripts/export-opencode-config.mjs"
   },
   "devDependencies": {
     "openai": "7.5.0"

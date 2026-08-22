@@ -659,6 +659,8 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Identify every local consumer: OpenCode, Open WebUI, dashboard, scripts,
       benchmarks, editor integrations and health monitors.
 - [x] Update consumers to strict OpenAI or the new control-plane endpoints.
+- [ ] Generate OpenCode provider configuration from the live model and stable
+      alias catalog; track implementation and deployment in #142.
 - [x] Back up configuration, StatsDb and managed-model manifests.
 - [x] Build matched gateway and dashboard artifacts from one revision.
 - [x] Run the complete clean verification matrix.
@@ -727,6 +729,23 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Close linked issues only with source, test, artifact and live evidence.
 - [x] Close the overhaul epic after every child issue is resolved.
 - [x] Update this file so every completed checkbox reflects verified reality.
+
+### Post-release remediation (2026-08-23)
+
+- [x] Reopen the overhaul epic and Phase 14 after discovering that OpenCode had
+      only a stale hand-maintained consumer file and no exporter.
+- [x] Back up and repair the rejected live active profile by removing only its
+      obsolete top-level `anthropic` block.
+- [x] Verify the repaired profile is active and that lifetime token totals did
+      not decrease; StatsDb was not modified or migrated.
+- [x] Restore and persist `Normal`, `Pro`, and `n8n-model` after the active
+      profile reload exposed their absence from the persisted profile.
+- [x] Merge the already-deployed authenticated LAN dashboard change in #141.
+- [ ] Merge #142 implementation through protected CI.
+- [ ] Deploy its matched gateway artifact and re-export OpenCode from the live
+      post-deployment catalog.
+- [ ] Close #142, Phase 14, and the epic only after the new live evidence is
+      attached.
 
 ## Audit finding coverage matrix
 

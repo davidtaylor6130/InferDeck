@@ -22,11 +22,33 @@ cd C:\Users\david\Documents\GitHub\InferDeck
 opencode
 ```
 
+Before starting OpenCode, export the live model catalog. The exporter reads
+concrete models and stable aliases from InferDeck, replaces only the InferDeck
+provider catalog, and preserves unrelated OpenCode plugins, MCP servers, and
+settings:
+
+```powershell
+pnpm export:opencode -- --source-url http://127.0.0.1:11434 `
+  --base-url http://192.168.0.168:11434 `
+  --model Normal --small-model n8n-model --output opencode.json
+```
+
+The resulting OpenAI-compatible model names include `Normal`, `Pro`, and
+`n8n-model` whenever the gateway advertises those aliases. Re-export after any
+model or alias change. When remote control authentication is enabled, set
+`INFERDECK_CONTROL_TOKEN`; the exporter sends it as a bearer header and never
+writes it into `opencode.json`.
+
 ## Provider
+
+The exported provider uses the requested gateway address and `/v1` data-plane
+base.
 
 | Provider | Endpoint | Use Case |
 |---|---|---|
-| `inferdeck/qwen36` | `http://127.0.0.1:11434/v1` | Primary — in-process gateway |
+| `inferdeck/Normal` | configured by `--base-url` | Stable normal-work alias |
+| `inferdeck/Pro` | configured by `--base-url` | Stable demanding-work alias |
+| `inferdeck/n8n-model` | configured by `--base-url` | Stable automation alias |
 
 ## Context Limits
 
