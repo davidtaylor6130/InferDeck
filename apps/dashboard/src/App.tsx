@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { XMarkIcon } from '@heroicons/react/24/outline';
-import { getHealth, getPricing } from './api';
+import { authenticateDashboard, getHealth, getPricing } from './api';
 import { Badge } from './components/ui';
 import { COST_STORAGE_KEY } from './cost';
 import type { DashboardSection } from './dashboardSections';
@@ -194,7 +194,7 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
 };
 
 const HealthNotices: React.FC = () => {
-  const { models } = useGateway();
+  const { connection, models } = useGateway();
   const [notices, setNotices] = useState<string[]>([]);
   const [dismissed, setDismissed] = useState(false);
 
@@ -230,7 +230,7 @@ const HealthNotices: React.FC = () => {
     return () => { active = false; };
   }, [models]);
 
-  if (dismissed || notices.length === 0) return null;
+  if (connection !== 'connected' || dismissed || notices.length === 0) return null;
   return (
     <aside className="border-b border-warning-amber/30 bg-warning-amber/10 px-4 py-2 text-sm text-warning-amber sm:px-6" aria-label="Configuration notices">
       <div className="flex items-start justify-between gap-4">
@@ -265,17 +265,57 @@ const NavLink: React.FC<{ id: PageId; label: string; page: PageId; nested?: bool
 
 const ConnectionBanner: React.FC = () => {
   const { connection, lastUpdatedAt } = useGateway();
+  const [token, setToken] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authenticating, setAuthenticating] = useState(false);
   if (connection === 'connected') return null;
+  const hostname = typeof window === 'undefined' ? '' : window.location.hostname;
+  const remote = hostname !== '' &&
+    hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1';
   const tone = connection === 'offline' ? 'border-danger-rose/40 bg-danger-rose/10 text-danger-rose' : 'border-warning-amber/40 bg-warning-amber/10 text-warning-amber';
   const message = connection === 'connecting'
     ? 'Connecting to the gateway…'
     : connection === 'reconnecting'
       ? 'Event stream interrupted — reconnecting.'
       : 'Gateway unreachable — retrying.';
+  const authenticate = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setAuthenticating(true);
+    setAuthError('');
+    try {
+      await authenticateDashboard(token);
+      window.location.reload();
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Dashboard authentication failed');
+      setAuthenticating(false);
+    }
+  };
   return (
     <div className={`border-b px-4 py-2 text-sm ${tone}`}>
-      {message}
+      <span>{remote ? 'Remote dashboard authentication required.' : message}</span>
       {lastUpdatedAt && <span className="ml-2 opacity-80">Data last updated {timeAgo(lastUpdatedAt)}.</span>}
+      {remote && (
+        <form className="mt-2 flex max-w-xl flex-wrap items-center gap-2" onSubmit={authenticate}>
+          <label className="sr-only" htmlFor="dashboard-token">Dashboard access token</label>
+          <input
+            id="dashboard-token"
+            type="password"
+            autoComplete="current-password"
+            value={token}
+            onChange={event => setToken(event.target.value)}
+            placeholder="Dashboard access token"
+            className="min-h-9 min-w-64 flex-1 rounded border border-white/20 bg-deck-navy px-3 text-text-primary"
+          />
+          <button
+            type="submit"
+            disabled={authenticating || token.length === 0}
+            className="min-h-9 rounded border border-current px-3 font-medium disabled:opacity-40"
+          >
+            {authenticating ? 'Connecting…' : 'Connect'}
+          </button>
+          {authError && <span className="w-full text-xs">{authError}</span>}
+        </form>
+      )}
     </div>
   );
 };

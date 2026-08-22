@@ -25,3 +25,4 @@ They are part of the implementation contract, not retrospective notes.
 | ADR | Status | Decision |
 |---|---|---|
 | [0001](0001-openai-core-boundary.md) | Accepted | OpenAI-only Core architecture boundary |
+| [0002](0002-authenticated-remote-dashboard.md) | Accepted | Authenticated remote dashboard sessions |
