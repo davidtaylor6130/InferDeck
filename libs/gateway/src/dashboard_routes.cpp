@@ -375,6 +375,13 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"active_requests", resident == residency.end() ? 0 : resident->second.active_requests},
             {"resizing", resident != residency.end() && resident->second.resizing},
             {"has_vision", info.has_vision},
+            {"reasoning", {
+                {"supported", info.reasoning.supported},
+                {"efforts", info.reasoning.efforts},
+                {"default", info.reasoning.default_effort},
+                {"none_disables", info.reasoning.none_disables},
+                {"aliases", info.reasoning.aliases},
+            }},
             {"optimization", {
                 {"status", info.optimization.status},
                 {"measured_at", info.optimization.measured_at},
@@ -412,6 +419,13 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"free_slots", resident == residency.end() ? 0 : resident->second.free_slots},
             {"active_requests", resident == residency.end() ? 0 : resident->second.active_requests},
             {"has_vision", info->has_vision},
+            {"reasoning", {
+                {"supported", info->reasoning.supported},
+                {"efforts", info->reasoning.efforts},
+                {"default", info->reasoning.default_effort},
+                {"none_disables", info->reasoning.none_disables},
+                {"aliases", info->reasoning.aliases},
+            }},
             {"alias", true},
             {"alias_target", alias.target},
             {"required_context_size", alias.required_context_size},
