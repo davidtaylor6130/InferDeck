@@ -119,7 +119,8 @@ control:
 When `allow_remote` is false, non-loopback control requests and preflights return
 403 regardless of the OpenAI token. When it is true, startup validation requires:
 
-- a `control.token` containing at least 32 non-whitespace characters;
+- a `control.token` containing at least 32 cookie-safe ASCII characters
+  (`A-Z`, `a-z`, `0-9`, `-`, `_`, `.`, or `~`);
 - at least one exact `control.origins` entry;
 - no empty or wildcard control origin;
 - a control token distinct from the OpenAI token unless sharing is explicitly
@@ -132,12 +133,16 @@ keys when the comment-preserving fast path cannot prove complete redaction.
 Credential checks use the constant-time bearer comparison shared by both
 principals.
 
-Remote bearer administration is an API mode, not a remote-dashboard login. The
-shipped dashboard and native `EventSource` remain direct-loopback only. The
-native listener has no TLS, so remote control must travel over an encrypted
-overlay that preserves the non-loopback client peer. Transparent reverse proxies
-are untrusted and require the remote-control token; they do not inherit loopback
-authority.
+Remote dashboard access uses the same separate control credential. The browser
+exchanges it at `POST /api/inferdeck/v1/dashboard/session` for an HTTP-only,
+`SameSite=Strict` session cookie. Status, pricing, SSE and administrative
+requests then use that cookie; the token is not stored in browser JavaScript
+storage. Loopback dashboard access remains passwordless.
+
+The native listener has no TLS. Restrict remote dashboard access to trusted LAN
+or encrypted overlay interfaces, and list every dashboard origin exactly in
+`control.origins`. Transparent reverse proxies are untrusted and do not inherit
+loopback authority.
 
 ## Browser and request policy
 
@@ -147,8 +152,10 @@ and legacy alternate API-key headers are no longer advertised. Ambient loopback 
 a CSRF credential: every control mutation rejects an unallowlisted `Origin` or
 `Sec-Fetch-Site: cross-site`, and even empty mutations require
 `Content-Type: application/json`. Cross-origin mutation attempts therefore fail
-or require a denied preflight. Adding cookie credentials later requires a new ADR
-and a session-specific CSRF design before merge.
+or require a denied preflight. Cookie-based dashboard sessions are governed by
+[ADR 0002](adr/0002-authenticated-remote-dashboard.md): the bootstrap request and
+every mutation require an exact allowed origin, while `SameSite=Strict` prevents
+the browser from attaching the session cross-site.
 
 Request policy is enforced before handlers:
 
@@ -205,7 +212,9 @@ proves both modes over the real listener:
 - remote-disabled control with no token, OpenAI token, or control token: 403;
 - remote-enabled control without token or with the OpenAI token: 401;
 - remote-enabled control with the control token: 200;
-- remote dashboard with the control token: 403;
+- remote dashboard without a session: 401;
+- remote dashboard session exchange with the control token: 200;
+- remote dashboard status and SSE with the session cookie: 200;
 - remote-disabled control preflight: 403;
 - exact remote control origin: returned;
 - untrusted remote control origin: 403;
@@ -226,3 +235,15 @@ proves both modes over the real listener:
 The fixture starts a separate gateway on ports 11439 or 11440, contains no model
 registry entries, and stops only the process it created. It does not modify or
 restart the live gateway on port 11434.
+When remote administration is enabled, the dashboard first exchanges the
+configured control token at `POST /api/inferdeck/v1/dashboard/session`. A
+successful exchange creates an HTTP-only, same-site browser-session cookie.
+Dashboard status, pricing, SSE and administrative requests then use that cookie;
+the token is not stored in browser JavaScript storage. Loopback dashboard access
+does not require a token.
+
+Remote dashboard origins must be listed exactly in `control.origins`.
+`control.allow_remote: true` also requires a separate control token of at least
+32 cookie-safe ASCII characters. Keep remote access restricted to trusted LAN or
+encrypted overlay interfaces because the built-in listener does not terminate
+TLS.

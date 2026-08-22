@@ -64,11 +64,12 @@ token returns 401.
 
 Remote administration is separately opt-in. Enable
 `control.allow_remote`, use a distinct control token with at least 32
-non-whitespace characters, configure exact HTTP or HTTPS origins, and carry
+cookie-safe ASCII characters, configure exact HTTP or HTTPS origins, and carry
 traffic over an encrypted overlay because the listener has no TLS. Forwarded
 headers and reverse proxies never inherit loopback authority. After rotation,
 prove unauthenticated, data-token, wrong-origin, and stale-token control
-requests fail. The dashboard remains direct-loopback only.
+requests fail. Remote dashboards exchange the control token for an HTTP-only,
+same-site session cookie; loopback dashboard access remains passwordless.
 
 ## Verification and rollback
 

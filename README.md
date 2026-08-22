@@ -113,6 +113,12 @@ diagnostics. Voice
 capture and playback belong to API clients such as Open WebUI, not the
 administration dashboard.
 
+Loopback dashboard access is passwordless. LAN and encrypted-overlay access
+requires remote control to be enabled, an exact `control.origins` entry, and
+the separate control token. The browser exchanges that token for an HTTP-only,
+same-site session cookie so native SSE and administrative actions remain
+authenticated.
+
 ### Observability & quality
 
 - Every request and swap is recorded three ways: in-memory metrics, SQLite

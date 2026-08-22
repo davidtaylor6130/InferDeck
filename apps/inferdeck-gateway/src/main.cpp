@@ -773,8 +773,11 @@ int run_gateway(const fs::path& config_path) {
     route_auth.control_allow_data_plane_token = cfg.control_allow_data_plane_token;
     route_auth.control_token = cfg.control_token;
     RouteAuthorizer authorizer(std::move(route_auth));
+    AuthMiddleware control_session({true, cfg.control_token});
     CorsMiddleware data_cors(cfg.cors_origins);
     CorsMiddleware control_cors(cfg.control_origins);
+    const std::string dashboard_session_path =
+        std::string(inferdeck::gateway::kControlApiBase) + "/dashboard/session";
 
     DeadlineServer server(server_request_read_deadline);
     server.set_read_timeout(server_read_timeout);
@@ -886,9 +889,19 @@ int run_gateway(const fs::path& config_path) {
             }
             return httplib::Server::HandlerResponse::Unhandled;
         }
-        const auto authorization = authorizer.authorize(
-            principal, header_value(req, "Authorization"), req.remote_addr,
-            header_value(req, "Host"), proxied);
+        const bool dashboard_login =
+            req.method == "POST" &&
+            req.path == dashboard_session_path;
+        auto credential = header_value(req, "Authorization");
+        if (credential.empty()) {
+            const auto token = cookie_value(
+                header_value(req, "Cookie"), "inferdeck_control");
+            if (!token.empty()) credential = "Bearer " + token;
+        }
+        const auto authorization = dashboard_login
+            ? AuthorizationStatus::Granted
+            : authorizer.authorize(principal, credential, req.remote_addr,
+                                   header_value(req, "Host"), proxied);
         if (authorization == AuthorizationStatus::AuthenticationRequired) {
             resp.set_header("WWW-Authenticate", "Bearer");
             write_error(resp, 401, "unauthorized", "valid Bearer token required");
@@ -952,6 +965,34 @@ int run_gateway(const fs::path& config_path) {
             }
         };
     };
+
+    server.Post(dashboard_session_path,
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
+        if (!cfg.control_allow_remote) {
+            write_error(resp, 403, "forbidden",
+                        "remote dashboard access is disabled");
+            return;
+        }
+        const auto body = nlohmann::json::parse(req.body, nullptr, false);
+        if (body.is_discarded() || !body.is_object() ||
+            !body.contains("token") || !body["token"].is_string()) {
+            write_error(resp, 400, "invalid_request",
+                        "dashboard token is required");
+            return;
+        }
+        const auto token = body["token"].get<std::string>();
+        if (!control_session.check("Bearer " + token)) {
+            resp.set_header("WWW-Authenticate", "Bearer");
+            write_error(resp, 401, "unauthorized",
+                        "valid dashboard token required");
+            return;
+        }
+        resp.set_header("Set-Cookie",
+                        "inferdeck_control=" + token +
+                        "; Path=/api/inferdeck/v1; HttpOnly; SameSite=Strict");
+        resp.set_content(R"({"ok":true})", "application/json");
+    }));
 
     server.Get(std::string(strict_openai_route(
                    StrictOpenAIRoute::Models).pattern),

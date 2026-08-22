@@ -289,7 +289,7 @@ try {
         control_loopback_cross_origin = 403
         control_loopback_missing_content_type = 415
         wrong_content_type = 415
-        dashboard_lan_control_token = 403
+        dashboard_lan_control_token = if ($RemoteControl) { 200 } else { 403 }
         unauthenticated_large_body = 401
         authenticated_oversized_json = 413
         authenticated_oversized_audio = 413

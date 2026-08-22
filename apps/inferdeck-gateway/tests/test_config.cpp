@@ -434,6 +434,12 @@ model_registry:
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\nauth:\n  required: true\n  token: secret\n"));
     CHECK_FALSE(validate_config_text("control:\n  allow_remote: true\n"));
+    CHECK_FALSE(validate_config_text(R"(
+control:
+  allow_remote: true
+  token: "test-control-token-0123456789abc;ef"
+  origins: ["http://192.168.0.168:11434"]
+)"));
     CHECK_FALSE(validate_config_text(
         "control:\n  allow_remote: true\n  token: control-secret\n"));
     CHECK_FALSE(validate_config_text(R"(
