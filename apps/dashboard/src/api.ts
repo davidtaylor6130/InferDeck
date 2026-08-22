@@ -11,6 +11,21 @@ import { API_BASE } from './utils';
 
 const CONTROL_API_BASE = '/api/inferdeck/v1';
 
+export async function authenticateDashboard(token: string): Promise<void> {
+  const response = await fetch(`${API_BASE}${CONTROL_API_BASE}/dashboard/session`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(15_000),
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as {
+      error?: { message?: string };
+    };
+    throw new Error(payload.error?.message || 'Dashboard authentication failed');
+  }
+}
+
 async function getJson<T>(path: string, timeoutMs = 15_000): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     signal: AbortSignal.timeout(timeoutMs),

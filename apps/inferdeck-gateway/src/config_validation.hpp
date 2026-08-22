@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <string>
 #include <unordered_map>
@@ -111,10 +113,14 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 }
             }
             if (allow_remote) {
-                if (control_token.size() < 32 ||
-                    control_token.find_first_of(" \t\r\n") != std::string::npos) {
+                const bool cookie_safe = std::all_of(
+                    control_token.begin(), control_token.end(), [](unsigned char ch) {
+                        return std::isalnum(ch) || ch == '-' || ch == '_' ||
+                            ch == '.' || ch == '~';
+                    });
+                if (control_token.size() < 32 || !cookie_safe) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
-                                                 "control.token must contain at least 32 non-whitespace characters for remote administration");
+                                                 "control.token must contain at least 32 cookie-safe ASCII characters for remote administration");
                 }
                 if (!control["origins"] || control["origins"].size() == 0) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,

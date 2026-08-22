@@ -13,6 +13,7 @@ using inferdeck::gateway::RouteAuthConfig;
 using inferdeck::gateway::RouteAuthorizer;
 using inferdeck::gateway::RoutePrincipal;
 using inferdeck::gateway::classify_route;
+using inferdeck::gateway::cookie_value;
 using inferdeck::gateway::ContentPolicy;
 using inferdeck::gateway::RequestPolicy;
 using inferdeck::gateway::RequestValidationStatus;
@@ -146,10 +147,13 @@ TEST_CASE("RouteAuthorizer: remote control requires its own credential",
                                       "Bearer openai-token", "192.168.1.20",
                                       "192.168.1.10:11434", false) ==
           AuthorizationStatus::Granted);
+    CHECK(authorizer.authorize(RoutePrincipal::DashboardSession, "",
+                               "192.168.1.20", "192.168.1.10:11434", false) ==
+          AuthorizationStatus::AuthenticationRequired);
     CHECK(authorizer.authorize(RoutePrincipal::DashboardSession,
                                "Bearer control-token", "192.168.1.20",
                                "192.168.1.10:11434", false) ==
-          AuthorizationStatus::Forbidden);
+          AuthorizationStatus::Granted);
 }
 
 TEST_CASE("Route classification separates data and control principals",
@@ -172,6 +176,14 @@ TEST_CASE("Route classification separates data and control principals",
           RoutePrincipal::ControlRead);
     CHECK(classify_route("PUT", "/api/inferdeck/v1/config") ==
           RoutePrincipal::ControlWrite);
+}
+
+TEST_CASE("Dashboard session cookie parsing is exact", "[auth][dashboard]") {
+    CHECK(cookie_value("a=1; inferdeck_control=secret-token; b=2",
+                       "inferdeck_control") == "secret-token");
+    CHECK(cookie_value("inferdeck_control=first; inferdeck_control_extra=second",
+                       "inferdeck_control") == "first");
+    CHECK(cookie_value("inferdeck_control_extra=second", "inferdeck_control").empty());
 }
 
 TEST_CASE("Every mutating administrative route requires the control principal",

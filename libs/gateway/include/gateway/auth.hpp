@@ -85,9 +85,6 @@ public:
         if (is_direct_loopback(remote_address, host, proxy_indicated)) {
             return AuthorizationStatus::Granted;
         }
-        if (principal == RoutePrincipal::DashboardSession) {
-            return AuthorizationStatus::Forbidden;
-        }
         if (!cfg_.control_allow_remote) {
             return AuthorizationStatus::Forbidden;
         }
@@ -190,6 +187,27 @@ inline RoutePrincipal classify_route(std::string_view method,
             : RoutePrincipal::ControlWrite;
     }
     return RoutePrincipal::PublicStatus;
+}
+
+inline std::string cookie_value(std::string_view header, std::string_view name) {
+    std::size_t begin = 0;
+    while (begin < header.size()) {
+        while (begin < header.size() &&
+               (header[begin] == ' ' || header[begin] == ';')) {
+            ++begin;
+        }
+        const auto end = header.find(';', begin);
+        const auto field = header.substr(
+            begin, end == std::string_view::npos ? header.size() - begin : end - begin);
+        const auto separator = field.find('=');
+        if (separator != std::string_view::npos &&
+            field.substr(0, separator) == name) {
+            return std::string{field.substr(separator + 1)};
+        }
+        if (end == std::string_view::npos) break;
+        begin = end + 1;
+    }
+    return {};
 }
 
 } // namespace inferdeck::gateway

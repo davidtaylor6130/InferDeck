@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  cancelProfileBenchmark, getModels, getProfileBenchmark, optimizeProfile,
+  authenticateDashboard, cancelProfileBenchmark, getModels, getProfileBenchmark, optimizeProfile,
   startProfileBenchmark, waitForActiveConfig, waitForStableConfig,
 } from './api';
 import type { ModelInfo } from './types';
@@ -115,6 +115,27 @@ describe('getModels', () => {
       active_requests: 0,
     });
     expect(withResizing.resizing).toBe(false);
+  });
+});
+
+describe('dashboard authentication', () => {
+  it('exchanges the control token for an HTTP-only session', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await authenticateDashboard('local-network-secret');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/inferdeck/v1/dashboard/session',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ token: 'local-network-secret' }),
+      }),
+    );
   });
 });
 
