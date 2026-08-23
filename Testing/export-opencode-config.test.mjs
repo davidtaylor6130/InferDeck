@@ -3,11 +3,12 @@ import test from 'node:test';
 import { buildOpenCodeModels, mergeOpenCodeConfig, parseArguments } from '../scripts/export-opencode-config.mjs';
 
 const advertised = [
-  { id: 'ornith-1.5-35b-a3b', context_size: 100000, has_vision: true, reasoning: { supported: true, efforts: ['low', 'medium', 'high'], none_disables: false } },
-  { id: 'qwen3.8-27b', context_size: 100000, has_vision: true, reasoning: { supported: true, efforts: ['low', 'medium', 'xhigh'], none_disables: true } },
-  { id: 'n8n-model', alias: true, required_context_size: 100000, has_vision: true },
-  { id: 'Normal', alias: true, required_context_size: 100000, has_vision: true },
-  { id: 'Pro', alias: true, required_context_size: 100000, has_vision: true },
+  { id: 'ornith-1.5-35b-a3b', capabilities: ['chat_completions', 'responses'], context_size: 100000, has_vision: true, reasoning: { supported: true, efforts: ['low', 'medium', 'high'], none_disables: false } },
+  { id: 'qwen3.8-27b', capabilities: ['chat_completions', 'responses'], context_size: 100000, has_vision: true, reasoning: { supported: true, efforts: ['low', 'medium', 'xhigh'], none_disables: true } },
+  { id: 'n8n-model', capabilities: ['chat_completions', 'responses'], alias: true, required_context_size: 100000, has_vision: true },
+  { id: 'Normal', capabilities: ['chat_completions', 'responses'], alias: true, required_context_size: 100000, has_vision: true },
+  { id: 'Pro', capabilities: ['chat_completions', 'responses'], alias: true, required_context_size: 100000, has_vision: true },
+  { id: 'whisper-base-en', capabilities: ['audio_transcriptions'], context_size: 32768 },
 ];
 
 test('parses explicit exporter selections', () => {
@@ -32,6 +33,7 @@ test('preserves unrelated settings and selects stable aliases', () => {
   assert.equal(output.model, 'inferdeck/Normal');
   assert.equal(output.small_model, 'inferdeck/n8n-model');
   assert.ok(output.provider.inferdeck.models.Pro);
+  assert.equal(output.provider.inferdeck.models['whisper-base-en'], undefined);
 });
 
 test('rejects aliases not advertised by InferDeck', () => {

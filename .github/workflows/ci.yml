@@ -47,6 +47,8 @@ jobs:
       - shell: pwsh
         run: pnpm test:openai-contract
       - shell: pwsh
+        run: pnpm test:opencode-export
+      - shell: pwsh
         run: python -m pip install --disable-pip-version-check -r Testing/requirements-openai-contract.txt
       - shell: pwsh
         run: python -m unittest -v Testing.openai_sdk_contract_test
