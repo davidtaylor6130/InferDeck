@@ -30,6 +30,8 @@ function reasoningVariants(reasoning) {
 export function buildOpenCodeModels(models) {
   return Object.fromEntries(models
     .filter((model) => typeof model.id === 'string' && model.id.length > 0)
+    .filter((model) => Array.isArray(model.capabilities) &&
+      model.capabilities.some((capability) => capability === 'chat_completions' || capability === 'responses'))
     .sort((left, right) => left.id.localeCompare(right.id))
     .map((model) => {
       const context = Number(model.required_context_size || model.context_size || 32768);

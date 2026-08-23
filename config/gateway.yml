@@ -76,7 +76,19 @@ gateway:
     dry_penalty_last_n: -1   # -1 = context size
     dry_seq_breakers: ["\n", ":", "\"", "*"]
 
-model_aliases: []
+model_aliases:
+  - name: n8n-model
+    target: ornith-1.5-35b-a3b
+    required_context_size: 100000
+    required_capabilities: [chat_completions, responses]
+  - name: Normal
+    target: ornith-1.5-35b-a3b
+    required_context_size: 100000
+    required_capabilities: [chat_completions, responses]
+  - name: Pro
+    target: qwen3.8-27b
+    required_context_size: 100000
+    required_capabilities: [chat_completions, responses]
 
 model_registry:
   - name: "supertonic-3"
@@ -228,6 +240,39 @@ model_registry:
     # crash during multi-step tool calling (e.g. OpenCode). See config/templates/.
     chat_template_path: "C:/Inferdeck/config/templates/qwen3.6-fixed.jinja"
     # Qwen3 thinking/reasoning sweet spot (Qwen team).
+    sampling:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      repeat_penalty: 1.0
+
+  - name: "ornith-1.5-35b-a3b"
+    family: "ornith-1.5"
+    gguf_path: "F:/InferDeck/models/ornith-ai/Ornith-1.5-35B-A3B-GGUF/Ornith-1.5-35B-Q4_K_M.gguf"
+    mmproj_path: "F:/InferDeck/models/ornith-ai/Ornith-1.5-35B-A3B-GGUF/mmproj-Ornith-1.5-35B-BF16.gguf"
+    n_slots: 4
+    min_slots: 2
+    vram_required_mb: 27000
+    context_size: 100000
+    n_batch: 2048
+    n_ubatch: 2048
+    cache_type_k: "q4_0"
+    cache_type_v: "q4_0"
+    prompt_price_per_million: 0.14
+    cached_prompt_price_per_million: 0.05
+    completion_price_per_million: 1.0
+    reasoning:
+      supported: true
+      efforts: [low, medium, high]
+      default: high
+      none_disables: false
+    optimization:
+      status: "measured"
+      measured_at: "2026-08-20"
+      single_tokens_per_second: 121.24
+      parallel_tokens_per_second: 229.61
+    has_vision: true
     sampling:
       temperature: 0.6
       top_p: 0.95

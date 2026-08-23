@@ -74,6 +74,18 @@
             "output": [
               "text"
             ]
+          },
+          "reasoning": true,
+          "variants": {
+            "low": {
+              "reasoningEffort": "low"
+            },
+            "medium": {
+              "reasoningEffort": "medium"
+            },
+            "high": {
+              "reasoningEffort": "high"
+            }
           }
         },
         "Normal": {
@@ -90,6 +102,18 @@
             "output": [
               "text"
             ]
+          },
+          "reasoning": true,
+          "variants": {
+            "low": {
+              "reasoningEffort": "low"
+            },
+            "medium": {
+              "reasoningEffort": "medium"
+            },
+            "high": {
+              "reasoningEffort": "high"
+            }
           }
         },
         "ornith-1.5-35b-a3b": {
@@ -106,21 +130,18 @@
             "output": [
               "text"
             ]
-          }
-        },
-        "parakeet-tdt-0.6b-v3": {
-          "name": "parakeet-tdt-0.6b-v3",
-          "limit": {
-            "context": 65536,
-            "output": 16384
           },
-          "modalities": {
-            "input": [
-              "text"
-            ],
-            "output": [
-              "text"
-            ]
+          "reasoning": true,
+          "variants": {
+            "low": {
+              "reasoningEffort": "low"
+            },
+            "medium": {
+              "reasoningEffort": "medium"
+            },
+            "high": {
+              "reasoningEffort": "high"
+            }
           }
         },
         "Pro": {
@@ -137,6 +158,21 @@
             "output": [
               "text"
             ]
+          },
+          "reasoning": true,
+          "variants": {
+            "low": {
+              "reasoningEffort": "low"
+            },
+            "medium": {
+              "reasoningEffort": "medium"
+            },
+            "xhigh": {
+              "reasoningEffort": "xhigh"
+            },
+            "off": {
+              "reasoningEffort": "none"
+            }
           }
         },
         "qwen2.5-coder-3b": {
@@ -230,36 +266,21 @@
             "output": [
               "text"
             ]
-          }
-        },
-        "supertonic-3": {
-          "name": "supertonic-3",
-          "limit": {
-            "context": 65536,
-            "output": 16384
           },
-          "modalities": {
-            "input": [
-              "text"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "whisper-base-en": {
-          "name": "whisper-base-en",
-          "limit": {
-            "context": 65536,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text"
-            ],
-            "output": [
-              "text"
-            ]
+          "reasoning": true,
+          "variants": {
+            "low": {
+              "reasoningEffort": "low"
+            },
+            "medium": {
+              "reasoningEffort": "medium"
+            },
+            "xhigh": {
+              "reasoningEffort": "xhigh"
+            },
+            "off": {
+              "reasoningEffort": "none"
+            }
           }
         }
       }

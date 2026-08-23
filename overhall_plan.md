@@ -659,7 +659,7 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Identify every local consumer: OpenCode, Open WebUI, dashboard, scripts,
       benchmarks, editor integrations and health monitors.
 - [x] Update consumers to strict OpenAI or the new control-plane endpoints.
-- [ ] Generate OpenCode provider configuration from the live model and stable
+- [x] Generate OpenCode provider configuration from the live model and stable
       alias catalog; track implementation and deployment in #142.
 - [x] Back up configuration, StatsDb and managed-model manifests.
 - [x] Build matched gateway and dashboard artifacts from one revision.
@@ -741,11 +741,23 @@ current implementation cannot satisfy the native single-process rule.
 - [x] Restore and persist `Normal`, `Pro`, and `n8n-model` after the active
       profile reload exposed their absence from the persisted profile.
 - [x] Merge the already-deployed authenticated LAN dashboard change in #141.
-- [ ] Merge #142 implementation through protected CI.
-- [ ] Deploy its matched gateway artifact and re-export OpenCode from the live
+- [x] Merge #142 implementation through protected CI.
+- [x] Deploy its matched gateway artifact and re-export OpenCode from the live
       post-deployment catalog.
 - [ ] Close #142, Phase 14, and the epic only after the new live evidence is
       attached.
+
+Remediation evidence: PR #143 merged as `0be8e008c006ba0d7cfb7d05f454ff7ffbe86578`
+after all protected checks passed. The matched gateway and dashboard were deployed
+from that revision; the live executable SHA-256 is
+`7FA1960F34E99C584C2D76681B34B01AE06262F344C7D5355B82C6E815888037`. The stopped
+StatsDb backup is retained under
+`C:\InferDeck\deploy-backups\overhaul-remediation-20260823-0019` with SHA-256
+`E14F6BF1F394C65B2636271472C945F9E67C41FE075FAAB8A51AC4C0768FABFF`, and live
+token totals remained monotonic after restart. The live export advertises the
+stable `Normal` and `n8n-model` aliases for Ornith 1.5 and `Pro` for Qwen 3.8,
+while excluding speech-only models. Final issue closure remains gated on the
+0.8.1 release and exact-artifact live verification.
 
 ## Audit finding coverage matrix
 
