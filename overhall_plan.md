@@ -7,6 +7,8 @@ Complete a controlled overhaul of InferDeck so that:
 - InferDeck Core is one native Windows executable with no runtime subprocesses,
   proxy servers, Python services, or orphan-process risk.
 - `/v1` exposes only OpenAI-defined endpoints and wire formats.
+- Every standard request field, response field, stream event, and error behavior
+  on an exposed OpenAI endpoint preserves the pinned OpenAI contract one to one.
 - OpenAI-compatible derivative behavior is explicit, isolated, opt-in, and
   incapable of changing the strict OpenAI contract.
 - InferDeck administration uses a separately authenticated control plane.
@@ -61,7 +63,9 @@ on a repository-specific project-board configuration.
    a model/runtime server.
 3. Core never proxies `llama-server`, vLLM, FastAPI, Uvicorn, or another inference
    service.
-4. `/v1` is reserved for a pinned OpenAI contract.
+4. `/v1` is reserved for a pinned OpenAI contract, including complete field-level
+   semantics for every exposed endpoint; an arbitrary supported-field subset is
+   not OpenAI compatibility.
 5. Backends receive typed domain objects, never HTTP requests or protocol JSON.
 6. Validation and capability checks finish before job creation, model loading,
    swapping, queue admission, or slot acquisition.
@@ -391,13 +395,57 @@ current implementation cannot satisfy the native single-process rule.
 
 - [x] Require and validate `model` and `messages`.
 - [x] Preserve developer/system instruction precedence.
-- [x] Validate all supported content, tools, tool choice, response format, stop,
-      token limits, temperature/top-p ranges, seed, streaming and stream options.
+- [x] Validate content, tools, tool choice, response format, stop, token limits,
+      temperature/top-p ranges, seed, streaming and stream options.
+- [x] Restore native `frequency_penalty` and `presence_penalty` semantics removed
+      by the overhaul.
 - [x] Remove `:latest` normalization.
-- [x] Remove public `priority`, `top_k`, repeat controls and template kwargs.
-- [x] Define strict behavior for unsupported official fields.
+- [x] Remove public `priority` and template kwargs; recognize Open WebUI's
+      validated advanced request controls and map generation fields natively.
+- [x] Implement one-to-one semantics for every remaining official field in the
+      pinned Chat Completions schema; blanket rejection does not satisfy this
+      requirement.
 - [x] Return canonical model identity consistently in stream and non-stream modes.
 - [x] Keep derivative reasoning output outside strict mode.
+
+Local parity evidence (2026-08-23): the strict allowlists exactly match OpenAI
+JavaScript SDK 7.5.0 for Chat Completions, Responses, Embeddings, Images,
+Speech, and Transcriptions. OpenAI Python SDK 3.3.1 and JavaScript SDK 7.5.0
+successfully serialize and parse every exposed strict route. Official fields
+now either execute with native semantics or return a selected-model capability
+error after shape validation and model resolution; no official top-level field
+is rejected as an unknown parameter. Native Chat coverage includes penalties,
+logit bias, token logprobs, deprecated function forms, cache affinity, service
+tier reporting, and streaming usage/obfuscation. The independently configured
+Release build at `build` passed all 130 labelled C++ tests
+(106 unit and 24 integration), and both architecture policy gates passed.
+The route suite also locks the complete Open WebUI advanced payload, including
+`num_ctx`, `num_predict`, native sampler mappings, and pre-admission context
+validation. Dashboard tests passed 42/42; the production dashboard build,
+OpenCode exporter tests, and both pinned OpenAI SDK suites also passed.
+Live parity evidence (2026-08-23): the protected stopped-service deployment
+backed up the executable, base config, complete SQLite StatsDb, WAL/SHM, and
+static tree at
+`C:\InferDeck\deploy-backups\api-parity-20260823-152627`. Pre-restart and
+post-restart usage were identical at 463,605,810 prompt tokens, 122,273,849
+cached prompt tokens, 10,880,844 completion tokens, and 13,675 requests. The
+installed executable hash
+`B68ABAC02EDD45E817C4E46E11EB4B3EA93BEF4B9656F0FCA1CFE72124FB002E`
+matches the verified Release artifact, the database reports healthy, and the
+deployed four-file static tree matches the production dashboard build.
+
+Live Chat probes accepted `frequency_penalty: 1.2` with `num_ctx: 32768`
+through `Pro`, `n8n-model`, and `Normal`, preserving each requested alias
+in the response. The complete Open WebUI advanced streaming payload returned
+one `[DONE]` marker and an OpenAI usage chunk. A cold `n8n-model` request
+loaded `ornith-1.5-35b-a3b` in 56.47 seconds and completed without the former
+30-second slot timeout. The effective active profile now contains the same
+authenticated LAN control policy as the base profile; browser-equivalent
+dashboard session, health, status, models, page, and SSE probes all returned
+200 on both `192.168.0.168:11434` and `100.95.44.9:11434`. Final usage
+increased monotonically to 463,605,980 prompt tokens, 122,273,858 cached prompt
+tokens, 10,880,885 completion tokens, and 13,681 requests. No commit, push, PR,
+issue mutation, or issue closure was performed.
 
 ### Responses
 

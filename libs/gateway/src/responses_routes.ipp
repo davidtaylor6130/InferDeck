@@ -34,20 +34,39 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
         write_error(resp, 404, "model_not_found", info.error().message);
         return;
     }
-    if (!info->has_vision && response_input_uses_vision(request["input"])) {
-        write_error(resp, 400, "unsupported_capability",
-                    "model does not support image input: " + model_name);
-        return;
-    }
     if (!info->supports("responses")) {
         write_error(resp, 400, "unsupported_capability",
                     "model does not support Responses API: " + model_name);
         return;
     }
+    if (parsed->capability_field) {
+        write_error(
+            resp, 400, "unsupported_capability",
+            "model '" + model_name + "' does not support " +
+                parsed->capability.value_or("the requested capability"),
+            *parsed->capability_field);
+        return;
+    }
+    if (!info->has_vision && request.contains("input") &&
+        response_input_uses_vision(request["input"])) {
+        write_error(resp, 400, "unsupported_capability",
+                    "model does not support image input: " + model_name);
+        return;
+    }
+    std::string cache_reservation_key;
+    for (const auto field : {"prompt_cache_key", "user"}) {
+        if (request.contains(field) && request[field].is_string() &&
+            !request[field].get_ref<const std::string&>().empty()) {
+            cache_reservation_key =
+                "openai-cache:" + request[field].get<std::string>();
+            break;
+        }
+    }
     const bool stream = parsed->stream;
     if (!stream) {
         auto acquired = acquire_generation_slot(
-            req, resp, deps, parsed->priority, requested_model, model_name);
+            req, resp, deps, parsed->priority, requested_model, model_name,
+            cache_reservation_key);
         if (!acquired) return;
         auto observation = observe_request(req, resp, deps, "text", false);
         observation.queue_duration_ms = acquired->queue_duration_ms;
@@ -72,7 +91,8 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
         return;
     }
     auto acquired = acquire_generation_slot(
-        req, resp, deps, parsed->priority, requested_model, model_name);
+        req, resp, deps, parsed->priority, requested_model, model_name,
+        cache_reservation_key);
     if (!acquired) return;
     auto observation = observe_request(req, resp, deps, "text", true);
     observation.queue_duration_ms = acquired->queue_duration_ms;
@@ -86,6 +106,10 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
     auto state = std::make_shared<ResponsesStreamState>();
     state->session = session;
     state->request = request;
+    state->include_obfuscation =
+        !request.contains("stream_options") ||
+        request["stream_options"].is_null() ||
+        request["stream_options"].value("include_obfuscation", true);
     state->response_id = make_id("resp_");
     state->model = requested_model;
     state->created_at = static_cast<std::int64_t>(std::time(nullptr));

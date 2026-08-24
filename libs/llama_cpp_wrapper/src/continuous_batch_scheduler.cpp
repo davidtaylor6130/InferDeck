@@ -142,7 +142,9 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
     auto* draft_mem = draft_ctx_ ? llama_get_memory(draft_ctx_) : nullptr;
     const int seq_id = task->slot_id;
     const bool has_media = !task->media_chunks.empty();
-    task->mtp_eligible = speculative_ != nullptr && !has_media;
+    task->mtp_eligible =
+        speculative_ != nullptr && !has_media &&
+        !task->capture_probabilities;
     task->out_mtp_cache_synced = true;
     const auto clear_sequence = [&] {
         if (mem) llama_memory_seq_rm(mem, seq_id, 0, -1);
@@ -720,6 +722,27 @@ void ContinuousBatchScheduler::run_loop() {
 
             // Sample the next token for this slot
             const llama_token id = common_sampler_sample(t->sampler, ctx_, t->i_batch);
+            TokenEvent sampled;
+            sampled.id = id;
+            if (t->capture_probabilities) {
+                auto* candidates =
+                    common_sampler_get_candidates(t->sampler, true);
+                const auto top_count = std::min<std::size_t>(
+                    candidates->size,
+                    static_cast<std::size_t>(
+                        std::max(0, t->top_probabilities)));
+                sampled.top_probabilities.reserve(top_count);
+                for (std::size_t index = 0; index < candidates->size; ++index) {
+                    const auto& candidate = candidates->data[index];
+                    if (candidate.id == id) {
+                        sampled.probability = candidate.p;
+                    }
+                    if (index < top_count && candidate.p > 0.0f) {
+                        sampled.top_probabilities.emplace_back(
+                            candidate.id, candidate.p);
+                    }
+                }
+            }
             common_sampler_accept(t->sampler, id, true);
             t->i_batch = -1;
 
@@ -746,14 +769,12 @@ void ContinuousBatchScheduler::run_loop() {
             if (stop || at_max) {
                 if (!stop) {
                     // Emit this last token (max_tokens reached, not EOS)
-                    TokenEvent ev; ev.id = id;
-                    push_event(t, ev);
+                    push_event(t, std::move(sampled));
                 }
                 if (t->sampler) { common_sampler_free(t->sampler); t->sampler = nullptr; }
                 completed.push_back(t);
             } else {
-                TokenEvent ev; ev.id = id;
-                push_event(t, ev);
+                push_event(t, std::move(sampled));
                 t->last_token = id;
                 t->n_generated++;
             }

@@ -44,6 +44,7 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     }
     const std::string model_name = body["model"].get<std::string>();
     model::SpeechRequest request;
+    bool needs_instruction_capability = false;
     request.input = body["input"].get<std::string>();
     if (body["voice"].is_string()) {
         request.voice = body["voice"].get<std::string>();
@@ -87,12 +88,7 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                         "instructions");
             return;
         }
-        if (!instructions.empty()) {
-            write_error(resp, 400, "unsupported_parameter",
-                        "instructions are not supported by this native speech runtime",
-                        "instructions");
-            return;
-        }
+        needs_instruction_capability = !instructions.empty();
     }
     if (utf8_character_count(request.input) > 4096) {
         write_error(resp, 400, "invalid_speech_request",
@@ -123,12 +119,6 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                     "stream_format must be audio or sse", "stream_format");
         return;
     }
-    if (stream_format == "sse") {
-        write_error(resp, 400, "unsupported_stream_format",
-                    "SSE speech streaming is not available for this native runtime",
-                    "stream_format");
-        return;
-    }
     const auto resolved_model = resolve_model_name(deps, model_name);
     if (!resolved_model) {
         write_error(resp, 404, "model_not_found", resolved_model.error().message);
@@ -140,6 +130,20 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                     "model does not support audio speech generation");
         return;
     }
+    if (needs_instruction_capability) {
+        write_error(resp, 400, "unsupported_capability",
+                    "model '" + resolved_model->resolved +
+                        "' does not support speech instructions",
+                    "instructions");
+        return;
+    }
+    if (stream_format == "sse") {
+        write_error(resp, 400, "unsupported_capability",
+                    "model '" + resolved_model->resolved +
+                        "' does not support SSE speech events",
+                    "stream_format");
+        return;
+    }
     const bool wav_runtime =
         info && (info->runtime == "sherpa_onnx" ||
                  info->runtime == "windows_sapi");
@@ -147,8 +151,10 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     const auto observation = observe_request(
         req, resp, deps, "audio_speech", request.format != "wav");
     if (wav_runtime && request.format != "wav" && request.format != "pcm") {
-        write_error(resp, 400, "unsupported_response_format",
-                    "this native speech runtime supports wav and pcm responses");
+        write_error(resp, 400, "unsupported_capability",
+                    "model '" + resolved_model->resolved +
+                        "' supports wav and pcm speech output only",
+                    "response_format");
         return;
     }
     const std::string& runtime_model = resolved_model->resolved;

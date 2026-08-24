@@ -97,7 +97,9 @@ TEST_CASE("OpenAI adapter produces canonical multimodal and tool inputs",
         {"tools", nlohmann::json::array({
             {{"type", "function"},
              {"function", {{"name", "lookup"}, {"description", "find"}}}}
-        })}
+        })},
+        {"frequency_penalty", 1.2},
+        {"presence_penalty", -0.4}
     };
 
     const auto parsed = parse_openai_chat_request(body, false);
@@ -120,6 +122,10 @@ TEST_CASE("OpenAI adapter produces canonical multimodal and tool inputs",
     CHECK(std::to_integer<unsigned char>(image->bytes[2]) == 3);
     REQUIRE(parsed->tools.size() == 1);
     CHECK(parsed->tools[0].parameters_schema == "{}");
+    REQUIRE(parsed->sampling.frequency_penalty.has_value());
+    CHECK(*parsed->sampling.frequency_penalty == 1.2f);
+    REQUIRE(parsed->sampling.presence_penalty.has_value());
+    CHECK(*parsed->sampling.presence_penalty == -0.4f);
 }
 
 TEST_CASE("OpenAI adapter rejects malformed image base64",
@@ -137,6 +143,35 @@ TEST_CASE("OpenAI adapter rejects malformed image base64",
         INFO(encoded);
         CHECK_FALSE(parse_openai_chat_request(body, false));
     }
+}
+
+TEST_CASE("OpenAI adapter validates standard penalty ranges",
+          "[routes][adapter][validation]") {
+    const auto request_with = [](const char* field,
+                                 const nlohmann::json& value) {
+        nlohmann::json body{
+            {"model", "adapter-model"},
+            {"messages", nlohmann::json::array({
+                {{"role", "user"}, {"content", "test"}}
+            })}
+        };
+        body[field] = value;
+        return body;
+    };
+    CHECK(parse_openai_chat_request(
+        request_with("frequency_penalty", -2.0), false));
+    CHECK(parse_openai_chat_request(
+        request_with("frequency_penalty", 2.0), false));
+    CHECK(parse_openai_chat_request(
+        request_with("presence_penalty", -2.0), false));
+    CHECK(parse_openai_chat_request(
+        request_with("presence_penalty", 2.0), false));
+    CHECK_FALSE(parse_openai_chat_request(
+        request_with("frequency_penalty", -2.01), false));
+    CHECK_FALSE(parse_openai_chat_request(
+        request_with("frequency_penalty", 2.01), false));
+    CHECK_FALSE(parse_openai_chat_request(
+        request_with("presence_penalty", "high"), false));
 }
 
 TEST_CASE("OpenAI adapter validates assistant tool call type",
@@ -393,6 +428,15 @@ public:
             r.tool_calls.push_back(std::move(call));
         } else {
             r.text = "Hello from model";
+            if (request.logprobs) {
+                inference::TokenLogprob token;
+                token.token = "Hello";
+                token.logprob = -0.125f;
+                token.bytes = {72, 101, 108, 108, 111};
+                token.top_logprobs.push_back(
+                    {"Hi", -1.5f, {72, 105}});
+                r.logprobs.push_back(std::move(token));
+            }
         }
         r.prompt_tokens = 3;
         r.completion_tokens = 4;
@@ -414,6 +458,14 @@ public:
         if (deltas > 0) {
             InferenceDelta delta;
             delta.content.assign(64 * 1024, 'x');
+            if (request.logprobs) {
+                inference::TokenLogprob token;
+                token.token = "x";
+                token.logprob = -0.25f;
+                token.bytes = {120};
+                token.top_logprobs.push_back({"y", -1.0f, {121}});
+                delta.logprobs.push_back(std::move(token));
+            }
             for (int index = 0; index < deltas; ++index) {
                 const bool accepted = callback(delta);
                 stream_deltas_emitted.fetch_add(1);
@@ -895,10 +947,6 @@ TEST_CASE("Strict Chat rejects derivative fields before admission",
     auto strict_deps = ts.make_deps();
     const std::vector<std::pair<std::string, nlohmann::json>> extensions{
         {"priority", 1},
-        {"top_k", 20},
-        {"min_p", 0.1},
-        {"repeat_penalty", 1.1},
-        {"repeat_last_n", 64},
         {"chat_template_kwargs", nlohmann::json::object()},
         {"reasoning_content", "private"},
         {"reasoning_format", "none"},
@@ -934,6 +982,72 @@ TEST_CASE("Strict Chat rejects derivative fields before admission",
     REQUIRE(derivative_response.status == 200);
 }
 
+TEST_CASE("Strict Chat accepts the complete Open WebUI advanced payload",
+          "[routes][chat][openwebui]") {
+    TestServer ts;
+    auto info = make_info("openwebui-model");
+    info.context_size = 65536;
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("openwebui-model"));
+    httplib::Request request;
+    request.is_connection_closed = [] { return false; };
+    request.body = nlohmann::json{
+        {"model", "openwebui-model"},
+        {"messages", nlohmann::json::array({
+            {{"role", "user"}, {"content", "test"}}
+        })},
+        {"frequency_penalty", 1.2},
+        {"num_ctx", 32768},
+        {"num_predict", 64},
+        {"top_k", 20},
+        {"min_p", 0.1},
+        {"repeat_penalty", 1.1},
+        {"repeat_last_n", 64},
+        {"mirostat", 2},
+        {"mirostat_eta", 0.1},
+        {"mirostat_tau", 5.0},
+        {"tfs_z", 1.0},
+        {"num_keep", 256},
+        {"num_batch", 512},
+        {"num_thread", 8},
+        {"num_gpu", 99},
+        {"use_mmap", true},
+        {"use_mlock", false},
+        {"keep_alive", "5m"},
+        {"think", false},
+        {"format", "json"}
+    }.dump();
+    httplib::Response response;
+    handle_chat_completions(request, response, ts.make_deps());
+    REQUIRE(response.status == 200);
+    const auto* backend = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend("openwebui-model"));
+    REQUIRE(backend != nullptr);
+    CHECK(backend->last_request.context_window == 32768);
+    CHECK(backend->last_request.prompt_keep_tokens == 256);
+    CHECK(backend->last_request.max_output_tokens == 64);
+    CHECK(backend->last_request.sampling.top_k == 20);
+    CHECK(backend->last_request.sampling.min_p == 0.1f);
+    CHECK(backend->last_request.sampling.repeat_penalty == 1.1f);
+    CHECK(backend->last_request.sampling.repeat_last_n == 64);
+    CHECK(backend->last_request.sampling.mirostat == 2);
+    CHECK(backend->last_request.sampling.mirostat_eta == 0.1f);
+    CHECK(backend->last_request.sampling.mirostat_tau == 5.0f);
+    CHECK(backend->last_request.sampling.tfs_z == 1.0f);
+    CHECK(backend->last_request.enable_reasoning == false);
+    CHECK(backend->last_request.output.kind ==
+          inference::StructuredOutputKind::JsonObject);
+
+    auto too_large = nlohmann::json::parse(request.body);
+    too_large["num_ctx"] = 65537;
+    request.body = too_large.dump();
+    handle_chat_completions(request, response, ts.make_deps());
+    REQUIRE(response.status == 400);
+    const auto error = nlohmann::json::parse(response.body)["error"];
+    CHECK(error["param"] == "num_ctx");
+    CHECK(ts.coordinator.active_request_count() == 0);
+}
+
 TEST_CASE("Routes: GET /v1/models lists registered models", "[routes][models]") {
     TestServer ts;
     auto reasoning_model = make_info("qwen3.6-27b");
@@ -965,6 +1079,50 @@ TEST_CASE("Routes: GET /v1/models lists registered models", "[routes][models]") 
     REQUIRE(reasoning_entry != body["data"].end());
     REQUIRE(reasoning_entry->size() == 4);
     ts.stop();
+}
+
+TEST_CASE("Strict Chat preserves native sampling and logprobs end to end",
+          "[routes][chat][sampling]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("penalty-model"));
+    REQUIRE(ts.coordinator.load("penalty-model"));
+    httplib::Request request;
+    request.is_connection_closed = [] { return false; };
+    request.body = nlohmann::json{
+        {"model", "penalty-model"},
+        {"messages", nlohmann::json::array({
+            {{"role", "user"}, {"content", "test"}}
+        })},
+        {"frequency_penalty", 1.2},
+        {"presence_penalty", -0.4},
+        {"logit_bias", {{"42", 6.5}}},
+        {"logprobs", true},
+        {"top_logprobs", 1},
+        {"service_tier", "default"}
+    }.dump();
+    httplib::Response response;
+    handle_chat_completions(request, response, ts.make_deps());
+    REQUIRE(response.status == 200);
+    const auto* backend = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend("penalty-model"));
+    REQUIRE(backend != nullptr);
+    REQUIRE(backend->last_request.sampling.frequency_penalty.has_value());
+    CHECK(*backend->last_request.sampling.frequency_penalty == 1.2f);
+    REQUIRE(backend->last_request.sampling.presence_penalty.has_value());
+    CHECK(*backend->last_request.sampling.presence_penalty == -0.4f);
+    REQUIRE(backend->last_request.sampling.logit_bias.size() == 1);
+    CHECK(backend->last_request.sampling.logit_bias[0].first == 42);
+    CHECK(backend->last_request.sampling.logit_bias[0].second == 6.5f);
+    CHECK(backend->last_request.logprobs);
+    CHECK(backend->last_request.top_logprobs == 1);
+    const auto body = nlohmann::json::parse(response.body);
+    CHECK(body["service_tier"] == "default");
+    const auto& logprobs = body["choices"][0]["logprobs"];
+    REQUIRE(logprobs["content"].size() == 1);
+    CHECK(logprobs["content"][0]["token"] == "Hello");
+    CHECK(logprobs["content"][0]["logprob"] == Catch::Approx(-0.125));
+    CHECK(logprobs["content"][0]["bytes"] ==
+          nlohmann::json::array({72, 101, 108, 108, 111}));
 }
 
 TEST_CASE("Routes: GET /v1/models does not expose residency", "[routes][models]") {
@@ -1021,7 +1179,7 @@ TEST_CASE("Routes: stable aliases resolve while preserving request attribution",
 
     const auto stream_response = client.Post(
         "/v1/chat/completions",
-        R"({"model":"assistant-stable","stream":true,"messages":[{"role":"user","content":"hi again"}]})",
+        R"({"model":"assistant-stable","stream":true,"stream_options":{"include_obfuscation":false},"messages":[{"role":"user","content":"hi again"}]})",
         "application/json");
     REQUIRE(stream_response);
     REQUIRE(stream_response->status == 200);
@@ -1330,22 +1488,23 @@ TEST_CASE("Routes: complete Chat shape validates before model resolution",
 TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering",
           "[routes][chat][stream][golden]") {
     REQUIRE(serialize_chat_stream_delta(
-        "chatcmpl-test", "model", 123, {{"content", "Hi"}}, true) ==
+        "chatcmpl-test", "model", 123, {{"content", "Hi"}}, true,
+        false, "", false) ==
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123,
-        {{"reasoning_content", "thinking"}}, true, true) ==
+        {{"reasoning_content", "thinking"}}, true, true, "", false) ==
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123,
-        {{"reasoning_content", "thinking"}}, true) ==
+        {{"reasoning_content", "thinking"}}, true, false, "", false) ==
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123,
         {{"tool_calls", nlohmann::json::array({{
             {"index", 0}, {"id", "call_1"}, {"type", "function"},
             {"function", {{"name", "f"}, {"arguments", "{}"}}},
-        }})}}, true) ==
+        }})}}, true, false, "", false) ==
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{}\",\"name\":\"f\"},\"id\":\"call_1\",\"index\":0,\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
 
     InferenceResult result;
@@ -1353,30 +1512,32 @@ TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering"
     result.cached_prompt_tokens = 3;
     result.completion_tokens = 12;
     REQUIRE(serialize_chat_stream_terminal(
-        "chatcmpl-test", "model", 123, "tool_calls", &result, true) ==
+        "chatcmpl-test", "model", 123, "tool_calls", &result, true,
+        "", false) ==
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\",\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"choices\":[],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":12,\"prompt_tokens\":8,\"prompt_tokens_details\":{\"cached_tokens\":3},\"total_tokens\":20}}\n\ndata: [DONE]\n\n");
     REQUIRE(serialize_chat_stream_terminal(
-        "chatcmpl-test", "model", 123, "stop", &result, false) ==
+        "chatcmpl-test", "model", 123, "stop", &result, false,
+        "", false) ==
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\"}\n\ndata: [DONE]\n\n");
 
     std::string actual;
     actual += serialize_chat_stream_delta(
         "chatcmpl-contract", "contract-model", 1787171200,
-        {{"content", "Hi"}}, true);
+        {{"content", "Hi"}}, true, false, "", false);
     actual += serialize_chat_stream_delta(
         "chatcmpl-contract", "contract-model", 1787171200,
         {{"tool_calls", nlohmann::json::array({{
             {"index", 0}, {"id", "call_1"}, {"type", "function"},
             {"function", {{"name", "lookup"}, {"arguments", ""}}},
-        }})}}, true);
+        }})}}, true, false, "", false);
     actual += serialize_chat_stream_delta(
         "chatcmpl-contract", "contract-model", 1787171200,
         {{"tool_calls", nlohmann::json::array({{
             {"index", 0}, {"function", {{"arguments", "{}"}}},
-        }})}}, true);
+        }})}}, true, false, "", false);
     actual += serialize_chat_stream_terminal(
         "chatcmpl-contract", "contract-model", 1787171200,
-        "tool_calls", &result, true);
+        "tool_calls", &result, true, "", false);
 
     const auto fixture_path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "tests/fixtures/oai_chat_stream_contract.sse";
@@ -1858,7 +2019,8 @@ TEST_CASE("Routes: POST /v1/responses maps structured output format", "[routes][
     ts.stop();
 }
 
-TEST_CASE("Routes: POST /v1/responses rejects stateful fields", "[routes][responses]") {
+TEST_CASE("Routes: POST /v1/responses recognizes unavailable stateful fields",
+          "[routes][responses]") {
     TestServer ts;
     ts.registry.register_model(make_info("chat-model"));
     REQUIRE(ts.start());
@@ -1869,8 +2031,91 @@ TEST_CASE("Routes: POST /v1/responses rejects stateful fields", "[routes][respon
     }.dump(), "application/json");
     REQUIRE(response);
     REQUIRE(response->status == 400);
-    REQUIRE(nlohmann::json::parse(response->body)["error"]["code"] == "unsupported_parameter");
+    const auto error = nlohmann::json::parse(response->body)["error"];
+    REQUIRE(error["code"] == "unsupported_capability");
+    REQUIRE(error["param"] == "store");
     ts.stop();
+}
+
+TEST_CASE("Routes: Responses top_logprobs reach inference and exact output",
+          "[routes][responses][logprobs]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("chat-model"));
+    REQUIRE(ts.coordinator.load("chat-model"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/responses", nlohmann::json{
+        {"model", "chat-model"}, {"input", "Hello"},
+        {"top_logprobs", 1},
+        {"include", nlohmann::json::array({"message.output_text.logprobs"})},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    const auto& values = body["output"][0]["content"][0]["logprobs"];
+    REQUIRE(values.size() == 1);
+    CHECK(values[0]["token"] == "Hello");
+    CHECK(values[0]["logprob"] == Catch::Approx(-0.125));
+    CHECK(values[0]["bytes"] == nlohmann::json::array({72, 101, 108, 108, 111}));
+    REQUIRE(values[0]["top_logprobs"].size() == 1);
+    CHECK(values[0]["top_logprobs"][0]["token"] == "Hi");
+    auto* model = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_model("chat-model"));
+    REQUIRE(model != nullptr);
+    CHECK(model->last_request.logprobs);
+    CHECK(model->last_request.top_logprobs == 1);
+    ts.stop();
+}
+
+TEST_CASE("Routes: Responses include alone requests output logprobs",
+          "[routes][responses][logprobs]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("chat-model"));
+    REQUIRE(ts.coordinator.load("chat-model"));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    auto response = client.Post("/v1/responses", nlohmann::json{
+        {"model", "chat-model"}, {"input", "Hello"},
+        {"include", nlohmann::json::array({"message.output_text.logprobs"})},
+    }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body["output"][0]["content"][0]["logprobs"].size() == 1);
+    auto* model = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_model("chat-model"));
+    REQUIRE(model != nullptr);
+    CHECK(model->last_request.logprobs);
+    CHECK(model->last_request.top_logprobs == 0);
+    ts.stop();
+}
+
+TEST_CASE("Responses adapter accepts pinned nested history fields",
+          "[routes][responses][adapter]") {
+    const auto parsed = parse_openai_responses_request(nlohmann::json{
+        {"model", "test-model"},
+        {"input", nlohmann::json::array({
+            {{"type", "message"}, {"role", "assistant"},
+             {"phase", "final_answer"}, {"status", "completed"},
+             {"content", nlohmann::json::array({
+                 {{"type", "output_text"}, {"text", "prior"},
+                  {"annotations", nlohmann::json::array()},
+                  {"logprobs", nlohmann::json::array()}},
+             })}},
+        })},
+        {"stream", nullptr}, {"stream_options", nullptr},
+        {"max_output_tokens", nullptr}, {"temperature", nullptr},
+        {"top_p", nullptr}, {"parallel_tool_calls", nullptr},
+        {"metadata", nullptr}, {"reasoning", nullptr}, {"text", nullptr},
+    }, false);
+    REQUIRE(parsed);
+    REQUIRE(parsed->generation.messages.size() == 1);
+    const auto* text = std::get_if<inference::TextContent>(
+        &parsed->generation.messages[0].content[0]);
+    REQUIRE(text != nullptr);
+    CHECK(text->text == "prior");
 }
 
 TEST_CASE("Routes: POST /v1/responses validates contract before acquisition",
@@ -2034,7 +2279,7 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     ts.stop();
 }
 
-TEST_CASE("Strict Images rejects derivative fields before admission",
+TEST_CASE("Strict Images separates unknown fields from model capabilities",
           "[routes][images][profile]") {
     TestServer ts;
     auto info = make_info("image-profile-model");
@@ -2071,8 +2316,14 @@ TEST_CASE("Strict Images rejects derivative fields before admission",
         httplib::Response response;
         handle_image_generations(request, response, strict_deps);
         REQUIRE(response.status == 400);
+        const bool standard_field = field == "background" ||
+            field == "moderation" || field == "output_compression" ||
+            field == "output_format" || field == "partial_images" ||
+            field == "quality" || field == "response_format" ||
+            field == "stream" || field == "style";
         CHECK(nlohmann::json::parse(response.body)["error"]["code"] ==
-              "unsupported_parameter");
+              (standard_field ? "unsupported_capability"
+                              : "unsupported_parameter"));
         CHECK(ts.coordinator.active_request_count() == 0);
     }
 
@@ -2219,7 +2470,7 @@ TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speec
     REQUIRE(response);
     CHECK(response->status == 400);
     CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
-          "unsupported_response_format");
+          "unsupported_capability");
     const auto usage = ts.stats_db.model_usage();
     REQUIRE(usage.size() == 1);
     CHECK(usage[0].model == "speech-model");
@@ -2286,7 +2537,7 @@ TEST_CASE("Routes: speech validates the OpenAI request contract before admission
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
                   {"instructions", 7}}, "invalid_speech_request");
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
-                  {"instructions", "Speak clearly"}}, "unsupported_parameter");
+                  {"instructions", "Speak clearly"}}, "unsupported_capability");
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
                   {"response_format", 7}}, "invalid_speech_request");
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
@@ -2296,7 +2547,7 @@ TEST_CASE("Routes: speech validates the OpenAI request contract before admission
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
                   {"stream_format", "events"}}, "unsupported_stream_format");
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
-                   {"stream_format", "sse"}}, "unsupported_stream_format");
+                   {"stream_format", "sse"}}, "unsupported_capability");
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"},
                   {"response_format", "wav"}, {"priority", 1}},
                  "unsupported_parameter");
@@ -2304,7 +2555,7 @@ TEST_CASE("Routes: speech validates the OpenAI request contract before admission
                   {"voice", {{"id", "voice_custom"}, {"ignored", true}}},
                   {"response_format", "wav"}}, "invalid_speech_request");
     expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"}},
-                 "unsupported_response_format");
+                 "unsupported_capability");
     expect_error({{"model", info.name}, {"input", "hello"},
                   {"voice", "not-a-voice"}, {"response_format", "wav"}},
                  "invalid_speech_request");
@@ -2602,7 +2853,7 @@ TEST_CASE("Media routes reject unsupported request shapes", "[routes][media]") {
         const std::string& format = "json") {
         return client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
             {"file", test_wav(), "test.wav", "audio/wav"},
-            {"model", "missing-model", "", ""},
+            {"model", "transcription-validation", "", ""},
             {"response_format", format, "", ""},
             {name, value, "", ""},
         });
@@ -2625,7 +2876,7 @@ TEST_CASE("Media routes reject unsupported request shapes", "[routes][media]") {
     }
     auto harmless_stream = unsupported_transcription("stream", "false");
     REQUIRE(harmless_stream);
-    CHECK(harmless_stream->status == 404);
+    CHECK(harmless_stream->status == 200);
     transcription = client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
         {"file", test_float_wav(std::numeric_limits<float>::quiet_NaN()),
          "test.wav", "audio/wav"},
@@ -2857,7 +3108,7 @@ TEST_CASE("Routes: chat stream applies producer backpressure until disconnect",
     httplib::Request request;
     request.is_connection_closed = [] { return false; };
     request.body =
-        R"({"model":"chat-pressure","stream":true,"messages":[{"role":"user","content":"test"}]})";
+        R"({"model":"chat-pressure","stream":true,"stream_options":{"include_obfuscation":false},"messages":[{"role":"user","content":"test"}]})";
     httplib::Response response;
     handle_chat_completions(request, response, ts.make_deps());
     REQUIRE(response.content_provider_);
@@ -2881,7 +3132,8 @@ TEST_CASE("Routes: chat stream applies producer backpressure until disconnect",
     REQUIRE(emitted == serialize_chat_stream_delta(
         chunk["id"].get<std::string>(), chunk["model"].get<std::string>(),
         chunk["created"].get<std::int64_t>(),
-        {{"content", std::string(64 * 1024, 'x')}}, false));
+        {{"content", std::string(64 * 1024, 'x')}}, false,
+        false, "", false));
     CHECK(emitted.find("finish_reason\":\"stop") == std::string::npos);
     CHECK(emitted.find("\"usage\"") == std::string::npos);
     CHECK(emitted.find("[DONE]") == std::string::npos);
@@ -3280,6 +3532,29 @@ TEST_CASE("SwapTracker owns the worker and joins it at destruction",
 
     REQUIRE(coordinator.is_loaded("a"));
     REQUIRE_FALSE(coordinator.swap_in_progress());
+}
+
+TEST_CASE("Async swap uses the gateway model-load deadline",
+          "[routes][swap][deadline]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto model = std::make_unique<IModelMock>(info);
+        model->load_delay_ms.store(80);
+        return model;
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    CHECK(deps.swap_timeout == std::chrono::minutes{5});
+    deps.swap_timeout = std::chrono::milliseconds{20};
+    deps.swap_tracker = &tracker;
+
+    REQUIRE(start_swap_async(deps, "a").status == 202);
+    tracker.join();
+
+    CHECK_FALSE(coordinator.is_loaded("a"));
+    CHECK(tracker.snapshot().last_error_code == ErrorCode::Timeout);
 }
 
 TEST_CASE("SwapTracker completion wait is bounded", "[routes][swap]") {

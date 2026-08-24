@@ -175,11 +175,11 @@
             }
           }
         },
-        "qwen2.5-coder-3b": {
-          "name": "qwen2.5-coder-3b",
+        "qwen2.5-0.5b-instruct": {
+          "name": "qwen2.5-0.5b-instruct",
           "limit": {
-            "context": 32768,
-            "output": 16384
+            "context": 4096,
+            "output": 512
           },
           "modalities": {
             "input": [
@@ -287,7 +287,7 @@
     }
   },
   "model": "inferdeck/Normal",
-  "small_model": "inferdeck/n8n-model",
+  "small_model": "inferdeck/qwen2.5-0.5b-instruct",
   "plugin": [
     "@tarquinen/opencode-dcp",
     "@mohak34/opencode-notifier@latest",

@@ -64,6 +64,9 @@ model::InferenceDelta InferenceDeltaUtf8Buffer::on_delta(
     model::InferenceDelta output;
     output.content = content_.on_chunk(input.content);
     output.reasoning_text = reasoning_.on_chunk(input.reasoning_text);
+    if (output.content == input.content) {
+        output.logprobs = input.logprobs;
+    }
     for (const auto& call : input.tool_calls) {
         auto& buffers = tool_calls_[call.index];
         model::ToolCallDelta clean;

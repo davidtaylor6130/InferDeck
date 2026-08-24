@@ -58,6 +58,7 @@ enum class MessageRole : std::uint8_t {
     User,
     Assistant,
     Tool,
+    Function,
 };
 
 struct TextContent {
@@ -104,6 +105,7 @@ struct Message {
         if (value == "system") return MessageRole::System;
         if (value == "assistant") return MessageRole::Assistant;
         if (value == "tool") return MessageRole::Tool;
+        if (value == "function") return MessageRole::Function;
         return MessageRole::User;
     }
 };
@@ -155,6 +157,13 @@ struct Sampling {
     std::optional<float> min_p;
     std::optional<float> repeat_penalty;
     std::optional<int> repeat_last_n;
+    std::optional<float> frequency_penalty;
+    std::optional<float> presence_penalty;
+    std::optional<float> tfs_z;
+    std::optional<int> mirostat;
+    std::optional<float> mirostat_eta;
+    std::optional<float> mirostat_tau;
+    std::vector<std::pair<std::int32_t, float>> logit_bias;
     std::int64_t seed{-1};
 };
 
@@ -169,6 +178,10 @@ struct GenerationRequest {
     std::optional<std::string> reasoning_effort;
     std::optional<bool> enable_reasoning;
     int max_output_tokens{kUseContextBudget};
+    std::optional<int> context_window;
+    std::optional<int> prompt_keep_tokens;
+    bool logprobs{false};
+    int top_logprobs{0};
     bool parallel_tool_calls{true};
     bool add_generation_prompt{true};
     ReasoningFormat reasoning_format{ReasoningFormat::Automatic};
@@ -194,10 +207,24 @@ struct ToolCallDelta {
     std::string function_arguments;
 };
 
+struct TopTokenLogprob {
+    std::string token;
+    float logprob{0.0f};
+    std::vector<std::uint8_t> bytes;
+};
+
+struct TokenLogprob {
+    std::string token;
+    float logprob{0.0f};
+    std::vector<std::uint8_t> bytes;
+    std::vector<TopTokenLogprob> top_logprobs;
+};
+
 struct GenerationDelta {
     std::string content;
     std::string reasoning_text;
     std::vector<ToolCallDelta> tool_calls;
+    std::vector<TokenLogprob> logprobs;
 };
 
 struct TextOutput {
@@ -274,6 +301,7 @@ struct GenerationResult {
     int mtp_drafted_tokens{0};
     int mtp_accepted_tokens{0};
     std::vector<ToolCall> tool_calls;
+    std::vector<TokenLogprob> logprobs;
 };
 
 using RequestOutcome = std::variant<GenerationResult, DomainError>;

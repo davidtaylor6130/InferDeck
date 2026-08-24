@@ -27,6 +27,8 @@ namespace inferdeck::llama_wrapper {
 // One token produced by the scheduler for a caller to consume.
 struct TokenEvent {
     llama_token id{0};
+    float probability{0.0f};
+    std::vector<std::pair<llama_token, float>> top_probabilities;
     bool is_done{false};
     bool is_error{false};
     std::string error_msg;
@@ -121,6 +123,8 @@ struct SlotTask {
     std::atomic<bool> caller_cancel{false};   // set by caller to abort generation early
     std::atomic<bool> caller_stop{false};
     bool mtp_cache_synced{true};
+    bool capture_probabilities{false};
+    int top_probabilities{0};
 
     // ---- State (managed exclusively by scheduler thread) ----
     bool initialized{false};

@@ -139,6 +139,14 @@ exchanges it at `POST /api/inferdeck/v1/dashboard/session` for an HTTP-only,
 requests then use that cookie; the token is not stored in browser JavaScript
 storage. Loopback dashboard access remains passwordless.
 
+`gateway.active.yml` is a complete runtime profile, not a partial overlay on
+`gateway.yml`. When an active profile exists, its `control` block must contain
+the remote-access flag, token, and every exact LAN or overlay origin. Changing
+only the base YAML does not change the running control policy. The configuration
+API reports `usingActiveProfile`, `activeRevision`, and `runningRevision`;
+remote deployment verification must confirm the intended active revision is
+running before testing the dashboard session and SSE paths.
+
 The native listener has no TLS. Restrict remote dashboard access to trusted LAN
 or encrypted overlay interfaces, and list every dashboard origin exactly in
 `control.origins`. Transparent reverse proxies are untrusted and do not inherit

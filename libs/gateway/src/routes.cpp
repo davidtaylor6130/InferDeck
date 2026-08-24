@@ -249,7 +249,8 @@ foundation::Result<void> perform_swap(const GatewayDeps& deps,
     const auto start = std::chrono::steady_clock::now();
     foundation::Result<void> result;
     try {
-        result = deps.coordinator.swap_to_cancellable(target);
+        result = deps.coordinator.swap_to_cancellable(
+            target, deps.swap_timeout);
     } catch (const std::exception& e) {
         result = foundation::Err(foundation::ErrorCode::Internal, e.what());
     } catch (...) {
@@ -301,7 +302,10 @@ std::string dump_json(const nlohmann::json& value) {
 
 std::string sse_chunk_json(const std::string& id, const std::string& model,
                            std::int64_t created, const nlohmann::json& delta,
-                           bool include_usage) {
+                           const nlohmann::json& logprobs,
+                           bool include_usage,
+                           const std::string& service_tier,
+                           bool include_obfuscation) {
     nlohmann::json chunk = {
         {"id", id},
         {"object", "chat.completion.chunk"},
@@ -315,6 +319,11 @@ std::string sse_chunk_json(const std::string& id, const std::string& model,
             }
         })},
     };
+    if (!logprobs.is_null()) {
+        chunk["choices"][0]["logprobs"] = logprobs;
+    }
+    if (!service_tier.empty()) chunk["service_tier"] = service_tier;
+    if (include_obfuscation) chunk["obfuscation"] = make_id().substr(9);
     if (include_usage) chunk["usage"] = nullptr;
     return "data: " + dump_json(chunk) + "\n\n";
 }
@@ -323,7 +332,9 @@ std::string sse_terminal(const std::string& id, const std::string& model,
                          std::int64_t created,
                          const std::string& finish_reason,
                          const model::InferenceResult* result,
-                         bool include_usage) {
+                         bool include_usage,
+                         const std::string& service_tier,
+                         bool include_obfuscation) {
     nlohmann::json finish = {
         {"id", id},
         {"object", "chat.completion.chunk"},
@@ -337,6 +348,8 @@ std::string sse_terminal(const std::string& id, const std::string& model,
             }
         })},
     };
+    if (!service_tier.empty()) finish["service_tier"] = service_tier;
+    if (include_obfuscation) finish["obfuscation"] = make_id().substr(9);
     if (include_usage) finish["usage"] = nullptr;
     std::string output = "data: " + dump_json(finish) + "\n\n";
     if (include_usage && result) {
@@ -353,6 +366,8 @@ std::string sse_terminal(const std::string& id, const std::string& model,
             {"total_tokens", result->prompt_tokens + result->completion_tokens},
             }},
         };
+        if (!service_tier.empty()) usage["service_tier"] = service_tier;
+        if (include_obfuscation) usage["obfuscation"] = make_id().substr(9);
         output += "data: " + dump_json(usage) + "\n\n";
     }
     output += "data: [DONE]\n\n";
@@ -384,6 +399,31 @@ nlohmann::json tool_call_delta_json(const model::ToolCallDelta& tc) {
         out["function"] = fn;
     }
     return out;
+}
+
+nlohmann::json token_logprobs_json(
+    const std::vector<inference::TokenLogprob>& values) {
+    nlohmann::json content = nlohmann::json::array();
+    for (const auto& value : values) {
+        nlohmann::json top = nlohmann::json::array();
+        for (const auto& candidate : value.top_logprobs) {
+            top.push_back({
+                {"token", candidate.token},
+                {"logprob", candidate.logprob},
+                {"bytes", candidate.bytes},
+            });
+        }
+        content.push_back({
+            {"token", value.token},
+            {"logprob", value.logprob},
+            {"bytes", value.bytes},
+            {"top_logprobs", std::move(top)},
+        });
+    }
+    return {
+        {"content", std::move(content)},
+        {"refusal", nullptr},
+    };
 }
 
 foundation::Result<std::optional<std::string>> normalize_reasoning_request(
@@ -473,6 +513,9 @@ nlohmann::json delta_json(const model::InferenceDelta& delta,
             out["tool_calls"].push_back(tool_call_delta_json(tc));
         }
     }
+    if (!delta.logprobs.empty()) {
+        out["logprobs"] = token_logprobs_json(delta.logprobs);
+    }
     return out;
 }
 
@@ -481,6 +524,12 @@ std::size_t delta_size(const model::InferenceDelta& delta) {
     for (const auto& call : delta.tool_calls) {
         size += call.id.size() + call.type.size() + call.function_name.size() +
                 call.function_arguments.size();
+    }
+    for (const auto& token : delta.logprobs) {
+        size += token.token.size() + token.bytes.size();
+        for (const auto& candidate : token.top_logprobs) {
+            size += candidate.token.size() + candidate.bytes.size();
+        }
     }
     return size;
 }
@@ -506,6 +555,49 @@ bool chat_uses_vision(const nlohmann::json& body) {
     return false;
 }
 
+bool chat_uses_content_type(const nlohmann::json& body,
+                            const std::string& type) {
+    if (!body.contains("messages") || !body["messages"].is_array()) {
+        return false;
+    }
+    for (const auto& message : body["messages"]) {
+        if (!message.is_object()) continue;
+        if (type == "audio_history" && message.contains("audio") &&
+            !message["audio"].is_null()) {
+            return true;
+        }
+        if (!message.contains("content") ||
+            !message["content"].is_array()) {
+            continue;
+        }
+        for (const auto& part : message["content"]) {
+            if (!part.is_object()) continue;
+            if (part.value("type", "") == type) return true;
+            if (type == "prompt_cache_breakpoint" &&
+                part.contains("prompt_cache_breakpoint")) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool chat_uses_non_function_tools(const nlohmann::json& body) {
+    if (body.contains("tools") && body["tools"].is_array()) {
+        for (const auto& tool : body["tools"]) {
+            if (tool.is_object() && tool.value("type", "") != "function") {
+                return true;
+            }
+        }
+    }
+    if (body.contains("tool_choice") &&
+        body["tool_choice"].is_object()) {
+        const auto type = body["tool_choice"].value("type", "");
+        return type == "custom" || type == "allowed_tools";
+    }
+    return false;
+}
+
 } // namespace
 
 std::string serialize_chat_stream_delta(const std::string& id,
@@ -513,10 +605,19 @@ std::string serialize_chat_stream_delta(const std::string& id,
                                         std::int64_t created,
                                         const nlohmann::json& delta,
                                         bool include_usage,
-                                        bool include_reasoning_content) {
+                                        bool include_reasoning_content,
+                                        const std::string& service_tier,
+                                        bool include_obfuscation) {
     auto filtered = delta;
     if (!include_reasoning_content) filtered.erase("reasoning_content");
-    return sse_chunk_json(id, model, created, filtered, include_usage);
+    nlohmann::json logprobs = nullptr;
+    if (filtered.contains("logprobs")) {
+        logprobs = std::move(filtered["logprobs"]);
+        filtered.erase("logprobs");
+    }
+    return sse_chunk_json(
+        id, model, created, filtered, logprobs, include_usage, service_tier,
+        include_obfuscation);
 }
 
 std::string serialize_chat_stream_terminal(const std::string& id,
@@ -524,8 +625,12 @@ std::string serialize_chat_stream_terminal(const std::string& id,
                                            std::int64_t created,
                                            const std::string& finish_reason,
                                            const model::InferenceResult* result,
-                                           bool include_usage) {
-    return sse_terminal(id, model, created, finish_reason, result, include_usage);
+                                           bool include_usage,
+                                           const std::string& service_tier,
+                                           bool include_obfuscation) {
+    return sse_terminal(
+        id, model, created, finish_reason, result, include_usage,
+        service_tier, include_obfuscation);
 }
 
 void write_json(httplib::Response& resp, int status,

@@ -149,7 +149,7 @@ private:
 
   // Drain task.out_queue until done, calling on_token for each produced token.
   // on_token returns false to request early stop.
-  using OnToken = std::function<bool(llama_token)>;
+  using OnToken = std::function<bool(const TokenEvent&)>;
   inferdeck::foundation::Result<void> drain_task(SlotTask& task, const OnToken& on_token);
 
   inferdeck::model::ModelInfo info_;
