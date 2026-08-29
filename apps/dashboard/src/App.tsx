@@ -10,6 +10,7 @@ import { ModelsPage } from './pages/ModelsPage';
 import { OperatePage } from './pages/OperatePage';
 import { UsagePage } from './pages/UsagePage';
 import { SystemPage } from './pages/SystemPage';
+import { FutureWorkspacePage } from './pages/FutureWorkspacePage';
 import { compactModel, timeAgo } from './utils';
 import { INFERDECK_VERSION } from './version';
 import logoUrl from '../../../Assets/Logo.png';
@@ -23,12 +24,16 @@ export type PageId =
   | 'dictation/settings'
   | 'dictation/models'
   | 'dictation/usage'
-  | 'dictation/diagnostics';
+  | 'dictation/diagnostics'
+  | 'image'
+  | 'music'
+  | 'post-training';
 
 interface DashboardPage {
   id: PageId;
   label: string;
   section?: DashboardSection;
+  preview?: boolean;
 }
 
 export const DASHBOARD_PAGES: ReadonlyArray<DashboardPage> = [
@@ -36,11 +41,14 @@ export const DASHBOARD_PAGES: ReadonlyArray<DashboardPage> = [
   { id: 'llm/settings', label: 'Model Settings', section: 'llm' },
   { id: 'llm/models', label: 'Model Store', section: 'llm' },
   { id: 'llm/usage', label: 'Usage', section: 'llm' },
-  { id: 'llm/diagnostics', label: 'Diagnostics', section: 'llm' },
+  { id: 'llm/diagnostics', label: 'Health & alerts', section: 'llm' },
   { id: 'dictation/settings', label: 'Model Settings', section: 'dictation' },
   { id: 'dictation/models', label: 'Model Store', section: 'dictation' },
   { id: 'dictation/usage', label: 'Usage', section: 'dictation' },
-  { id: 'dictation/diagnostics', label: 'Diagnostics', section: 'dictation' },
+  { id: 'dictation/diagnostics', label: 'Health & alerts', section: 'dictation' },
+  { id: 'image', label: 'Image', preview: true },
+  { id: 'music', label: 'Music', preview: true },
+  { id: 'post-training', label: 'Post Training', preview: true },
 ];
 
 const LEGACY_ROUTES: Record<string, PageId> = {
@@ -98,6 +106,16 @@ const Shell: React.FC = () => {
               </div>
             </div>
           ))}
+          <div className="mt-5 border-t border-white/10 pt-4">
+            <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
+              Planned
+            </div>
+            <div className="flex flex-col gap-1">
+              {DASHBOARD_PAGES.filter(item => item.preview).map(({ id, label }) => (
+                <NavLink key={id} id={id} label={label} page={page} nested />
+              ))}
+            </div>
+          </div>
         </nav>
         <div className="mt-auto px-2 pt-6 text-xs text-text-muted">
           <span className="block">InferDeck v{INFERDECK_VERSION}</span>
@@ -120,6 +138,9 @@ const Shell: React.FC = () => {
             {page === 'dictation/models' && <ModelsPage section="dictation" />}
             {page === 'dictation/usage' && <UsagePage section="dictation" />}
             {page === 'dictation/diagnostics' && <SystemPage section="dictation" />}
+            {page === 'image' && <FutureWorkspacePage area="image" />}
+            {page === 'music' && <FutureWorkspacePage area="music" />}
+            {page === 'post-training' && <FutureWorkspacePage area="post-training" />}
           </div>
         </main>
       </div>
@@ -133,62 +154,87 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
   const pageInfo = DASHBOARD_PAGES.find(item => item.id === page);
   const connectionTone = connection === 'connected' ? 'good' : connection === 'offline' ? 'critical' : 'warn';
   const connectionLabel = connection === 'connected' ? 'Live' : connection === 'connecting' ? 'Connecting' : connection === 'reconnecting' ? 'Reconnecting' : 'Offline';
+  const pageLabel = pageInfo?.section
+    ? `${pageInfo.section === 'llm' ? 'LLM' : 'Dictation'} / ${pageInfo.label}`
+    : pageInfo?.label;
+  const healthTarget = pageInfo?.section === 'dictation' ? 'dictation/diagnostics' : 'llm/diagnostics';
 
   return (
     <header className="border-b border-border-slate bg-deck-navy px-4 py-3 sm:px-6">
       <div className="flex min-w-0 items-center justify-between gap-3">
-        <span className="text-base font-semibold text-text-primary md:hidden">InferDeck</span>
-        <h1 className="hidden text-base font-semibold text-text-primary md:block">
-          {pageInfo?.section ? `${pageInfo.section === 'llm' ? 'LLM' : 'Dictation'} / ${pageInfo.label}` : pageInfo?.label}
-        </h1>
+        <div className="min-w-0">
+          <span className="block text-[10px] font-medium uppercase tracking-[0.14em] text-text-muted md:hidden">InferDeck</span>
+          <h1 className="truncate text-base font-semibold text-text-primary">{pageLabel}</h1>
+        </div>
         <div className="flex shrink-0 items-center gap-2">
           {swap.swapping ? (
-            <Badge label={`Switching to ${compactModel(swap.target)}`} tone="info" />
+            <span className="hidden sm:inline"><Badge label={`Switching to ${compactModel(swap.target)}`} tone="info" /></span>
           ) : loaded ? (
             <span className="hidden text-xs text-text-secondary sm:inline">{compactModel(loaded)}</span>
           ) : (
             <span className="hidden text-xs text-text-muted sm:inline">No model loaded</span>
           )}
-          <Badge label={connectionLabel} tone={connectionTone} />
+          <a
+            href={`#${healthTarget}`}
+            aria-label={`${connectionLabel}. Open Health and alerts`}
+            title="Open Health & alerts"
+            className="rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
+          >
+            <Badge label={connectionLabel} tone={connectionTone} />
+          </a>
+          <details className="relative z-30">
+            <summary className="min-h-10 cursor-pointer rounded border border-white/15 bg-white/[0.06] px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-white/[0.12]">
+              Settings
+            </summary>
+            <nav className="absolute right-0 z-40 mt-2 w-72 border border-border-slate bg-[#07101d] shadow-deck" aria-label="Settings">
+              <a
+                href="#llm/settings"
+                onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
+                className="block border-b border-white/10 px-4 py-3 hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-queue-blue"
+              >
+                <span className="block text-sm font-medium text-text-primary">LLM settings</span>
+                <span className="mt-0.5 block text-xs text-text-muted">Profiles, aliases, pricing, and model loading</span>
+              </a>
+              <a
+                href="#dictation/settings"
+                onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
+                className="block border-b border-white/10 px-4 py-3 hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-queue-blue"
+              >
+                <span className="block text-sm font-medium text-text-primary">Dictation settings</span>
+                <span className="mt-0.5 block text-xs text-text-muted">Speech runtimes, costs, and model configuration</span>
+              </a>
+              <a
+                href={`#${healthTarget}`}
+                onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
+                className="block px-4 py-3 hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-queue-blue"
+              >
+                <span className="block text-sm font-medium text-text-primary">Configuration & recovery</span>
+                <span className="mt-0.5 block text-xs text-text-muted">Health, warnings, errors, and safe baseline recovery</span>
+              </a>
+            </nav>
+          </details>
         </div>
       </div>
-      <span className="mt-1 block text-[10px] text-text-muted md:hidden">v{INFERDECK_VERSION}</span>
-      <nav className="-mx-1 mt-3 flex min-w-0 gap-1 overflow-x-auto pb-1 md:hidden" aria-label="Dashboard sections">
-        <a
-          href="#home"
-          aria-current={page === 'home' ? 'page' : undefined}
-          className={`shrink-0 rounded px-2.5 py-1.5 text-xs ${page === 'home' ? 'bg-white/10 text-text-primary' : 'text-text-muted'}`}
+      <label className="mt-3 block md:hidden">
+        <span className="sr-only">Dashboard page</span>
+        <select
+          aria-label="Dashboard page"
+          className="min-h-10 w-full border-white/15 bg-[#07101d] px-3 text-sm text-text-primary"
+          value={page}
+          onChange={event => { window.location.hash = event.target.value; }}
         >
-          Home
-        </a>
-        {(['llm', 'dictation'] as DashboardSection[]).map(section => {
-          const active = pageInfo?.section === section;
-          return (
-            <a
-              key={section}
-              href={`#${section}/settings`}
-              aria-current={active ? 'true' : undefined}
-              className={`shrink-0 rounded px-2.5 py-1.5 text-xs ${active ? 'bg-white/10 text-text-primary' : 'text-text-muted'}`}
-            >
-              {section === 'llm' ? 'LLM' : 'Dictation'}
-            </a>
-          );
-        })}
-      </nav>
-      {pageInfo?.section && (
-        <nav className="-mx-1 mt-1 flex min-w-0 gap-1 overflow-x-auto pb-1 md:hidden" aria-label={`${pageInfo.section} pages`}>
-          {DASHBOARD_PAGES.filter(item => item.section === pageInfo.section).map(({ id, label }) => (
-          <a
-            key={id}
-            href={`#${id}`}
-            aria-current={page === id ? 'page' : undefined}
-            className={`shrink-0 rounded px-2.5 py-1.5 text-xs ${page === id ? 'bg-white/10 text-text-primary' : 'text-text-muted'}`}
-          >
-            {label}
-          </a>
-          ))}
-        </nav>
-      )}
+          <option value="home">Home</option>
+          <optgroup label="LLM">
+            {DASHBOARD_PAGES.filter(item => item.section === 'llm').map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+          </optgroup>
+          <optgroup label="Dictation">
+            {DASHBOARD_PAGES.filter(item => item.section === 'dictation').map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+          </optgroup>
+          <optgroup label="Planned">
+            {DASHBOARD_PAGES.filter(item => item.preview).map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+          </optgroup>
+        </select>
+      </label>
     </header>
   );
 };
@@ -206,7 +252,7 @@ const HealthNotices: React.FC = () => {
       const health = results[0];
       const pricing = results[1];
       if (health.status === 'rejected') {
-        next.push('Gateway health details are unavailable. Check Diagnostics for connection and log details.');
+        next.push('Gateway health details are unavailable. Open Health & alerts for connection and error details.');
       } else if (!health.value.db_healthy) {
         next.push('Usage database is unhealthy. Request history and cost totals may be incomplete.');
       }
@@ -304,12 +350,12 @@ const ConnectionBanner: React.FC = () => {
             value={token}
             onChange={event => setToken(event.target.value)}
             placeholder="Dashboard access token"
-            className="min-h-9 min-w-64 flex-1 rounded border border-white/20 bg-deck-navy px-3 text-text-primary"
+            className="min-h-10 min-w-0 flex-1 rounded border border-white/20 bg-deck-navy px-3 text-text-primary sm:min-w-64"
           />
           <button
             type="submit"
             disabled={authenticating || token.length === 0}
-            className="min-h-9 rounded border border-current px-3 font-medium disabled:opacity-40"
+            className="min-h-10 w-full rounded border border-current px-3 font-medium disabled:opacity-40 sm:w-auto"
           >
             {authenticating ? 'Connecting…' : 'Connect'}
           </button>

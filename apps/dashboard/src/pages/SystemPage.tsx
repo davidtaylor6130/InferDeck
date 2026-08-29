@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { getLogs } from '../api';
 import { Badge, Button, EmptyState, Panel, ProgressBar, SectionTitle, Stat } from '../components/ui';
 import { modalityLabel, modelsForSection, type DashboardSection } from '../dashboardSections';
@@ -18,6 +18,40 @@ import { ConfigPanel } from './ConfigPanel';
 import { MediaJobsPanel } from './MediaJobsPanel';
 
 const LOG_POLL_MS = 5_000;
+type AlertLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'critical';
+
+const normalizeLogLevel = (value: unknown): AlertLogLevel => {
+  const level = String(value || '').toLowerCase();
+  if (level === 'warning') return 'warn';
+  if (level === 'fatal') return 'critical';
+  return ['trace', 'debug', 'info', 'warn', 'error', 'critical'].includes(level)
+    ? level as AlertLogLevel
+    : 'info';
+};
+
+export function parseDashboardLogLine(line: string) {
+  try {
+    const value = JSON.parse(line) as Record<string, unknown>;
+    if (value && typeof value === 'object') {
+      return {
+        level: normalizeLogLevel(value.level),
+        event: typeof value.event === 'string' ? value.event : 'gateway',
+        message: typeof value.message === 'string' ? value.message : line,
+        timestampUnixMs: Number.isFinite(Number(value.ts)) ? Number(value.ts) : 0,
+      };
+    }
+  } catch {}
+  const level = line.match(/\[(trace|debug|info|warn|warning|error|critical|fatal)\]/i)?.[1]
+    ?? line.match(/\b(trace|debug|info|warn|warning|error|critical|fatal)\b/i)?.[1];
+  const eventMatch = line.match(/\bevent=([^\s]+)/);
+  const timestamp = line.match(/^\[([^\]]+)\]/)?.[1];
+  return {
+    level: normalizeLogLevel(level),
+    event: eventMatch?.[1] ?? 'gateway',
+    message: eventMatch?.index == null ? line : line.slice(eventMatch.index + eventMatch[0].length).trim(),
+    timestampUnixMs: timestamp ? Date.parse(timestamp.replace(' ', 'T')) || 0 : 0,
+  };
+}
 
 export const SystemPage: React.FC<{ section?: DashboardSection }> = ({ section = 'llm' }) => {
   const { stats, status, models } = useGateway();
@@ -104,10 +138,7 @@ export const SystemPage: React.FC<{ section?: DashboardSection }> = ({ section =
       </section>
 
       {section === 'dictation' && <MediaJobsPanel showEmpty />}
-      <LogPanel
-        title={section === 'dictation' ? 'Dictation and gateway log' : 'LLM and gateway log'}
-        collapsed={section === 'dictation'}
-      />
+      <LogPanel />
       <ConfigPanel />
     </div>
   );
@@ -137,18 +168,18 @@ const MeterRow: React.FC<{
   );
 };
 
-const LogPanel: React.FC<{ title: string; collapsed?: boolean }> = ({ title, collapsed }) => {
-  const [lines, setLines] = useState<string[]>([]);
+const LogPanel: React.FC = () => {
+  const [lines, setLines] = useState<string[] | null>(null);
   const [limit, setLimit] = useState(250);
   const [paused, setPaused] = useState(false);
-  const [follow, setFollow] = useState(true);
-  const scrollRef = useRef<HTMLPreElement | null>(null);
+  const [loadError, setLoadError] = useState('');
 
   const fetchLogs = useCallback(async () => {
     try {
       setLines(await getLogs(limit));
-    } catch {
-      // Keep the last good lines during transient gateway failures.
+      setLoadError('');
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'Gateway logs are unavailable');
     }
   }, [limit]);
 
@@ -159,55 +190,68 @@ const LogPanel: React.FC<{ title: string; collapsed?: boolean }> = ({ title, col
     return () => clearInterval(timer);
   }, [fetchLogs, paused]);
 
-  useEffect(() => {
-    if (follow && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [lines, follow]);
+  const entries = (lines ?? []).map(parseDashboardLogLine);
+  const issues = entries
+    .filter(entry => entry.level === 'warn' || entry.level === 'error' || entry.level === 'critical')
+    .reverse();
+  const warningCount = issues.filter(entry => entry.level === 'warn').length;
+  const errorCount = issues.length - warningCount;
 
-  const content = (
-    <>
+  return (
+    <Panel>
       <SectionTitle
-        title={title}
-        aside={`last ${limit} lines`}
+        title="Warnings & errors"
+        aside={`${errorCount} error${errorCount === 1 ? '' : 's'} · ${warningCount} warning${warningCount === 1 ? '' : 's'}`}
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <select
-              className="h-8 rounded-md border border-white/10 bg-[#0b1626] px-2 text-xs text-text-primary"
+              aria-label="Log history"
+              className="min-h-10 rounded border border-white/10 bg-[#0b1626] px-2 text-xs text-text-primary"
               value={limit}
               onChange={event => setLimit(Number(event.target.value))}
             >
-              {[100, 250, 500, 1000].map(value => <option key={value} value={value}>{value}</option>)}
+              {[100, 250, 500, 1000].map(value => <option key={value} value={value}>Last {value} lines</option>)}
             </select>
-            <Button onClick={() => setFollow(current => !current)}>{follow ? 'Following' : 'Follow'}</Button>
             <Button onClick={() => setPaused(current => !current)}>{paused ? 'Resume' : 'Pause'}</Button>
           </div>
         }
       />
-      <pre
-        ref={scrollRef}
-        className="mt-3 h-[420px] overflow-auto border border-border-slate bg-[#0b1017] p-3 font-mono text-[12px] leading-5 text-text-secondary"
-      >
-        {lines.length ? lines.join('\n') : 'No log lines available.'}
-      </pre>
-    </>
-  );
-
-  if (collapsed) {
-    return (
-      <Panel>
-        <details>
-          <summary className="cursor-pointer text-sm font-medium text-text-secondary">
-            Advanced dictation diagnostics
-            <span className="ml-1 text-xs font-normal text-text-muted">(logs collapsed)</span>
-          </summary>
-          <div className="mt-3 border-l border-border-slate pl-4">{content}</div>
-        </details>
-      </Panel>
-    );
-  }
-
-  return (
-    <Panel>
-      {content}
+      <p className="mt-2 text-xs text-text-muted">Recent gateway exceptions are shown first. Open the full log only when you need surrounding diagnostic context.</p>
+      {loadError && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-l-2 border-danger-rose bg-danger-rose/10 px-3 py-2 text-xs text-danger-rose" role="alert">
+          <span>Alert updates failed: {loadError}{lines ? ' · showing the last successful result' : ''}</span>
+          <Button tone="danger" onClick={() => { void fetchLogs(); }}>Retry</Button>
+        </div>
+      )}
+      {lines === null && !loadError ? (
+        <p className="mt-3 border-y border-dashed border-border-slate py-8 text-center text-sm text-text-muted" role="status">Checking recent gateway alerts…</p>
+      ) : lines !== null && issues.length === 0 ? (
+        <div className="mt-3"><EmptyState title="No warnings or errors" detail={`Checked the last ${limit} gateway log lines.`} /></div>
+      ) : issues.length > 0 ? (
+        <div className="mt-3 divide-y divide-white/10 border-y border-white/10" role="log" aria-live="polite">
+          {issues.map((entry, index) => {
+            const critical = entry.level === 'error' || entry.level === 'critical';
+            return (
+              <div key={`${entry.timestampUnixMs}:${entry.event}:${index}`} className="grid gap-2 py-3 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-start">
+                <Badge label={entry.level === 'critical' ? 'Critical' : critical ? 'Error' : 'Warning'} tone={critical ? 'critical' : 'warn'} />
+                <div className="min-w-0">
+                  <p className="break-words text-sm text-text-primary">{entry.message || 'No detail was recorded.'}</p>
+                  <p className="mt-1 font-mono text-xs text-text-muted">{entry.event.replace(/_/g, ' ')}</p>
+                </div>
+                <span className="text-xs text-text-muted">
+                  {entry.timestampUnixMs ? new Date(entry.timestampUnixMs).toLocaleTimeString() : 'Recent'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+      <details className="mt-4 border-t border-border-slate pt-3">
+        <summary className="cursor-pointer text-sm font-medium text-text-secondary">Full gateway log <span className="text-xs font-normal text-text-muted">(last {limit} lines)</span></summary>
+        <pre className="mt-3 h-[360px] overflow-auto border border-border-slate bg-[#0b1017] p-3 font-mono text-[12px] leading-5 text-text-secondary">
+          {lines?.length ? lines.join('\n') : 'No log lines available.'}
+        </pre>
+      </details>
     </Panel>
   );
 };

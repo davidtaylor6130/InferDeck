@@ -188,7 +188,7 @@ const LlmUsagePage: React.FC = () => {
         {periodUsage.length === 0 ? (
           <p className="mt-3 text-sm text-text-muted">No usage recorded for this range.</p>
         ) : (
-          <div className="mt-3 overflow-x-auto">
+          <div className="mt-3 overflow-x-auto" role="region" aria-label="Per-model LLM usage" tabIndex={0}>
             <table className="w-full min-w-[880px] text-left text-sm">
               <thead>
                 <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">

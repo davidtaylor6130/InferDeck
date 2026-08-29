@@ -7,11 +7,11 @@ export const Panel: React.FC<{ children: React.ReactNode; className?: string }> 
 );
 
 export const SectionTitle: React.FC<{ title: string; aside?: string; action?: React.ReactNode }> = ({ title, aside, action }) => (
-  <div className="flex min-w-0 items-center justify-between gap-3">
-    <h2 className="truncate text-base font-semibold text-text-primary">
+  <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-2">
+    <h2 className="min-w-0 text-base font-semibold text-text-primary">
       {title} {aside && <span className="text-xs font-normal text-text-muted">({aside})</span>}
     </h2>
-    {action}
+    {action && <div className="shrink-0">{action}</div>}
   </div>
 );
 
@@ -46,9 +46,10 @@ export const Button: React.FC<{
   children: React.ReactNode;
   onClick?: () => void;
   tone?: 'blue' | 'green' | 'neutral' | 'danger';
+  type?: 'button' | 'submit';
   disabled?: boolean;
   className?: string;
-}> = ({ children, onClick, tone = 'neutral', disabled, className = '' }) => {
+}> = ({ children, onClick, tone = 'neutral', type = 'button', disabled, className = '' }) => {
   const palette = tone === 'blue'
     ? 'border-queue-blue/40 bg-queue-blue/15 text-queue-blue hover:bg-queue-blue/25'
     : tone === 'green'
@@ -58,10 +59,10 @@ export const Button: React.FC<{
       : 'border-white/15 bg-white/[0.06] text-text-primary hover:bg-white/[0.12]';
   return (
     <button
-      type="button"
+      type={type}
       disabled={disabled}
       onClick={onClick}
-      className={`inline-flex min-h-9 items-center justify-center rounded border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue disabled:cursor-not-allowed disabled:opacity-40 ${palette} ${className}`}
+      className={`inline-flex min-h-10 items-center justify-center rounded border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue disabled:cursor-not-allowed disabled:opacity-40 ${palette} ${className}`}
     >
       {children}
     </button>
@@ -90,7 +91,7 @@ export const IconButton: React.FC<{
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue disabled:cursor-not-allowed disabled:opacity-40 ${palette} ${className}`}
+      className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue disabled:cursor-not-allowed disabled:opacity-40 ${palette} ${className}`}
     >
       {children}
     </button>

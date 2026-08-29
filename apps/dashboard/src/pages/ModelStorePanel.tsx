@@ -1,38 +1,52 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  controlStoreDownload, getStoreActivity, inspectStoreModel, installStoreModel,
-  removeStoreModel, searchStore, unregisterConfiguredModel, type InstalledStoreModel, type StoreDownload,
-  type StoreFile, type StoreModel,
+  controlStoreDownload,
+  getStoreActivity,
+  inspectStoreModel,
+  installStoreModel,
+  removeStoreModel,
+  searchStore,
+  unregisterConfiguredModel,
+  type InstalledStoreModel,
+  type StoreDownload,
+  type StoreFile,
+  type StoreModel,
 } from '../api';
 import { Badge, Button, EmptyState, Panel, ProgressBar, SectionTitle } from '../components/ui';
 import { sectionLabel, type DashboardSection } from '../dashboardSections';
 import { useGateway } from '../gateway';
 import { formatBytes, formatDate, formatTokenCount } from '../utils';
 
-const inputClass = 'h-9 rounded border border-white/10 bg-[#07101d] px-2 text-sm text-text-primary';
+const inputClass = 'min-h-10 rounded border border-white/10 bg-[#07101d] px-3 text-sm text-text-primary';
 type ServerSortKey = 'name' | 'type' | 'configured' | 'runtime' | 'size';
 
 const serverModelType = (entry: InstalledStoreModel) => {
-  if (entry.hasVision) return 'Vision + text';
+  if (entry.hasVision) return 'Vision and text';
   if (entry.modality === 'audio_transcription') return 'Speech to text';
   if (entry.modality === 'audio_speech') return 'Text to speech';
   return entry.modality || 'Text';
 };
+
 const DISCOVERY: Record<DashboardSection, Array<{ label: string; query: string; runtime: string; modality: string }>> = {
   llm: [
-    { label: 'Recommended 20–40B', query: 'Qwen3.6 GGUF', runtime: 'llama_cpp', modality: 'text' },
-    { label: 'Multimodal', query: 'vision instruct GGUF', runtime: 'llama_cpp', modality: 'text' },
+    { label: 'Balanced 20–40B', query: 'Qwen3.6 GGUF', runtime: 'llama_cpp', modality: 'text' },
+    { label: 'Vision', query: 'vision instruct GGUF', runtime: 'llama_cpp', modality: 'text' },
     { label: 'Coding', query: 'coder instruct GGUF', runtime: 'llama_cpp', modality: 'text' },
-    { label: 'Efficient', query: 'instruct 8B GGUF', runtime: 'llama_cpp', modality: 'text' },
+    { label: 'Fast 8B', query: 'instruct 8B GGUF', runtime: 'llama_cpp', modality: 'text' },
   ],
   dictation: [
-    { label: 'Recommended STT', query: 'ASR ONNX', runtime: '', modality: 'audio_transcription' },
-    { label: 'Whisper GGUF', query: 'Whisper GGUF', runtime: 'whisper_cpp', modality: 'audio_transcription' },
-    { label: 'Parakeet ONNX', query: 'Parakeet ONNX', runtime: '', modality: 'audio_transcription' },
-    { label: 'Recommended TTS', query: 'TTS ONNX', runtime: '', modality: 'audio_speech' },
-    { label: 'Kokoro ONNX', query: 'Kokoro ONNX', runtime: '', modality: 'audio_speech' },
+    { label: 'Speech to text', query: 'ASR ONNX', runtime: '', modality: 'audio_transcription' },
+    { label: 'Whisper', query: 'Whisper GGUF', runtime: 'whisper_cpp', modality: 'audio_transcription' },
+    { label: 'Parakeet', query: 'Parakeet ONNX', runtime: '', modality: 'audio_transcription' },
+    { label: 'Text to speech', query: 'TTS ONNX', runtime: '', modality: 'audio_speech' },
+    { label: 'Kokoro', query: 'Kokoro ONNX', runtime: '', modality: 'audio_speech' },
   ],
 };
+
+export function defaultStoreModelName(file: Pick<StoreFile, 'repo' | 'name'>): string {
+  return `${file.repo.split('/').pop() || 'model'}-${file.name.replace(/\.[^.]+$/, '').slice(-40)}`
+    .replace(/[^A-Za-z0-9_.-]/g, '_');
+}
 
 export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ section }) => {
   const { status } = useGateway();
@@ -43,6 +57,8 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
   const [results, setResults] = useState<StoreModel[]>([]);
   const [files, setFiles] = useState<StoreFile[]>([]);
   const [selectedRepo, setSelectedRepo] = useState('');
+  const [selectedFile, setSelectedFile] = useState<StoreFile | null>(null);
+  const [modelName, setModelName] = useState('');
   const [downloads, setDownloads] = useState<StoreDownload[]>([]);
   const [installed, setInstalled] = useState<Record<string, InstalledStoreModel>>({});
   const [library, setLibrary] = useState<InstalledStoreModel[]>([]);
@@ -51,7 +67,10 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
   const [catalogSort, setCatalogSort] = useState<'downloads' | 'likes' | 'recent'>('downloads');
   const [searchBusy, setSearchBusy] = useState(false);
   const [inspectBusy, setInspectBusy] = useState(false);
+  const [installBusy, setInstallBusy] = useState(false);
+  const [searchError, setSearchError] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [serverSort, setServerSort] = useState<{ key: ServerSortKey; direction: 'asc' | 'desc' }>({ key: 'name', direction: 'asc' });
   const inspectRequest = useRef(0);
 
@@ -64,33 +83,31 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
     } catch {}
   }, []);
 
-  const runSearch = useCallback(async (
-    nextQuery = query,
-    nextRuntime = runtime,
-    nextModality = modality,
-  ) => {
+  const executeSearch = useCallback(async (nextQuery: string, nextRuntime: string, nextModality: string) => {
     setSearchBusy(true);
+    setSearchError('');
     setError('');
+    setNotice('');
+    setResults([]);
     setFiles([]);
     setSelectedRepo('');
+    setSelectedFile(null);
     try {
       setResults(await searchStore(nextQuery, nextRuntime, nextModality));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setSearchError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setSearchBusy(false);
     }
-  }, [query, runtime, modality]);
+  }, []);
 
   useEffect(() => {
     const recommendation = DISCOVERY[section][0];
     setQuery(recommendation.query);
     setRuntime(recommendation.runtime);
     setModality(recommendation.modality);
-    void runSearch(recommendation.query, recommendation.runtime, recommendation.modality);
-  // runSearch deliberately omitted so switching filters does not retrigger discovery.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [section]);
+    void executeSearch(recommendation.query, recommendation.runtime, recommendation.modality);
+  }, [section, executeSearch]);
 
   useEffect(() => {
     void refresh();
@@ -102,7 +119,9 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
     const request = ++inspectRequest.current;
     setInspectBusy(true);
     setError('');
+    setNotice('');
     setSelectedRepo(repo);
+    setSelectedFile(null);
     try {
       const next = await inspectStoreModel(repo);
       if (request === inspectRequest.current) {
@@ -118,17 +137,29 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
     }
   };
 
-  const install = async (file: StoreFile) => {
-    const fallback = `${file.repo.split('/').pop() || 'model'}-${file.name.replace(/\.[^.]+$/, '').slice(-40)}`
-      .replace(/[^A-Za-z0-9_.-]/g, '_');
-    const modelName = window.prompt('InferDeck model name', fallback);
-    if (!modelName) return;
+  const chooseFile = (file: StoreFile) => {
+    setSelectedFile(file);
+    setModelName(defaultStoreModelName(file));
     setError('');
+    setNotice('');
+  };
+
+  const install = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selectedFile || !modelName.trim()) return;
+    setInstallBusy(true);
+    setError('');
+    setNotice('');
     try {
-      await installStoreModel(file, modelName);
+      await installStoreModel(selectedFile, modelName.trim());
+      setNotice(`${modelName.trim()} was added to the download queue.`);
+      setSelectedFile(null);
+      setModelName('');
       await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setInstallBusy(false);
     }
   };
 
@@ -206,20 +237,6 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
       return serverSort.direction === 'asc' ? compared : -compared;
     });
   }, [scopedLibrary, serverSort]);
-  const changeServerSort = (key: ServerSortKey) => {
-    setServerSort(current => current.key === key
-      ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
-      : { key, direction: 'asc' });
-  };
-  const sortHeading = (key: ServerSortKey, label: string) => (
-    <button
-      type="button"
-      className="rounded py-2 text-left font-medium hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
-      onClick={() => { changeServerSort(key); }}
-    >
-      {label}{serverSort.key === key ? ` (${serverSort.direction})` : ''}
-    </button>
-  );
   const scopedDownloads = downloads.filter(download =>
     section === 'dictation'
       ? download.modality === 'audio_transcription' || download.modality === 'audio_speech'
@@ -239,251 +256,243 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
       return right.downloads - left.downloads || right.likes - left.likes;
     }), [results, recommendedOnly, popularityFloor, section, selectedCapacityMb, catalogSort]);
   const selectedModel = results.find(model => model.id === selectedRepo);
+  const activeFilters = [
+    recommendedOnly ? 'recommended' : 'all adoption levels',
+    section === 'llm' ? (vramCapacityGb === 'server' ? 'fits this server' : vramCapacityGb === '0' ? 'any VRAM' : `up to ${vramCapacityGb} GB`) : '',
+    catalogSort === 'downloads' ? 'most downloaded' : catalogSort === 'likes' ? 'most liked' : 'recently updated',
+  ].filter(Boolean).join(' · ');
 
   const chooseDiscovery = (recommendation: typeof DISCOVERY.llm[number]) => {
     setQuery(recommendation.query);
     setRuntime(recommendation.runtime);
     setModality(recommendation.modality);
-    void runSearch(recommendation.query, recommendation.runtime, recommendation.modality);
+    void executeSearch(recommendation.query, recommendation.runtime, recommendation.modality);
   };
 
   return (
-    <div className="space-y-4">
-      <Panel>
-        <SectionTitle
-          title={`${sectionLabel(section)} Model Store`}
-          aside={section === 'llm' && vramTotalMb
-            ? `Hugging Face · ${Math.round(vramTotalMb / 1024)} GB VRAM profile`
-            : 'live Hugging Face discovery'}
-        />
-        <p className="mt-2 max-w-3xl text-sm text-text-secondary">
-          Popular compatible repositories are ranked by real downloads, then checked against this server when you inspect an artifact.
-          {section === 'llm'
-            ? ' Recommendations favour quality while preserving VRAM headroom for context and parallel slots.'
-            : ' Speech discovery covers transcription and neural speech synthesis runtimes; sherpa models are installed as complete runtime bundles.'}
-        </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {DISCOVERY[section].map(recommendation => (
-            <Button key={recommendation.label} onClick={() => chooseDiscovery(recommendation)}>{recommendation.label}</Button>
-          ))}
-        </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <input
-            aria-label="Search model catalogue"
-            className={`${inputClass} min-w-[240px] flex-1`}
-            placeholder={section === 'dictation' ? 'Search speech models' : 'Search language models'}
-            value={query}
-            onChange={event => setQuery(event.target.value)}
-            onKeyDown={event => { if (event.key === 'Enter') void runSearch(); }}
+    <div className="space-y-5">
+      {error && <p className="border-l-2 border-danger-rose bg-danger-rose/10 px-3 py-2 text-xs text-danger-rose" role="alert">{error}</p>}
+      <section className="grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
+        <Panel className="border-t-0 pt-0">
+          <SectionTitle
+            title={`${sectionLabel(section)} Model Store`}
+            aside={section === 'llm' && vramTotalMb ? `${Math.round(vramTotalMb / 1024)} GB VRAM detected` : 'Hugging Face catalogue'}
           />
-          <select aria-label="Runtime" className={inputClass} value={runtime} onChange={event => setRuntime(event.target.value)}>
-            {section === 'llm' ? (
-              <>
-                <option value="llama_cpp">llama.cpp / GGUF</option>
-                <option value="">All compatible runtimes</option>
-              </>
-            ) : (
-              <>
-                <option value="whisper_cpp">whisper.cpp STT</option>
-                <option value="sherpa_onnx">sherpa-onnx speech</option>
-                <option value="">All speech runtimes</option>
-              </>
-            )}
-          </select>
-          {section === 'dictation' && (
-            <select aria-label="Speech service" className={inputClass} value={modality} onChange={event => setModality(event.target.value)}>
-              <option value="audio_transcription">Speech to text</option>
-              <option value="audio_speech">Text to speech</option>
-              <option value="">All dictation models</option>
-            </select>
-          )}
-          <Button tone="blue" disabled={searchBusy || !query.trim()} onClick={() => { void runSearch(); }}>
-            {searchBusy ? 'Searching...' : 'Search'}
-          </Button>
-          <label className="inline-flex min-h-9 items-center gap-2 border border-white/10 px-3 text-xs text-text-secondary">
-            <input
-              type="checkbox"
-              checked={recommendedOnly}
-              onChange={event => setRecommendedOnly(event.target.checked)}
-            />
-            Recommended only
-          </label>
-          {section === 'llm' && (
-            <select aria-label="VRAM capacity" className={inputClass} value={vramCapacityGb} onChange={event => setVramCapacityGb(event.target.value)}>
-              <option value="server">Fits this server</option>
-              <option value="8">Up to 8 GB VRAM</option>
-              <option value="16">Up to 16 GB VRAM</option>
-              <option value="24">Up to 24 GB VRAM</option>
-              <option value="32">Up to 32 GB VRAM</option>
-              <option value="48">Up to 48 GB VRAM</option>
-              <option value="0">Any VRAM size</option>
-            </select>
-          )}
-          <select aria-label="Popularity order" className={inputClass} value={catalogSort} onChange={event => setCatalogSort(event.target.value as typeof catalogSort)}>
-            <option value="downloads">Most downloaded</option>
-            <option value="likes">Most liked</option>
-            <option value="recent">Recently updated</option>
-          </select>
-        </div>
-        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-muted">
-          <span>Active filters: {recommendedOnly ? 'recommended' : 'all adoption levels'} · {catalogSort.replace('downloads', 'download popularity').replace('likes', 'like popularity').replace('recent', 'recently updated')}{section === 'llm' ? ` · ${vramCapacityGb === 'server' ? 'this server VRAM' : vramCapacityGb === '0' ? 'any VRAM' : `${vramCapacityGb} GB VRAM`}` : ''}</span>
-          <button type="button" className="rounded text-queue-blue hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue" onClick={() => { setRecommendedOnly(false); setVramCapacityGb('0'); setCatalogSort('downloads'); }}>Clear filters</button>
-        </div>
-        {error && <p className="mt-2 text-xs text-danger-rose" role="alert">{error}</p>}
+          <p className="mt-2 max-w-2xl text-sm text-text-secondary">
+            Find a compatible model, compare the files that fit this machine, then start a verified background install.
+          </p>
 
-        {visibleResults.length === 0 ? (
-          <div className="mt-4">
-            <EmptyState
-              title={searchBusy ? 'Checking Hugging Face...' : 'No recommended compatible models'}
-              detail={!searchBusy && results.length ? 'The active adoption or VRAM filters exclude these matches. Clear filters to show every compatible result.' : undefined}
-            />
-          </div>
-        ) : (
-          <div className="mt-4 grid gap-2 lg:grid-cols-2">
-            {visibleResults.slice(0, 20).map(model => (
+          <form className="mt-5" onSubmit={event => { event.preventDefault(); void executeSearch(query, runtime, modality); }}>
+            <label className="text-sm font-medium text-text-primary" htmlFor={`${section}-model-search`}>1. Find a model</label>
+            <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+              <input
+                id={`${section}-model-search`}
+                className={`${inputClass} min-w-0 flex-1`}
+                placeholder={section === 'dictation' ? 'Search speech models' : 'Search language models'}
+                value={query}
+                onChange={event => setQuery(event.target.value)}
+              />
+              <Button type="submit" tone="blue" disabled={searchBusy || !query.trim()} className="sm:min-w-24">
+                {searchBusy ? 'Searching…' : 'Search'}
+              </Button>
+            </div>
+          </form>
+
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs">
+            <span className="text-text-muted">Start with</span>
+            {DISCOVERY[section].map(recommendation => (
               <button
-                key={model.id}
+                key={recommendation.label}
                 type="button"
-                onClick={() => { void inspect(model.id); }}
-                className="border border-white/10 bg-[#07101d] p-3 text-left hover:border-queue-blue/50"
+                className="rounded py-1 text-queue-blue hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
+                onClick={() => chooseDiscovery(recommendation)}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate font-mono text-sm text-text-primary">{model.id}</span>
-                  <span className="flex shrink-0 items-center gap-1">
-                    {model.hasVision && <Badge label="◈ Vision" tone="violet" />}
-                    <Badge
-                      label={model.recommended ? 'Recommended' : model.modality || 'text'}
-                      tone={model.recommended ? 'good' : selectedRepo === model.id ? 'info' : 'idle'}
-                    />
-                  </span>
-                </div>
-                <p className="mt-1 text-xs text-text-muted">
-                  {model.runtime} · {formatTokenCount(model.downloads)} downloads · {model.likes} likes
-                  {section === 'llm' ? ` · ~${Math.round(estimateRepositoryVramMb(model.id) / 1024)} GB artifact estimate` : ''}
-                  {model.lastModified ? ` · updated ${formatDate(model.lastModified)}` : ''}
-                </p>
+                {recommendation.label}
               </button>
             ))}
           </div>
-        )}
-      </Panel>
 
-      {selectedRepo && (
-        <Panel>
-          <SectionTitle
-            title="Available artifacts"
-            aside={`${selectedRepo}${selectedModel?.hasVision ? ' · multimodal repository' : ''}`}
-          />
-          {section === 'llm' && (
-            <p className="mt-2 text-xs text-text-muted">
-              VRAM fit uses artifact size plus a safety reserve. Context length, KV-cache precision, and parallel slots consume additional memory and are verified in the active profile.
-            </p>
-          )}
-          {section === 'dictation' && files.some(file => file.runtime === 'sherpa_onnx') && (
-            <p className="mt-2 text-xs text-text-muted">
-              Sherpa-onnx repositories install as one verified bundle. InferDeck downloads every required model, token, and vocabulary artifact into staging, then publishes the complete bundle atomically.
-            </p>
-          )}
-          {files.length === 0 ? (
-            <div className="mt-3"><EmptyState title={inspectBusy ? 'Inspecting repository...' : 'No compatible artifacts found'} /></div>
-          ) : (
-            <div className="mt-3 overflow-x-auto">
-              <table className="w-full min-w-[760px] text-left text-sm">
-                <thead>
-                  <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
-                    <th className="py-2 pr-3 font-medium">File</th>
-                    <th className="pr-3 font-medium">Runtime</th>
-                    <th className="pr-3 font-medium">Size</th>
-                    <th className="pr-3 font-medium">{section === 'llm' ? 'Hardware fit' : 'Execution'}</th>
-                    <th className="font-medium"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {files.map(file => {
-                    const requiresBundle = file.runtime === 'sherpa_onnx' && file.artifactCount === undefined;
-                    const isBundle = file.runtime === 'sherpa_onnx' && (file.artifactCount ?? 0) > 1;
-                    return (
-                    <tr key={file.name}>
-                      <td className="max-w-[380px] truncate py-2 pr-3 font-mono text-xs text-text-primary" title={file.name}>{file.name}</td>
-                      <td className="pr-3 text-text-secondary">{file.runtime} · {file.modality} · {file.quantization}</td>
-                      <td className="pr-3 text-text-secondary">{formatBytes(file.size)}</td>
-                      <td className="pr-3 text-text-secondary">
-                        <ArtifactFit
-                          section={section}
-                          estimatedVramMb={file.estimatedVramMb}
-                          vramTotalMb={vramTotalMb}
-                        />
-                      </td>
-                      <td className="text-right">
-                        <Button
-                          tone="blue"
-                          disabled={!file.compatible || requiresBundle}
-                          onClick={() => { void install(file); }}
-                        >
-                          {requiresBundle ? 'Included in bundle' : file.compatible ? isBundle ? `Install ${file.artifactCount} artifacts` : 'Download' : 'Unverified'}
-                        </Button>
-                      </td>
-                    </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+          <details className="mt-4 border-y border-border-slate py-3">
+            <summary className="cursor-pointer text-sm font-medium text-text-secondary">
+              Advanced filters <span className="ml-1 text-xs font-normal text-text-muted">({activeFilters})</span>
+            </summary>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="text-xs text-text-muted">
+                Runtime
+                <select className={`${inputClass} mt-1 w-full`} value={runtime} onChange={event => setRuntime(event.target.value)}>
+                  {section === 'llm' ? (
+                    <>
+                      <option value="llama_cpp">llama.cpp / GGUF</option>
+                      <option value="">All compatible runtimes</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="whisper_cpp">whisper.cpp speech to text</option>
+                      <option value="sherpa_onnx">sherpa-onnx speech</option>
+                      <option value="">All speech runtimes</option>
+                    </>
+                  )}
+                </select>
+              </label>
+              {section === 'dictation' && (
+                <label className="text-xs text-text-muted">
+                  Speech service
+                  <select className={`${inputClass} mt-1 w-full`} value={modality} onChange={event => setModality(event.target.value)}>
+                    <option value="audio_transcription">Speech to text</option>
+                    <option value="audio_speech">Text to speech</option>
+                    <option value="">All dictation models</option>
+                  </select>
+                </label>
+              )}
+              {section === 'llm' && (
+                <label className="text-xs text-text-muted">
+                  VRAM capacity
+                  <select className={`${inputClass} mt-1 w-full`} value={vramCapacityGb} onChange={event => setVramCapacityGb(event.target.value)}>
+                    <option value="server">Fits this server</option>
+                    <option value="8">Up to 8 GB</option>
+                    <option value="16">Up to 16 GB</option>
+                    <option value="24">Up to 24 GB</option>
+                    <option value="32">Up to 32 GB</option>
+                    <option value="48">Up to 48 GB</option>
+                    <option value="0">Any VRAM size</option>
+                  </select>
+                </label>
+              )}
+              <label className="text-xs text-text-muted">
+                Order
+                <select className={`${inputClass} mt-1 w-full`} value={catalogSort} onChange={event => setCatalogSort(event.target.value as typeof catalogSort)}>
+                  <option value="downloads">Most downloaded</option>
+                  <option value="likes">Most liked</option>
+                  <option value="recent">Recently updated</option>
+                </select>
+              </label>
+              <label className="inline-flex min-h-10 items-center gap-2 text-xs text-text-secondary">
+                <input type="checkbox" checked={recommendedOnly} onChange={event => setRecommendedOnly(event.target.checked)} />
+                Hide low-adoption results
+              </label>
+              <div className="flex items-center sm:justify-end">
+                <Button onClick={() => { setRecommendedOnly(false); setVramCapacityGb('0'); setCatalogSort('downloads'); }}>Clear filters</Button>
+              </div>
+            </div>
+          </details>
+
+          {searchError && (
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-l-2 border-danger-rose bg-danger-rose/10 px-3 py-2 text-xs text-danger-rose" role="alert">
+              <span>{searchError}</span>
+              <Button tone="danger" onClick={() => { void executeSearch(query, runtime, modality); }}>Retry search</Button>
             </div>
           )}
-        </Panel>
-      )}
 
-      <Panel>
-        <SectionTitle title="Models on this server" aside={`${scopedLibrary.length} detected`} />
-        <p className="mt-2 text-xs text-text-muted">
-          Configured external models can be removed from InferDeck without deleting their files. Managed downloads also support archive and permanent deletion.
-        </p>
-        {scopedLibrary.length === 0 ? (
-          <div className="mt-3"><EmptyState title={`No downloaded ${sectionLabel(section)} models`} detail="No compatible artifacts were detected in the model library." /></div>
-        ) : (
-          <div className="mt-3 overflow-x-auto">
-            <table className="w-full min-w-[980px] text-left text-sm">
-              <thead>
-                <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
-                  <th aria-sort={serverSort.key === 'name' ? `${serverSort.direction}ending` : 'none'} className="pr-4">{sortHeading('name', 'Name')}</th>
-                  <th aria-sort={serverSort.key === 'type' ? `${serverSort.direction}ending` : 'none'} className="pr-4">{sortHeading('type', 'Type')}</th>
-                  <th aria-sort={serverSort.key === 'configured' ? `${serverSort.direction}ending` : 'none'} className="pr-4">{sortHeading('configured', 'Configured')}</th>
-                  <th aria-sort={serverSort.key === 'runtime' ? `${serverSort.direction}ending` : 'none'} className="pr-4">{sortHeading('runtime', 'Runtime')}</th>
-                  <th aria-sort={serverSort.key === 'size' ? `${serverSort.direction}ending` : 'none'} className="pr-4">{sortHeading('size', 'Disk size')}</th>
-                  <th className="py-2 pr-4 font-medium">Storage</th>
-                  <th className="py-2 text-right font-medium">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5">
-                {sortedLibrary.map(entry => (
-                  <tr key={entry.id || `${entry.name}:${entry.path}`}>
-                    <td className="max-w-[340px] py-3 pr-4">
-                      <p className="truncate font-mono text-text-primary">{entry.name || 'Unconfigured model artifact'}</p>
-                      <p className="truncate text-xs text-text-muted" title={entry.path}>{entry.path || 'Managed storage'}</p>
-                    </td>
-                    <td className="pr-4"><Badge label={serverModelType(entry)} tone={entry.hasVision ? 'violet' : 'idle'} /></td>
-                    <td className="pr-4"><Badge label={entry.configured ? 'Yes' : 'No'} tone={entry.configured ? 'good' : 'warn'} /></td>
-                    <td className="pr-4 font-mono text-xs text-text-secondary">{entry.runtime || 'Unknown'}</td>
-                    <td className="pr-4 tabular-nums text-text-secondary">{formatBytes(entry.size ?? 0)}</td>
-                    <td className="pr-4 text-xs text-text-secondary">
-                      {entry.managed ? 'InferDeck managed' : 'External'}
-                      {entry.artifactCount ? ` · ${entry.artifactCount} artifact${entry.artifactCount === 1 ? '' : 's'}` : ''}
-                      {entry.quantization && entry.quantization !== 'unknown' ? ` · ${entry.quantization}` : ''}
-                    </td>
-                    <td className="py-3 text-right">
-                      {entry.managed
-                        ? <span className="flex justify-end gap-2"><Button onClick={() => { if (entry.name) void retire(entry.name, 'archive'); }}>Archive</Button><Button tone="danger" onClick={() => { if (entry.name) void retire(entry.name, 'remove'); }}>Delete permanently</Button></span>
-                        : entry.configured && entry.name
-                          ? <Button tone="danger" onClick={() => { void unregister(entry.name!); }}>Remove from InferDeck</Button>
-                          : <span className="text-xs text-text-muted">Detected on disk</span>}
-                    </td>
-                  </tr>
+          <div className="mt-4" aria-live="polite">
+            <div className="flex items-baseline justify-between gap-3">
+              <h3 className="text-sm font-semibold text-text-primary">Search results</h3>
+              <span className="text-xs text-text-muted">{searchBusy ? 'Searching…' : `${visibleResults.length} shown`}</span>
+            </div>
+            {visibleResults.length === 0 ? (
+              <div className="mt-2">
+                <EmptyState
+                  title={searchBusy ? 'Checking compatible repositories…' : 'No matching models'}
+                  detail={!searchBusy && results.length ? 'The current adoption or VRAM filters exclude every match. Open Advanced filters to broaden the results.' : 'Try a model family, task, or repository name.'}
+                />
+              </div>
+            ) : (
+              <div className="mt-2 divide-y divide-white/10 border-y border-white/10">
+                {visibleResults.slice(0, 20).map(model => (
+                  <button
+                    key={model.id}
+                    type="button"
+                    aria-pressed={selectedRepo === model.id}
+                    onClick={() => { void inspect(model.id); }}
+                    className={`grid w-full gap-2 px-1 py-3 text-left transition-colors sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center ${selectedRepo === model.id ? 'bg-white/[0.06]' : 'hover:bg-white/[0.03]'}`}
+                  >
+                    <span className="min-w-0">
+                      <span className="block break-all font-mono text-sm text-text-primary">{model.id}</span>
+                      <span className="mt-1 block text-xs text-text-muted">
+                        {formatTokenCount(model.downloads)} downloads · {model.likes} likes
+                        {section === 'llm' ? ` · about ${Math.round(estimateRepositoryVramMb(model.id) / 1024)} GB model file` : ''}
+                        {model.lastModified ? ` · updated ${formatDate(model.lastModified)}` : ''}
+                      </span>
+                    </span>
+                    <span className="flex flex-wrap items-center gap-2 sm:justify-end">
+                      {model.hasVision && <Badge label="Vision" tone="violet" />}
+                      {model.recommended && <Badge label="Recommended" tone="good" />}
+                      <span className="text-xs font-medium text-queue-blue">Review files</span>
+                    </span>
+                  </button>
                 ))}
-              </tbody>
-            </table>
+              </div>
+            )}
           </div>
-        )}
-      </Panel>
+        </Panel>
+
+        <Panel className="xl:border-t-0 xl:pt-0">
+          <SectionTitle title="2. Review and install" aside={selectedRepo || 'select a result'} />
+          {!selectedRepo ? (
+            <div className="mt-4"><EmptyState title="Select a model" detail="Compatible files and hardware fit will appear here without leaving the search results." /></div>
+          ) : inspectBusy ? (
+            <p className="mt-4 border-y border-dashed border-border-slate py-8 text-center text-sm text-text-muted" role="status">Inspecting repository files…</p>
+          ) : files.length === 0 ? (
+            <div className="mt-4"><EmptyState title="No compatible files found" detail="Choose another repository or broaden the search." /></div>
+          ) : (
+            <>
+              <div className="mt-3 flex flex-wrap gap-2 text-xs text-text-muted">
+                <span>{selectedModel?.runtime}</span>
+                {selectedModel?.hasVision && <Badge label="Vision capable" tone="violet" />}
+                <span>{files.length} compatible file{files.length === 1 ? '' : 's'}</span>
+              </div>
+              <div className="mt-3 divide-y divide-white/10 border-y border-white/10">
+                {files.map(file => {
+                  const requiresBundle = file.runtime === 'sherpa_onnx' && file.artifactCount === undefined;
+                  const isBundle = file.runtime === 'sherpa_onnx' && (file.artifactCount ?? 0) > 1;
+                  const active = selectedFile?.name === file.name;
+                  return (
+                    <div key={file.name} className={`py-3 ${active ? 'bg-white/[0.04]' : ''}`}>
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <p className="break-all font-mono text-xs text-text-primary">{file.name}</p>
+                          <p className="mt-1 text-xs text-text-muted">
+                            {file.quantization} · {formatBytes(file.size)} · {file.runtime}
+                            {isBundle ? ` · ${file.artifactCount} files` : ''}
+                          </p>
+                          <div className="mt-2"><ArtifactFit section={section} estimatedVramMb={file.estimatedVramMb} vramTotalMb={vramTotalMb} /></div>
+                        </div>
+                        <Button
+                          tone={active ? 'green' : 'blue'}
+                          disabled={!file.compatible || requiresBundle}
+                          onClick={() => chooseFile(file)}
+                        >
+                          {requiresBundle ? 'Included in bundle' : file.compatible ? active ? 'Selected' : 'Choose file' : 'Unverified'}
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {selectedFile && (
+            <form className="mt-4 border-l-2 border-queue-blue pl-4" onSubmit={install}>
+              <h3 className="text-sm font-semibold text-text-primary">3. Name and install</h3>
+              <p className="mt-1 text-xs text-text-muted">The verified download runs in the background and can be cancelled or resumed.</p>
+              <label className="mt-3 block text-xs text-text-muted" htmlFor={`${section}-install-name`}>
+                InferDeck model name
+                <input
+                  id={`${section}-install-name`}
+                  className={`${inputClass} mt-1 w-full`}
+                  value={modelName}
+                  onChange={event => setModelName(event.target.value)}
+                />
+              </label>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button type="submit" tone="blue" disabled={installBusy || !modelName.trim()}>{installBusy ? 'Starting…' : 'Install model'}</Button>
+                <Button disabled={installBusy} onClick={() => { setSelectedFile(null); setModelName(''); }}>Choose another file</Button>
+              </div>
+            </form>
+          )}
+          {notice && <p className="mt-4 text-xs text-success-green" role="status">{notice}</p>}
+        </Panel>
+      </section>
 
       {scopedDownloads.length > 0 && (
         <Panel>
@@ -493,12 +502,12 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
               const percent = download.bytesTotal ? download.bytesDownloaded / download.bytesTotal * 100 : 0;
               return (
                 <div key={download.id} className="border-l border-border-slate pl-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="truncate font-mono text-xs text-text-primary">{download.modelName}</span>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="break-all font-mono text-xs text-text-primary">{download.modelName}</span>
                     <Badge label={download.state} tone={download.state === 'installed' ? 'good' : download.state === 'failed' ? 'critical' : 'info'} />
                   </div>
                   <div className="mt-2"><ProgressBar percent={percent} tone={download.state === 'failed' ? 'critical' : 'info'} /></div>
-                  <div className="mt-2 flex items-center justify-between gap-2 text-xs text-text-muted">
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
                     <span>{formatBytes(download.bytesDownloaded)} / {formatBytes(download.bytesTotal)}{download.error ? ` · ${download.error}` : ''}</span>
                     {download.state === 'downloading' || download.state === 'queued'
                       ? <Button tone="danger" onClick={() => { void control(download.id, 'cancel'); }}>Cancel</Button>
@@ -512,6 +521,65 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
           </div>
         </Panel>
       )}
+
+      <Panel>
+        <details>
+          <summary className="cursor-pointer text-base font-semibold text-text-primary">
+            Models on this server <span className="text-xs font-normal text-text-muted">({scopedLibrary.length} detected)</span>
+          </summary>
+          <p className="mt-2 max-w-3xl text-xs text-text-muted">
+            Configured external models can be removed from InferDeck without deleting their files. Managed downloads can also be archived or permanently deleted.
+          </p>
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <label className="text-xs text-text-muted">
+              Sort by
+              <select className={`${inputClass} mt-1`} value={serverSort.key} onChange={event => setServerSort(current => ({ ...current, key: event.target.value as ServerSortKey }))}>
+                <option value="name">Name</option>
+                <option value="type">Type</option>
+                <option value="configured">Configured</option>
+                <option value="runtime">Runtime</option>
+                <option value="size">Disk size</option>
+              </select>
+            </label>
+            <Button onClick={() => setServerSort(current => ({ ...current, direction: current.direction === 'asc' ? 'desc' : 'asc' }))}>
+              {serverSort.direction === 'asc' ? 'Ascending' : 'Descending'}
+            </Button>
+          </div>
+          {scopedLibrary.length === 0 ? (
+            <div className="mt-3"><EmptyState title={`No downloaded ${sectionLabel(section)} models`} detail="No compatible artifacts were detected in the model library." /></div>
+          ) : (
+            <div className="mt-3 divide-y divide-white/10 border-y border-white/10">
+              {sortedLibrary.map(entry => (
+                <div key={entry.id || `${entry.name}:${entry.path}`} className="grid gap-3 py-3 md:grid-cols-[minmax(0,1fr)_minmax(220px,auto)] md:items-center">
+                  <div className="min-w-0">
+                    <p className="break-all font-mono text-sm text-text-primary">{entry.name || 'Unconfigured model artifact'}</p>
+                    <p className="mt-1 break-all text-xs text-text-muted">{entry.path || 'Managed storage'}</p>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-secondary">
+                      <Badge label={serverModelType(entry)} tone={entry.hasVision ? 'violet' : 'idle'} />
+                      <Badge label={entry.configured ? 'Configured' : 'Not configured'} tone={entry.configured ? 'good' : 'warn'} />
+                      <span>{entry.runtime || 'Unknown runtime'}</span>
+                      <span>{formatBytes(entry.size ?? 0)}</span>
+                      <span>{entry.managed ? 'InferDeck managed' : 'External'}</span>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2 md:justify-end">
+                    {entry.managed ? (
+                      <>
+                        <Button onClick={() => { if (entry.name) void retire(entry.name, 'archive'); }}>Archive</Button>
+                        <Button tone="danger" onClick={() => { if (entry.name) void retire(entry.name, 'remove'); }}>Delete permanently</Button>
+                      </>
+                    ) : entry.configured && entry.name ? (
+                      <Button tone="danger" onClick={() => { void unregister(entry.name!); }}>Remove from InferDeck</Button>
+                    ) : (
+                      <span className="text-xs text-text-muted">Detected on disk</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </details>
+      </Panel>
     </div>
   );
 };
