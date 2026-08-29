@@ -84,7 +84,7 @@ foundation::Result<int> speaker_id(std::string voice, int speakers) {
         openai_aliases.begin(), openai_aliases.end(),
         [&voice](const auto& item) { return item.first == voice; });
     if (openai_alias != openai_aliases.end()) {
-        value = speakers == 1 ? 0 : openai_alias->second;
+        value = openai_alias->second < speakers ? openai_alias->second : 0;
     } else {
         const auto legacy_alias = std::find_if(
             legacy_aliases.begin(), legacy_aliases.end(),
