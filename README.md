@@ -328,12 +328,11 @@ completions today.
   from release packaging.
 
 **Beyond text: the multimodal gateway**
-- [ ] **Speech-to-text** (`/v1/audio/transcriptions`, Parakeet TDT). The route
-  and optional sherpa-onnx integration exist, but end-to-end testing is still
-  outstanding.
-- [ ] **Text-to-speech** (`/v1/audio/speech`, Supertonic 3). The route and
-  optional sherpa-onnx integration exist, but end-to-end testing is still
-  outstanding.
+- [x] **Speech-to-text** (`/v1/audio/transcriptions`, Parakeet TDT and
+  whisper.cpp). Both native runtimes pass real-audio and pinned OpenAI SDK
+  verification.
+- [x] **Text-to-speech** (`/v1/audio/speech`, Supertonic 3). The native runtime
+  passes real-model and pinned OpenAI SDK verification.
 - [ ] **Image generation API and adapter** (`/v1/images/generations`). The
   compile-gated stable-diffusion.cpp path exists, but the dependency and model
   are not bundled and end-to-end testing is still outstanding.
