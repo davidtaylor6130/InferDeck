@@ -209,7 +209,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
                     state->session->finish_once(false, 200, "completed");
                 }
                 sink.done();
-                return false;
+                return true;
             } catch (...) {
                 state->session->finish_once(
                     true, 500, "provider_exception");

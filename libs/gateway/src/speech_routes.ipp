@@ -361,7 +361,7 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                 lock.unlock();
                 state->finish(aborted ? 499 : failed ? 500 : 200);
                 sink.done();
-                return false;
+                return true;
             }
             return true;
         },

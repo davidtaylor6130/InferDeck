@@ -3094,6 +3094,79 @@ TEST_CASE("Routes: vision models admit image input and preserve the payload",
     ts.stop();
 }
 
+TEST_CASE("Routes: finite chunked providers report successful completion",
+          "[routes][stream][regression]") {
+    const auto drain = [](httplib::Response& response) {
+        REQUIRE(response.content_provider_);
+        bool done = false;
+        bool provider_succeeded = true;
+        std::string body;
+        httplib::DataSink sink;
+        sink.write = [&body](const char* data, std::size_t size) {
+            body.append(data, size);
+            return true;
+        };
+        sink.is_writable = [] { return true; };
+        sink.done = [&done] { done = true; };
+
+        for (int attempt = 0; attempt < 1000 && !done; ++attempt) {
+            provider_succeeded = response.content_provider_(0, 0, sink);
+            if (!provider_succeeded) break;
+        }
+
+        REQUIRE(done);
+        CHECK(provider_succeeded);
+        return body;
+    };
+
+    SECTION("Chat Completions") {
+        TestServer ts;
+        ts.registry.register_model(make_info("chat-completion"));
+        REQUIRE(ts.coordinator.load("chat-completion"));
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        request.body =
+            R"({"model":"chat-completion","stream":true,"stream_options":{"include_obfuscation":false},"messages":[{"role":"user","content":"test"}]})";
+        httplib::Response response;
+        handle_chat_completions(request, response, ts.make_deps());
+        CHECK(drain(response).ends_with("data: [DONE]\n\n"));
+        CHECK(ts.coordinator.active_request_count() == 0);
+    }
+
+    SECTION("Responses") {
+        TestServer ts;
+        ts.registry.register_model(make_info("responses-completion"));
+        REQUIRE(ts.coordinator.load("responses-completion"));
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        request.body =
+            R"({"model":"responses-completion","stream":true,"input":"test"})";
+        httplib::Response response;
+        handle_responses(request, response, ts.make_deps());
+        CHECK(drain(response).find("event: response.completed") !=
+              std::string::npos);
+        CHECK(ts.coordinator.active_request_count() == 0);
+    }
+
+    SECTION("Speech") {
+        TestServer ts;
+        auto info = make_info("speech-completion");
+        info.runtime = "sherpa_onnx";
+        info.modality = "audio";
+        info.capabilities = {"audio_speech"};
+        ts.registry.register_model(std::move(info));
+        REQUIRE(ts.coordinator.load("speech-completion"));
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        request.body =
+            R"({"model":"speech-completion","input":"test","voice":"default","response_format":"pcm"})";
+        httplib::Response response;
+        handle_audio_speech(request, response, ts.make_deps());
+        CHECK(drain(response) == "RIFF");
+        CHECK(ts.coordinator.active_request_count() == 0);
+    }
+}
+
 TEST_CASE("Routes: chat stream applies producer backpressure until disconnect",
           "[routes][chat][stream][backpressure]") {
     TestServer ts;

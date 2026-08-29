@@ -704,7 +704,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 state->finish_once(false, 200, "completed");
             }
             sink.done();
-            return false;
+            return true;
             } catch (const std::exception& e) {
                 LOG_ERROR("stream_provider_exception", "model={} slot_id={} what={}",
                           state->model_name, state->slot_id, e.what());
