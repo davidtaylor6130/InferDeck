@@ -413,8 +413,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         : nlohmann::json(inference_request.error().field));
         return;
     }
-    if (!derivative &&
-        !apply_openwebui_chat_fields(body, *inference_request, resp)) {
+    if (!apply_openwebui_chat_fields(body, *inference_request, resp)) {
         return;
     }
     std::string requested_model = body["model"].get<std::string>();

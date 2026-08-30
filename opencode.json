@@ -74,18 +74,6 @@
             "output": [
               "text"
             ]
-          },
-          "reasoning": true,
-          "variants": {
-            "low": {
-              "reasoningEffort": "low"
-            },
-            "medium": {
-              "reasoningEffort": "medium"
-            },
-            "high": {
-              "reasoningEffort": "high"
-            }
           }
         },
         "Normal": {
@@ -102,18 +90,6 @@
             "output": [
               "text"
             ]
-          },
-          "reasoning": true,
-          "variants": {
-            "low": {
-              "reasoningEffort": "low"
-            },
-            "medium": {
-              "reasoningEffort": "medium"
-            },
-            "high": {
-              "reasoningEffort": "high"
-            }
           }
         },
         "ornith-1.5-35b-a3b": {
@@ -158,32 +134,33 @@
             "output": [
               "text"
             ]
-          },
-          "reasoning": true,
-          "variants": {
-            "low": {
-              "reasoningEffort": "low"
-            },
-            "medium": {
-              "reasoningEffort": "medium"
-            },
-            "xhigh": {
-              "reasoningEffort": "xhigh"
-            },
-            "off": {
-              "reasoningEffort": "none"
-            }
           }
         },
         "qwen2.5-0.5b-instruct": {
           "name": "qwen2.5-0.5b-instruct",
           "limit": {
             "context": 4096,
-            "output": 512
+            "output": 4096
           },
           "modalities": {
             "input": [
               "text"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "qwen2.5-coder-3b": {
+          "name": "qwen2.5-coder-3b",
+          "limit": {
+            "context": 4096,
+            "output": 4096
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image"
             ],
             "output": [
               "text"
@@ -251,43 +228,12 @@
               "text"
             ]
           }
-        },
-        "qwen3.8-27b": {
-          "name": "qwen3.8-27b",
-          "limit": {
-            "context": 100000,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
-          },
-          "reasoning": true,
-          "variants": {
-            "low": {
-              "reasoningEffort": "low"
-            },
-            "medium": {
-              "reasoningEffort": "medium"
-            },
-            "xhigh": {
-              "reasoningEffort": "xhigh"
-            },
-            "off": {
-              "reasoningEffort": "none"
-            }
-          }
         }
       }
     }
   },
   "model": "inferdeck/Normal",
-  "small_model": "inferdeck/qwen2.5-0.5b-instruct",
+  "small_model": "inferdeck/n8n-model",
   "plugin": [
     "@tarquinen/opencode-dcp",
     "@mohak34/opencode-notifier@latest",

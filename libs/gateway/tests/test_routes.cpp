@@ -982,8 +982,56 @@ TEST_CASE("Strict Chat rejects derivative fields before admission",
     REQUIRE(derivative_response.status == 200);
 }
 
-TEST_CASE("Strict Chat accepts the complete Open WebUI advanced payload",
-          "[routes][chat][openwebui]") {
+TEST_CASE("Strict Chat accepts every supported Open WebUI field",
+          "[routes][chat][openwebui][validation]") {
+    TestServer ts;
+    ts.registry.register_model(make_info("openwebui-model"));
+    REQUIRE(ts.coordinator.load("openwebui-model"));
+    const auto initial_loaded = ts.coordinator.get_loaded_models();
+    const std::vector<std::pair<std::string, nlohmann::json>> fields{
+        {"top_k", 20},
+        {"min_p", 0.1},
+        {"repeat_penalty", 1.1},
+        {"repeat_last_n", 64},
+        {"mirostat", 2},
+        {"mirostat_eta", 0.1},
+        {"mirostat_tau", 5.0},
+        {"tfs_z", 1.0},
+        {"num_ctx", 32768},
+        {"num_predict", 64},
+        {"num_keep", 256},
+        {"num_batch", 512},
+        {"num_thread", 8},
+        {"num_gpu", 99},
+        {"use_mmap", true},
+        {"use_mlock", false},
+        {"think", false},
+        {"format", "json"},
+        {"keep_alive", "5m"},
+    };
+    for (const auto& [field, value] : fields) {
+        INFO(field);
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        nlohmann::json body{
+            {"model", "openwebui-model"},
+            {"messages", nlohmann::json::array({
+                {{"role", "user"}, {"content", "test"}}
+            })},
+        };
+        body[field] = value;
+        request.body = body.dump();
+        httplib::Response response;
+        handle_chat_completions(request, response, ts.make_deps());
+        REQUIRE(response.status == 200);
+        CHECK(ts.coordinator.active_request_count() == 0);
+        CHECK(ts.coordinator.queued_request_count() == 0);
+        CHECK(ts.coordinator.get_loaded_models() == initial_loaded);
+    }
+}
+
+TEST_CASE("Derivative Chat maps the complete Open WebUI advanced payload",
+          "[routes][chat][openwebui][profile]") {
     TestServer ts;
     auto info = make_info("openwebui-model");
     info.context_size = 65536;
@@ -1017,8 +1065,11 @@ TEST_CASE("Strict Chat accepts the complete Open WebUI advanced payload",
         {"think", false},
         {"format", "json"}
     }.dump();
+    auto derivative_deps = ts.make_deps();
+    derivative_deps.compatibility_profile =
+        CompatibilityProfile::OpenAIDerivative;
     httplib::Response response;
-    handle_chat_completions(request, response, ts.make_deps());
+    handle_chat_completions(request, response, derivative_deps);
     REQUIRE(response.status == 200);
     const auto* backend = dynamic_cast<const IModelMock*>(
         ts.coordinator.get_backend("openwebui-model"));
@@ -1041,7 +1092,7 @@ TEST_CASE("Strict Chat accepts the complete Open WebUI advanced payload",
     auto too_large = nlohmann::json::parse(request.body);
     too_large["num_ctx"] = 65537;
     request.body = too_large.dump();
-    handle_chat_completions(request, response, ts.make_deps());
+    handle_chat_completions(request, response, derivative_deps);
     REQUIRE(response.status == 400);
     const auto error = nlohmann::json::parse(response.body)["error"];
     CHECK(error["param"] == "num_ctx");
