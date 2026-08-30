@@ -124,7 +124,7 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
             />
           </div>
         ) : (
-          <div className="mt-3 overflow-x-auto">
+          <div className="mt-3 overflow-x-auto" role="region" aria-label="Runtime models" tabIndex={0}>
             <table className="w-full min-w-[820px] text-left text-sm">
               <thead>
                 <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
@@ -704,7 +704,7 @@ const ModelConfigDialog: React.FC<{
                           {' '}{benchmark.recommended.cacheTypeK}/{benchmark.recommended.cacheTypeV} KV,
                           {' '}batch {benchmark.recommended.nBatch}/{benchmark.recommended.nUbatch}.
                         </p>
-                        <div className="mt-3 overflow-x-auto">
+                        <div className="mt-3 overflow-x-auto" role="region" aria-label="Benchmark comparison" tabIndex={0}>
                           <table className="w-full min-w-[760px] text-left text-xs">
                             <thead>
                               <tr className="border-b border-white/10 uppercase tracking-wide text-text-muted">

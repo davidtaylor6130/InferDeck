@@ -61,6 +61,11 @@ select:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   outline-offset: 2px;
 }
 
+summary:focus-visible {
+  outline: 2px solid var(--queue-blue);
+  outline-offset: 4px;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -264,6 +269,8 @@ select:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   }
 
   .task-header {
+    flex-direction: column;
+    gap: 12px;
     padding-bottom: 18px;
   }
 

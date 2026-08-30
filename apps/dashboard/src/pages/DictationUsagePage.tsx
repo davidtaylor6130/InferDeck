@@ -175,7 +175,7 @@ export const DictationUsagePage: React.FC = () => {
         {usage.length === 0 ? (
           <div className="mt-3"><EmptyState title="No persisted dictation usage" /></div>
         ) : (
-          <div className="mt-3 overflow-x-auto">
+          <div className="mt-3 overflow-x-auto" role="region" aria-label="Per-model dictation usage" tabIndex={0}>
             <table className="w-full min-w-[860px] text-left text-sm">
               <thead>
                 <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">

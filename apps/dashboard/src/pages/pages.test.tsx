@@ -5,10 +5,12 @@ import { parseDocument } from 'yaml';
 import { GatewayContext, type GatewayValue } from '../gateway';
 import { OverviewPage } from './OverviewPage';
 import { ModelsPage } from './ModelsPage';
+import { defaultStoreModelName } from './ModelStorePanel';
 import { OperatePage, stageProfileOptimization } from './OperatePage';
 import type { ProfileOptimizationCandidate } from '../api';
 import { UsagePage } from './UsagePage';
-import { SystemPage } from './SystemPage';
+import { parseDashboardLogLine, SystemPage } from './SystemPage';
+import { FutureWorkspacePage } from './FutureWorkspacePage';
 import type { StatsEvent, StatusPayload } from '../types';
 
 const stats: StatsEvent = {
@@ -90,19 +92,22 @@ const renderWith = (node: React.ReactElement) =>
   renderToStaticMarkup(<GatewayContext.Provider value={value}>{node}</GatewayContext.Provider>);
 
 describe('pages', () => {
-  it('Home shows global LLM and dictation summaries with aggregate counters', () => {
+  it('Home leads with the current runtime, then combined health, usage, and activity', () => {
     const html = renderWith(<OverviewPage />);
-    expect(html).toContain('Everything at a glance');
-    expect(html).toContain('LLM');
-    expect(html).toContain('Dictation');
-    expect(html).toContain('Open LLM');
-    expect(html).toContain('Open Dictation');
+    expect(html).toContain('Runtime now');
+    expect(html).toContain('Current model');
+    expect(html).toContain('qwen3.6-35b-a3b');
+    expect(html).toContain('Processing');
     expect(html).toContain('GPU utilization');
     expect(html).toContain('42%');
-    expect(html).toContain('Tokens in');
+    expect(html).toContain('Lifetime tokens');
     expect(html).toContain('p95 latency');
     expect(html).toContain('Combined usage');
+    expect(html).toContain('All services');
+    expect(html).toContain('Recent activity');
     expect(html).toContain('API-equivalent value');
+    expect(html).not.toContain('Open LLM');
+    expect(html).not.toContain('Open Dictation');
   });
 
   it('LLM and dictation Model Settings pages stay administration-only', () => {
@@ -171,16 +176,33 @@ describe('pages', () => {
     const llm = renderWith(<ModelsPage section="llm" />);
     const dictation = renderWith(<ModelsPage section="dictation" />);
     expect(llm).toContain('LLM Model Store');
-    expect(llm).toContain('Recommended 20–40B');
-    expect(llm).toContain('Recommended only');
+    expect(llm).toContain('1. Find a model');
+    expect(llm).toContain('2. Review and install');
+    expect(llm).toContain('Advanced filters');
+    expect(llm).toContain('Hide low-adoption results');
     expect(llm).toContain('Models on this server');
     expect(dictation).toContain('Dictation Model Store');
     expect(dictation).toContain('Speech to text');
     expect(dictation).toContain('Text to speech');
-    expect(dictation).toContain('complete runtime bundles');
     expect(llm).not.toContain('Stable API aliases');
     expect(llm).not.toContain('Load history');
     expect(dictation).not.toContain('Load history');
+  });
+
+  it('generates a useful editable model name before install', () => {
+    expect(defaultStoreModelName({
+      repo: 'bartowski/Qwen3.5-27B-GGUF',
+      name: 'Qwen3.5-27B-Q4_K_M.gguf',
+    })).toBe('Qwen3.5-27B-GGUF-Qwen3.5-27B-Q4_K_M');
+  });
+
+  it('keeps planned workspaces explicit and non-interactive', () => {
+    for (const area of ['image', 'music', 'post-training'] as const) {
+      const html = renderWith(<FutureWorkspacePage area={area} />);
+      expect(html).toContain('Planned workflow');
+      expect(html).toContain('No controls are active here yet');
+      expect(html).not.toContain('<button');
+    }
   });
 
   it('Usage pages expose correctly scoped LLM and dictation economics', () => {
@@ -204,17 +226,35 @@ describe('pages', () => {
     expect(dictation).not.toContain('Portfolio break-even USD');
   });
 
-  it('Diagnostics pages expose section-specific runtime health', () => {
+  it('Health and alerts pages expose section-specific runtime health before raw logs', () => {
     const llm = renderWith(<SystemPage section="llm" />);
     const dictation = renderWith(<SystemPage section="dictation" />);
     expect(llm).toContain('LLM accelerator');
     expect(llm).toContain('GPU utilization');
+    expect(llm).toContain('Warnings &amp; errors');
+    expect(llm).toContain('Full gateway log');
+    expect(llm.indexOf('Warnings &amp; errors')).toBeLessThan(llm.indexOf('Full gateway log'));
     expect(dictation).toContain('Dictation runtimes');
     expect(dictation).toContain('parakeet-tdt-0.6b-v3');
     expect(dictation).toContain('Dictation host resources');
     expect(dictation).toContain('Configuration recovery');
     expect(dictation).toContain('Complete stable YAML');
-    expect(dictation).toContain('Advanced dictation diagnostics');
+    expect(dictation).toContain('Warnings &amp; errors');
+    expect(dictation).toContain('Full gateway log');
     expect(dictation).toContain('collapsed for safety');
+  });
+
+  it('classifies structured and legacy gateway alerts without guessing from presentation', () => {
+    expect(parseDashboardLogLine('{"ts":1787868000000,"level":"error","event":"model_load_failed","message":"out of VRAM"}')).toEqual({
+      level: 'error',
+      event: 'model_load_failed',
+      message: 'out of VRAM',
+      timestampUnixMs: 1787868000000,
+    });
+    expect(parseDashboardLogLine('[2026-08-28 00:00:00.000] [inferdeck] [warning] event=state_persist_failed error=disk full')).toMatchObject({
+      level: 'warn',
+      event: 'state_persist_failed',
+      message: 'error=disk full',
+    });
   });
 });
