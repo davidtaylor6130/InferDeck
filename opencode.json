@@ -228,6 +228,37 @@
               "text"
             ]
           }
+        },
+        "qwen3.8-27b": {
+          "name": "qwen3.8-27b",
+          "limit": {
+            "context": 100000,
+            "output": 16384
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "reasoning": true,
+          "variants": {
+            "low": {
+              "reasoningEffort": "low"
+            },
+            "medium": {
+              "reasoningEffort": "medium"
+            },
+            "xhigh": {
+              "reasoningEffort": "xhigh"
+            },
+            "off": {
+              "reasoningEffort": "none"
+            }
+          }
         }
       }
     }
