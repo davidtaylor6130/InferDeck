@@ -35,6 +35,22 @@ resolves `static` relative to its executable. Never activate only one
 artifact. Remove stale hashed bundles from the staged static directory before
 the directory swap.
 
+## Prove build identity
+
+Every development and release executable reports its semantic version, full Git
+revision, and dirty state:
+
+```powershell
+& .\build\bin\Release\inferdeck-gateway.exe --version
+```
+
+A release candidate must report the expected 40-character revision and
+`dirty=false`. Source archives without `.git` metadata must configure with
+`-DINFERDECK_BUILD_REVISION=<full-sha>`. After activation,
+`GET /api/inferdeck/v1/health` must report the same `version`, `build_revision`,
+and `build_dirty=false`. Stop verification if the CLI, health response, release
+manifest, and intended source revision do not agree.
+
 ## Backup and activation
 
 Explicit owner authorization is required before writing `C:\InferDeck` or

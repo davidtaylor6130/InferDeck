@@ -18,8 +18,10 @@ Complete a controlled overhaul of InferDeck so that:
 - Architecture rules are enforced by required CI checks instead of relying on
   documentation alone.
 
-This file is the source of truth for the tracked goal. The goal is complete only
-when every required checkbox and the final definition of done are satisfied.
+This file records the overhaul decisions and verification history. Current GitHub
+issue state and current executable evidence govern closure. A checked work item
+records verified implementation; it does not override a later reopened issue or
+an unchecked closure gate.
 
 ## Baseline
 
@@ -44,17 +46,19 @@ when every required checkbox and the final definition of done are satisfied.
 | Phase 5 - Chat Completions | #113 |
 | Phase 6 - Responses | #114 |
 | Phase 7 - Resource roles | #115 |
-| Phase 8 - Audio | #116 |
-| Phase 9 - Lifecycle | #117 |
-| Phase 10 - Configuration | #118 |
-| Phase 11 - Observability and pricing | #119 |
-| Phase 12 - Build and CI | #120 |
-| Phase 13 - Decomposition and documentation | #121 |
+| Phase 8 - Transactional configuration and state | #116 |
+| Phase 9 - Bounded cancellation, deadlines, swap and shutdown | #117 |
+| Phase 10 - Transactional configuration and persistence | #118 |
+| Phase 11 - Protocol-aware observability, usage and pricing | #119 |
+| Phase 12 - Reproducible builds and required architecture checks | #120 |
+| Phase 13 - Implementation decomposition and documentation truth | #121 |
 | Phase 14 - Migration and release | #122 |
 
 Epic #107 defines the milestone order. Each phase issue records its predecessor
 in `Blocked by`, so the dependency chain remains explicit even without relying
-on a repository-specific project-board configuration.
+on a repository-specific project-board configuration. The detailed work sections
+below preserve the original implementation sequence; regrouped GitHub issues can
+cover more than one adjacent work section.
 
 ## Non-negotiable invariants
 
@@ -671,7 +675,10 @@ issue mutation, or issue closure was performed.
 ### Exit gate
 
 - [x] Module boundaries match the target architecture.
-- [x] No protocol or administration god-file remains.
+- [x] No protocol or administration god-file remains. The former gateway
+      hotspots are composition files below 800 lines, with parsing, streaming,
+      static hosting, process handling, benchmark execution and YAML editing in
+      named implementation modules. `implementation_boundaries` enforces this.
 - [x] CMake dependency graph has no cycle or backend-to-gateway dependency.
 
 ## Phase 13 - Documentation and compatibility truth pass
@@ -690,6 +697,10 @@ issue mutation, or issue closure was performed.
 - [x] Document secure LAN deployment and credential rotation.
 - [x] Document config schema and migration.
 - [x] Document release reproducibility and verification.
+- [x] Expose the full Git revision and dirty state through `--version` and the
+      control-plane health response, with a focused regression test.
+- [x] Verify the documented OpenCode export against the live model and alias
+      catalog while preserving unrelated plugins and MCP settings.
 - [x] Add an architecture-change checklist for future agents and developers.
 
 ### Exit gate
@@ -774,8 +785,8 @@ issue mutation, or issue closure was performed.
 - [x] Tag and publish the release with executable, static assets, config templates,
       checksums, SBOM and migration notes.
 - [x] Confirm release CI and downloadable artifact integrity.
-- [x] Close linked issues only with source, test, artifact and live evidence.
-- [x] Close the overhaul epic after every child issue is resolved.
+- [ ] Close linked issues only with source, test, artifact and live evidence.
+- [ ] Close the overhaul epic after every child issue is resolved.
 - [x] Update this file so every completed checkbox reflects verified reality.
 
 ### Post-release remediation (2026-08-23)
@@ -796,17 +807,48 @@ issue mutation, or issue closure was performed.
       attached.
 
 Remediation evidence: PR #143 merged as `0be8e008c006ba0d7cfb7d05f454ff7ffbe86578`
-after all protected checks passed. The matched gateway and dashboard were deployed
-from that revision; the live executable SHA-256 is
-`7FA1960F34E99C584C2D76681B34B01AE06262F344C7D5355B82C6E815888037`. The stopped
-StatsDb backup is retained under
-`C:\InferDeck\deploy-backups\overhaul-remediation-20260823-0019` with SHA-256
-`E14F6BF1F394C65B2636271472C945F9E67C41FE075FAAB8A51AC4C0768FABFF`, and live
-token totals remained monotonic after restart. The live export advertises the
-stable `Normal` and `n8n-model` aliases for Ornith 1.5 and `Pro` for Qwen 3.8,
-while excluding speech-only models. Final issue closure remains gated on the
-0.8.1 release and exact-artifact live verification.
+after all protected checks passed. Its issue comment correctly records that the
+three attempted interactive UAC launches did not deploy that artifact. A later
+read-only audit on 2026-08-30 compared the current live executable with the clean
+pre-change development build from `02c415e64eac47233bfa5d77bd01abda1ce777ea`.
+Both files are 2,866,688 bytes and differ at only six bytes across the two known
+PE timestamp fields, at offsets 288-290 and 2,380,532-2,380,534. The deployed
+static assets match the same checkout. A deterministic live export returned 17
+models, produced 14 OpenCode chat/Responses entries, retained `Normal` and
+`n8n-model`, used the configured LAN `/v1` base URL, and preserved all unrelated
+plugin and MCP settings. No live file, process or service state changed during
+these checks. Final tracker closure still requires an explicitly approved issue
+update; it must not be inferred from these local documentation changes.
 
+## Development completion evidence (2026-08-30)
+
+The non-dashboard implementation and migration follow-up was completed on the
+isolated `codex/finish-overhaul-core` branch. No file, service, process, or
+configuration under `C:\InferDeck` was modified.
+
+- A fresh Release configure and build completed in
+  `C:\tmp\InferDeckOverhaulCore-20260830`.
+- The fresh build passed 133 of 133 labelled CTest cases: 108 unit and 25
+  integration, with zero failures.
+- Dashboard tests remained green at 47 of 47 and the production dashboard build
+  completed without changing its committed asset hashes.
+- OpenCode exporter tests passed 5 of 5; its read-only live export retained all
+  existing plugin and MCP settings and exactly reproduced the repository model
+  catalog.
+- OpenAI JavaScript contract tests passed 3 of 3, supplementary JavaScript tests
+  passed 10 of 10, and the Python SDK contract test passed 1 of 1.
+- Architecture and committed-static policy checks both returned their explicit
+  `OK` verdicts.
+- `inferdeck-gateway --version` and the control-plane health response now expose
+  the exact 40-character source revision and tracked-dirty state. Release
+  documentation rejects dirty artifacts and explains the source-archive override.
+- The five implementation composition roots are mechanically capped at 800 lines
+  by `implementation_boundaries`; their extracted modules remain private textual
+  includes so request/runtime ownership and behaviour do not change.
+
+GitHub issue comments, issue closure, commits, publication, deployment, and live
+activation are separate approval-gated actions and were not performed by this
+development-only run.
 ## Audit finding coverage matrix
 
 | Finding family | Phases |
@@ -861,7 +903,7 @@ Additionally required:
 
 The overhaul goal is complete only when all of the following are true:
 
-- [x] Every checkbox in Phases 0 through 14 is complete or explicitly removed by
+- [ ] Every checkbox in Phases 0 through 14 is complete or explicitly removed by
       an owner-approved amendment to this plan.
 - [x] InferDeck Core builds and operates as one native executable.
 - [x] No Core runtime or deployment path starts a subprocess or proxy service.
@@ -883,7 +925,7 @@ The overhaul goal is complete only when all of the following are true:
 - [x] Required CI prevents every invariant regression listed in this plan.
 - [x] #99 and #103 are resolved with evidence or superseded by owner-approved
       decisions.
-- [x] All new audit issues and the overhaul epic are closed with evidence.
+- [ ] All new audit issues and the overhaul epic are closed with evidence.
 - [x] Documentation matches source, tests, packaged artifacts and live behavior.
-- [x] The matched release is built, published and live-verified when deployment is
+- [ ] The matched release is built, published and live-verified when deployment is
       authorized.

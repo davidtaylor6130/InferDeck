@@ -5,6 +5,23 @@ add_executable(inferdeck-gateway
     src/main.cpp
 )
 
+set(INFERDECK_BUILD_REVISION "" CACHE STRING
+    "Full Git revision for source archives that do not contain .git metadata")
+set(_inferdeck_build_info
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/inferdeck_build_info.hpp")
+add_custom_target(inferdeck-build-info ALL
+    COMMAND ${CMAKE_COMMAND}
+            -DOUTPUT=${_inferdeck_build_info}
+            -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+            -DVERSION=${INFERDECK_VERSION}
+            -DREVISION_OVERRIDE=${INFERDECK_BUILD_REVISION}
+            -P ${CMAKE_SOURCE_DIR}/cmake/GenerateBuildInfo.cmake
+    BYPRODUCTS ${_inferdeck_build_info}
+    VERBATIM)
+add_dependencies(inferdeck-gateway inferdeck-build-info)
+target_include_directories(inferdeck-gateway PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
 find_package(yaml-cpp REQUIRED)
 
 target_link_libraries(inferdeck-gateway PRIVATE
@@ -74,6 +91,22 @@ if(INFERDECK_BUILD_TESTS)
     set_tests_properties(tts_config_tests PROPERTIES LABELS "unit")
     if(WIN32)
         find_program(INFERDECK_POWERSHELL_EXECUTABLE powershell.exe REQUIRED)
+        add_test(NAME build_provenance
+            COMMAND "${INFERDECK_POWERSHELL_EXECUTABLE}" -NoProfile
+                    -ExecutionPolicy Bypass
+                    -File "${CMAKE_SOURCE_DIR}/Testing/Test-BuildProvenance.ps1"
+                    -Gateway "$<TARGET_FILE:inferdeck-gateway>")
+        set_tests_properties(build_provenance PROPERTIES LABELS "integration")
+        add_test(NAME implementation_boundaries
+            COMMAND "${INFERDECK_POWERSHELL_EXECUTABLE}" -NoProfile
+                    -ExecutionPolicy Bypass
+                    -File "${CMAKE_SOURCE_DIR}/Testing/Test-ImplementationBoundaries.ps1")
+        set_tests_properties(implementation_boundaries PROPERTIES LABELS "unit")
+        add_test(NAME documentation_truth
+            COMMAND "${INFERDECK_POWERSHELL_EXECUTABLE}" -NoProfile
+                    -ExecutionPolicy Bypass
+                    -File "${CMAKE_SOURCE_DIR}/Testing/Test-DocumentationTruth.ps1")
+        set_tests_properties(documentation_truth PROPERTIES LABELS "unit")
         add_test(NAME control_security_local
             COMMAND "${INFERDECK_POWERSHELL_EXECUTABLE}" -NoProfile
                     -ExecutionPolicy Bypass

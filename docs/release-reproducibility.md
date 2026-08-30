@@ -3,7 +3,11 @@
 `VERSION` is the authoritative product version. CMake reads it before
 `project()`, native binaries receive it through `INFERDECK_VERSION`, the
 dashboard reads it during the Vite build, and release metadata reads the same
-file. Package metadata must match it at a release commit.
+file. Package metadata must match it at a release commit. The gateway embeds the
+full source revision and dirty state at build time. `--version` and
+`GET /api/inferdeck/v1/health` expose that identity. A clean release must report
+`dirty=false`; a source archive without `.git` metadata must pass the full SHA
+through `INFERDECK_BUILD_REVISION` during CMake configuration.
 
 The Windows release environment is pinned to:
 

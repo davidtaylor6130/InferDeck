@@ -169,12 +169,14 @@ Generated images, synthesized audio, uploaded audio, transcripts, chat output, a
 ## Source layout
 
 ```text
-apps/inferdeck-gateway/       executable wiring and static dashboard serving
+apps/inferdeck-gateway/       composition root plus process, static-hosting and
+                             benchmark implementation modules
 apps/dashboard/               React dashboard
 libs/model/                   contracts, registry, shared queue/coordinator
 libs/llama_cpp_wrapper/       in-process llama.cpp implementation
 libs/native_runtimes/         optional image, TTS, and STT adapters
-libs/gateway/                 protocol routes, streaming, model store, SSE
+libs/gateway/                 endpoint adapters plus focused content parsing,
+                             stream serialization and control YAML modules
 libs/observability/           GPU telemetry, metrics, SQLite
 libs/foundation/              Result/Error, logging, EventBus
 ```
