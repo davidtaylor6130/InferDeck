@@ -39,6 +39,7 @@ struct GatewayDeps {
     SwapTracker* swap_tracker{nullptr};
     std::atomic<ComputeResource>* maintenance_resource{nullptr};
     CompatibilityProfile compatibility_profile{CompatibilityProfile::StrictOpenAI};
+    std::chrono::milliseconds swap_timeout{std::chrono::minutes{5}};
 };
 
 struct RequestObservation {
@@ -110,13 +111,17 @@ std::string serialize_chat_stream_delta(const std::string& id,
                                         std::int64_t created,
                                         const nlohmann::json& delta,
                                         bool include_usage,
-                                        bool include_reasoning_content = false);
+                                        bool include_reasoning_content = false,
+                                        const std::string& service_tier = {},
+                                        bool include_obfuscation = true);
 std::string serialize_chat_stream_terminal(const std::string& id,
                                            const std::string& model,
                                            std::int64_t created,
                                            const std::string& finish_reason,
                                            const model::InferenceResult* result,
-                                           bool include_usage);
+                                           bool include_usage,
+                                           const std::string& service_tier = {},
+                                           bool include_obfuscation = true);
 std::string header_value(const httplib::Request& req, const std::string& name);
 std::string request_client_key(const httplib::Request& req);
 bool require_json_media_type(const httplib::Request& req,
@@ -133,7 +138,8 @@ struct AcquiredGenerationSlot {
 std::optional<AcquiredGenerationSlot> acquire_generation_slot(
     const httplib::Request& req, httplib::Response& resp,
     const GatewayDeps& deps, int priority,
-    const std::string& requested_model, const std::string& resolved_model);
+    const std::string& requested_model, const std::string& resolved_model,
+    std::string reservation_key = {});
 
 struct SwapStartResult {
     int status{200};

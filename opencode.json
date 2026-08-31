@@ -74,18 +74,6 @@
             "output": [
               "text"
             ]
-          },
-          "reasoning": true,
-          "variants": {
-            "low": {
-              "reasoningEffort": "low"
-            },
-            "medium": {
-              "reasoningEffort": "medium"
-            },
-            "high": {
-              "reasoningEffort": "high"
-            }
           }
         },
         "Normal": {
@@ -102,18 +90,6 @@
             "output": [
               "text"
             ]
-          },
-          "reasoning": true,
-          "variants": {
-            "low": {
-              "reasoningEffort": "low"
-            },
-            "medium": {
-              "reasoningEffort": "medium"
-            },
-            "high": {
-              "reasoningEffort": "high"
-            }
           }
         },
         "ornith-1.5-35b-a3b": {
@@ -158,32 +134,33 @@
             "output": [
               "text"
             ]
+          }
+        },
+        "qwen2.5-0.5b-instruct": {
+          "name": "qwen2.5-0.5b-instruct",
+          "limit": {
+            "context": 4096,
+            "output": 4096
           },
-          "reasoning": true,
-          "variants": {
-            "low": {
-              "reasoningEffort": "low"
-            },
-            "medium": {
-              "reasoningEffort": "medium"
-            },
-            "xhigh": {
-              "reasoningEffort": "xhigh"
-            },
-            "off": {
-              "reasoningEffort": "none"
-            }
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
           }
         },
         "qwen2.5-coder-3b": {
           "name": "qwen2.5-coder-3b",
           "limit": {
-            "context": 32768,
-            "output": 16384
+            "context": 4096,
+            "output": 4096
           },
           "modalities": {
             "input": [
-              "text"
+              "text",
+              "image"
             ],
             "output": [
               "text"

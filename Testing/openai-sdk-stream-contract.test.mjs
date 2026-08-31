@@ -8,6 +8,38 @@ const jsonResponse = (body) => new Response(JSON.stringify(body), {
   headers: { 'content-type': 'application/json' },
 });
 
+const interfaceFields = (source, name) => {
+  const clean = source.replace(/\/\*[\s\S]*?\*\//g, '');
+  const marker = `export interface ${name}`;
+  const start = clean.indexOf(marker);
+  assert.notEqual(start, -1, `missing SDK interface ${name}`);
+  const open = clean.indexOf('{', start);
+  let depth = 1;
+  const fields = [];
+  for (const line of clean.slice(open + 1).split('\n')) {
+    if (depth === 1) {
+      const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\??:/);
+      if (match) fields.push(match[1]);
+    }
+    for (const character of line) {
+      if (character === '{') depth += 1;
+      if (character === '}') depth -= 1;
+    }
+    if (depth === 0) break;
+  }
+  return fields.sort();
+};
+
+const cppStringSet = (source, marker) => {
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `missing C++ field set ${marker}`);
+  const end = source.indexOf('};', start);
+  assert.notEqual(end, -1, `unterminated C++ field set ${marker}`);
+  return [...source.slice(start, end).matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"/g)]
+    .map((match) => match[1])
+    .sort();
+};
+
 const responseObject = {
   id: 'resp_contract',
   object: 'response',
@@ -50,6 +82,54 @@ const responseObject = {
   },
 };
 
+test('strict parameter allowlists exactly track the pinned OpenAI SDK', async () => {
+  const [chatSdk, responsesSdk, embeddingsSdk, imagesSdk, speechSdk,
+    transcriptionsSdk, chatRoute, responsesAdapter, embeddingsRoute,
+    imagesRoute, speechRoute, transcriptionsRoute] = await Promise.all([
+    readFile(new URL('../node_modules/openai/resources/chat/completions/completions.d.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../node_modules/openai/resources/responses/responses.d.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../node_modules/openai/resources/embeddings.d.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../node_modules/openai/resources/images.d.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../node_modules/openai/resources/audio/speech.d.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../node_modules/openai/resources/audio/transcriptions.d.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../libs/gateway/src/chat_routes.ipp', import.meta.url), 'utf8'),
+    readFile(new URL('../libs/gateway/src/responses_adapter.cpp', import.meta.url), 'utf8'),
+    readFile(new URL('../libs/gateway/src/embeddings_routes.ipp', import.meta.url), 'utf8'),
+    readFile(new URL('../libs/gateway/src/image_routes.ipp', import.meta.url), 'utf8'),
+    readFile(new URL('../libs/gateway/src/speech_routes.ipp', import.meta.url), 'utf8'),
+    readFile(new URL('../libs/gateway/src/transcription_routes.ipp', import.meta.url), 'utf8'),
+  ]);
+  assert.deepEqual(
+    cppStringSet(chatRoute, 'supported_fields{'),
+    interfaceFields(chatSdk, 'ChatCompletionCreateParamsBase'),
+  );
+  const responses = cppStringSet(
+    responsesAdapter.slice(responsesAdapter.indexOf('parse_openai_responses_request')),
+    'fields{',
+  ).filter((field) => field !== 'priority');
+  assert.deepEqual(responses, interfaceFields(responsesSdk, 'ResponseCreateParamsBase'));
+  assert.deepEqual(
+    cppStringSet(embeddingsRoute, 'supported{'),
+    interfaceFields(embeddingsSdk, 'EmbeddingCreateParams'),
+  );
+  assert.deepEqual(
+    cppStringSet(imagesRoute, 'supported_fields{'),
+    interfaceFields(imagesSdk, 'ImageGenerateParamsBase'),
+  );
+  assert.deepEqual(
+    cppStringSet(speechRoute, 'fields{'),
+    interfaceFields(speechSdk, 'SpeechCreateParams'),
+  );
+  const transcription = cppStringSet(transcriptionsRoute, 'strict_fields{')
+    .filter((field) => !field.endsWith('[]'));
+  transcription.push('file');
+  transcription.sort();
+  assert.deepEqual(
+    transcription,
+    interfaceFields(transcriptionsSdk, 'TranscriptionCreateParamsBase'),
+  );
+});
+
 test('official OpenAI SDK parses InferDeck Chat streaming usage ordering', async () => {
   const body = await readFile(
     new URL('../tests/fixtures/oai_chat_stream_contract.sse', import.meta.url),
@@ -63,6 +143,8 @@ test('official OpenAI SDK parses InferDeck Chat streaming usage ordering', async
       const request = JSON.parse(init.body);
       assert.equal(request.stream, true);
       assert.equal(request.stream_options.include_usage, true);
+      assert.equal(request.frequency_penalty, 1.2);
+      assert.equal(request.presence_penalty, -0.4);
       return new Response(body, {
         status: 200,
         headers: { 'content-type': 'text/event-stream' },
@@ -73,6 +155,8 @@ test('official OpenAI SDK parses InferDeck Chat streaming usage ordering', async
     model: 'contract-model',
     messages: [{ role: 'user', content: 'test' }],
     tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } }],
+    frequency_penalty: 1.2,
+    presence_penalty: -0.4,
     stream: true,
     stream_options: { include_usage: true },
   });

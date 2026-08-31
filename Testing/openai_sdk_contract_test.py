@@ -53,6 +53,7 @@ RESPONSE_OBJECT = {
 class StrictOpenAIContractTest(unittest.TestCase):
     def setUp(self):
         self.requested = []
+        self.chat_request = None
         self.client = OpenAI(
             api_key="contract-test",
             base_url="http://inferdeck.test/v1",
@@ -71,6 +72,7 @@ class StrictOpenAIContractTest(unittest.TestCase):
                 "data": [{"id": "contract-model", "object": "model", "created": 0, "owned_by": "inferdeck"}],
             })
         if path == "/v1/chat/completions":
+            self.chat_request = json.loads(request.content)
             return httpx2.Response(200, json={
                 "id": "chatcmpl-contract",
                 "object": "chat.completion",
@@ -125,8 +127,12 @@ class StrictOpenAIContractTest(unittest.TestCase):
         chat = self.client.chat.completions.create(
             model="contract-model",
             messages=[{"role": "user", "content": "Hello"}],
+            frequency_penalty=1.2,
+            presence_penalty=-0.4,
         )
         self.assertEqual(chat.choices[0].message.content, "Hello")
+        self.assertEqual(self.chat_request["frequency_penalty"], 1.2)
+        self.assertEqual(self.chat_request["presence_penalty"], -0.4)
         response = self.client.responses.create(
             model="contract-model", input="Hello", store=False)
         self.assertEqual(response.output_text, "Hello")

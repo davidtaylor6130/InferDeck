@@ -89,6 +89,10 @@ model_aliases:
     target: qwen3.8-27b
     required_context_size: 100000
     required_capabilities: [chat_completions, responses]
+  - name: qwen2.5-coder-3b
+    target: qwen2.5-0.5b-instruct
+    required_context_size: 4096
+    required_capabilities: [chat_completions, responses]
 
 model_registry:
   - name: "supertonic-3"
@@ -233,7 +237,7 @@ model_registry:
     gguf_path: "C:/Inferdeck/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
     mmproj_path: ""
     n_slots: 2
-    vram_required_mb: 24000
+    vram_required_mb: 26000
     context_size: 100096
     has_vision: false
     # Corrected Qwen3.6 chat template: avoids the "No user query found in messages."
@@ -269,9 +273,11 @@ model_registry:
       none_disables: false
     optimization:
       status: "measured"
-      measured_at: "2026-08-20"
-      single_tokens_per_second: 121.24
-      parallel_tokens_per_second: 229.61
+      measured_at: "2026-08-24"
+      quality_passes: 3
+      quality_total: 3
+      single_tokens_per_second: 132.53
+      parallel_tokens_per_second: 161.02
     has_vision: true
     sampling:
       temperature: 0.6
@@ -319,16 +325,25 @@ model_registry:
       min_p: 0.0
       repeat_penalty: 1.05
 
-  - name: "qwen2.5-coder-3b"
+  - name: "qwen2.5-0.5b-instruct"
     family: "qwen2.5"
     prompt_price_per_million: 0.10
     cached_prompt_price_per_million: 0.10
     completion_price_per_million: 0.10
-    gguf_path: "C:/Inferdeck/models/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
+    gguf_path: "C:/InferDeck/models/Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf"
     mmproj_path: null
-    n_slots: 16
-    vram_required_mb: 2500
-    context_size: 32768
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 900
+    context_size: 4096
+    n_gpu_layers: 0
+    role: helper
+    compute: cpu
+    residency: always
+    admission_pool: helper
+    concurrency_limit: 1
+    memory_required_mb: 2048
+    eviction_eligible: false
     has_vision: false
     # Qwen2.5 recommended generation config: temp 0.7, top_p 0.8, top_k 20,
     # repetition_penalty 1.05.

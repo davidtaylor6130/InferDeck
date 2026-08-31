@@ -66,12 +66,23 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
     }
     const std::string format = req.form.has_field("response_format") ? req.form.get_field("response_format") : "json";
     if (format != "json" && format != "text" && format != "verbose_json" &&
-        format != "srt" && format != "vtt") {
+        format != "srt" && format != "vtt" && format != "diarized_json") {
         write_error(resp, 400, "unsupported_response_format",
                     "response_format must be json, text, verbose_json, srt, or vtt",
                     "response_format");
         return;
     }
+    std::string capability_field;
+    std::string capability;
+    const auto require_capability = [&](std::string field,
+                                        std::string description) {
+        if (capability_field.empty()) {
+            capability_field = std::move(field);
+            capability = std::move(description);
+        }
+    };
+    if (format == "diarized_json")
+        require_capability("response_format", "speaker diarization");
     if (req.form.has_field("stream")) {
         const auto stream = req.form.get_field("stream");
         if (stream != "true" && stream != "false") {
@@ -80,10 +91,7 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
             return;
         }
         if (stream == "true") {
-            write_error(resp, 400, "unsupported_parameter",
-                        "streaming transcription is not supported by this native runtime",
-                        "stream");
-            return;
+            require_capability("stream", "streaming transcription");
         }
     }
     for (const auto& name : {"chunking_strategy", "include", "include[]",
@@ -92,11 +100,7 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
                              "known_speaker_references[]", "languages",
                              "languages[]"}) {
         if (req.form.has_field(name)) {
-            write_error(resp, 400, "unsupported_parameter",
-                        std::string{name} +
-                            " is not supported by this native transcription runtime",
-                        name);
-            return;
+            require_capability(name, std::string{name} + " transcription");
         }
     }
     std::vector<std::string> granularities =
@@ -112,11 +116,17 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
                         "timestamp_granularities");
             return;
         }
-        if (granularities.size() != 1 || granularities.front() != "segment") {
-            write_error(resp, 400, "unsupported_parameter",
-                        "only segment timestamp granularity is supported",
-                        "timestamp_granularities");
-            return;
+        for (const auto& granularity : granularities) {
+            if (granularity != "word" && granularity != "segment") {
+                write_error(resp, 400, "invalid_transcription_request",
+                            "timestamp granularities must be word or segment",
+                            "timestamp_granularities");
+                return;
+            }
+            if (granularity == "word") {
+                require_capability("timestamp_granularities",
+                                   "word-level transcription timestamps");
+            }
         }
     }
     auto parameters = apply_transcription_parameters(
@@ -132,6 +142,21 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         return;
     }
     const std::string& runtime_model = resolved_model->resolved;
+    const auto info =
+        deps.coordinator.registry().get_info_result(runtime_model);
+    if (!info || !info->supports("audio_transcription")) {
+        write_error(resp, 400, "unsupported_capability",
+                    "model does not support audio transcription: " +
+                        runtime_model);
+        return;
+    }
+    if (!capability_field.empty()) {
+        write_error(resp, 400, "unsupported_capability",
+                    "model '" + runtime_model + "' does not support " +
+                        capability,
+                    capability_field);
+        return;
+    }
     VoiceSessionGuard voice_session(req, deps);
     auto job = begin_job(model_name, "audio_transcription");
     if (deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative) {

@@ -359,6 +359,37 @@ TEST_CASE("Repository Qwen 3.6 27B profile enables the measured adaptive MTP set
     CHECK(qwen->optimization.schedule_window_end == "04:00");
 }
 
+TEST_CASE("Repository gateway configuration reserves measured Qwen resources",
+          "[config][resources][vram]") {
+    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "config" / "gateway.yml";
+    const auto config = load_config(path);
+    const auto qwen35 = std::find_if(
+        config.models.begin(), config.models.end(),
+        [](const auto& model) { return model.name == "qwen3.6-35b-a3b"; });
+    const auto helper = std::find_if(
+        config.models.begin(), config.models.end(),
+        [](const auto& model) {
+            return model.name == "qwen2.5-0.5b-instruct";
+        });
+    REQUIRE(qwen35 != config.models.end());
+    REQUIRE(helper != config.models.end());
+    CHECK(qwen35->vram_required_mb == 26000);
+    CHECK(helper->n_slots == 1);
+    CHECK(helper->context_size == 4096);
+    CHECK(helper->vram_required_mb == 900);
+    REQUIRE(helper->n_gpu_layers);
+    CHECK(*helper->n_gpu_layers == 0);
+    CHECK(helper->resource_metadata_explicit);
+    CHECK(helper->role == inferdeck::model::ModelRole::Helper);
+    CHECK(helper->compute == inferdeck::model::ModelCompute::Cpu);
+    CHECK(helper->residency == inferdeck::model::ResidencyPolicy::Always);
+    CHECK(helper->admission_pool == "helper");
+    CHECK(helper->concurrency_limit == 1);
+    CHECK(helper->memory_required_mb == 2048);
+    CHECK_FALSE(helper->eviction_eligible);
+}
+
 TEST_CASE("Repository gateway configuration exposes native speech models",
           "[config][speech-config]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /

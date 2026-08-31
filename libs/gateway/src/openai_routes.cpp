@@ -110,6 +110,38 @@ nlohmann::json response_usage(const nlohmann::json& chat_usage) {
     };
 }
 
+bool responses_request_wants_logprobs(const nlohmann::json& request) {
+    if (request.contains("top_logprobs") &&
+        !request["top_logprobs"].is_null()) {
+        return true;
+    }
+    return request.contains("include") && request["include"].is_array() &&
+        std::find(request["include"].begin(), request["include"].end(),
+                  "message.output_text.logprobs") != request["include"].end();
+}
+
+nlohmann::json responses_logprobs(
+    const std::vector<inference::TokenLogprob>& values, bool include_bytes) {
+    nlohmann::json output = nlohmann::json::array();
+    for (const auto& value : values) {
+        nlohmann::json top = nlohmann::json::array();
+        for (const auto& candidate : value.top_logprobs) {
+            nlohmann::json item{
+                {"token", candidate.token}, {"logprob", candidate.logprob},
+            };
+            if (include_bytes) item["bytes"] = candidate.bytes;
+            top.push_back(std::move(item));
+        }
+        nlohmann::json item{
+            {"token", value.token}, {"logprob", value.logprob},
+            {"top_logprobs", std::move(top)},
+        };
+        if (include_bytes) item["bytes"] = value.bytes;
+        output.push_back(std::move(item));
+    }
+    return output;
+}
+
 
 nlohmann::json result_to_response(const model::InferenceResult& result,
                                   const nlohmann::json& request,
@@ -127,13 +159,17 @@ nlohmann::json result_to_response(const model::InferenceResult& result,
         });
     }
     if (!result.text.empty()) {
+        nlohmann::json content{
+            {"type", "output_text"}, {"text", result.text},
+            {"annotations", nlohmann::json::array()},
+        };
+        if (responses_request_wants_logprobs(request)) {
+            content["logprobs"] = responses_logprobs(result.logprobs, true);
+        }
         output.push_back({
             {"id", make_id("msg_")}, {"type", "message"},
             {"status", "completed"}, {"role", "assistant"},
-            {"content", nlohmann::json::array({{
-                {"type", "output_text"}, {"text", result.text},
-                {"annotations", nlohmann::json::array()},
-            }})},
+            {"content", nlohmann::json::array({std::move(content)})},
         });
     }
     for (const auto& tool : result.tool_calls) {
@@ -200,8 +236,10 @@ struct ResponsesStreamState {
     int sequence{0};
     bool started{false};
     bool completed{false};
+    bool include_obfuscation{true};
     std::string text;
     std::string reasoning;
+    std::vector<inference::TokenLogprob> logprobs;
     std::map<std::size_t, ToolStreamState> tools;
     nlohmann::json usage = nlohmann::json::object();
 };
@@ -242,6 +280,9 @@ nlohmann::json stream_response_object(const ResponsesStreamState& state,
 bool emit_response_event(ResponsesStreamState& state, httplib::DataSink& sink,
                          nlohmann::json event) {
     event["sequence_number"] = state.sequence++;
+    if (state.include_obfuscation) {
+        event["obfuscation"] = make_id("obf_").substr(4);
+    }
     const std::string type = event.value("type", "response.event");
     const std::string frame = "event: " + type + "\ndata: " +
         event.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n\n";
@@ -309,11 +350,14 @@ bool apply_sanitized_generation_delta(ResponsesStreamState& state,
     if (!delta.content.empty()) {
         if (!ensure_message_stream(state, sink)) return false;
         state.text += delta.content;
+        state.logprobs.insert(state.logprobs.end(), delta.logprobs.begin(),
+                              delta.logprobs.end());
         if (!emit_response_event(state, sink, {
             {"type", "response.output_text.delta"},
             {"item_id", state.message_id},
             {"output_index", *state.message_index}, {"content_index", 0},
             {"delta", delta.content},
+            {"logprobs", responses_logprobs(delta.logprobs, false)},
         })) return false;
     }
     for (const auto& source : delta.tool_calls) {
@@ -369,12 +413,17 @@ nlohmann::json completed_stream_output(const ResponsesStreamState& state) {
         }});
     }
     if (state.message_index) {
+        nlohmann::json content{
+            {"type", "output_text"}, {"text", state.text},
+            {"annotations", nlohmann::json::array()},
+        };
+        if (responses_request_wants_logprobs(state.request)) {
+            content["logprobs"] = responses_logprobs(state.logprobs, true);
+        }
         indexed.push_back({*state.message_index, {
             {"id", state.message_id}, {"type", "message"}, {"status", "completed"},
             {"role", "assistant"},
-            {"content", nlohmann::json::array({{{"type", "output_text"},
-                                                  {"text", state.text},
-                                                  {"annotations", nlohmann::json::array()}}})},
+            {"content", nlohmann::json::array({std::move(content)})},
         }});
     }
     for (const auto& [_, tool] : state.tools) {
@@ -408,12 +457,19 @@ bool finish_response_stream(ResponsesStreamState& state, httplib::DataSink& sink
             {"type", "response.output_text.done"}, {"item_id", state.message_id},
             {"output_index", *state.message_index}, {"content_index", 0},
             {"text", state.text},
+            {"logprobs", responses_logprobs(state.logprobs, false)},
         })) return false;
+        nlohmann::json part{
+            {"type", "output_text"}, {"text", state.text},
+            {"annotations", nlohmann::json::array()},
+        };
+        if (responses_request_wants_logprobs(state.request)) {
+            part["logprobs"] = responses_logprobs(state.logprobs, true);
+        }
         if (!emit_response_event(state, sink, {
             {"type", "response.content_part.done"}, {"item_id", state.message_id},
             {"output_index", *state.message_index}, {"content_index", 0},
-            {"part", {{"type", "output_text"}, {"text", state.text},
-                      {"annotations", nlohmann::json::array()}}},
+            {"part", std::move(part)},
         })) return false;
     }
     const auto output = completed_stream_output(state);

@@ -116,6 +116,20 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
   result.sampling_params.min_p         = req.sampling.min_p.value_or(sc.min_p);
   result.sampling_params.penalty_repeat = req.sampling.repeat_penalty.value_or(sc.repeat_penalty);
   result.sampling_params.penalty_last_n = req.sampling.repeat_last_n.value_or(sc.repeat_last_n);
+  result.sampling_params.penalty_freq = req.sampling.frequency_penalty.value_or(0.0f);
+  result.sampling_params.penalty_present = req.sampling.presence_penalty.value_or(0.0f);
+  if (req.sampling.mirostat) result.sampling_params.mirostat = *req.sampling.mirostat;
+  if (req.sampling.mirostat_eta) {
+    result.sampling_params.mirostat_eta = *req.sampling.mirostat_eta;
+  }
+  if (req.sampling.mirostat_tau) {
+    result.sampling_params.mirostat_tau = *req.sampling.mirostat_tau;
+  }
+  result.sampling_params.logit_bias.reserve(req.sampling.logit_bias.size());
+  for (const auto& [token, bias] : req.sampling.logit_bias) {
+    result.sampling_params.logit_bias.push_back({
+        static_cast<llama_token>(token), bias});
+  }
   result.sampling_params.dry_multiplier     = sc.dry_multiplier;
   result.sampling_params.dry_base           = sc.dry_base;
   result.sampling_params.dry_allowed_length = sc.dry_allowed_length;
@@ -180,7 +194,10 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
   // oldest messages (history-aware truncation, issue #38) before tokenizing.
   // Mirrors the reserve/target maths in maybe_truncate_prompt, which remains as
   // a hard safety net for the pathological single-oversized-message case.
-  const int n_ctx_seq = static_cast<int>(llama_n_ctx_seq(shared_ctx_));
+  const int loaded_n_ctx_seq = static_cast<int>(llama_n_ctx_seq(shared_ctx_));
+  const int n_ctx_seq = req.context_window
+      ? std::min(loaded_n_ctx_seq, *req.context_window)
+      : loaded_n_ctx_seq;
   int budget = 0;
   if (cfg_.truncate_prompt && n_ctx_seq > 0) {
     // See maybe_truncate_prompt: clamp bounds must satisfy lo <= hi (UB
@@ -352,7 +369,7 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
   }
 
   // Per-slot context window = n_ctx_seq (total context / n_slots as set during load)
-  s.n_ctx_seq = static_cast<int>(llama_n_ctx_seq(shared_ctx_));
+  s.n_ctx_seq = n_ctx_seq;
 
   const int prompt_context = s.prompt_position_count > 0
       ? s.prompt_position_count

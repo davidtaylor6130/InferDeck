@@ -29,53 +29,90 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
                 return;
             }
         }
-        const auto compatible_default =
-            [&body, &resp](std::string_view field, std::string_view value) {
+        const auto validate_enum =
+            [&body, &resp](std::string_view field,
+                           const std::unordered_set<std::string>& values) {
             if (!body.contains(field) || body[field].is_null()) return true;
             if (!body[field].is_string() ||
-                body[field].get<std::string>() != value) {
-                write_error(resp, 400, "unsupported_parameter",
-                            std::string(field) + " is not supported by the native image runtime",
+                !values.contains(body[field].get<std::string>())) {
+                write_error(resp, 400, "invalid_image_request",
+                            std::string(field) + " has an invalid value",
                             std::string(field));
                 return false;
             }
             return true;
         };
-        if (!compatible_default("background", "auto") ||
-            !compatible_default("moderation", "auto") ||
-            !compatible_default("output_format", "png") ||
-            !compatible_default("quality", "auto") ||
-            !compatible_default("response_format", "b64_json")) {
-            return;
-        }
+        if (!validate_enum("background", {"transparent", "opaque", "auto"}) ||
+            !validate_enum("moderation", {"low", "auto"}) ||
+            !validate_enum("output_format", {"png", "jpeg", "webp"}) ||
+            !validate_enum("quality", {"standard", "hd", "low", "medium", "high", "auto"}) ||
+            !validate_enum("response_format", {"url", "b64_json"}) ||
+            !validate_enum("style", {"vivid", "natural"})) return;
+        const auto require_native_default =
+            [&body, &resp](std::string_view field, std::string_view value) {
+            if (!body.contains(field) || body[field].is_null() ||
+                (body[field].is_string() &&
+                 body[field].get<std::string>() == value)) return true;
+            write_error(resp, 400, "unsupported_capability",
+                        "native image model does not support the requested " +
+                            std::string(field), std::string(field));
+            return false;
+        };
+        if (!require_native_default("background", "auto") ||
+            !require_native_default("moderation", "auto") ||
+            !require_native_default("output_format", "png") ||
+            !require_native_default("quality", "auto") ||
+            !require_native_default("response_format", "b64_json")) return;
         if (body.contains("style") && !body["style"].is_null()) {
-            write_error(resp, 400, "unsupported_parameter",
+            write_error(resp, 400, "unsupported_capability",
                         "style is not supported by the native image runtime",
                         "style");
             return;
         }
         if (body.contains("output_compression") &&
             !body["output_compression"].is_null()) {
-            write_error(resp, 400, "unsupported_parameter",
+            if (!body["output_compression"].is_number_integer() ||
+                body["output_compression"].get<int>() < 0 ||
+                body["output_compression"].get<int>() > 100) {
+                write_error(resp, 400, "invalid_image_request",
+                            "output_compression must be between 0 and 100",
+                            "output_compression");
+                return;
+            }
+            write_error(resp, 400, "unsupported_capability",
                         "output_compression is not supported for PNG output",
                         "output_compression");
             return;
         }
         if (body.contains("stream") && !body["stream"].is_null() &&
-            (!body["stream"].is_boolean() || body["stream"].get<bool>())) {
-            write_error(resp, 400, "unsupported_parameter",
+            !body["stream"].is_boolean()) {
+            write_error(resp, 400, "invalid_image_request",
+                        "stream must be a boolean", "stream");
+            return;
+        }
+        if (body.contains("stream") && body["stream"].is_boolean() &&
+            body["stream"].get<bool>()) {
+            write_error(resp, 400, "unsupported_capability",
                         "streaming image generation is not supported",
                         "stream");
             return;
         }
         if (body.contains("partial_images") &&
-            !body["partial_images"].is_null() &&
-            (!body["partial_images"].is_number_integer() ||
-             body["partial_images"].get<int>() != 0)) {
-            write_error(resp, 400, "unsupported_parameter",
+            !body["partial_images"].is_null()) {
+            if (!body["partial_images"].is_number_integer() ||
+                body["partial_images"].get<int>() < 0 ||
+                body["partial_images"].get<int>() > 3) {
+                write_error(resp, 400, "invalid_image_request",
+                            "partial_images must be between 0 and 3",
+                            "partial_images");
+                return;
+            }
+            if (body["partial_images"].get<int>() != 0) {
+                write_error(resp, 400, "unsupported_capability",
                         "partial_images requires unsupported image streaming",
                         "partial_images");
-            return;
+                return;
+            }
         }
         if (body.contains("user") &&
             (!body["user"].is_string() ||
@@ -131,7 +168,7 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     char trailing = '\0';
     if (std::sscanf(size.c_str(), "%dx%d%c", &request.width, &request.height, &trailing) != 2 ||
         model_name.empty() || request.prompt.empty() || request.prompt.size() > 32000 ||
-        request.negative_prompt.size() > 32768 || request.count < 1 || request.count > 4 ||
+        request.negative_prompt.size() > 32768 || request.count < 1 || request.count > 10 ||
         request.width < 256 || request.height < 256 || request.width > 2048 || request.height > 2048 ||
         request.width % 64 != 0 || request.height % 64 != 0 || request.steps < 1 || request.steps > 200 ||
         !std::isfinite(request.guidance_scale) || request.guidance_scale < 0.0f || request.guidance_scale > 50.0f) {

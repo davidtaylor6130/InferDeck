@@ -14,6 +14,7 @@ std::string template_role(inference::MessageRole role) {
     if (role == inference::MessageRole::System) return "system";
     if (role == inference::MessageRole::Assistant) return "assistant";
     if (role == inference::MessageRole::Tool) return "tool";
+    if (role == inference::MessageRole::Function) return "function";
     return "user";
 }
 

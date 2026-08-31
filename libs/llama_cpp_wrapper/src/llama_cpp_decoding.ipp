@@ -14,7 +14,7 @@ Result<void> LlamaCppModel::drain_task(SlotTask& task, const OnToken& on_token) 
       return Result<void>(std::unexpect, make_error(ErrorCode::Internal, ev.error_msg));
     if (ev.is_done)
       return Result<void>{};
-    if (!on_token(ev.id) && !task.caller_stop.load())
+    if (!on_token(ev) && !task.caller_stop.load())
       task.caller_cancel.store(true);
   }
 }
@@ -58,12 +58,17 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   task.sampler             = setup.smp;   // scheduler takes ownership
   task.max_tokens          = setup.max_tokens;
   task.stop_tokens         = setup.stop_tokens;
+  task.capture_probabilities = req.logprobs;
+  task.top_probabilities   = req.top_logprobs;
 
   scheduler_->submit(&task);
 
-  auto drain_res = drain_task(task, [&](llama_token id) -> bool {
+  std::vector<inference::TokenLogprob> generated_logprobs;
+  auto drain_res = drain_task(task, [&](const TokenEvent& event) -> bool {
+    const llama_token id = event.id;
     if (string_stopped) return false; // already stopping
-    generated.append(token_to_piece(vocab_, id));
+    const std::string piece = token_to_piece(vocab_, id);
+    generated.append(piece);
     for (const auto& stop : setup.stop_strings) {
       if (!stop.empty() && generated.size() >= stop.size() &&
           generated.compare(generated.size() - stop.size(), stop.size(), stop) == 0) {
@@ -74,6 +79,22 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
       }
     }
     decoded_ids.push_back(id);
+    if (req.logprobs) {
+      inference::TokenLogprob token;
+      token.token = piece;
+      token.bytes.assign(piece.begin(), piece.end());
+      token.logprob = std::log(std::max(
+          event.probability, std::numeric_limits<float>::min()));
+      for (const auto& [top_id, probability] : event.top_probabilities) {
+        inference::TopTokenLogprob top;
+        top.token = token_to_piece(vocab_, top_id);
+        top.bytes.assign(top.token.begin(), top.token.end());
+        top.logprob = std::log(std::max(
+            probability, std::numeric_limits<float>::min()));
+        token.top_logprobs.push_back(std::move(top));
+      }
+      generated_logprobs.push_back(std::move(token));
+    }
     return true;
   });
   if (!drain_res.has_value())
@@ -130,6 +151,9 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
       apply_fallback_tool_calls(out, out.text);
   }
   out.reasoning_tokens = count_output_tokens(vocab_, out.reasoning_text);
+  if (req.logprobs) {
+    out.logprobs = std::move(generated_logprobs);
+  }
   return Result<InferenceResult>(std::move(out));
 }
 
@@ -178,10 +202,14 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   task.max_tokens         = setup.max_tokens;
   task.stop_tokens        = setup.stop_tokens;
   task.ext_cancel         = cancel;
+  task.capture_probabilities = req.logprobs;
+  task.top_probabilities  = req.top_logprobs;
 
   scheduler_->submit(&task);
 
-  auto drain_res = drain_task(task, [&](llama_token id) -> bool {
+  std::vector<inference::TokenLogprob> generated_logprobs;
+  auto drain_res = drain_task(task, [&](const TokenEvent& event) -> bool {
+    const llama_token id = event.id;
     if (callback_aborted || string_stopped) return false;
 
     std::string piece = token_to_piece(vocab_, id);
@@ -199,6 +227,24 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       }
 
       decoded_ids.push_back(id);
+      std::optional<inference::TokenLogprob> token_logprob;
+      if (req.logprobs) {
+        inference::TokenLogprob token;
+        token.token = piece;
+        token.bytes.assign(piece.begin(), piece.end());
+        token.logprob = std::log(std::max(
+            event.probability, std::numeric_limits<float>::min()));
+        for (const auto& [top_id, probability] : event.top_probabilities) {
+          inference::TopTokenLogprob top;
+          top.token = token_to_piece(vocab_, top_id);
+          top.bytes.assign(top.token.begin(), top.token.end());
+          top.logprob = std::log(std::max(
+              probability, std::numeric_limits<float>::min()));
+          token.top_logprobs.push_back(std::move(top));
+        }
+        generated_logprobs.push_back(token);
+        token_logprob = std::move(token);
+      }
       std::vector<common_chat_msg_diff> diffs;
       try {
         diffs = parser_state.update(piece, /*is_partial=*/true,
@@ -207,6 +253,9 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
 
       for (const auto& diff : diffs) {
         auto delta = to_delta(diff);
+        if (token_logprob && delta.content == piece) {
+          delta.logprobs.push_back(*token_logprob);
+        }
         if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty())
           continue;
         if (!callback(delta)) {
@@ -257,6 +306,9 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       out.completion_tokens, out.generation_duration_ms);
   out.mtp_drafted_tokens = task.n_drafted;
   out.mtp_accepted_tokens = task.n_draft_accepted;
+  if (req.logprobs) {
+    out.logprobs = std::move(generated_logprobs);
+  }
   if (out.completion_tokens >= setup.max_tokens)
     out.finish_reason = "length";
 
