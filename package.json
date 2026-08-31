@@ -1,6 +1,6 @@
 {
   "name": "inferdeck",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "private": true,
   "description": "Production-ready local AI gateway for single-GPU machines",
   "workspaces": [
