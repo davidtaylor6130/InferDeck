@@ -274,6 +274,14 @@ try {
         -Headers @{'X-Request-Id' = 'client.probe_1'} -TimeoutSec 10
     $generated = Invoke-WebRequest -UseBasicParsing -Uri "$loopback/api/inferdeck/v1/health" `
         -Headers @{'X-Request-Id' = 'invalid request id'} -TimeoutSec 10
+    $health = $echo.Content | ConvertFrom-Json
+    if ($health.version -notmatch '^\d+\.\d+\.\d+$' -or
+        $health.build_revision -notmatch '^[0-9a-f]{40}$' -or
+        -not ($health.PSObject.Properties.Name -contains 'build_dirty')) {
+        throw "Health response has no trustworthy build provenance: $($echo.Content)"
+    }
+    $results.build_revision = $health.build_revision
+    $results.build_dirty = [bool]$health.build_dirty
     $results.request_id_echo = $echo.Headers['X-Request-Id']
     $results.request_id_generated = $generated.Headers['X-Request-Id']
 

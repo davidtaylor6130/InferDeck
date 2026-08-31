@@ -174,7 +174,10 @@ jobs:
         run: |
           $output = & .\dist\inferdeck-gateway.exe --version
           if ($LASTEXITCODE -ne 0) { throw "Packaged executable failed to load: exit $LASTEXITCODE" }
-          if ($output -ne "inferdeck-gateway $env:INFERDECK_VERSION") {
+          $expectedRevision = (& git rev-parse HEAD | Out-String).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0) { throw "Unable to resolve the packaged source revision" }
+          $expected = "inferdeck-gateway $env:INFERDECK_VERSION revision=$expectedRevision dirty=false"
+          if ($output -ne $expected) {
             throw "Unexpected packaged executable version output: $output"
           }
 

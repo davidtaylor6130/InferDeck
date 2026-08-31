@@ -5,7 +5,7 @@
 ```
 OpenCode → InferDeck Gateway (port 11434)
               ↓
-         LlamaEngine (in-process inference)
+         BackendCoordinator and native runtimes
 ```
 
 The gateway runs llama.cpp inference directly in its own process on port 11434.
@@ -52,26 +52,14 @@ base.
 
 ## Context Limits
 
-| Setting | Value | Reason |
-|---|---|---|
-| `context` | 65536 | Stable on 4GB VRAM + 19.7GB model |
-| `output` | 8192 | Prevents premature truncation |
-| Max safe | ~98k | PC crashes beyond this (memory pressure) |
+The exporter derives each model or alias context limit from the live InferDeck
+catalog. It does not preserve a stale handwritten limit. The bundled Qwen3.8
+profile currently advertises a 100,000-token context and the exporter caps the
+OpenCode output limit at 16,384 tokens. Re-export after any runtime profile or
+alias change instead of editing these values by hand.
 
-For large tasks (full repo reviews), use the **two-phase workflow**:
-
-### Phase 1: Explore and summarize
-```bash
-opencode run "Read src/main.ts, src/config.ts, src/utils.ts.
-Write arch-findings.md summarizing the architecture."
-```
-
-### Phase 2: Analyze and write
-```bash
-opencode run "Read arch-findings.md.
-Create optimization-plan.md with actionable recommendations."
-```
-
+For large repository tasks, keep discovery and implementation as separate
+turns when the complete working set would exceed the advertised context.
 ## Reasoning Effort
 
 InferDeck accepts `reasoning_effort` on Chat Completions and

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+No unreleased changes.
+
+---
+
+## [0.9.0] - 2026-08-31
+
+### Added
+- Build provenance in the CLI and health response, including the full source
+  revision and dirty state.
+- Runtime-first dashboard navigation for LLM and dictation operations, model
+  management, usage, health, and configuration.
+
 ### Changed
 - Pinned the strict OpenAI `/v1` surface to seven supported endpoints and moved
   all InferDeck operations and enriched model metadata to
@@ -11,11 +23,53 @@
   unless explicitly configured. Removed the former non-OpenAI protocol adapter.
 - Removed InferDeck-only model fields, queue priority, sampler extensions, and
   `reasoning_content` from strict OpenAI responses and requests.
+- Split the remaining gateway implementation hotspots into private cohesive
+  modules without changing their public interfaces or runtime ownership.
+
+### Fixed
+- Completed finite streams successfully instead of reporting client
+  disconnections after a clean final event.
+- Preserved requested OpenAI voices through the native Supertonic speech path.
+- Restored strict client request parity and the Qwen 3.8 OpenCode catalog.
 
 ### Verified
-- Exact route-manifest snapshot, official OpenAI JavaScript SDK stream
-  contract, dashboard tests/build, and the complete 124-test native
-  unit/integration suite.
+- Clean Release build, complete native and dashboard suites, OpenAI JavaScript
+  and Python SDK contracts, OpenCode export, architecture policy, static policy,
+  and release-package provenance.
+
+---
+
+## [0.8.1] - 2026-08-23
+
+### Added
+- Deterministic OpenCode export from the live InferDeck model and alias catalog
+  while preserving unrelated plugins and MCP configuration.
+- Authenticated remote dashboard access without changing localhost behavior.
+
+### Fixed
+- Completed the release remediation pass for native speech runtime packaging,
+  reproducibility metadata, and overhaul evidence.
+
+---
+
+## [0.8.0] - 2026-08-21
+
+### Changed
+- Rebuilt InferDeck Core around strict OpenAI contracts, typed inference
+  requests and events, explicit resource lifecycles, transactional
+  configuration, and one in-process native runtime.
+- Isolated InferDeck administration under `/api/inferdeck/v1` and removed the
+  obsolete non-OpenAI protocol and subprocess companions.
+
+### Added
+- Cache-aware three-rate pricing, request phase metrics, media-unit accounting,
+  and a unified request ledger.
+- Reproducible Windows release archives with dependency metadata, an SPDX SBOM,
+  checksums, and pinned build inputs.
+
+### Fixed
+- Bounded swap and shutdown paths, strict streaming contracts, native audio
+  validation, and control-plane security.
 
 ---
 
