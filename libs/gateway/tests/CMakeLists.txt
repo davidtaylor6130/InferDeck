@@ -13,6 +13,7 @@ add_executable(route_tests
 
 add_executable(auth_tests
     test_auth.cpp
+    test_api_key_store.cpp
     test_shutdown_state.cpp
 )
 

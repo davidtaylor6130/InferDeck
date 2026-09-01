@@ -13,6 +13,7 @@ logging:
 auth:
   required: false
   token: ""
+  api_keys_db: "C:/InferDeck/data/api-keys.db"
 
 control:
   allow_remote: false

@@ -18,6 +18,8 @@ set(GATEWAY_SOURCES
     src/profile_benchmark_scheduler.cpp
     src/config_repository.cpp
     src/config_secrets.cpp
+    src/api_key_store.cpp
+    src/api_key_routes.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})
@@ -39,6 +41,7 @@ target_link_libraries(gateway
         httplib::httplib
     PRIVATE
         yaml-cpp::yaml-cpp
+        unofficial::sqlite3::sqlite3
 )
 
 if(WIN32)

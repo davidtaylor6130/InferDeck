@@ -33,6 +33,7 @@
 #include "foundation/json_utils.hpp"
 #include "foundation/logging.hpp"
 #include "foundation/path_utils.hpp"
+#include "gateway/api_key_store.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
 #include "gateway/deadline_server.hpp"
@@ -145,6 +146,12 @@ int run_gateway(const fs::path& config_path) {
     observability::Metrics metrics;
     observability::GpuTelemetry gpu;
     observability::StatsDb stats_db(cfg.stats_db_path);
+    auto api_keys = std::make_shared<ApiKeyStore>(cfg.api_keys_db_path);
+    if (api_keys->healthy()) {
+        LOG_INFO("api_key_store_opened", "db={}", api_keys->path());
+    } else {
+        LOG_ERROR("api_key_store_unavailable", "db={}", api_keys->path());
+    }
     if (stats_db.healthy()) {
         const auto totals = stats_db.lifetime_totals();
         metrics.restore_lifetime(totals.requests, totals.swaps,
@@ -172,6 +179,7 @@ int run_gateway(const fs::path& config_path) {
                      cfg.voice_session_grace_ms,
                      &metrics, &stats_db, &events, &swap_tracker,
                      &maintenance_resource};
+    deps.api_keys = api_keys;
     auto derivative_deps = deps;
     derivative_deps.compatibility_profile =
         CompatibilityProfile::OpenAIDerivative;
@@ -244,7 +252,7 @@ int run_gateway(const fs::path& config_path) {
     route_auth.control_allow_remote = cfg.control_allow_remote;
     route_auth.control_allow_data_plane_token = cfg.control_allow_data_plane_token;
     route_auth.control_token = cfg.control_token;
-    RouteAuthorizer authorizer(std::move(route_auth));
+    RouteAuthorizer authorizer(std::move(route_auth), api_keys);
     AuthMiddleware control_session({true, cfg.control_token});
     CorsMiddleware data_cors(cfg.cors_origins);
     CorsMiddleware control_cors(cfg.control_origins);

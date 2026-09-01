@@ -132,7 +132,7 @@ struct SlotGuard {
 class VoiceSessionGuard {
 public:
     VoiceSessionGuard(const httplib::Request& req, const GatewayDeps& deps)
-        : coordinator_(&deps.coordinator), key_(request_client_key(req)),
+        : coordinator_(&deps.coordinator), key_(request_client_key(req, deps)),
           duration_(deps.voice_session_grace_ms) {
         if (key_.empty() || deps.default_model.empty() ||
             deps.voice_session_grace_ms <= 0) {
@@ -229,7 +229,8 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
         return req.is_connection_closed() || job->cancelled->load();
     };
     model::AcquireSlotOptions options;
-    options.priority = 100;
+    options.priority = resolve_request_priority(
+        deps.api_keys.get(), header_value(req, "Authorization"), 100);
     options.cancelled = cancelled;
     options.prepare = [&deps, model_name, deadline, cancelled] {
         auto loaded = ensure_model_loaded(

@@ -62,6 +62,10 @@ alias, unregister, and reset requests cannot overwrite one another.
 persisted values inside `ConfigRepository` before validation. Secret handling
 preserves surrounding YAML and comments.
 
+`auth.api_keys_db` selects the separate managed-key database. Managed key
+plaintext is returned only by the create endpoint and is never written to YAML
+or returned by the configuration API. See [Managed API keys](api-keys.md).
+
 ## Atomicity and recovery
 
 Persistence writes a sibling temporary file, flushes it, and atomically replaces

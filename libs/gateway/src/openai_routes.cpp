@@ -71,7 +71,8 @@ foundation::Result<int> acquire_for_request(
     };
     model::AcquireSlotOptions options;
     options.timeout = std::chrono::minutes{5};
-    options.priority = std::clamp(priority, -100, 100);
+    options.priority = resolve_request_priority(
+        deps.api_keys.get(), header_value(req, "Authorization"), priority);
     options.cancelled = cancelled;
     options.prepare = [&deps, &model_name, deadline, cancelled] {
         auto loaded = ensure_model_loaded(

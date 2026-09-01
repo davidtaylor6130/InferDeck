@@ -145,7 +145,7 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     std::string reservation_key) {
     AcquiredChatSlot acquired;
     const auto acquisition_started = std::chrono::steady_clock::now();
-    const auto voice_key = request_client_key(req);
+    const auto voice_key = request_client_key(req, deps);
     acquired.reservation_key = reservation_key.empty()
         ? voice_key : std::move(reservation_key);
     if (!voice_key.empty() && acquired.reservation_key == voice_key) {
@@ -160,7 +160,8 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     model::AcquireSlotOptions opts;
     opts.timeout = std::chrono::minutes{5};
     opts.block = true;
-    opts.priority = std::clamp(priority, -100, 100);
+    opts.priority = resolve_request_priority(
+        deps.api_keys.get(), header_value(req, "Authorization"), priority);
     opts.reservation_key = acquired.reservation_key;
     if (acquired.voice_session_token) opts.priority = 100;
     opts.cancelled = cancelled;

@@ -80,6 +80,11 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
             return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                          "auth.token is required when authentication is enabled");
         }
+        if (root["auth"] && root["auth"]["api_keys_db"] &&
+            root["auth"]["api_keys_db"].as<std::string>().empty()) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "auth.api_keys_db cannot be empty");
+        }
         if (root["control"]) {
             const auto& control = root["control"];
             if (!control.IsMap()) {

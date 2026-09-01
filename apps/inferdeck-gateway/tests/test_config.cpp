@@ -212,6 +212,7 @@ TEST_CASE("Repository gateway configuration keeps remote control disabled", "[co
     const auto config = load_config(path);
     CHECK(config.host == "0.0.0.0");
     CHECK_FALSE(config.auth_required);
+    CHECK(config.api_keys_db_path == "C:/InferDeck/data/api-keys.db");
     REQUIRE(config.cors_origins.size() == 1);
     CHECK(config.cors_origins.front() == "*");
     CHECK_FALSE(config.control_allow_remote);

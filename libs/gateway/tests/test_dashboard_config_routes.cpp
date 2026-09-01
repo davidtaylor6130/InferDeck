@@ -30,6 +30,7 @@ namespace {
 namespace fs = std::filesystem;
 using inferdeck::foundation::ErrorCode;
 using inferdeck::foundation::Ok;
+using inferdeck::gateway::ApiKeyStore;
 using inferdeck::gateway::DashboardDeps;
 using inferdeck::gateway::ComputeResource;
 using inferdeck::gateway::ConfigRepository;
@@ -151,6 +152,8 @@ struct ConfigRouteServer {
     std::thread thread;
     int port{0};
     std::atomic<int> reloads{0};
+    std::shared_ptr<ApiKeyStore> api_keys{
+        std::make_shared<ApiKeyStore>(":memory:")};
     std::function<inferdeck::foundation::Result<void>(const std::string&)> validate =
         [](const std::string&) { return Ok(); };
     std::shared_ptr<ConfigRepository> config_repository;
@@ -169,6 +172,7 @@ struct ConfigRouteServer {
             &swap_tracker, &maintenance_resource};
         gateway_deps.metrics = &metrics;
         gateway_deps.stats_db = &stats_db;
+        gateway_deps.api_keys = api_keys;
         DashboardDeps deps{
             gateway_deps,
             gpu,
@@ -208,6 +212,47 @@ struct ConfigRouteServer {
     }
 };
 
+}
+
+TEST_CASE("API key control routes create, reprioritize, list, and revoke",
+          "[gateway][dashboard][api-key]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+
+    const auto created = client.Post(
+        "/api/inferdeck/v1/api-keys",
+        R"({"name":"background worker","priority":-60})",
+        "application/json");
+    REQUIRE(created);
+    REQUIRE(created->status == 201);
+    CHECK(created->get_header_value("Cache-Control") == "no-store");
+    const auto created_body = nlohmann::json::parse(created->body);
+    const std::string id = created_body["id"].get<std::string>();
+    const std::string key = created_body["key"].get<std::string>();
+    REQUIRE(routes.api_keys->authenticate_bearer("Bearer " + key));
+
+    const auto updated = client.Patch(
+        "/api/inferdeck/v1/api-keys/" + id,
+        R"({"priority":45})", "application/json");
+    REQUIRE(updated);
+    REQUIRE(updated->status == 200);
+    CHECK(nlohmann::json::parse(updated->body)["priority"] == 45);
+    REQUIRE(routes.api_keys->authenticate_bearer("Bearer " + key));
+    CHECK(routes.api_keys->authenticate_bearer("Bearer " + key)->priority == 45);
+
+    const auto listed = client.Get("/api/inferdeck/v1/api-keys");
+    REQUIRE(listed);
+    REQUIRE(listed->status == 200);
+    CHECK(listed->body.find(key) == std::string::npos);
+    const auto listed_body = nlohmann::json::parse(listed->body);
+    REQUIRE(listed_body["apiKeys"].size() == 1);
+    CHECK_FALSE(listed_body["apiKeys"][0].contains("key"));
+
+    const auto revoked = client.Delete("/api/inferdeck/v1/api-keys/" + id);
+    REQUIRE(revoked);
+    CHECK(revoked->status == 204);
+    CHECK_FALSE(routes.api_keys->authenticate_bearer("Bearer " + key));
 }
 
 TEST_CASE("Active configuration save schedules an automatic runtime reload",

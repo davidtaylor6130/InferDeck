@@ -52,6 +52,9 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         const auto& a = root["auth"];
         if (a["required"]) cfg.auth_required = a["required"].as<bool>();
         if (a["token"]) cfg.auth_token = a["token"].as<std::string>();
+        if (a["api_keys_db"]) {
+            cfg.api_keys_db_path = a["api_keys_db"].as<std::string>();
+        }
     }
     if (root["cors"]) {
         const auto& c = root["cors"];

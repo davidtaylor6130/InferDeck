@@ -60,7 +60,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
     };
     if (!(result = check("server", {"host", "port"}))) return result;
     if (!(result = check("logging", {"level", "file"}))) return result;
-    if (!(result = check("auth", {"required", "token"}))) return result;
+    if (!(result = check("auth", {"required", "token", "api_keys_db"}))) return result;
     if (!(result = check("control", {
             "allow_remote", "allow_data_plane_token", "token", "origins"}))) return result;
     if (!(result = check("cors", {"origins"}))) return result;

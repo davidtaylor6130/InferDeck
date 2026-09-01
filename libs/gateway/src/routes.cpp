@@ -54,7 +54,10 @@ RequestObservation observe_request(const httplib::Request& req,
     if (observation.request_id.empty()) {
         observation.request_id = request_id(header_value(req, "X-Request-Id"));
     }
-    observation.principal_class = "openai_data_plane";
+    const auto authorization = header_value(req, "Authorization");
+    observation.principal_class =
+        deps.api_keys && deps.api_keys->authenticate_bearer(authorization)
+            ? "managed_api_key" : "openai_data_plane";
     observation.endpoint = req.path;
     observation.protocol_profile =
         deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative
@@ -346,7 +349,21 @@ std::string request_client_key(const httplib::Request& req) {
     if (!authorization.starts_with("Bearer ") || authorization.size() <= 7) {
         return {};
     }
-    return authorization.substr(7) + '\x1f' + session;
+    const std::string principal =
+        "credential:" + credential_fingerprint(authorization);
+    if (principal.ends_with(':')) return {};
+    return principal + '\x1f' + session;
+}
+
+std::string request_client_key(const httplib::Request& req,
+                               const GatewayDeps& deps) {
+    const auto fallback = request_client_key(req);
+    if (fallback.empty() || !deps.api_keys) return fallback;
+    const auto managed = deps.api_keys->authenticate_bearer(
+        header_value(req, "Authorization"));
+    if (!managed) return fallback;
+    return "api-key:" + managed->id + '\x1f' +
+        header_value(req, "X-InferDeck-Voice-Session");
 }
 
 bool require_json_media_type(const httplib::Request& req,

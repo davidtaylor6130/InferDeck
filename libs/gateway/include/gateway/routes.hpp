@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 
 #include "foundation/event_bus.hpp"
+#include "gateway/api_key_store.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
@@ -14,6 +15,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -40,6 +42,7 @@ struct GatewayDeps {
     std::atomic<ComputeResource>* maintenance_resource{nullptr};
     CompatibilityProfile compatibility_profile{CompatibilityProfile::StrictOpenAI};
     std::chrono::milliseconds swap_timeout{std::chrono::minutes{5}};
+    std::shared_ptr<ApiKeyStore> api_keys;
 };
 
 struct RequestObservation {
@@ -124,6 +127,8 @@ std::string serialize_chat_stream_terminal(const std::string& id,
                                            bool include_obfuscation = true);
 std::string header_value(const httplib::Request& req, const std::string& name);
 std::string request_client_key(const httplib::Request& req);
+std::string request_client_key(const httplib::Request& req,
+                               const GatewayDeps& deps);
 bool require_json_media_type(const httplib::Request& req,
                              httplib::Response& resp);
 

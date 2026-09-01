@@ -12,7 +12,7 @@ InferDeck assigns one principal to every API request before its handler runs.
 | Principal | Default authority | Authentication |
 |---|---|---|
 | Public status | reserved for a future minimal liveness route | none |
-| OpenAI data plane | OpenAI inference and model discovery | independently configured `auth` bearer token |
+| OpenAI data plane | OpenAI inference and model discovery | configured `auth` bearer token or a managed API key |
 | Dashboard session | live status, pricing, and event stream | direct loopback only |
 | Control read | configuration, logs, jobs, metrics, model-store state | loopback, or remote control principal |
 | Control write | every operation that changes runtime, files, configuration, aliases, or jobs | loopback, or remote control principal |
@@ -27,9 +27,10 @@ to sharing that token with `control.allow_data_plane_token: true`, but the remot
 control token must still be non-empty and the configuration must explicitly
 acknowledge the shared principal.
 
-Legacy alternate API-key promotion has been removed and cannot authenticate either
-plane. The optional OpenAI-derivative profile uses a separate `/compat/*` path and
-the same data-plane bearer authentication; it is disabled by default.
+Managed `idk_` keys authenticate only the OpenAI data plane. They never satisfy
+dashboard or control authorization, even when remote control is enabled. The
+optional OpenAI-derivative profile uses a separate `/compat/*` path and the same
+data-plane bearer authentication; it is disabled by default.
 
 ## Route inventory
 
@@ -69,6 +70,7 @@ The paths below are the canonical Phase 4 routes.
 - `GET /api/inferdeck/v1/config`
 - `GET /api/inferdeck/v1/jobs`
 - `GET /api/inferdeck/v1/logs`
+- `GET /api/inferdeck/v1/api-keys`
 
 ### Control write
 
@@ -91,6 +93,9 @@ The paths below are the canonical Phase 4 routes.
 - `DELETE /api/inferdeck/v1/config/active`
 - `POST /api/inferdeck/v1/models/load`
 - `POST /api/inferdeck/v1/models/unload`
+- `POST /api/inferdeck/v1/api-keys`
+- `PATCH /api/inferdeck/v1/api-keys/:id`
+- `DELETE /api/inferdeck/v1/api-keys/:id`
 
 All future `/api` mutations default to the control-write principal through the
 central classifier, even before they are added to this human-readable inventory.
@@ -99,9 +104,10 @@ review visibly.
 
 ## Configuration contract
 
-`auth` configures only the OpenAI data plane. `cors.origins` is likewise a
-data-plane allowlist and may remain wildcard for explicitly public local-model
-clients.
+`auth` configures only the OpenAI data plane. `auth.token` is the legacy shared
+credential. `auth.api_keys_db` stores hashes and metadata for managed client
+keys. `cors.origins` is likewise a data-plane allowlist and may remain wildcard
+for explicitly public local-model clients.
 
 `control` configures administrative access:
 
@@ -130,8 +136,10 @@ Control and model-store tokens are masked as `__INFERDECK_SECRET__` by the
 configuration API and restored server-side during an update. A parsed-YAML
 fallback covers flow mappings, quoted keys, block scalars, and duplicate secret
 keys when the comment-preserving fast path cannot prove complete redaction.
-Credential checks use the constant-time bearer comparison shared by both
-principals.
+Configured-token checks use constant-time bearer comparison. Managed keys use
+Windows CNG for random generation and SHA-256, then compare the stored digest in
+constant time. The create response is marked `Cache-Control: no-store`; list
+responses never contain plaintext credentials.
 
 Remote dashboard access uses the same separate control credential. The browser
 exchanges it at `POST /api/inferdeck/v1/dashboard/session` for an HTTP-only,
@@ -156,7 +164,7 @@ loopback authority.
 
 Control CORS returns only an exact configured HTTP(S) origin. Empty, wildcard,
 `null`, credential-bearing, and path-bearing origins are invalid in every mode,
-and legacy alternate API-key headers are no longer advertised. Ambient loopback authority is treated as
+and alternate API-key headers are not accepted. Ambient loopback authority is treated as
 a CSRF credential: every control mutation rejects an unallowlisted `Origin` or
 `Sec-Fetch-Site: cross-site`, and even empty mutations require
 `Content-Type: application/json`. Cross-origin mutation attempts therefore fail

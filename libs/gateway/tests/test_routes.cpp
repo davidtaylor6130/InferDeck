@@ -2800,12 +2800,14 @@ TEST_CASE("Routes: Open WebUI voice reservation spans STT through TTS",
     REQUIRE(ts.start());
 
     httplib::Client client("127.0.0.1", ts.port);
-    client.set_default_headers({
+    const httplib::Headers voice_headers{
         {"Authorization", "Bearer voice-principal"},
         {"X-InferDeck-Voice-Session", "voice-session-0001"},
-    });
-    const std::string session_key =
-        std::string{"voice-principal"} + '\x1f' + "voice-session-0001";
+    };
+    client.set_default_headers(voice_headers);
+    httplib::Request identity_request;
+    identity_request.headers = voice_headers;
+    const std::string session_key = request_client_key(identity_request);
     const auto transcription = client.Post(
         "/v1/audio/transcriptions", httplib::UploadFormDataItems{
             {"file", test_wav(), "test.wav", "audio/wav"},

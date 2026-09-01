@@ -18,6 +18,7 @@ struct GatewayConfig {
     std::string state_file{};
     bool auth_required{false};
     std::string auth_token{};
+    std::string api_keys_db_path{"data/api-keys.db"};
     std::vector<std::string> cors_origins{};
     bool control_allow_remote{false};
     bool control_allow_data_plane_token{false};
