@@ -2357,6 +2357,7 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     CHECK(rows[0].protocol_profile == "strict_openai");
     CHECK(rows[0].modality == "image_generation");
     CHECK(rows[0].output_image_count == 2);
+    CHECK(rows[0].generation_duration_ms == Catch::Approx(12.0));
     CHECK_FALSE(rows[0].request_id.empty());
     ts.stop();
 }
@@ -2620,6 +2621,7 @@ TEST_CASE("InferDeck audio generation returns a WAV with job metadata",
     CHECK(rows[0].modality == "audio_generation");
     CHECK(rows[0].input_characters == 13);
     CHECK(rows[0].output_audio_seconds == Catch::Approx(12.0));
+    CHECK(rows[0].generation_duration_ms == Catch::Approx(18.0));
     CHECK(rows[0].status_code == 200);
 
     const nlohmann::json jobs = media_jobs();

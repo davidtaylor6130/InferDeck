@@ -505,6 +505,7 @@ void record_media(const GatewayDeps& deps, const std::string& model_name,
                   RequestObservation observation) {
     model::InferenceResult metrics;
     metrics.duration_ms = duration_ms;
+    metrics.generation_duration_ms = duration_ms;
     const auto resolved = deps.coordinator.registry().resolve(model_name);
     if (observation.modality.empty()) observation.modality = "media";
     record_request(deps, model_name, metrics, status, slot,
