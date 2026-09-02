@@ -129,8 +129,12 @@ export interface UsageRow {
   peakPromptTokensPerSecond?: number;
   avgPromptTokensPerSecond?: number;
   lastTimestampUnixMs: number;
+  generationDurationMs?: number;
   inputAudioSeconds?: number;
   inputCharacters?: number;
+  outputAudioSeconds?: number;
+  inputImageCount?: number;
+  outputImageCount?: number;
 }
 
 export interface MonthlyUsageRow {
@@ -150,6 +154,9 @@ export interface MonthlyUsageRow {
   peakPromptTokensPerSecond?: number;
   inputAudioSeconds?: number;
   inputCharacters?: number;
+  outputAudioSeconds?: number;
+  inputImageCount?: number;
+  outputImageCount?: number;
 }
 
 export interface StatusPayload {

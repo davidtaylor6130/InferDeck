@@ -5,7 +5,7 @@ import App, { DASHBOARD_PAGES } from './App';
 import { INFERDECK_VERSION } from './version';
 
 describe('dashboard boundary', () => {
-  it('keeps image and music active while only unfinished work stays planned', () => {
+  it('exposes Image and Music as complete dashboard divisions', () => {
     expect(DASHBOARD_PAGES).toEqual([
       { id: 'home', label: 'Home' },
       { id: 'llm/settings', label: 'Model Settings', section: 'llm' },
@@ -16,12 +16,22 @@ describe('dashboard boundary', () => {
       { id: 'dictation/models', label: 'Model Store', section: 'dictation' },
       { id: 'dictation/usage', label: 'Usage', section: 'dictation' },
       { id: 'dictation/diagnostics', label: 'Health & alerts', section: 'dictation' },
-      { id: 'image', label: 'Image' },
-      { id: 'music', label: 'Music' },
+      { id: 'image/generate', label: 'Generate', section: 'image' },
+      { id: 'image/settings', label: 'Model Settings', section: 'image' },
+      { id: 'image/models', label: 'Model Store', section: 'image' },
+      { id: 'image/usage', label: 'Usage', section: 'image' },
+      { id: 'image/diagnostics', label: 'Health & alerts', section: 'image' },
+      { id: 'music/generate', label: 'Generate', section: 'music' },
+      { id: 'music/settings', label: 'Model Settings', section: 'music' },
+      { id: 'music/models', label: 'Model Store', section: 'music' },
+      { id: 'music/usage', label: 'Usage', section: 'music' },
+      { id: 'music/diagnostics', label: 'Health & alerts', section: 'music' },
       { id: 'post-training', label: 'Post Training', preview: true },
     ]);
     expect(DASHBOARD_PAGES.filter(page => page.section === 'llm')).toHaveLength(4);
     expect(DASHBOARD_PAGES.filter(page => page.section === 'dictation')).toHaveLength(4);
+    expect(DASHBOARD_PAGES.filter(page => page.section === 'image')).toHaveLength(5);
+    expect(DASHBOARD_PAGES.filter(page => page.section === 'music')).toHaveLength(5);
     expect(DASHBOARD_PAGES.filter(page => page.preview)).toHaveLength(1);
   });
 
@@ -36,7 +46,9 @@ describe('dashboard boundary', () => {
     expect(html).toContain('aria-label="Dashboard page"');
     expect(html).toContain('<optgroup label="LLM">');
     expect(html).toContain('<optgroup label="Dictation">');
-    expect(html).toContain('<optgroup label="Create">');
+    expect(html).toContain('<optgroup label="Image">');
+    expect(html).toContain('<optgroup label="Music">');
+    expect(html).not.toContain('<optgroup label="Create">');
     expect(html).toContain('<optgroup label="Planned">');
     expect(html).not.toContain('aria-label="Dashboard sections"');
   });
@@ -47,6 +59,8 @@ describe('dashboard boundary', () => {
     expect(html).toContain('Settings</summary>');
     expect(html).toContain('LLM settings');
     expect(html).toContain('Dictation settings');
+    expect(html).toContain('Image settings');
+    expect(html).toContain('Music settings');
     expect(html).toContain('Configuration &amp; recovery');
     expect(html).toContain('Open Health and alerts');
   });

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { getLogs } from '../api';
 import { Badge, Button, EmptyState, Panel, ProgressBar, SectionTitle, Stat } from '../components/ui';
-import { modalityLabel, modelsForSection, type DashboardSection } from '../dashboardSections';
+import { modalityLabel, modelsForSection, sectionLabel, type DashboardSection } from '../dashboardSections';
 import { useGateway } from '../gateway';
 import {
   clamp,
@@ -59,14 +59,16 @@ export const SystemPage: React.FC<{ section?: DashboardSection }> = ({ section =
   const memory = status?.hardware?.memory;
   const cpu = status?.hardware?.cpu;
   const memoryPercent = memory ? clamp(memory.percentage, 0, 100) : null;
-  const speechModels = modelsForSection(models, 'dictation');
+  const scopedModels = modelsForSection(models, section);
+  const label = sectionLabel(section);
+  const usesGpu = section !== 'dictation';
 
   return (
     <div className="space-y-4">
       <section className="grid gap-4 xl:grid-cols-2">
-        {section === 'llm' ? (
+        {usesGpu ? (
           <Panel>
-            <SectionTitle title="LLM accelerator" aside={gpu?.name || status?.hardware?.provider} />
+            <SectionTitle title={`${label} accelerator`} aside={gpu?.name || status?.hardware?.provider} />
             <div className="mt-3 space-y-4">
               <MeterRow
                 label="GPU utilization"
@@ -99,12 +101,12 @@ export const SystemPage: React.FC<{ section?: DashboardSection }> = ({ section =
           </Panel>
         ) : (
           <Panel>
-            <SectionTitle title="Dictation runtimes" aside={`${speechModels.length} configured`} />
-            {speechModels.length === 0 ? (
+            <SectionTitle title="Dictation runtimes" aside={`${scopedModels.length} configured`} />
+            {scopedModels.length === 0 ? (
               <div className="mt-3"><EmptyState title="No dictation runtimes configured" /></div>
             ) : (
               <div className="mt-3 divide-y divide-white/5">
-                {speechModels.map(model => (
+                {scopedModels.map(model => (
                   <div key={model.id} className="flex min-w-0 items-center gap-3 py-2.5">
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-mono text-sm text-text-primary" title={model.id}>{compactModel(model.id)}</p>
@@ -121,7 +123,7 @@ export const SystemPage: React.FC<{ section?: DashboardSection }> = ({ section =
         )}
 
         <Panel>
-          <SectionTitle title={section === 'dictation' ? 'Dictation host resources' : 'Host'} aside={cpu?.name} />
+          <SectionTitle title={section === 'llm' ? 'Host' : `${label} host resources`} aside={cpu?.name} />
           <div className="mt-3 space-y-4">
             <MeterRow
               label="System RAM"
@@ -137,7 +139,47 @@ export const SystemPage: React.FC<{ section?: DashboardSection }> = ({ section =
         </Panel>
       </section>
 
+      {(section === 'image' || section === 'music') && (
+        <Panel>
+          <SectionTitle title={`${label} runtimes`} aside={`${scopedModels.length} configured`} />
+          {scopedModels.length === 0 ? (
+            <div className="mt-3"><EmptyState title={`No ${label.toLowerCase()} runtimes configured`} /></div>
+          ) : (
+            <div className="mt-3 divide-y divide-white/5">
+              {scopedModels.map(model => (
+                <div key={model.id} className="flex min-w-0 items-center gap-3 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-sm text-text-primary" title={model.id}>{compactModel(model.id)}</p>
+                    <p className="mt-0.5 text-xs text-text-muted">{model.runtime || 'unknown runtime'} / {modalityLabel(model.modality)}</p>
+                  </div>
+                  {model.runtime_available === false
+                    ? <Badge label="Unavailable" tone="critical" />
+                    : <Badge label={model.loaded ? 'Loaded' : 'Ready'} tone={model.loaded ? 'good' : 'idle'} />}
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+      )}
       {section === 'dictation' && <MediaJobsPanel showEmpty />}
+      {section === 'image' && (
+        <MediaJobsPanel
+          modalities={['image']}
+          title="Image generation health"
+          emptyTitle="No image generation jobs"
+          emptyDetail="Completed, running, and failed image jobs appear here."
+          showEmpty
+        />
+      )}
+      {section === 'music' && (
+        <MediaJobsPanel
+          modalities={['audio_generation']}
+          title="Music generation health"
+          emptyTitle="No music generation jobs"
+          emptyDetail="Completed, running, and failed music jobs appear here."
+          showEmpty
+        />
+      )}
       <LogPanel />
       <ConfigPanel />
     </div>

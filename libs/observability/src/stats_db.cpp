@@ -426,11 +426,14 @@ std::vector<ModelUsageRow> StatsDb::model_usage() const {
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN completion_tokens ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN prompt_tokens - cached_prompt_tokens ELSE 0 END),0), "
     "COALESCE(SUM(duration_ms),0), "
-    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN generation_duration_ms ELSE 0 END),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 THEN generation_duration_ms ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN prompt_duration_ms ELSE 0 END),0), "
     "COALESCE(MAX(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN completion_tokens * 1000.0 / generation_duration_ms ELSE 0 END),0), "
     "COALESCE(MAX(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN (prompt_tokens - cached_prompt_tokens) * 1000.0 / prompt_duration_ms ELSE 0 END),0), COALESCE(MAX(ts),0), "
-    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
+    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN output_audio_seconds ELSE 0 END),0), "
+    "COALESCE(SUM(input_image_count),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN output_image_count ELSE 0 END),0) "
     "FROM requests GROUP BY model ORDER BY MAX(ts) DESC;";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
   while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -451,6 +454,9 @@ std::vector<ModelUsageRow> StatsDb::model_usage() const {
     r.last_timestamp_unix_ms = sqlite3_column_int64(stmt, 13);
     r.input_audio_seconds = sqlite3_column_double(stmt, 14);
     r.input_characters = sqlite3_column_int64(stmt, 15);
+    r.output_audio_seconds = sqlite3_column_double(stmt, 16);
+    r.input_image_count = sqlite3_column_int64(stmt, 17);
+    r.output_image_count = sqlite3_column_int64(stmt, 18);
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);
@@ -500,11 +506,14 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN completion_tokens ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN prompt_tokens - cached_prompt_tokens ELSE 0 END),0), "
-    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN generation_duration_ms ELSE 0 END),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 THEN generation_duration_ms ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN prompt_duration_ms ELSE 0 END),0), "
     "COALESCE(MAX(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN completion_tokens * 1000.0 / generation_duration_ms ELSE 0 END),0), "
     "COALESCE(MAX(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN (prompt_tokens - cached_prompt_tokens) * 1000.0 / prompt_duration_ms ELSE 0 END),0), "
-    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
+    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN output_audio_seconds ELSE 0 END),0), "
+    "COALESCE(SUM(input_image_count),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN output_image_count ELSE 0 END),0) "
     "FROM requests "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
   const char* limited_sql =
@@ -514,11 +523,14 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN completion_tokens ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN prompt_tokens - cached_prompt_tokens ELSE 0 END),0), "
-    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN generation_duration_ms ELSE 0 END),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 THEN generation_duration_ms ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN prompt_duration_ms ELSE 0 END),0), "
     "COALESCE(MAX(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN completion_tokens * 1000.0 / generation_duration_ms ELSE 0 END),0), "
     "COALESCE(MAX(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN (prompt_tokens - cached_prompt_tokens) * 1000.0 / prompt_duration_ms ELSE 0 END),0), "
-    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
+    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN output_audio_seconds ELSE 0 END),0), "
+    "COALESCE(SUM(input_image_count),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN output_image_count ELSE 0 END),0) "
     "FROM requests "
     "WHERE ts >= ((strftime('%s','now','start of month', ?) * 1000)) "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
@@ -547,6 +559,9 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
     r.peak_prompt_tokens_per_second = sqlite3_column_double(stmt, 13);
     r.input_audio_seconds = sqlite3_column_double(stmt, 14);
     r.input_characters = sqlite3_column_int64(stmt, 15);
+    r.output_audio_seconds = sqlite3_column_double(stmt, 16);
+    r.input_image_count = sqlite3_column_int64(stmt, 17);
+    r.output_image_count = sqlite3_column_int64(stmt, 18);
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);
@@ -577,11 +592,14 @@ std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN completion_tokens ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN prompt_tokens - cached_prompt_tokens ELSE 0 END),0), "
-    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN generation_duration_ms ELSE 0 END),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 THEN generation_duration_ms ELSE 0 END),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN prompt_duration_ms ELSE 0 END),0), "
     "COALESCE(MAX(CASE WHEN status_code >= 200 AND status_code < 300 AND generation_duration_ms > 0 AND completion_tokens > 0 THEN completion_tokens * 1000.0 / generation_duration_ms ELSE 0 END),0), "
     "COALESCE(MAX(CASE WHEN status_code >= 200 AND status_code < 300 AND prompt_duration_ms > 0 AND prompt_tokens > cached_prompt_tokens THEN (prompt_tokens - cached_prompt_tokens) * 1000.0 / prompt_duration_ms ELSE 0 END),0), "
-    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0) "
+    "COALESCE(SUM(input_audio_seconds),0), COALESCE(SUM(input_characters),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN output_audio_seconds ELSE 0 END),0), "
+    "COALESCE(SUM(input_image_count),0), "
+    "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN output_image_count ELSE 0 END),0) "
     "FROM requests WHERE ts >= ? "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
@@ -605,6 +623,9 @@ std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_
     r.peak_prompt_tokens_per_second = sqlite3_column_double(stmt, 13);
     r.input_audio_seconds = sqlite3_column_double(stmt, 14);
     r.input_characters = sqlite3_column_int64(stmt, 15);
+    r.output_audio_seconds = sqlite3_column_double(stmt, 16);
+    r.input_image_count = sqlite3_column_int64(stmt, 17);
+    r.output_image_count = sqlite3_column_int64(stmt, 18);
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);

@@ -33,6 +33,8 @@ using foundation::Result;
 namespace {
 
 constexpr std::string_view sherpa_bundle_name = "__inferdeck_sherpa_bundle__";
+constexpr std::string_view ace_step_bundle_prefix =
+    "__inferdeck_ace_step_bundle__:";
 
 std::string encode(const std::string& value) {
     std::ostringstream output;
@@ -91,6 +93,21 @@ std::string artifact_key(const std::string& name) {
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (lower_name == "tts.json") return "tts_json";
     if (lower_name.find("voice_styles") != std::string::npos) return "voice_style";
+    if (lower_name.find("qwen3-embedding") != std::string::npos) {
+        return "text_encoder";
+    }
+    if (lower_name.starts_with("acestep-5hz-lm") &&
+        std::filesystem::path(lower_name).extension() == ".gguf") {
+        return "language_model";
+    }
+    if (lower_name.starts_with("acestep-v15") &&
+        std::filesystem::path(lower_name).extension() == ".gguf") {
+        return "dit";
+    }
+    if (lower_name.find("vae") != std::string::npos &&
+        std::filesystem::path(lower_name).extension() == ".gguf") {
+        return "vae";
+    }
     for (const char* key : {"duration_predictor", "text_encoder", "vector_estimator",
                             "unicode_indexer", "voice_style", "tts_json", "encoder",
                             "decoder", "joiner", "tokens", "vocab", "voices",
@@ -106,7 +123,8 @@ bool compatible_extension(const std::string& filename, const std::string& runtim
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (runtime == "llama_cpp") return extension == ".gguf";
     if (runtime == "stable_diffusion_cpp") return extension == ".safetensors" || extension == ".gguf" ||
-                                                    extension == ".ckpt" || extension == ".pth" || extension == ".pt";
+                                                     extension == ".ckpt" || extension == ".pth" || extension == ".pt";
+    if (runtime == "ace_step_cpp") return extension == ".gguf";
     if (runtime == "whisper_cpp") return extension == ".bin" || extension == ".gguf";
     if (runtime == "sherpa_onnx") {
         return extension == ".onnx" || extension == ".bin" ||
@@ -133,9 +151,15 @@ std::string lower(std::string value) {
     return value;
 }
 
-std::string infer_runtime(const std::string& filename, const std::string& pipeline) {
+std::string infer_runtime(const std::string& filename, const std::string& pipeline,
+                          const std::string& context = {}) {
     const std::string name = lower(filename);
     const std::string tag = lower(pipeline);
+    const std::string searchable = lower(filename + " " + pipeline + " " + context);
+    if (searchable.find("ace-step") != std::string::npos ||
+        searchable.find("acestep") != std::string::npos) {
+        return "ace_step_cpp";
+    }
     if (name.ends_with(".onnx") || name.ends_with(".ort")) return "sherpa_onnx";
     if (tag.find("text-to-image") != std::string::npos || name.ends_with(".safetensors")) return "stable_diffusion_cpp";
     if (tag.find("automatic-speech-recognition") != std::string::npos) return "whisper_cpp";
@@ -145,6 +169,7 @@ std::string infer_runtime(const std::string& filename, const std::string& pipeli
 
 std::string infer_modality(const std::string& runtime, const std::string& pipeline) {
     if (runtime == "stable_diffusion_cpp") return "image";
+    if (runtime == "ace_step_cpp") return "audio_generation";
     if (runtime == "whisper_cpp") return "audio_transcription";
     if (runtime == "sherpa_onnx") {
         return lower(pipeline).find("automatic-speech-recognition") != std::string::npos
@@ -164,6 +189,57 @@ std::string infer_quantization(const std::string& filename) {
         if (name.find(quantization) != std::string::npos) return quantization;
     }
     return "unknown";
+}
+
+bool is_ace_step_bundle(const std::string& name) {
+    return name.rfind(ace_step_bundle_prefix, 0) == 0;
+}
+
+std::string ace_step_bundle_name(const std::string& dit_name) {
+    return std::string(ace_step_bundle_prefix) + dit_name;
+}
+
+std::optional<std::string> ace_step_bundle_dit(const std::string& name) {
+    if (!is_ace_step_bundle(name)) return std::nullopt;
+    const std::string dit_name = name.substr(ace_step_bundle_prefix.size());
+    if (!valid_artifact_path(dit_name) || artifact_key(dit_name) != "dit") {
+        return std::nullopt;
+    }
+    return dit_name;
+}
+
+std::optional<std::string> preferred_ace_artifact(
+    const nlohmann::json& files, const std::string_view artifact) {
+    std::optional<std::string> selected;
+    int selected_priority = 0;
+    std::uint64_t selected_size = 0;
+    for (const auto& file : files) {
+        const std::string name = file.value("name", "");
+        if (file.value("runtime", "") != "ace_step_cpp" ||
+            artifact_key(name) != artifact || !valid_artifact_path(name) ||
+            !file.value("compatible", false)) {
+            continue;
+        }
+        const std::string normalized = lower(name);
+        int priority = 1;
+        if (artifact == "text_encoder" &&
+            normalized.find("q8_0") != std::string::npos) {
+            priority = 0;
+        } else if (artifact == "vae" &&
+                   normalized.find("bf16") != std::string::npos) {
+            priority = 0;
+        }
+        const std::uint64_t size = file.value("size", std::uint64_t{0});
+        if (!selected || priority < selected_priority ||
+            (priority == selected_priority &&
+             (size < selected_size ||
+              (size == selected_size && name < *selected)))) {
+            selected = name;
+            selected_priority = priority;
+            selected_size = size;
+        }
+    }
+    return selected;
 }
 
 std::uint64_t local_file_size(const std::filesystem::path& path) {

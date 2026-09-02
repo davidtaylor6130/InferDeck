@@ -3,7 +3,7 @@ import { XMarkIcon } from '@heroicons/react/24/outline';
 import { authenticateDashboard, getHealth, getPricing } from './api';
 import { Badge } from './components/ui';
 import { COST_STORAGE_KEY } from './cost';
-import type { DashboardSection } from './dashboardSections';
+import { DASHBOARD_SECTIONS, sectionLabel, type DashboardSection } from './dashboardSections';
 import { GatewayProvider, useGateway } from './gateway';
 import { OverviewPage } from './pages/OverviewPage';
 import { ModelsPage } from './pages/ModelsPage';
@@ -27,8 +27,16 @@ export type PageId =
   | 'dictation/models'
   | 'dictation/usage'
   | 'dictation/diagnostics'
-  | 'image'
-  | 'music'
+  | 'image/generate'
+  | 'image/settings'
+  | 'image/models'
+  | 'image/usage'
+  | 'image/diagnostics'
+  | 'music/generate'
+  | 'music/settings'
+  | 'music/models'
+  | 'music/usage'
+  | 'music/diagnostics'
   | 'post-training';
 
 interface DashboardPage {
@@ -48,12 +56,25 @@ export const DASHBOARD_PAGES: ReadonlyArray<DashboardPage> = [
   { id: 'dictation/models', label: 'Model Store', section: 'dictation' },
   { id: 'dictation/usage', label: 'Usage', section: 'dictation' },
   { id: 'dictation/diagnostics', label: 'Health & alerts', section: 'dictation' },
-  { id: 'image', label: 'Image' },
-  { id: 'music', label: 'Music' },
+  { id: 'image/generate', label: 'Generate', section: 'image' },
+  { id: 'image/settings', label: 'Model Settings', section: 'image' },
+  { id: 'image/models', label: 'Model Store', section: 'image' },
+  { id: 'image/usage', label: 'Usage', section: 'image' },
+  { id: 'image/diagnostics', label: 'Health & alerts', section: 'image' },
+  { id: 'music/generate', label: 'Generate', section: 'music' },
+  { id: 'music/settings', label: 'Model Settings', section: 'music' },
+  { id: 'music/models', label: 'Model Store', section: 'music' },
+  { id: 'music/usage', label: 'Usage', section: 'music' },
+  { id: 'music/diagnostics', label: 'Health & alerts', section: 'music' },
   { id: 'post-training', label: 'Post Training', preview: true },
 ];
 
-const CREATE_PAGE_IDS = new Set<PageId>(['image', 'music']);
+const SECTION_SETTINGS_HELP: Record<DashboardSection, string> = {
+  llm: 'Profiles, aliases, pricing, and model loading',
+  dictation: 'Speech runtimes, costs, and model configuration',
+  image: 'Image runtimes, model loading, and active profiles',
+  music: 'Music runtimes, model loading, and active profiles',
+};
 
 const LEGACY_ROUTES: Record<string, PageId> = {
   overview: 'home',
@@ -62,6 +83,10 @@ const LEGACY_ROUTES: Record<string, PageId> = {
   system: 'llm/diagnostics',
   'llm/operate': 'llm/settings',
   'dictation/operate': 'dictation/settings',
+  image: 'image/generate',
+  music: 'music/generate',
+  'image/operate': 'image/settings',
+  'music/operate': 'music/settings',
 };
 
 function pageFromHash(): PageId {
@@ -88,7 +113,7 @@ const Shell: React.FC = () => {
 
   return (
     <div className="app-shell flex min-h-screen">
-      <aside className="hidden w-52 shrink-0 flex-col border-r border-border-slate bg-deck-navy px-4 py-5 md:flex">
+      <aside className="hidden w-52 shrink-0 flex-col overflow-y-auto border-r border-border-slate bg-deck-navy px-4 py-5 md:flex">
         <div className="mb-6 flex items-center gap-3 px-2">
           <img src={logoUrl} alt="" className="h-9 w-9 rounded-md object-cover" />
           <div>
@@ -98,10 +123,10 @@ const Shell: React.FC = () => {
         </div>
         <nav className="flex flex-col" aria-label="Dashboard">
           <NavLink id="home" label="Home" page={page} />
-          {(['llm', 'dictation'] as DashboardSection[]).map(section => (
-            <div key={section} className="mt-5">
+          {DASHBOARD_SECTIONS.map(section => (
+            <div key={section} className="mt-4">
               <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
-                {section === 'llm' ? 'LLM' : 'Dictation'}
+                {sectionLabel(section)}
               </div>
               <div className="flex flex-col gap-1">
                 {DASHBOARD_PAGES.filter(item => item.section === section).map(({ id, label }) => (
@@ -111,16 +136,6 @@ const Shell: React.FC = () => {
             </div>
           ))}
           <div className="mt-5 border-t border-white/10 pt-4">
-            <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
-              Create
-            </div>
-            <div className="flex flex-col gap-1">
-              {DASHBOARD_PAGES.filter(item => CREATE_PAGE_IDS.has(item.id)).map(({ id, label }) => (
-                <NavLink key={id} id={id} label={label} page={page} nested />
-              ))}
-            </div>
-          </div>
-          <div className="mt-5">
             <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
               Planned
             </div>
@@ -152,8 +167,16 @@ const Shell: React.FC = () => {
             {page === 'dictation/models' && <ModelsPage section="dictation" />}
             {page === 'dictation/usage' && <UsagePage section="dictation" />}
             {page === 'dictation/diagnostics' && <SystemPage section="dictation" />}
-            {page === 'image' && <ImagePage />}
-            {page === 'music' && <MusicPage />}
+            {page === 'image/generate' && <ImagePage />}
+            {page === 'image/settings' && <OperatePage section="image" />}
+            {page === 'image/models' && <ModelsPage section="image" />}
+            {page === 'image/usage' && <UsagePage section="image" />}
+            {page === 'image/diagnostics' && <SystemPage section="image" />}
+            {page === 'music/generate' && <MusicPage />}
+            {page === 'music/settings' && <OperatePage section="music" />}
+            {page === 'music/models' && <ModelsPage section="music" />}
+            {page === 'music/usage' && <UsagePage section="music" />}
+            {page === 'music/diagnostics' && <SystemPage section="music" />}
             {page === 'post-training' && <FutureWorkspacePage area="post-training" />}
           </div>
         </main>
@@ -169,9 +192,9 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
   const connectionTone = connection === 'connected' ? 'good' : connection === 'offline' ? 'critical' : 'warn';
   const connectionLabel = connection === 'connected' ? 'Live' : connection === 'connecting' ? 'Connecting' : connection === 'reconnecting' ? 'Reconnecting' : 'Offline';
   const pageLabel = pageInfo?.section
-    ? `${pageInfo.section === 'llm' ? 'LLM' : 'Dictation'} / ${pageInfo.label}`
+    ? `${sectionLabel(pageInfo.section)} / ${pageInfo.label}`
     : pageInfo?.label;
-  const healthTarget = pageInfo?.section === 'dictation' ? 'dictation/diagnostics' : 'llm/diagnostics';
+  const healthTarget = pageInfo?.section ? `${pageInfo.section}/diagnostics` : 'llm/diagnostics';
 
   return (
     <header className="sticky top-0 z-20 border-b border-border-slate bg-deck-navy px-4 py-3 md:static sm:px-6">
@@ -201,22 +224,17 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
               Settings
             </summary>
             <nav className="absolute right-0 z-40 mt-2 w-[min(18rem,calc(100vw-2rem))] border border-border-slate bg-[#07101d] shadow-deck" aria-label="Settings">
-              <a
-                href="#llm/settings"
-                onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
-                className="block border-b border-white/10 px-4 py-3 hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-queue-blue"
-              >
-                <span className="block text-sm font-medium text-text-primary">LLM settings</span>
-                <span className="mt-0.5 block text-xs text-text-muted">Profiles, aliases, pricing, and model loading</span>
-              </a>
-              <a
-                href="#dictation/settings"
-                onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
-                className="block border-b border-white/10 px-4 py-3 hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-queue-blue"
-              >
-                <span className="block text-sm font-medium text-text-primary">Dictation settings</span>
-                <span className="mt-0.5 block text-xs text-text-muted">Speech runtimes, costs, and model configuration</span>
-              </a>
+              {DASHBOARD_SECTIONS.map(section => (
+                <a
+                  key={section}
+                  href={`#${section}/settings`}
+                  onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
+                  className="block border-b border-white/10 px-4 py-3 hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-queue-blue"
+                >
+                  <span className="block text-sm font-medium text-text-primary">{sectionLabel(section)} settings</span>
+                  <span className="mt-0.5 block text-xs text-text-muted">{SECTION_SETTINGS_HELP[section]}</span>
+                </a>
+              ))}
               <a
                 href={`#${healthTarget}`}
                 onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
@@ -238,15 +256,11 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
           onChange={event => { window.location.hash = event.target.value; }}
         >
           <option value="home">Home</option>
-          <optgroup label="LLM">
-            {DASHBOARD_PAGES.filter(item => item.section === 'llm').map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
-          </optgroup>
-          <optgroup label="Dictation">
-            {DASHBOARD_PAGES.filter(item => item.section === 'dictation').map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
-          </optgroup>
-          <optgroup label="Create">
-            {DASHBOARD_PAGES.filter(item => CREATE_PAGE_IDS.has(item.id)).map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
-          </optgroup>
+          {DASHBOARD_SECTIONS.map(section => (
+            <optgroup key={section} label={sectionLabel(section)}>
+              {DASHBOARD_PAGES.filter(item => item.section === section).map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+            </optgroup>
+          ))}
           <optgroup label="Planned">
             {DASHBOARD_PAGES.filter(item => item.preview).map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
           </optgroup>

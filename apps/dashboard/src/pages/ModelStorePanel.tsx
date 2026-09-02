@@ -13,7 +13,7 @@ import {
   type StoreModel,
 } from '../api';
 import { Badge, Button, EmptyState, Panel, ProgressBar, SectionTitle } from '../components/ui';
-import { sectionLabel, type DashboardSection } from '../dashboardSections';
+import { modelBelongsToSection, sectionLabel, type DashboardSection } from '../dashboardSections';
 import { useGateway } from '../gateway';
 import { formatBytes, formatDate, formatTokenCount } from '../utils';
 
@@ -24,6 +24,8 @@ const serverModelType = (entry: InstalledStoreModel) => {
   if (entry.hasVision) return 'Vision and text';
   if (entry.modality === 'audio_transcription') return 'Speech to text';
   if (entry.modality === 'audio_speech') return 'Text to speech';
+  if (entry.modality === 'image') return 'Image generation';
+  if (entry.modality === 'audio_generation') return 'Music generation';
   return entry.modality || 'Text';
 };
 
@@ -41,10 +43,25 @@ const DISCOVERY: Record<DashboardSection, Array<{ label: string; query: string; 
     { label: 'Text to speech', query: 'TTS ONNX', runtime: '', modality: 'audio_speech' },
     { label: 'Kokoro', query: 'Kokoro ONNX', runtime: '', modality: 'audio_speech' },
   ],
+  image: [
+    { label: 'Stable Diffusion', query: 'Stable Diffusion safetensors', runtime: 'stable_diffusion_cpp', modality: 'image' },
+    { label: 'SDXL', query: 'SDXL safetensors', runtime: 'stable_diffusion_cpp', modality: 'image' },
+  ],
+  music: [
+    { label: 'ACE-Step', query: 'ACE-Step 1.5 GGUF', runtime: 'ace_step_cpp', modality: 'audio_generation' },
+  ],
 };
 
-export function defaultStoreModelName(file: Pick<StoreFile, 'repo' | 'name'>): string {
-  return `${file.repo.split('/').pop() || 'model'}-${file.name.replace(/\.[^.]+$/, '').slice(-40)}`
+const SEARCH_PLACEHOLDER: Record<DashboardSection, string> = {
+  llm: 'Search language models',
+  dictation: 'Search speech models',
+  image: 'Search image generation models',
+  music: 'Search music generation models',
+};
+
+export function defaultStoreModelName(file: Pick<StoreFile, 'repo' | 'name' | 'variant'>): string {
+  const artifactName = file.variant || file.name;
+  return `${file.repo.split('/').pop() || 'model'}-${artifactName.replace(/\.[^.]+$/, '').slice(-40)}`
     .replace(/[^A-Za-z0-9_.-]/g, '_');
 }
 
@@ -125,10 +142,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
     try {
       const next = await inspectStoreModel(repo);
       if (request === inspectRequest.current) {
-        setFiles(next.filter(file =>
-          section === 'dictation'
-            ? file.modality === 'audio_transcription' || file.modality === 'audio_speech'
-            : file.modality !== 'audio_transcription' && file.modality !== 'audio_speech'));
+        setFiles(next.filter(file => modelBelongsToSection(file, section)));
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -200,9 +214,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
 
   const scopedInstalled = useMemo(
     () => Object.entries(installed).filter(([, entry]) =>
-      section === 'dictation'
-        ? entry.modality === 'audio_transcription' || entry.modality === 'audio_speech'
-        : entry.modality !== 'audio_transcription' && entry.modality !== 'audio_speech'),
+      modelBelongsToSection(entry, section)),
     [installed, section],
   );
   const scopedLibrary = useMemo(() => {
@@ -215,10 +227,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
           configured: true,
           managed: true,
         }));
-    return entries.filter(entry =>
-      section === 'dictation'
-        ? entry.modality === 'audio_transcription' || entry.modality === 'audio_speech'
-        : entry.modality !== 'audio_transcription' && entry.modality !== 'audio_speech');
+    return entries.filter(entry => modelBelongsToSection(entry, section));
   }, [library, scopedInstalled, section]);
   const sortedLibrary = useMemo(() => {
     const value = (entry: InstalledStoreModel) => {
@@ -238,9 +247,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
     });
   }, [scopedLibrary, serverSort]);
   const scopedDownloads = downloads.filter(download =>
-    section === 'dictation'
-      ? download.modality === 'audio_transcription' || download.modality === 'audio_speech'
-      : download.modality !== 'audio_transcription' && download.modality !== 'audio_speech');
+    modelBelongsToSection(download, section));
   const gpu = (status?.hardware?.gpu ?? {}) as Record<string, unknown>;
   const vramTotalMb = Number(gpu.vramTotal ?? 0) / (1024 * 1024);
   const popularityFloor = section === 'llm' ? 1_000 : 100;
@@ -256,6 +263,12 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
       return right.downloads - left.downloads || right.likes - left.likes;
     }), [results, recommendedOnly, popularityFloor, section, selectedCapacityMb, catalogSort]);
   const selectedModel = results.find(model => model.id === selectedRepo);
+  const reviewFiles = useMemo(
+    () => files.some(file => file.runtime === 'ace_step_cpp' && file.format === 'bundle')
+      ? files.filter(file => file.runtime !== 'ace_step_cpp' || file.format === 'bundle')
+      : files,
+    [files],
+  );
   const activeFilters = [
     recommendedOnly ? 'recommended' : 'all adoption levels',
     section === 'llm' ? (vramCapacityGb === 'server' ? 'fits this server' : vramCapacityGb === '0' ? 'any VRAM' : `up to ${vramCapacityGb} GB`) : '',
@@ -276,7 +289,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
         <Panel className="border-t-0 pt-0">
           <SectionTitle
             title={`${sectionLabel(section)} Model Store`}
-            aside={section === 'llm' && vramTotalMb ? `${Math.round(vramTotalMb / 1024)} GB VRAM detected` : 'Hugging Face catalogue'}
+            aside={section !== 'dictation' && vramTotalMb ? `${Math.round(vramTotalMb / 1024)} GB VRAM detected` : 'Hugging Face catalogue'}
           />
           <p className="mt-2 max-w-2xl text-sm text-text-secondary">
             Find a compatible model, compare the files that fit this machine, then start a verified background install.
@@ -288,7 +301,7 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
               <input
                 id={`${section}-model-search`}
                 className={`${inputClass} min-w-0 flex-1`}
-                placeholder={section === 'dictation' ? 'Search speech models' : 'Search language models'}
+                placeholder={SEARCH_PLACEHOLDER[section]}
                 value={query}
                 onChange={event => setQuery(event.target.value)}
               />
@@ -325,11 +338,21 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
                       <option value="llama_cpp">llama.cpp / GGUF</option>
                       <option value="">All compatible runtimes</option>
                     </>
-                  ) : (
+                  ) : section === 'dictation' ? (
                     <>
                       <option value="whisper_cpp">whisper.cpp speech to text</option>
                       <option value="sherpa_onnx">sherpa-onnx speech</option>
                       <option value="">All speech runtimes</option>
+                    </>
+                  ) : section === 'image' ? (
+                    <>
+                      <option value="stable_diffusion_cpp">stable-diffusion.cpp</option>
+                      <option value="">All image runtimes</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="ace_step_cpp">ACE-Step C++</option>
+                      <option value="">All music runtimes</option>
                     </>
                   )}
                 </select>
@@ -431,25 +454,26 @@ export const ModelStorePanel: React.FC<{ section: DashboardSection }> = ({ secti
             <div className="mt-4"><EmptyState title="Select a model" detail="Compatible files and hardware fit will appear here without leaving the search results." /></div>
           ) : inspectBusy ? (
             <p className="mt-4 border-y border-dashed border-border-slate py-8 text-center text-sm text-text-muted" role="status">Inspecting repository files…</p>
-          ) : files.length === 0 ? (
+          ) : reviewFiles.length === 0 ? (
             <div className="mt-4"><EmptyState title="No compatible files found" detail="Choose another repository or broaden the search." /></div>
           ) : (
             <>
               <div className="mt-3 flex flex-wrap gap-2 text-xs text-text-muted">
                 <span>{selectedModel?.runtime}</span>
                 {selectedModel?.hasVision && <Badge label="Vision capable" tone="violet" />}
-                <span>{files.length} compatible file{files.length === 1 ? '' : 's'}</span>
+                <span>{reviewFiles.length} compatible choice{reviewFiles.length === 1 ? '' : 's'}</span>
               </div>
               <div className="mt-3 divide-y divide-white/10 border-y border-white/10">
-                {files.map(file => {
-                  const requiresBundle = file.runtime === 'sherpa_onnx' && file.artifactCount === undefined;
-                  const isBundle = file.runtime === 'sherpa_onnx' && (file.artifactCount ?? 0) > 1;
+                {reviewFiles.map(file => {
+                  const bundleRuntime = file.runtime === 'sherpa_onnx' || file.runtime === 'ace_step_cpp';
+                  const requiresBundle = bundleRuntime && file.artifactCount === undefined;
+                  const isBundle = bundleRuntime && (file.artifactCount ?? 0) > 1;
                   const active = selectedFile?.name === file.name;
                   return (
                     <div key={file.name} className={`py-3 ${active ? 'bg-white/[0.04]' : ''}`}>
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div className="min-w-0">
-                          <p className="break-all font-mono text-xs text-text-primary">{file.name}</p>
+                          <p className="break-all font-mono text-xs text-text-primary">{file.variant || file.name}</p>
                           <p className="mt-1 text-xs text-text-muted">
                             {file.quantization} · {formatBytes(file.size)} · {file.runtime}
                             {isBundle ? ` · ${file.artifactCount} files` : ''}
@@ -593,6 +617,7 @@ const ArtifactFit: React.FC<{
   if (!vramTotalMb) return <Badge label={`${estimatedVramMb.toLocaleString()} MB · verify profile`} tone="warn" />;
   const share = estimatedVramMb / vramTotalMb;
   if (share <= 0.65) return <Badge label="Fits with headroom" tone="good" />;
+  if (share <= 0.85 && section !== 'llm') return <Badge label="Fits with limited headroom" tone="warn" />;
   if (share <= 0.85) return <Badge label="Fits · tight at long context" tone="warn" />;
   return <Badge label="Not recommended for this VRAM" tone="critical" />;
 };

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { deleteModelAlias, getModelAliases, getModels, saveModelAlias, type ModelAliasRecord } from '../api';
 import { Badge, Button, EmptyState, Panel, SectionTitle } from '../components/ui';
-import { type DashboardSection } from '../dashboardSections';
+import { modelBelongsToSection, type DashboardSection } from '../dashboardSections';
 
 export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ section }) => {
   const [aliases, setAliases] = useState<ModelAliasRecord[]>([]);
@@ -11,11 +11,10 @@ export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ secti
   const [target, setTarget] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const concrete = useMemo(() => models.filter(model => !model.alias && (
-    section === 'dictation'
-      ? model.modality === 'audio_transcription' || model.modality === 'audio_speech'
-      : model.modality !== 'audio_transcription' && model.modality !== 'audio_speech'
-  )), [models, section]);
+  const concrete = useMemo(
+    () => models.filter(model => !model.alias && modelBelongsToSection(model, section)),
+    [models, section],
+  );
 
   const refresh = async () => {
     const [aliasDocument, nextModels] = await Promise.all([getModelAliases(), getModels()]);

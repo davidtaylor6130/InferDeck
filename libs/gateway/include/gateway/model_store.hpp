@@ -125,7 +125,7 @@ private:
         const std::string& runtime, const std::string& modality);
     foundation::Result<std::vector<StoreFile>> resolve_bundle(
         const std::string& repo, const std::string& runtime,
-        const std::string& modality);
+        const std::string& modality, const std::string& bundle_name);
     foundation::Result<void> start(std::uint64_t id);
     void worker_entry(std::uint64_t id,
                       const std::shared_ptr<std::atomic<bool>>& done) noexcept;

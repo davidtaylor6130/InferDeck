@@ -402,6 +402,43 @@ public:
     }
 };
 
+class AceStepBundleTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string&) override {
+        if (url.find("?search=") != std::string::npos) {
+            return foundation::Ok(nlohmann::json::array({
+                {
+                    {"id", "Serveurperso/ACE-Step-1.5-GGUF"},
+                    {"pipeline_tag", "text-to-audio"},
+                    {"tags", nlohmann::json::array({"ace-step", "gguf"})},
+                    {"downloads", 100},
+                },
+            }));
+        }
+        const std::string checksum = "9f86d081884c7d659a2feaa0c55ad015"
+                                     "a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        return foundation::Ok(nlohmann::json{
+            {"sha", "revision"}, {"pipeline_tag", "text-to-audio"},
+            {"tags", nlohmann::json::array({"ace-step", "gguf"})},
+            {"siblings", nlohmann::json::array({
+                {{"rfilename", "Qwen3-Embedding-0.6B-BF16.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "Qwen3-Embedding-0.6B-Q8_0.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "acestep-5Hz-lm-0.6B-Q8_0.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "acestep-v15-turbo-Q4_K_M.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "acestep-v15-turbo-Q8_0.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "vae-BF16.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+            })}
+        });
+    }
+};
+
 class IncompleteSherpaTransport final : public SherpaBundleTransport {
 public:
     foundation::Result<nlohmann::json> get_json(
@@ -503,6 +540,79 @@ TEST_CASE("Model store filters search results by runtime", "[model-store]") {
         REQUIRE(result->size() == 1);
         CHECK((*result)[0]["id"] == "owner/image");
         CHECK((*result)[0]["modality"] == "image");
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store discovers and installs a verified ACE-Step bundle",
+          "[model-store][ace-step]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<AceStepBundleTransport>());
+        const auto search = store.search(
+            "ACE-Step", "ace_step_cpp", "audio_generation");
+        REQUIRE(search);
+        REQUIRE(search->size() == 1);
+        CHECK((*search)[0]["runtime"] == "ace_step_cpp");
+        CHECK((*search)[0]["modality"] == "audio_generation");
+
+        const auto inspected =
+            store.inspect("Serveurperso/ACE-Step-1.5-GGUF");
+        REQUIRE(inspected);
+        const std::string selected_bundle =
+            "__inferdeck_ace_step_bundle__:acestep-v15-turbo-Q4_K_M.gguf";
+        const auto bundle = std::find_if(
+            inspected->at("files").begin(), inspected->at("files").end(),
+            [&selected_bundle](const auto& file) {
+                return file.value("name", "") == selected_bundle;
+            });
+        REQUIRE(bundle != inspected->at("files").end());
+        CHECK(bundle->value("compatible", false));
+        CHECK(bundle->value("artifactCount", 0) == 3);
+        CHECK(bundle->value("variant", "") ==
+              "acestep-v15-turbo-Q4_K_M.gguf");
+        CHECK(std::count_if(
+                  inspected->at("files").begin(),
+                  inspected->at("files").end(),
+                  [](const auto& file) {
+                      return file.value("format", "") == "bundle" &&
+                             file.value("runtime", "") == "ace_step_cpp";
+                  }) == 2);
+        CHECK_FALSE(store.install(
+            "Serveurperso/ACE-Step-1.5-GGUF",
+            "acestep-v15-turbo-Q4_K_M.gguf", "ace_step_cpp",
+            "audio_generation", "unsafe-single-file"));
+        CHECK_FALSE(store.install(
+            "Serveurperso/ACE-Step-1.5-GGUF",
+            "__inferdeck_ace_step_bundle__:acestep-v15-base-Q4_K_M.gguf",
+            "ace_step_cpp", "audio_generation", "missing-variant"));
+
+        const auto install = store.install(
+            "Serveurperso/ACE-Step-1.5-GGUF",
+            selected_bundle, "ace_step_cpp",
+            "audio_generation", "ace-step-bundle");
+        REQUIRE(install);
+        const auto job = wait_for_terminal(store, *install);
+        REQUIRE(job);
+        CHECK(job->state == "installed");
+        const auto info = registry.get_info_result("ace-step-bundle");
+        REQUIRE(info);
+        CHECK(info->runtime == "ace_step_cpp");
+        CHECK(info->modality == "audio_generation");
+        CHECK(info->artifacts.contains("text_encoder"));
+        CHECK(info->artifacts.contains("dit"));
+        CHECK(info->artifacts.contains("vae"));
+        CHECK(info->artifacts.size() == 3);
+        CHECK(std::filesystem::path(info->artifacts.at("text_encoder"))
+                  .filename().string() ==
+              "Qwen3-Embedding-0.6B-Q8_0.gguf");
+        CHECK(std::filesystem::path(info->artifacts.at("dit"))
+                  .filename().string() ==
+              "acestep-v15-turbo-Q4_K_M.gguf");
+        CHECK(info->vram_required_mb == 1);
     }
     std::filesystem::remove_all(root);
 }

@@ -383,6 +383,36 @@ TEST_CASE("StatsDb: canonical request dimensions round-trip",
   CHECK(rows[0].output_audio_seconds == Catch::Approx(8.0));
   CHECK(rows[0].input_image_count == 10);
   CHECK(rows[0].output_image_count == 11);
+
+  RequestRow failed_output = row;
+  failed_output.timestamp_unix_ms = 1235;
+  failed_output.status_code = 500;
+  failed_output.generation_duration_ms = 50.0;
+  failed_output.output_audio_seconds = 80.0;
+  failed_output.input_image_count = 0;
+  failed_output.output_image_count = 110;
+  db.record_request(failed_output);
+
+  const auto usage = db.model_usage();
+  REQUIRE(usage.size() == 1);
+  CHECK(usage[0].output_audio_seconds == Catch::Approx(8.0));
+  CHECK(usage[0].input_image_count == 10);
+  CHECK(usage[0].output_image_count == 11);
+  CHECK(usage[0].total_generation_duration_ms == Catch::Approx(5.0));
+
+  const auto monthly = db.monthly_usage();
+  REQUIRE(monthly.size() == 1);
+  CHECK(monthly[0].output_audio_seconds == Catch::Approx(8.0));
+  CHECK(monthly[0].input_image_count == 10);
+  CHECK(monthly[0].output_image_count == 11);
+  CHECK(monthly[0].generation_duration_ms == Catch::Approx(5.0));
+
+  const auto daily = db.daily_usage(0);
+  REQUIRE(daily.size() == 1);
+  CHECK(daily[0].output_audio_seconds == Catch::Approx(8.0));
+  CHECK(daily[0].input_image_count == 10);
+  CHECK(daily[0].output_image_count == 11);
+  CHECK(daily[0].generation_duration_ms == Catch::Approx(5.0));
 }
 
 TEST_CASE("StatsDb: failed schema migration rolls back",

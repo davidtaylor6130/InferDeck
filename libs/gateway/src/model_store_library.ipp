@@ -208,7 +208,8 @@ nlohmann::json ModelStore::library() const {
             group.size += local_file_size(path);
             ++group.count;
             const auto searchable = lower(path.string());
-            const auto file_runtime = infer_runtime(path.filename().string(), "");
+            const auto file_runtime =
+                infer_runtime(path.filename().string(), "", searchable);
             if (group.runtime.empty() || file_runtime != "llama_cpp") {
                 group.runtime = file_runtime;
             }

@@ -17,7 +17,7 @@ Result<nlohmann::json> ModelStore::search(const std::string& query,
         if (id.empty()) continue;
         const auto tags = item.value("tags", nlohmann::json::array());
         const std::string searchable = lower(id + " " + tags.dump());
-        std::string inferred_runtime = infer_runtime("", pipeline);
+        std::string inferred_runtime = infer_runtime("", pipeline, searchable);
         if (lower(pipeline).find("automatic-speech-recognition") != std::string::npos &&
             (searchable.find("onnx") != std::string::npos ||
              searchable.find("sherpa") != std::string::npos)) {
@@ -59,6 +59,9 @@ Result<nlohmann::json> ModelStore::inspect(const std::string& repo) {
     if (!response) return Err<nlohmann::json>(response.error().code, response.error().message);
     const std::string revision = response->value("sha", "main");
     const std::string pipeline = response->value("pipeline_tag", "");
+    const auto tags = response->value("tags", nlohmann::json::array());
+    const std::string repository_searchable =
+        lower(repo + " " + pipeline + " " + tags.dump());
     const auto siblings = response->value("siblings", nlohmann::json::array());
     const bool sherpa_asr_repository =
         lower(pipeline).find("automatic-speech-recognition") != std::string::npos &&
@@ -70,7 +73,8 @@ Result<nlohmann::json> ModelStore::inspect(const std::string& repo) {
     for (const auto& sibling : siblings) {
         const std::string filename = sibling.value("rfilename", "");
         const std::string runtime = sherpa_asr_repository
-            ? "sherpa_onnx" : infer_runtime(filename, pipeline);
+            ? "sherpa_onnx"
+            : infer_runtime(filename, pipeline, repository_searchable);
         if (filename.empty() || !compatible_extension(filename, runtime)) continue;
         const auto lfs = sibling.value("lfs", nlohmann::json::object());
         const std::uint64_t size = lfs.value("size", sibling.value("size", std::uint64_t{0}));
@@ -131,6 +135,49 @@ Result<nlohmann::json> ModelStore::inspect(const std::string& repo) {
             {"estimatedVramMb", 0}
         });
     }
+    const auto ace_text_encoder =
+        preferred_ace_artifact(files, "text_encoder");
+    const auto ace_vae = preferred_ace_artifact(files, "vae");
+    std::uint64_t ace_support_size = 0;
+    std::size_t ace_support_count = 0;
+    for (const auto& file : files) {
+        const std::string name = file.value("name", "");
+        if ((ace_text_encoder && name == *ace_text_encoder) ||
+            (ace_vae && name == *ace_vae)) {
+            ace_support_size += file.value("size", std::uint64_t{0});
+            ++ace_support_count;
+        }
+    }
+    std::vector<nlohmann::json> ace_dits;
+    for (const auto& file : files) {
+        const std::string name = file.value("name", "");
+        if (file.value("runtime", "") == "ace_step_cpp" &&
+            artifact_key(name) == "dit" && valid_artifact_path(name)) {
+            ace_dits.push_back(file);
+        }
+    }
+    for (const auto& dit : ace_dits) {
+        const std::string dit_name = dit.value("name", "");
+        const std::uint64_t ace_variant_size =
+            ace_support_size + dit.value("size", std::uint64_t{0});
+        files.push_back({
+            {"repo", repo}, {"revision", revision},
+            {"name", ace_step_bundle_name(dit_name)},
+            {"variant", dit_name},
+            {"size", ace_variant_size}, {"sha256", ""},
+            {"runtime", "ace_step_cpp"}, {"modality", "audio_generation"},
+            {"capabilities", capabilities_for("ace_step_cpp", "audio_generation")},
+            {"format", "bundle"},
+            {"quantization", infer_quantization(dit_name)},
+            {"compatible", ace_support_count == 2 &&
+                               dit.value("compatible", false)},
+            {"artifactCount", ace_support_count + 1},
+            {"estimatedRamMb", static_cast<std::uint64_t>(
+                (ace_variant_size + 1024 * 1024 - 1) / (1024 * 1024))},
+            {"estimatedVramMb", static_cast<std::uint64_t>(
+                (ace_variant_size + 1024 * 1024 - 1) / (1024 * 1024))}
+        });
+    }
     return Ok(nlohmann::json{{"id", repo}, {"revision", revision},
                               {"pipeline", pipeline}, {"files", std::move(files)}});
 }
@@ -165,20 +212,51 @@ Result<StoreFile> ModelStore::resolve_file(const std::string& repo,
 
 Result<std::vector<StoreFile>> ModelStore::resolve_bundle(
     const std::string& repo, const std::string& runtime,
-    const std::string& modality) {
-    if (runtime != "sherpa_onnx") {
+    const std::string& modality, const std::string& bundle_name) {
+    if (runtime != "sherpa_onnx" && runtime != "ace_step_cpp") {
         return Err<std::vector<StoreFile>>(ErrorCode::InvalidArgument,
-                                           "only sherpa-onnx repositories use bundle installation");
+                                           "runtime does not use bundle installation");
     }
     auto details = inspect(repo);
     if (!details) return Err<std::vector<StoreFile>>(details.error().code, details.error().message);
+    const auto selected_ace_dit = runtime == "ace_step_cpp"
+        ? ace_step_bundle_dit(bundle_name)
+        : std::optional<std::string>{};
+    if (runtime == "ace_step_cpp" && !selected_ace_dit) {
+        return Err<std::vector<StoreFile>>(
+            ErrorCode::InvalidArgument, "invalid ACE-Step bundle selection");
+    }
+    const auto ace_text_encoder = runtime == "ace_step_cpp"
+        ? preferred_ace_artifact(details->at("files"), "text_encoder")
+        : std::optional<std::string>{};
+    const auto ace_vae = runtime == "ace_step_cpp"
+        ? preferred_ace_artifact(details->at("files"), "vae")
+        : std::optional<std::string>{};
+    const bool exposed_ace_bundle = runtime != "ace_step_cpp" ||
+        std::any_of(details->at("files").begin(), details->at("files").end(),
+                    [&bundle_name](const auto& file) {
+                        return file.value("name", "") == bundle_name &&
+                               file.value("compatible", false);
+                    });
+    if (!exposed_ace_bundle || (runtime == "ace_step_cpp" &&
+        (!ace_text_encoder || !ace_vae))) {
+        return Err<std::vector<StoreFile>>(
+            ErrorCode::InvalidArgument,
+            "repository does not expose the selected complete verified runtime bundle");
+    }
     std::vector<StoreFile> artifacts;
     std::unordered_set<std::string> keys;
     for (const auto& file : details->at("files")) {
         const std::string name = file.value("name", "");
-        if (name == sherpa_bundle_name || file.value("runtime", "") != runtime ||
+        if (name == sherpa_bundle_name || is_ace_step_bundle(name) ||
+            file.value("runtime", "") != runtime ||
             file.value("modality", "") != modality || !file.value("compatible", false) ||
             !valid_artifact_path(name)) {
+            continue;
+        }
+        if (runtime == "ace_step_cpp" &&
+            name != *selected_ace_dit && name != *ace_text_encoder &&
+            name != *ace_vae) {
             continue;
         }
         StoreFile artifact;
@@ -193,7 +271,8 @@ Result<std::vector<StoreFile>> ModelStore::resolve_bundle(
         if (artifact.size == 0 || artifact.sha256.size() != 64) continue;
         keys.insert(artifact_key(name));
         const auto extension = lower(std::filesystem::path(name).extension().string());
-        if (modality == "audio_speech" && (extension == ".onnx" || extension == ".ort")) {
+        if (modality == "audio_speech" &&
+            (extension == ".onnx" || extension == ".ort")) {
             keys.insert("model");
         }
         artifacts.push_back(std::move(artifact));
@@ -204,16 +283,20 @@ Result<std::vector<StoreFile>> ModelStore::resolve_bundle(
         });
     };
     const bool supertonic = keys.contains("duration_predictor") ||
-        keys.contains("text_encoder") || keys.contains("vector_estimator");
-    const bool complete = modality == "audio_transcription"
-        ? contains_all({"encoder", "decoder", "joiner", "tokens"})
-        : supertonic
-            ? contains_all({"duration_predictor", "text_encoder", "vector_estimator",
-                            "vocoder", "tts_json", "unicode_indexer", "voice_style"})
-            : contains_all({"model", "tokens"});
+        keys.contains("vector_estimator");
+    const bool complete = runtime == "ace_step_cpp"
+        ? modality == "audio_generation" && artifacts.size() == 3 &&
+          contains_all({"text_encoder", "dit", "vae"})
+        : modality == "audio_transcription"
+            ? contains_all({"encoder", "decoder", "joiner", "tokens"})
+            : supertonic
+                ? contains_all({"duration_predictor", "text_encoder",
+                                "vector_estimator", "vocoder", "tts_json",
+                                "unicode_indexer", "voice_style"})
+                : contains_all({"model", "tokens"});
     if (!complete || artifacts.size() < 2) {
         return Err<std::vector<StoreFile>>(ErrorCode::InvalidArgument,
-                                           "sherpa-onnx repository does not expose a complete verified runtime bundle");
+                                           "repository does not expose a complete verified runtime bundle");
     }
     return Ok(std::move(artifacts));
 }

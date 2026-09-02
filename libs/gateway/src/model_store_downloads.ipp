@@ -7,12 +7,15 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
         return Err<std::uint64_t>(ErrorCode::InvalidArgument, "invalid model name");
     }
     std::vector<StoreFile> artifacts;
-    if (runtime == "sherpa_onnx") {
-        if (filename != sherpa_bundle_name) {
+    if (runtime == "sherpa_onnx" || runtime == "ace_step_cpp") {
+        const bool valid_bundle = runtime == "sherpa_onnx"
+            ? filename == sherpa_bundle_name
+            : ace_step_bundle_dit(filename).has_value();
+        if (!valid_bundle) {
             return Err<std::uint64_t>(ErrorCode::InvalidArgument,
-                                      "sherpa-onnx models must be installed as a complete bundle");
+                                      "multi-artifact runtime models must be installed as a complete bundle");
         }
-        auto bundle = resolve_bundle(repo, runtime, modality);
+        auto bundle = resolve_bundle(repo, runtime, modality, filename);
         if (!bundle) return Err<std::uint64_t>(bundle.error().code, bundle.error().message);
         artifacts = std::move(*bundle);
     } else {
@@ -436,6 +439,10 @@ void ModelStore::run_bundle(
     info.runtime = job.file.runtime;
     info.modality = job.file.modality;
     info.capabilities = job.file.capabilities;
+    info.vram_required_mb = job.file.runtime == "ace_step_cpp"
+        ? static_cast<int>((job.file.size + 1024 * 1024 - 1) /
+                           (1024 * 1024))
+        : 0;
     nlohmann::json artifact_manifest = nlohmann::json::object();
     for (const auto& artifact : job.artifacts) {
         auto key = artifact_key(artifact.name);
@@ -460,7 +467,7 @@ void ModelStore::run_bundle(
             {"modality", info.modality}, {"capabilities", info.capabilities},
             {"path", destination.string()}, {"size", job.file.size},
             {"artifacts", artifact_manifest}, {"artifactCount", job.artifacts.size()},
-            {"vramRequiredMb", 0}
+            {"vramRequiredMb", info.vram_required_mb}
         };
         downloads_.at(id).installed_path = destination.string();
     }

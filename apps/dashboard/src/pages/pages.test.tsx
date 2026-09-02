@@ -52,10 +52,24 @@ const status: StatusPayload = {
       peakTokensPerSecond: 0, avgTokensPerSecond: 0, lastTimestampUnixMs: Date.now(),
       inputAudioSeconds: 3_600, inputCharacters: 0,
     },
+    {
+      model: 'stable-diffusion-v1-5-fp16', requests: 2, successfulRequests: 2,
+      promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      peakTokensPerSecond: 0, avgTokensPerSecond: 0, lastTimestampUnixMs: Date.now(),
+      generationDurationMs: 9_000, outputImageCount: 3,
+    },
+    {
+      model: 'ace-step-v1.5-turbo-q4', requests: 1, successfulRequests: 1,
+      promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      peakTokensPerSecond: 0, avgTokensPerSecond: 0, lastTimestampUnixMs: Date.now(),
+      generationDurationMs: 6_000, outputAudioSeconds: 10,
+    },
   ],
   monthlyTokenUsage: [
     { bucket: '2026-06', model: 'qwen3.6-35b-a3b', promptTokens: 384_220, completionTokens: 120_000, totalTokens: 504_220, requests: 12, successfulRequests: 11 },
     { bucket: '2026-06', model: 'parakeet-tdt-0.6b-v3', promptTokens: 0, completionTokens: 0, totalTokens: 0, requests: 7, successfulRequests: 7, inputAudioSeconds: 3_600, inputCharacters: 0 },
+    { bucket: '2026-06', model: 'stable-diffusion-v1-5-fp16', promptTokens: 0, completionTokens: 0, totalTokens: 0, requests: 2, successfulRequests: 2, generationDurationMs: 9_000, outputImageCount: 3 },
+    { bucket: '2026-06', model: 'ace-step-v1.5-turbo-q4', promptTokens: 0, completionTokens: 0, totalTokens: 0, requests: 1, successfulRequests: 1, generationDurationMs: 6_000, outputAudioSeconds: 10 },
   ],
   models: [],
   current: 'qwen3.6-35b-a3b',
@@ -114,15 +128,25 @@ describe('pages', () => {
     expect(html).not.toContain('Open Dictation');
   });
 
-  it('LLM and dictation Model Settings pages stay administration-only', () => {
+  it('every active division has section-scoped Model Settings', () => {
     const llm = renderWith(<OperatePage section="llm" />);
     const dictation = renderWith(<OperatePage section="dictation" />);
+    const image = renderWith(<OperatePage section="image" />);
+    const music = renderWith(<OperatePage section="music" />);
     expect(llm).toContain('LLM Model Settings');
     expect(llm).toContain('qwen3.6-35b-a3b');
     expect(dictation).toContain('Dictation Model Settings');
     expect(dictation).toContain('parakeet-tdt-0.6b-v3');
     expect(dictation).toContain('Recording and playback stay in clients');
     expect(dictation).not.toContain('microphone');
+    expect(image).toContain('Image Model Settings');
+    expect(image).toContain('stable-diffusion-v1-5-fp16');
+    expect(image).not.toContain('ace-step-v1.5-turbo-q4');
+    expect(image).toContain('Image generation jobs');
+    expect(music).toContain('Music Model Settings');
+    expect(music).toContain('ace-step-v1.5-turbo-q4');
+    expect(music).not.toContain('stable-diffusion-v1-5-fp16');
+    expect(music).toContain('Music generation jobs');
     expect(llm).toContain('Model settings for qwen3.6-35b-a3b');
     expect(llm).toContain('Auto-optimize');
     expect(llm).not.toContain('Auto-optimize with benchmark');
@@ -179,6 +203,8 @@ describe('pages', () => {
   it('Model Store pages are section-specific catalogues rather than runtime controls', () => {
     const llm = renderWith(<ModelsPage section="llm" />);
     const dictation = renderWith(<ModelsPage section="dictation" />);
+    const image = renderWith(<ModelsPage section="image" />);
+    const music = renderWith(<ModelsPage section="music" />);
     expect(llm).toContain('LLM Model Store');
     expect(llm).toContain('1. Find a model');
     expect(llm).toContain('2. Review and install');
@@ -188,6 +214,14 @@ describe('pages', () => {
     expect(dictation).toContain('Dictation Model Store');
     expect(dictation).toContain('Speech to text');
     expect(dictation).toContain('Text to speech');
+    expect(image).toContain('Image Model Store');
+    expect(image).toContain('Stable Diffusion');
+    expect(image).toContain('stable-diffusion.cpp');
+    expect(image).toContain('Search image generation models');
+    expect(music).toContain('Music Model Store');
+    expect(music).toContain('ACE-Step');
+    expect(music).toContain('ACE-Step C++');
+    expect(music).toContain('Search music generation models');
     expect(llm).not.toContain('Stable API aliases');
     expect(llm).not.toContain('Load history');
     expect(dictation).not.toContain('Load history');
@@ -198,6 +232,11 @@ describe('pages', () => {
       repo: 'bartowski/Qwen3.5-27B-GGUF',
       name: 'Qwen3.5-27B-Q4_K_M.gguf',
     })).toBe('Qwen3.5-27B-GGUF-Qwen3.5-27B-Q4_K_M');
+    expect(defaultStoreModelName({
+      repo: 'Serveurperso/ACE-Step-1.5-GGUF',
+      name: '__inferdeck_ace_step_bundle__:acestep-v15-turbo-Q4_K_M.gguf',
+      variant: 'acestep-v15-turbo-Q4_K_M.gguf',
+    })).toBe('ACE-Step-1.5-GGUF-acestep-v15-turbo-Q4_K_M');
   });
 
   it('renders functional image and music generation workspaces with history', () => {
@@ -227,9 +266,11 @@ describe('pages', () => {
     expect(html).not.toContain('<button');
   });
 
-  it('Usage pages expose correctly scoped LLM and dictation economics', () => {
+  it('Usage pages expose section-correct metrics and persisted media output', () => {
     const llm = renderWith(<UsagePage section="llm" />);
     const dictation = renderWith(<UsagePage section="dictation" />);
+    const image = renderWith(<UsagePage section="image" />);
+    const music = renderWith(<UsagePage section="music" />);
     expect(llm).toContain('LLM usage');
     expect(llm).toContain('Estimated API cost');
     expect(llm).toContain('server-side prices configured for each model in Model Settings');
@@ -246,12 +287,26 @@ describe('pages', () => {
     expect(dictation).toContain('OpenAI whisper-1');
     expect(dictation).not.toContain('ROI remaining');
     expect(dictation).not.toContain('Portfolio break-even USD');
+    expect(image).toContain('Image usage');
+    expect(image).toContain('Images generated');
+    expect(image).toContain('persisted SQL ledger');
+    expect(image).toContain('stable-diffusion-v1-5-fp16');
+    expect(image).not.toContain('ace-step-v1.5-turbo-q4');
+    expect(image).toContain('Image history');
+    expect(music).toContain('Music usage');
+    expect(music).toContain('Audio generated');
+    expect(music).toContain('persisted SQL ledger');
+    expect(music).toContain('ace-step-v1.5-turbo-q4');
+    expect(music).not.toContain('stable-diffusion-v1-5-fp16');
+    expect(music).toContain('Music history');
   });
 
   it('gives dense runtime and usage data phone-native views without dropping controls or metrics', () => {
     const settings = renderWith(<OperatePage section="llm" />);
     const llm = renderWith(<UsagePage section="llm" />);
     const dictation = renderWith(<UsagePage section="dictation" />);
+    const image = renderWith(<UsagePage section="image" />);
+    const music = renderWith(<UsagePage section="music" />);
 
     expect(settings).toContain('aria-label="Runtime model cards"');
     expect(settings).toContain('aria-label="Unload qwen3.6-35b-a3b"');
@@ -261,11 +316,15 @@ describe('pages', () => {
     expect(llm).toContain('<dt class="text-xs text-text-muted">Prompt processing</dt>');
     expect(dictation).toContain('aria-label="Per-model dictation usage cards"');
     expect(dictation).toContain('<dt class="text-xs text-text-muted">Billable work</dt>');
+    expect(image).toContain('aria-label="Per-model image usage cards"');
+    expect(music).toContain('aria-label="Per-model music usage cards"');
   });
 
   it('Health and alerts pages expose section-specific runtime health before raw logs', () => {
     const llm = renderWith(<SystemPage section="llm" />);
     const dictation = renderWith(<SystemPage section="dictation" />);
+    const image = renderWith(<SystemPage section="image" />);
+    const music = renderWith(<SystemPage section="music" />);
     expect(llm).toContain('LLM accelerator');
     expect(llm).toContain('GPU utilization');
     expect(llm).toContain('Warnings &amp; errors');
@@ -279,6 +338,16 @@ describe('pages', () => {
     expect(dictation).toContain('Warnings &amp; errors');
     expect(dictation).toContain('Full gateway log');
     expect(dictation).toContain('collapsed for safety');
+    expect(image).toContain('Image accelerator');
+    expect(image).toContain('Image runtimes');
+    expect(image).toContain('stable-diffusion-v1-5-fp16');
+    expect(image).toContain('Image generation health');
+    expect(image).not.toContain('ace-step-v1.5-turbo-q4');
+    expect(music).toContain('Music accelerator');
+    expect(music).toContain('Music runtimes');
+    expect(music).toContain('ace-step-v1.5-turbo-q4');
+    expect(music).toContain('Music generation health');
+    expect(music).not.toContain('stable-diffusion-v1-5-fp16');
   });
 
   it('classifies structured and legacy gateway alerts without guessing from presentation', () => {

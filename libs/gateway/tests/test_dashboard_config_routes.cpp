@@ -781,6 +781,22 @@ TEST_CASE("Usage API exposes daily usage for the complete retained history",
         1704067200000LL, "old-model", 100, 50, 0.0, 0.0, 200, -1});
     routes.stats_db.record_request({
         1787011200000LL, "new-model", 10, 5, 0.0, 0.0, 200, -1});
+    inferdeck::observability::RequestRow image;
+    image.timestamp_unix_ms = 1787011201000LL;
+    image.model = "stable-diffusion-v1-5";
+    image.modality = "image_generation";
+    image.status_code = 200;
+    image.generation_duration_ms = 4'000.0;
+    image.output_image_count = 2;
+    routes.stats_db.record_request(image);
+    inferdeck::observability::RequestRow music;
+    music.timestamp_unix_ms = 1787011202000LL;
+    music.model = "ace-step-v1.5";
+    music.modality = "audio_generation";
+    music.status_code = 200;
+    music.generation_duration_ms = 6'000.0;
+    music.output_audio_seconds = 10.0;
+    routes.stats_db.record_request(music);
     auto client = routes.client();
     const auto status_response = client.Get("/api/inferdeck/v1/status");
     REQUIRE(status_response);
@@ -794,11 +810,33 @@ TEST_CASE("Usage API exposes daily usage for the complete retained history",
     };
     CHECK(sum_tokens(status["tokenUsage"]) == 165);
     CHECK(sum_tokens(status["monthlyTokenUsage"]) == 165);
+    const auto find_model = [](const auto& rows, const std::string& model) {
+        return std::find_if(rows.begin(), rows.end(), [&model](const auto& row) {
+            return row.value("model", "") == model;
+        });
+    };
+    const auto image_usage =
+        find_model(status["tokenUsage"], "stable-diffusion-v1-5");
+    const auto music_usage = find_model(status["tokenUsage"], "ace-step-v1.5");
+    REQUIRE(image_usage != status["tokenUsage"].end());
+    REQUIRE(music_usage != status["tokenUsage"].end());
+    CHECK((*image_usage)["outputImageCount"] == 2);
+    CHECK((*image_usage)["generationDurationMs"] == 4'000.0);
+    CHECK((*music_usage)["outputAudioSeconds"] == 10.0);
+    CHECK((*music_usage)["generationDurationMs"] == 6'000.0);
     const auto response = client.Get("/api/inferdeck/v1/usage/daily");
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto body = nlohmann::json::parse(response->body);
     CHECK(body["dailyTokenUsageAllTime"] == true);
+    const auto image_daily =
+        find_model(body["dailyTokenUsage"], "stable-diffusion-v1-5");
+    const auto music_daily =
+        find_model(body["dailyTokenUsage"], "ace-step-v1.5");
+    REQUIRE(image_daily != body["dailyTokenUsage"].end());
+    REQUIRE(music_daily != body["dailyTokenUsage"].end());
+    CHECK((*image_daily)["outputImageCount"] == 2);
+    CHECK((*music_daily)["outputAudioSeconds"] == 10.0);
     CHECK(std::any_of(
         body["dailyTokenUsage"].begin(), body["dailyTokenUsage"].end(),
         [](const auto& row) {

@@ -470,7 +470,10 @@ nlohmann::json usage_bucket_json(
             {"peakTokensPerSecond", row.peak_tokens_per_second},
             {"peakPromptTokensPerSecond", row.peak_prompt_tokens_per_second},
             {"inputAudioSeconds", row.input_audio_seconds},
-            {"inputCharacters", row.input_characters}
+            {"inputCharacters", row.input_characters},
+            {"outputAudioSeconds", row.output_audio_seconds},
+            {"inputImageCount", row.input_image_count},
+            {"outputImageCount", row.output_image_count}
         });
     }
     return out;
@@ -507,6 +510,9 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
             bucket.peak_prompt_tokens_per_second);
         total.input_audio_seconds += bucket.input_audio_seconds;
         total.input_characters += bucket.input_characters;
+        total.output_audio_seconds += bucket.output_audio_seconds;
+        total.input_image_count += bucket.input_image_count;
+        total.output_image_count += bucket.output_image_count;
     }
     std::int64_t prompt_tokens = 0;
     std::int64_t completion_tokens = 0;
@@ -537,9 +543,13 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
             {"avgTokensPerSecond", avg_tps},
             {"peakPromptTokensPerSecond", canonical.peak_prompt_tokens_per_second},
             {"avgPromptTokensPerSecond", avg_prompt_tps},
+            {"generationDurationMs", canonical.generation_duration_ms},
             {"lastTimestampUnixMs", row.last_timestamp_unix_ms},
             {"inputAudioSeconds", canonical.input_audio_seconds},
-            {"inputCharacters", canonical.input_characters}
+            {"inputCharacters", canonical.input_characters},
+            {"outputAudioSeconds", canonical.output_audio_seconds},
+            {"inputImageCount", canonical.input_image_count},
+            {"outputImageCount", canonical.output_image_count}
         });
     }
 

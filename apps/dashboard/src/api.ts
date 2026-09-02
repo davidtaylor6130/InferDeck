@@ -220,6 +220,7 @@ export interface StoreFile {
   estimatedRamMb: number;
   estimatedVramMb: number;
   artifactCount?: number;
+  variant?: string;
 }
 
 export interface StoreDownload {

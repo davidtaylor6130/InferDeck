@@ -23,10 +23,15 @@ import { useGateway } from '../gateway';
 import type { JobRecord, UsageRow } from '../types';
 import { clamp, compactModel, formatCurrency, formatTokenCount } from '../utils';
 import { DictationUsagePage } from './DictationUsagePage';
+import { MediaGenerationUsagePage } from './MediaGenerationUsagePage';
 
-export const UsagePage: React.FC<{ section?: DashboardSection }> = ({ section = 'llm' }) => (
-  section === 'dictation' ? <DictationUsagePage /> : <LlmUsagePage />
-);
+export const UsagePage: React.FC<{ section?: DashboardSection }> = ({ section = 'llm' }) => {
+  if (section === 'dictation') return <DictationUsagePage />;
+  if (section === 'image' || section === 'music') {
+    return <MediaGenerationUsagePage section={section} />;
+  }
+  return <LlmUsagePage />;
+};
 
 type UsageSortKey = 'model' | 'requests' | 'promptTokens' | 'completionTokens' | 'avgTokensPerSecond' | 'avgPromptTokensPerSecond' | 'peakTokensPerSecond' | 'cost';
 const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);

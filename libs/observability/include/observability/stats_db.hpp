@@ -39,6 +39,9 @@ struct ModelUsageRow {
   std::int64_t last_timestamp_unix_ms{};
   double input_audio_seconds{};
   std::int64_t input_characters{};
+  double output_audio_seconds{};
+  std::int64_t input_image_count{};
+  std::int64_t output_image_count{};
 };
 
 struct UsageBucketRow {
@@ -58,6 +61,9 @@ struct UsageBucketRow {
   double peak_prompt_tokens_per_second{};
   double input_audio_seconds{};
   std::int64_t input_characters{};
+  double output_audio_seconds{};
+  std::int64_t input_image_count{};
+  std::int64_t output_image_count{};
 };
 
 struct LifetimeTotals {

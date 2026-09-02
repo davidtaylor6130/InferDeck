@@ -25,6 +25,13 @@ const inputClass = 'h-9 w-full rounded border border-white/10 bg-[#07101d] px-2 
 type ConfigValue = string | number | boolean | null;
 type EditingModel = { model: ModelInfo; autoOptimize: boolean };
 
+const SETTINGS_DESCRIPTION: Record<DashboardSection, string> = {
+  llm: 'Load, unload, and tune the models the gateway actually runs. Saving applies the active profile automatically.',
+  dictation: 'Control backend speech services and tune their runtime profiles. Recording and playback stay in clients such as Open WebUI.',
+  image: 'Control image generation runtimes, residency, and model profiles used by the Image API and dashboard generator.',
+  music: 'Control music generation runtimes, residency, and model profiles used by the audio generation API and dashboard generator.',
+};
+
 export function stageProfileOptimization(
   yaml: string,
   modelId: string,
@@ -130,20 +137,18 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
       <Panel>
         <SectionTitle
           title={`${sectionLabel(section)} Model Settings`}
-          aside={section === 'dictation' ? 'runtime control' : `${loaded.length} loaded`}
+          aside={`${loaded.length} loaded`}
         />
         <p className="mt-2 max-w-3xl text-sm text-text-secondary">
-          {section === 'dictation'
-            ? 'Control backend speech services and tune their runtime profiles. Recording and playback stay in clients such as Open WebUI.'
-            : 'Load, unload, and tune the models the gateway actually runs. Saving applies the active profile automatically.'}
+          {SETTINGS_DESCRIPTION[section]}
         </p>
         <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Stat label="Configured" value={String(scopedModels.length)} />
           <Stat label="Loaded" value={String(loaded.length)} tone={loaded.length ? 'good' : 'idle'} />
           <Stat label="Lifetime requests" value={requests.toLocaleString()} />
           <Stat
-            label={section === 'dictation' ? 'Successful' : 'Lifetime tokens'}
-            value={section === 'dictation' ? successful.toLocaleString() : formatTokenCount(promptTokens + completionTokens)}
+            label={section === 'llm' ? 'Lifetime tokens' : 'Successful'}
+            value={section === 'llm' ? formatTokenCount(promptTokens + completionTokens) : successful.toLocaleString()}
             sub={lastUsed ? `last used ${timeAgo(lastUsed)}` : 'no persisted use'}
           />
         </div>
@@ -180,7 +185,7 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
                   )}
                   <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
                     <DetailItem label="Service">
-                      <Badge label={modalityLabel(model.modality)} tone={section === 'dictation' ? 'violet' : 'info'} />
+                      <Badge label={modalityLabel(model.modality)} tone={section === 'dictation' || section === 'music' ? 'violet' : 'info'} />
                       <span className="mt-1 block text-xs text-text-muted">{model.runtime || 'llama_cpp'}</span>
                     </DetailItem>
                     <DetailItem label="Slots">
@@ -225,7 +230,7 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
                         )}
                       </td>
                       <td className="py-2.5 pr-4">
-                        <Badge label={modalityLabel(model.modality)} tone={section === 'dictation' ? 'violet' : 'info'} />
+                        <Badge label={modalityLabel(model.modality)} tone={section === 'dictation' || section === 'music' ? 'violet' : 'info'} />
                         <p className="mt-1 text-xs text-text-muted">{model.runtime || 'llama_cpp'}</p>
                       </td>
                       <td className="py-2.5 pr-4">
@@ -264,6 +269,24 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
       )}
 
       {section === 'dictation' && <MediaJobsPanel showEmpty />}
+      {section === 'image' && (
+        <MediaJobsPanel
+          modalities={['image']}
+          title="Image generation jobs"
+          emptyTitle="No image generation jobs yet"
+          emptyDetail="Image requests appear here while the gateway processes them."
+          showEmpty
+        />
+      )}
+      {section === 'music' && (
+        <MediaJobsPanel
+          modalities={['audio_generation']}
+          title="Music generation jobs"
+          emptyTitle="No music generation jobs yet"
+          emptyDetail="Music requests appear here while the gateway processes them."
+          showEmpty
+        />
+      )}
       {editing && (
         <ModelConfigDialog
           model={editing.model}
@@ -295,6 +318,7 @@ const ModelConfigDialog: React.FC<{
   const [scheduleTimezone, setScheduleTimezone] = useState('server local time');
 
   useEffect(() => {
+    if (section !== 'llm') return;
     let active = true;
     getConfig().then(document => {
       if (!active) return;
@@ -323,9 +347,10 @@ const ModelConfigDialog: React.FC<{
       }
     }).catch(() => {});
     return () => { active = false; };
-  }, [model.id]);
+  }, [model.id, section]);
 
   useEffect(() => {
+    if (section !== 'llm') return;
     let active = true;
     getOptimizationSchedule().then(result => {
       if (!active) return;
@@ -333,7 +358,7 @@ const ModelConfigDialog: React.FC<{
       setScheduleStatus(result.schedules.find(schedule => schedule.model === model.id) ?? null);
     }).catch(() => {});
     return () => { active = false; };
-  }, [model.id]);
+  }, [model.id, section]);
 
   const modelIndex = (text: string) => {
     try {
@@ -568,26 +593,26 @@ const ModelConfigDialog: React.FC<{
                 <ConfigField label="Minimum slots">
                   <input className={inputClass} type="number" min="1" value={Number(read(['min_slots']) ?? 1)} onChange={event => update(['min_slots'], Number(event.target.value))} />
                 </ConfigField>
-                <ConfigField label="Context tokens">
-                  <input className={inputClass} type="number" min="1" disabled={section === 'dictation'} value={Number(read(['context_size']) ?? model.context_size)} onChange={event => update(['context_size'], Number(event.target.value))} />
-                </ConfigField>
                 <ConfigField label="VRAM budget (MB)">
                   <input className={inputClass} type="number" min="0" value={Number(read(['vram_required_mb']) ?? model.vram_required_mb)} onChange={event => update(['vram_required_mb'], Number(event.target.value))} />
                 </ConfigField>
-                <ConfigField label="GPU layers (-1 = all)">
-                  <input className={inputClass} type="number" min="-1" disabled={section === 'dictation'} value={Number(read(['n_gpu_layers']) ?? -1)} onChange={event => update(['n_gpu_layers'], Number(event.target.value))} />
-                </ConfigField>
-                <ConfigField label="Temperature">
-                  <input className={inputClass} type="number" min="0" max="2" step="0.05" disabled={section === 'dictation'} value={Number(read(['sampling', 'temperature']) ?? 0.7)} onChange={event => update(['sampling', 'temperature'], Number(event.target.value))} />
-                </ConfigField>
-                <ConfigField label="Top P">
-                  <input className={inputClass} type="number" min="0" max="1" step="0.01" disabled={section === 'dictation'} value={Number(read(['sampling', 'top_p']) ?? 0.95)} onChange={event => update(['sampling', 'top_p'], Number(event.target.value))} />
-                </ConfigField>
-                <ConfigField label="Repeat penalty">
-                  <input className={inputClass} type="number" min="0.01" step="0.01" disabled={section === 'dictation'} value={Number(read(['sampling', 'repeat_penalty']) ?? 1)} onChange={event => update(['sampling', 'repeat_penalty'], Number(event.target.value))} />
-                </ConfigField>
                 {section === 'llm' && (
                   <>
+                    <ConfigField label="Context tokens">
+                      <input className={inputClass} type="number" min="1" value={Number(read(['context_size']) ?? model.context_size)} onChange={event => update(['context_size'], Number(event.target.value))} />
+                    </ConfigField>
+                    <ConfigField label="GPU layers (-1 = all)">
+                      <input className={inputClass} type="number" min="-1" value={Number(read(['n_gpu_layers']) ?? -1)} onChange={event => update(['n_gpu_layers'], Number(event.target.value))} />
+                    </ConfigField>
+                    <ConfigField label="Temperature">
+                      <input className={inputClass} type="number" min="0" max="2" step="0.05" value={Number(read(['sampling', 'temperature']) ?? 0.7)} onChange={event => update(['sampling', 'temperature'], Number(event.target.value))} />
+                    </ConfigField>
+                    <ConfigField label="Top P">
+                      <input className={inputClass} type="number" min="0" max="1" step="0.01" value={Number(read(['sampling', 'top_p']) ?? 0.95)} onChange={event => update(['sampling', 'top_p'], Number(event.target.value))} />
+                    </ConfigField>
+                    <ConfigField label="Repeat penalty">
+                      <input className={inputClass} type="number" min="0.01" step="0.01" value={Number(read(['sampling', 'repeat_penalty']) ?? 1)} onChange={event => update(['sampling', 'repeat_penalty'], Number(event.target.value))} />
+                    </ConfigField>
                     <ConfigField label="Input / 1M tokens (USD)">
                       <input className={inputClass} type="number" min="0" step="0.001" value={Number(read(['prompt_price_per_million']) ?? 0)} onChange={event => update(['prompt_price_per_million'], Number(event.target.value))} />
                     </ConfigField>
