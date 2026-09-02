@@ -226,6 +226,21 @@ describe('pages', () => {
     expect(dictation).not.toContain('Portfolio break-even USD');
   });
 
+  it('gives dense runtime and usage data phone-native views without dropping controls or metrics', () => {
+    const settings = renderWith(<OperatePage section="llm" />);
+    const llm = renderWith(<UsagePage section="llm" />);
+    const dictation = renderWith(<UsagePage section="dictation" />);
+
+    expect(settings).toContain('aria-label="Runtime model cards"');
+    expect(settings).toContain('aria-label="Unload qwen3.6-35b-a3b"');
+    expect(settings).toContain('aria-label="Model settings for qwen3.6-35b-a3b"');
+    expect(llm).toContain('aria-label="Sort mobile LLM usage"');
+    expect(llm).toContain('aria-label="Per-model LLM usage cards"');
+    expect(llm).toContain('<dt class="text-xs text-text-muted">Prompt processing</dt>');
+    expect(dictation).toContain('aria-label="Per-model dictation usage cards"');
+    expect(dictation).toContain('<dt class="text-xs text-text-muted">Billable work</dt>');
+  });
+
   it('Health and alerts pages expose section-specific runtime health before raw logs', () => {
     const llm = renderWith(<SystemPage section="llm" />);
     const dictation = renderWith(<SystemPage section="dictation" />);

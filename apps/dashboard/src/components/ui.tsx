@@ -42,6 +42,17 @@ export const Stat: React.FC<{
   );
 };
 
+export const DetailItem: React.FC<{
+  label: string;
+  children: React.ReactNode;
+  className?: string;
+}> = ({ label, children, className = '' }) => (
+  <div className={`min-w-0 ${className}`}>
+    <dt className="text-xs text-text-muted">{label}</dt>
+    <dd className="mt-0.5 break-words text-sm text-text-secondary">{children}</dd>
+  </div>
+);
+
 export const Button: React.FC<{
   children: React.ReactNode;
   onClick?: () => void;
@@ -62,7 +73,7 @@ export const Button: React.FC<{
       type={type}
       disabled={disabled}
       onClick={onClick}
-      className={`inline-flex min-h-10 items-center justify-center rounded border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue disabled:cursor-not-allowed disabled:opacity-40 ${palette} ${className}`}
+      className={`inline-flex min-h-11 items-center justify-center rounded border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-10 ${palette} ${className}`}
     >
       {children}
     </button>
@@ -91,7 +102,7 @@ export const IconButton: React.FC<{
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue disabled:cursor-not-allowed disabled:opacity-40 ${palette} ${className}`}
+      className={`inline-flex h-11 w-11 shrink-0 items-center justify-center rounded border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue disabled:cursor-not-allowed disabled:opacity-40 sm:h-10 sm:w-10 ${palette} ${className}`}
     >
       {children}
     </button>

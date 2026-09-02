@@ -160,7 +160,7 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
   const healthTarget = pageInfo?.section === 'dictation' ? 'dictation/diagnostics' : 'llm/diagnostics';
 
   return (
-    <header className="border-b border-border-slate bg-deck-navy px-4 py-3 sm:px-6">
+    <header className="sticky top-0 z-20 border-b border-border-slate bg-deck-navy px-4 py-3 md:static sm:px-6">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="min-w-0">
           <span className="block text-[10px] font-medium uppercase tracking-[0.14em] text-text-muted md:hidden">InferDeck</span>
@@ -178,15 +178,15 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
             href={`#${healthTarget}`}
             aria-label={`${connectionLabel}. Open Health and alerts`}
             title="Open Health & alerts"
-            className="rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue md:min-h-0 md:min-w-0"
           >
             <Badge label={connectionLabel} tone={connectionTone} />
           </a>
           <details className="relative z-30">
-            <summary className="min-h-10 cursor-pointer rounded border border-white/15 bg-white/[0.06] px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-white/[0.12]">
+            <summary className="flex min-h-11 cursor-pointer items-center rounded border border-white/15 bg-white/[0.06] px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-white/[0.12] sm:min-h-10">
               Settings
             </summary>
-            <nav className="absolute right-0 z-40 mt-2 w-72 border border-border-slate bg-[#07101d] shadow-deck" aria-label="Settings">
+            <nav className="absolute right-0 z-40 mt-2 w-[min(18rem,calc(100vw-2rem))] border border-border-slate bg-[#07101d] shadow-deck" aria-label="Settings">
               <a
                 href="#llm/settings"
                 onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
@@ -219,7 +219,7 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
         <span className="sr-only">Dashboard page</span>
         <select
           aria-label="Dashboard page"
-          className="min-h-10 w-full border-white/15 bg-[#07101d] px-3 text-sm text-text-primary"
+          className="min-h-11 w-full border-white/15 bg-[#07101d] px-3 text-sm text-text-primary sm:min-h-10"
           value={page}
           onChange={event => { window.location.hash = event.target.value; }}
         >
@@ -288,7 +288,7 @@ const HealthNotices: React.FC = () => {
           aria-label="Dismiss configuration notices"
           title="Dismiss configuration notices"
           onClick={() => setDismissed(true)}
-          className="rounded p-1 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning-amber"
+          className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning-amber sm:min-h-0 sm:min-w-0 sm:p-1"
         >
           <XMarkIcon className="h-4 w-4" aria-hidden="true" />
         </button>
@@ -337,7 +337,7 @@ const ConnectionBanner: React.FC = () => {
     }
   };
   return (
-    <div className={`border-b px-4 py-2 text-sm ${tone}`}>
+    <div className={`border-b px-4 py-2 text-sm sm:px-6 ${tone}`}>
       <span>{remote ? 'Remote dashboard authentication required.' : message}</span>
       {lastUpdatedAt && <span className="ml-2 opacity-80">Data last updated {timeAgo(lastUpdatedAt)}.</span>}
       {remote && (
@@ -350,12 +350,12 @@ const ConnectionBanner: React.FC = () => {
             value={token}
             onChange={event => setToken(event.target.value)}
             placeholder="Dashboard access token"
-            className="min-h-10 min-w-0 flex-1 rounded border border-white/20 bg-deck-navy px-3 text-text-primary sm:min-w-64"
+            className="min-h-11 min-w-0 flex-1 rounded border border-white/20 bg-deck-navy px-3 text-text-primary sm:min-h-10 sm:min-w-64"
           />
           <button
             type="submit"
             disabled={authenticating || token.length === 0}
-            className="min-h-10 w-full rounded border border-current px-3 font-medium disabled:opacity-40 sm:w-auto"
+            className="min-h-11 w-full rounded border border-current px-3 font-medium disabled:opacity-40 sm:min-h-10 sm:w-auto"
           >
             {authenticating ? 'Connecting…' : 'Connect'}
           </button>

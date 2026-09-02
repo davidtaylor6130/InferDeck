@@ -42,11 +42,19 @@ describe('dashboard boundary', () => {
 
   it('keeps real settings and health controls visible from the product shell', () => {
     const html = renderToStaticMarkup(<App />);
-    expect(html).toContain('<summary class="min-h-10');
+    expect(html).toContain('<summary class="flex min-h-11');
     expect(html).toContain('Settings</summary>');
     expect(html).toContain('LLM settings');
     expect(html).toContain('Dictation settings');
     expect(html).toContain('Configuration &amp; recovery');
     expect(html).toContain('Open Health and alerts');
+  });
+
+  it('keeps mobile navigation reachable and settings inside the phone viewport', () => {
+    const html = renderToStaticMarkup(<App />);
+    expect(html).toContain('<header class="sticky top-0 z-20');
+    expect(html).toContain('min-h-11 min-w-11');
+    expect(html).toContain('w-[min(18rem,calc(100vw-2rem))]');
+    expect(html).toContain('class="min-h-11 w-full');
   });
 });

@@ -57,7 +57,7 @@ export const UsageLineChart: React.FC<{
     );
   }
 
-  const handlePointerMove = (event: React.MouseEvent<SVGSVGElement>) => {
+  const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return;
     const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
@@ -78,11 +78,12 @@ export const UsageLineChart: React.FC<{
               ref={svgRef}
               viewBox={`0 0 ${width} ${height}`}
               preserveAspectRatio="none"
-              className="h-[170px] w-full overflow-visible"
+              className="h-[170px] w-full touch-pan-y overflow-visible"
               role="img"
               aria-label={ariaLabel}
-              onMouseMove={handlePointerMove}
-              onMouseLeave={() => setHoverIndex(null)}
+              onPointerDown={handlePointerMove}
+              onPointerMove={handlePointerMove}
+              onPointerLeave={() => setHoverIndex(null)}
             >
               <g stroke="rgba(148,163,184,0.14)" strokeDasharray="4 5" vectorEffect="non-scaling-stroke">
                 {[0, height / 2, height].map(gridY => (
@@ -112,7 +113,7 @@ export const UsageLineChart: React.FC<{
             </svg>
             {hoverIndex !== null && (
               <div
-                className="pointer-events-none absolute z-10 whitespace-nowrap rounded-md border border-white/10 bg-[#0b1626] px-2.5 py-1.5 text-xs shadow-deck"
+                className="pointer-events-none absolute z-10 max-w-[min(18rem,calc(100vw-2rem))] rounded-md border border-white/10 bg-[#0b1626] px-2.5 py-1.5 text-xs shadow-deck"
                 style={{
                   left: `${x(hoverIndex) / width * 100}%`,
                   top: '0',
@@ -130,7 +131,7 @@ export const UsageLineChart: React.FC<{
               </div>
             )}
           </div>
-          <div className="relative mt-1 h-4 text-xs text-text-muted">
+          <div className="chart-ticks relative mt-1 h-4 text-xs text-text-muted">
             {labels.map((label, index) => tickIndices.includes(index) && (
               <span
                 key={`${label}:${index}`}

@@ -7,7 +7,7 @@ import {
   type ConfigDocument, type ProfileBenchmarkSnapshot, type ProfileOptimizationCandidate,
   type ScheduledOptimizationRecord,
 } from '../api';
-import { Badge, Button, EmptyState, IconButton, Panel, SectionTitle, Stat } from '../components/ui';
+import { Badge, Button, DetailItem, EmptyState, IconButton, Panel, SectionTitle, Stat } from '../components/ui';
 import {
   modalityLabel,
   modelsForSection,
@@ -82,6 +82,43 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
     setPending('');
   };
 
+  const renderRuntimeState = (model: ModelInfo, isTarget: boolean) => (
+    model.runtime_available === false
+      ? <Badge label="Unavailable" tone="critical" />
+      : model.loaded
+        ? <Badge label={model.primary ? 'Primary' : 'Loaded'} tone="good" />
+        : isTarget
+          ? <Badge label="Loading" tone="info" />
+          : <Badge label="Standby" tone="idle" />
+  );
+
+  const renderRuntimeActions = (model: ModelInfo) => (
+    <div className="flex flex-wrap gap-2">
+      {model.runtime_available === false ? (
+        <Button disabled>Unavailable</Button>
+      ) : model.loaded ? (
+        <IconButton label={pending === `unload:${model.id}` ? `Unloading ${model.id}` : `Unload ${model.id}`} disabled={pending !== ''} onClick={() => { void unloadModel(model.id); }}>
+          <StopIcon className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
+      ) : (
+        <IconButton label={pending === `load:${model.id}` ? `Loading ${model.id}` : `Load ${model.id}`} tone="blue" disabled={swap.swapping || pending !== ''} onClick={() => { void load(model.id); }}>
+          <PlayIcon className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
+      )}
+      {section === 'llm' && (
+        <Button
+          tone={model.optimization?.status === 'measured' ? 'green' : 'blue'}
+          onClick={() => setEditing({ model, autoOptimize: true })}
+        >
+          Auto-optimize
+        </Button>
+      )}
+      <IconButton label={`Model settings for ${model.id}`} onClick={() => setEditing({ model, autoOptimize: false })}>
+        <Cog6ToothIcon className="h-4 w-4" aria-hidden="true" />
+      </IconButton>
+    </div>
+  );
+
   return (
     <div className="space-y-4">
       {error && (
@@ -124,7 +161,42 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
             />
           </div>
         ) : (
-          <div className="mt-3 overflow-x-auto" role="region" aria-label="Runtime models" tabIndex={0}>
+          <>
+          <div className="mt-3 divide-y divide-white/10 md:hidden" aria-label="Runtime model cards">
+            {scopedModels.map(model => {
+              const modelUsage = usage.find(row => row.model === model.id);
+              const isTarget = swap.swapping && swap.target === model.id;
+              return (
+                <article key={model.id} className="py-4 first:pt-0 last:pb-0">
+                  <div className="flex min-w-0 items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="break-words font-mono text-sm text-text-primary">{compactModel(model.id)}</h3>
+                      <p className="mt-0.5 text-xs text-text-muted">{model.family || 'unknown family'}</p>
+                    </div>
+                    {renderRuntimeState(model, isTarget)}
+                  </div>
+                  {model.optimization?.status === 'measured' && (
+                    <div className="mt-2"><Badge label="Measured optimized" tone="good" /></div>
+                  )}
+                  <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
+                    <DetailItem label="Service">
+                      <Badge label={modalityLabel(model.modality)} tone={section === 'dictation' ? 'violet' : 'info'} />
+                      <span className="mt-1 block text-xs text-text-muted">{model.runtime || 'llama_cpp'}</span>
+                    </DetailItem>
+                    <DetailItem label="Slots">
+                      {model.loaded && model.free_slots != null ? `${model.free_slots}/${model.n_slots} free` : model.n_slots}
+                    </DetailItem>
+                    <DetailItem label={section === 'llm' ? 'Context' : 'Memory'}>
+                      {section === 'llm' ? formatTokenCount(model.context_size) : formatMb(model.vram_required_mb)}
+                    </DetailItem>
+                    <DetailItem label="Requests">{(modelUsage?.requests ?? 0).toLocaleString()}</DetailItem>
+                  </dl>
+                  <div className="mt-3" aria-label={`Actions for ${model.id}`}>{renderRuntimeActions(model)}</div>
+                </article>
+              );
+            })}
+          </div>
+          <div className="mt-3 hidden overflow-x-auto md:block" role="region" aria-label="Runtime models" tabIndex={0}>
             <table className="w-full min-w-[820px] text-left text-sm">
               <thead>
                 <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
@@ -157,13 +229,7 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
                         <p className="mt-1 text-xs text-text-muted">{model.runtime || 'llama_cpp'}</p>
                       </td>
                       <td className="py-2.5 pr-4">
-                        {model.runtime_available === false
-                          ? <Badge label="Unavailable" tone="critical" />
-                          : model.loaded
-                            ? <Badge label={model.primary ? 'Primary' : 'Loaded'} tone="good" />
-                            : isTarget
-                              ? <Badge label="Loading" tone="info" />
-                              : <Badge label="Standby" tone="idle" />}
+                        {renderRuntimeState(model, isTarget)}
                       </td>
                       <td className="py-2.5 pr-4 text-text-secondary">
                         {model.loaded && model.free_slots != null ? `${model.free_slots}/${model.n_slots} free` : model.n_slots}
@@ -173,30 +239,7 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
                       </td>
                       <td className="py-2.5 pr-4 text-text-secondary">{(modelUsage?.requests ?? 0).toLocaleString()}</td>
                       <td className="py-2.5">
-                        <div className="flex flex-wrap gap-2">
-                          {model.runtime_available === false ? (
-                            <Button disabled>Unavailable</Button>
-                          ) : model.loaded ? (
-                            <IconButton label={pending === `unload:${model.id}` ? `Unloading ${model.id}` : `Unload ${model.id}`} disabled={pending !== ''} onClick={() => { void unloadModel(model.id); }}>
-                              <StopIcon className="h-4 w-4" aria-hidden="true" />
-                            </IconButton>
-                          ) : (
-                            <IconButton label={pending === `load:${model.id}` ? `Loading ${model.id}` : `Load ${model.id}`} tone="blue" disabled={swap.swapping || pending !== ''} onClick={() => { void load(model.id); }}>
-                              <PlayIcon className="h-4 w-4" aria-hidden="true" />
-                            </IconButton>
-                          )}
-                          {section === 'llm' && (
-                            <Button
-                              tone={model.optimization?.status === 'measured' ? 'green' : 'blue'}
-                              onClick={() => setEditing({ model, autoOptimize: true })}
-                            >
-                              Auto-optimize
-                            </Button>
-                          )}
-                          <IconButton label={`Model settings for ${model.id}`} onClick={() => setEditing({ model, autoOptimize: false })}>
-                            <Cog6ToothIcon className="h-4 w-4" aria-hidden="true" />
-                          </IconButton>
-                        </div>
+                        {renderRuntimeActions(model)}
                       </td>
                     </tr>
                   );
@@ -204,6 +247,7 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
               </tbody>
             </table>
           </div>
+          </>
         )}
       </Panel>
 
@@ -499,10 +543,10 @@ const ModelConfigDialog: React.FC<{
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/75 p-4 sm:p-8" role="dialog" aria-modal="true" aria-label={`${model.id} model details`}>
       <div className="w-full max-w-5xl border border-border-slate bg-panel-slate shadow-2xl">
-        <header className="flex items-start justify-between gap-4 border-b border-border-slate p-4">
-          <div>
+        <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-border-slate bg-panel-slate p-4">
+          <div className="min-w-0">
             <p className="text-xs uppercase tracking-wide text-text-muted">{sectionLabel(section)} active profile</p>
-            <h2 className="mt-1 font-mono text-base font-semibold text-text-primary">{model.id}</h2>
+            <h2 className="mt-1 break-all font-mono text-base font-semibold text-text-primary">{model.id}</h2>
             <p className="mt-1 text-xs text-text-muted">Changes are validated and saved separately from the stable gateway.yml baseline.</p>
           </div>
           <IconButton label="Close model settings" onClick={onClose}>
@@ -704,7 +748,8 @@ const ModelConfigDialog: React.FC<{
                           {' '}{benchmark.recommended.cacheTypeK}/{benchmark.recommended.cacheTypeV} KV,
                           {' '}batch {benchmark.recommended.nBatch}/{benchmark.recommended.nUbatch}.
                         </p>
-                        <div className="mt-3 overflow-x-auto" role="region" aria-label="Benchmark comparison" tabIndex={0}>
+                        <p className="mt-3 text-xs text-text-muted md:hidden">Swipe horizontally to compare the current and recommended values.</p>
+                        <div className="mt-2 overflow-x-auto md:mt-3" role="region" aria-label="Benchmark comparison" tabIndex={0}>
                           <table className="w-full min-w-[760px] text-left text-xs">
                             <thead>
                               <tr className="border-b border-white/10 uppercase tracking-wide text-text-muted">
@@ -849,8 +894,8 @@ const ModelConfigDialog: React.FC<{
           )}
 
           <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border-slate pt-4">
-            <Button tone="blue" disabled={busy || benchmarkRunning || !dirty || index < 0} onClick={() => { void save(); }}>Save active profile</Button>
-            <Button disabled={busy || benchmarkRunning || index < 0} onClick={resetModel}>Restore model baseline</Button>
+            <Button tone="blue" className="w-full sm:w-auto" disabled={busy || benchmarkRunning || !dirty || index < 0} onClick={() => { void save(); }}>Save active profile</Button>
+            <Button className="w-full sm:w-auto" disabled={busy || benchmarkRunning || index < 0} onClick={resetModel}>Restore model baseline</Button>
             {config?.hasActiveProfile && <Badge label={config.usingActiveProfile ? 'Active profile running' : 'Active profile saved'} tone={config.usingActiveProfile ? 'good' : 'warn'} />}
             {message && <span className="text-xs text-text-secondary" role="status">{message}</span>}
           </div>

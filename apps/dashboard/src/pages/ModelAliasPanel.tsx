@@ -83,7 +83,7 @@ export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ secti
                 </select>
                 <span className="mt-1 flex flex-wrap gap-1">{alias.requiredCapabilities.map(capability => <Badge key={capability} label={capability} tone="idle" />)}</span>
               </div>
-              <Button tone="danger" disabled={busy} onClick={() => { void remove(alias.name); }}>Delete alias</Button>
+              <Button tone="danger" className="w-full md:w-auto" disabled={busy} onClick={() => { void remove(alias.name); }}>Delete alias</Button>
             </div>
           ))}
         </div>

@@ -156,7 +156,7 @@ export const OverviewPage: React.FC = () => {
                 <Button tone="danger" onClick={() => { void cancel(); }}>Cancel switch</Button>
               </div>
             ) : !loadedName ? (
-              <a className="mt-3 inline-flex min-h-10 items-center rounded bg-queue-blue px-3 text-sm font-medium text-[#08111f]" href="#llm/models">Find a model</a>
+              <a className="mt-3 inline-flex min-h-11 items-center rounded bg-queue-blue px-3 text-sm font-medium text-[#08111f] sm:min-h-10" href="#llm/models">Find a model</a>
             ) : null}
             {(cancelError || swap.lastError) && <p className="mt-2 text-xs text-danger-rose" role="alert">{cancelError || swap.lastError}</p>}
           </div>

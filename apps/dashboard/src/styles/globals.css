@@ -29,8 +29,15 @@
 body {
   margin: 0;
   min-width: 320px;
+  overflow-x: hidden;
   background: var(--void-black);
   color: var(--text-primary);
+}
+
+@supports (overflow: clip) {
+  body {
+    overflow-x: clip;
+  }
 }
 
 #root {
@@ -264,6 +271,15 @@ summary:focus-visible {
 }
 
 @media (max-width: 640px) {
+  button, select, summary, .file-action,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]) {
+    min-height: 44px;
+  }
+
+  .chart-ticks > span:nth-child(even):not(:last-child) {
+    display: none;
+  }
+
   .field-row {
     grid-template-columns: 1fr;
   }
