@@ -71,6 +71,22 @@ struct ImageGenerationResult {
     float duration_ms{0.0f};
 };
 
+struct AudioGenerationRequest {
+    std::string prompt;
+    std::string lyrics;
+    float duration_seconds{30.0f};
+    std::int64_t seed{-1};
+    int steps{0};
+    float guidance_scale{0.0f};
+};
+
+struct AudioGenerationResult {
+    std::vector<std::byte> wav_bytes;
+    std::int64_t seed{-1};
+    float duration_ms{0.0f};
+    double output_audio_seconds{0.0};
+};
+
 struct SpeechRequest {
     std::string input;
     std::string voice;
@@ -116,6 +132,14 @@ public:
     virtual ~IImageBackend() = default;
     virtual foundation::Result<ImageGenerationResult> generate_images(
         int slot_id, const ImageGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) = 0;
+};
+
+class IAudioGenerationBackend {
+public:
+    virtual ~IAudioGenerationBackend() = default;
+    virtual foundation::Result<AudioGenerationResult> generate_audio(
+        int slot_id, const AudioGenerationRequest& request,
         const std::function<bool(int)>& progress = {}) = 0;
 };
 

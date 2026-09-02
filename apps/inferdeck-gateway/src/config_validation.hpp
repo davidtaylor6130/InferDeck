@@ -604,6 +604,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     else if (modality == "image") target_capabilities.insert("image_generation");
                     else if (modality == "audio_speech") target_capabilities.insert("audio_speech");
                     else if (modality == "audio_transcription") target_capabilities.insert("audio_transcription");
+                    else if (modality == "audio_generation") target_capabilities.insert("audio_generation");
                     else target_capabilities = {"chat_completions", "responses"};
                 }
                 if (alias["required_capabilities"]) {

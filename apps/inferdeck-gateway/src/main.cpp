@@ -533,6 +533,11 @@ int run_gateway(const fs::path& config_path) {
                                                            httplib::Response& resp) {
         handle_audio_transcriptions(req, resp, deps);
     }));
+    server.Post(control_api_pattern("/audio/generations"),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
+        handle_audio_generations(req, resp, deps);
+    }));
     if (cfg.openai_derivative_compatibility_enabled) {
         server.Post(std::string(openai_derivative_route(
                         OpenAIDerivativeRoute::ChatCompletions).pattern),

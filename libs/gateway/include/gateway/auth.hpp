@@ -191,6 +191,9 @@ inline RoutePrincipal classify_route(std::string_view method,
     if (path.starts_with("/compat/openai-derivative/v1/")) {
         return RoutePrincipal::OpenAIDataPlane;
     }
+    if (path == "/api/inferdeck/v1/audio/generations") {
+        return RoutePrincipal::OpenAIDataPlane;
+    }
     if (path == "/api/inferdeck/v1/background/availability" ||
         path == "/api/inferdeck/v1/background/lease" ||
         path.starts_with("/api/inferdeck/v1/background/lease/")) {

@@ -182,6 +182,9 @@ TEST_CASE("Route classification separates data and control principals",
           RoutePrincipal::ControlRead);
     CHECK(classify_route("POST", "/api/inferdeck/v1/swap/cancel") ==
           RoutePrincipal::ControlWrite);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/audio/generations") ==
+          RoutePrincipal::OpenAIDataPlane);
     CHECK(classify_route("GET", "/api/inferdeck/v1/status") ==
           RoutePrincipal::DashboardSession);
     CHECK(classify_route("GET", "/api/inferdeck/v1/usage/daily") ==

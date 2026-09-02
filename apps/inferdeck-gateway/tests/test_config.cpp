@@ -96,6 +96,25 @@ model_registry:
     REQUIRE(result);
 }
 
+TEST_CASE("Gateway configuration accepts ACE-Step audio artifacts",
+          "[config][audio-generation]") {
+    const auto result = validate_config_text(R"(
+server:
+  port: 11434
+default_model: music
+model_registry:
+  - name: music
+    runtime: ace_step_cpp
+    modality: audio_generation
+    artifacts:
+      text_encoder: C:/models/Qwen3-Embedding-0.6B-Q8_0.gguf
+      dit: C:/models/acestep-v15-turbo-Q4_K_M.gguf
+      vae: C:/models/vae-BF16.gguf
+    n_slots: 1
+)");
+    REQUIRE(result);
+}
+
 TEST_CASE("Gateway configuration accepts Windows SAPI without artifacts", "[config]") {
     auto result = validate_config_text(R"(
 server:

@@ -103,10 +103,13 @@ std::shared_ptr<MediaJob> begin_job(const std::string& model, const std::string&
     return job;
 }
 
-void update_job(const std::shared_ptr<MediaJob>& job, int progress) {
-    job->progress = std::clamp(progress, 0, 100);
+bool update_job(const std::shared_ptr<MediaJob>& job, int progress) {
+    const int bounded = std::clamp(progress, 0, 100);
     std::lock_guard lock(jobs_mutex);
+    if (job->progress == bounded) return false;
+    job->progress = bounded;
     jobs[job->id] = *job;
+    return true;
 }
 
 void finish_job(const std::shared_ptr<MediaJob>& job, const std::string& state) {
@@ -504,6 +507,8 @@ foundation::Result<void> cancel_media_job(std::uint64_t id) {
 }
 
 #include "image_routes.ipp"
+
+#include "audio_generation_routes.ipp"
 
 #include "speech_routes.ipp"
 

@@ -77,6 +77,11 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         RuntimeArtifactPolicy::ArtifactMap,
     });
     registry.register_runtime(RuntimeContract{
+        "ace_step_cpp",
+        {{"audio_generation", {"audio_generation"}}},
+        RuntimeArtifactPolicy::ArtifactMap,
+    });
+    registry.register_runtime(RuntimeContract{
         "whisper_cpp",
         {{"audio_transcription", {"audio_transcription"}}},
         RuntimeArtifactPolicy::ArtifactMap,

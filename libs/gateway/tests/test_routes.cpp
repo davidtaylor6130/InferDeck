@@ -319,7 +319,8 @@ TEST_CASE("OpenAI adapter matches the canonical golden fixture",
 namespace {
 
 class IModelMock : public IModel, public IEmbeddingBackend, public IImageBackend,
-                   public ISpeechBackend, public ITranscriptionBackend {
+                   public IAudioGenerationBackend, public ISpeechBackend,
+                   public ITranscriptionBackend {
 public:
     ModelInfo model_info{};
     std::atomic<bool> loaded{false};
@@ -626,6 +627,31 @@ public:
         return Ok(std::move(result));
     }
 
+    Result<AudioGenerationResult> generate_audio(
+        int, const AudioGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) override {
+        if (block_media_until_cancel.load()) {
+            while (!progress || progress(25)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            }
+            return inferdeck::foundation::Err<AudioGenerationResult>(
+                ErrorCode::Cancelled, "cancelled");
+        }
+        if (progress && !progress(50)) {
+            return inferdeck::foundation::Err<AudioGenerationResult>(
+                ErrorCode::Cancelled, "cancelled");
+        }
+        AudioGenerationResult result;
+        result.wav_bytes = {
+            std::byte{0x52}, std::byte{0x49},
+            std::byte{0x46}, std::byte{0x46},
+        };
+        result.seed = request.seed < 0 ? 42 : request.seed;
+        result.duration_ms = 18.0f;
+        result.output_audio_seconds = request.duration_seconds;
+        return Ok(std::move(result));
+    }
+
     Result<void> validate_speech_request(
         const SpeechRequest& request) override {
         if (request.voice == "not-a-voice" || request.voice == "999") {
@@ -745,7 +771,7 @@ struct TestServer {
         registry.set_factory([](const ModelInfo& info) {
             return std::make_unique<IModelMock>(info);
         });
-        for (const std::string runtime : {"stable_diffusion_cpp", "sherpa_onnx", "whisper_cpp"}) {
+        for (const std::string runtime : {"stable_diffusion_cpp", "ace_step_cpp", "sherpa_onnx", "whisper_cpp"}) {
             registry.register_factory(runtime, [](const ModelInfo& info) {
                 return std::make_unique<IModelMock>(info);
             });
@@ -784,6 +810,11 @@ struct TestServer {
         server.Post("/v1/audio/transcriptions",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_audio_transcriptions(req, resp, make_deps());
+                    });
+        server.Post("/api/inferdeck/v1/audio/generations",
+                    [this](const httplib::Request& req,
+                           httplib::Response& resp) {
+                        handle_audio_generations(req, resp, make_deps());
                     });
     }
 
@@ -2475,6 +2506,171 @@ TEST_CASE("Image jobs can be cancelled through the shared tracker", "[routes][im
     const auto rows = ts.stats_db.recent_requests(1);
     REQUIRE(rows.size() == 1);
     CHECK(rows[0].status_code == 499);
+    ts.stop();
+}
+
+TEST_CASE("InferDeck audio generation returns a WAV with job metadata",
+          "[routes][audio-generation]") {
+    TestServer ts;
+    ModelInfo info = make_info("music-model");
+    info.runtime = "ace_step_cpp";
+    info.modality = "audio_generation";
+    info.capabilities = {"audio_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const httplib::Result response = client.Post(
+        "/api/inferdeck/v1/audio/generations",
+        nlohmann::json{
+            {"model", info.name},
+            {"prompt", "ambient pulse"},
+            {"duration", 12},
+            {"seed", 99},
+            {"steps", 8},
+        }.dump(),
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(response->get_header_value("Content-Type") == "audio/wav");
+    REQUIRE(response->body.size() == 4);
+    CHECK(response->body == "RIFF");
+    CHECK(response->get_header_value("X-InferDeck-Seed") == "99");
+    CHECK_FALSE(
+        response->get_header_value("X-InferDeck-Job-Id").empty());
+
+    const std::vector<observability::RequestRow> rows =
+        ts.stats_db.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].endpoint ==
+          "/api/inferdeck/v1/audio/generations");
+    CHECK(rows[0].protocol_profile == "inferdeck");
+    CHECK(rows[0].modality == "audio_generation");
+    CHECK(rows[0].input_characters == 13);
+    CHECK(rows[0].output_audio_seconds == Catch::Approx(12.0));
+    CHECK(rows[0].status_code == 200);
+
+    const nlohmann::json jobs = media_jobs();
+    bool found = false;
+    for (const auto& job : jobs) {
+        if (job["model"] == info.name &&
+            job["modality"] == "audio_generation") {
+            found = true;
+            CHECK(job["state"] == "completed");
+            CHECK(job["progress"] == 100);
+        }
+    }
+    CHECK(found);
+    ts.stop();
+}
+
+TEST_CASE("Invalid audio generation requests do not load models or create jobs",
+          "[routes][audio-generation][validation]") {
+    TestServer ts;
+    ModelInfo audio = make_info("validation-music");
+    audio.runtime = "ace_step_cpp";
+    audio.modality = "audio_generation";
+    audio.capabilities = {"audio_generation"};
+    ts.registry.register_model(audio);
+    ModelInfo text = make_info("validation-text");
+    ts.registry.register_model(text);
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const std::size_t initial_jobs = media_jobs().size();
+    const std::vector<nlohmann::json> invalid{
+        nlohmann::json::array(),
+        {{"prompt", "missing model"}},
+        {{"model", audio.name}, {"prompt", 42}},
+        {{"model", audio.name}, {"prompt", "short"}, {"duration", 9}},
+        {{"model", audio.name}, {"prompt", "long"}, {"duration", 601}},
+        {{"model", audio.name}, {"prompt", "seed"}, {"seed", 4294967296ULL}},
+        {{"model", audio.name}, {"prompt", "steps"}, {"steps", 101}},
+        {{"model", audio.name}, {"prompt", "field"}, {"future", true}},
+    };
+    for (const nlohmann::json& body : invalid) {
+        const httplib::Result response = client.Post(
+            "/api/inferdeck/v1/audio/generations", body.dump(),
+            "application/json");
+        REQUIRE(response);
+        INFO(body.dump());
+        CHECK(response->status == 400);
+    }
+    const httplib::Result unsupported = client.Post(
+        "/api/inferdeck/v1/audio/generations",
+        nlohmann::json{
+            {"model", text.name},
+            {"prompt", "wrong capability"},
+            {"duration", 30},
+        }.dump(),
+        "application/json");
+    REQUIRE(unsupported);
+    CHECK(unsupported->status == 400);
+    CHECK(nlohmann::json::parse(unsupported->body)["error"]["code"] ==
+          "unsupported_audio_model");
+
+    CHECK_FALSE(ts.coordinator.is_loaded(audio.name));
+    CHECK_FALSE(ts.coordinator.is_loaded(text.name));
+    CHECK(ts.coordinator.active_request_count() == 0);
+    CHECK(ts.coordinator.queued_request_count() == 0);
+    CHECK(media_jobs().size() == initial_jobs);
+    CHECK(ts.stats_db.recent_requests(1).empty());
+    ts.stop();
+}
+
+TEST_CASE("Audio generation jobs can be cancelled through the shared tracker",
+          "[routes][audio-generation][cancel]") {
+    TestServer ts;
+    ModelInfo info = make_info("cancel-music");
+    info.runtime = "ace_step_cpp";
+    info.modality = "audio_generation";
+    info.capabilities = {"audio_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    const IModelMock* backend = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend(info.name));
+    REQUIRE(backend);
+    const_cast<IModelMock*>(backend)->block_media_until_cancel.store(true);
+    REQUIRE(ts.start());
+
+    std::atomic<int> status{0};
+    std::thread request_thread([&] {
+        httplib::Client client("127.0.0.1", ts.port);
+        const httplib::Result response = client.Post(
+            "/api/inferdeck/v1/audio/generations",
+            nlohmann::json{
+                {"model", info.name},
+                {"prompt", "cancel me"},
+                {"duration", 30},
+            }.dump(),
+            "application/json");
+        status.store(response ? response->status : -1);
+    });
+
+    std::uint64_t job_id = 0;
+    for (int attempt = 0; attempt < 100 && job_id == 0; ++attempt) {
+        for (const auto& job : media_jobs()) {
+            if (job["model"] == info.name &&
+                job["modality"] == "audio_generation" &&
+                job["state"] == "running") {
+                job_id = job["id"];
+            }
+        }
+        if (job_id == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+    }
+    REQUIRE(job_id > 0);
+    REQUIRE(cancel_media_job(job_id));
+    request_thread.join();
+    CHECK(status.load() == 408);
+    const std::vector<observability::RequestRow> rows =
+        ts.stats_db.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].status_code == 499);
+    CHECK(rows[0].modality == "audio_generation");
+    CHECK(ts.coordinator.active_request_count() == 0);
     ts.stop();
 }
 

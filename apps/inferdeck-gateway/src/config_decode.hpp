@@ -143,6 +143,7 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             if (info.modality == "image") info.capabilities = {"image_generation"};
             else if (info.modality == "audio_speech") info.capabilities = {"audio_speech"};
             else if (info.modality == "audio_transcription") info.capabilities = {"audio_transcription"};
+            else if (info.modality == "audio_generation") info.capabilities = {"audio_generation"};
             else if (info.modality == "embedding") info.capabilities = {"embeddings"};
             if (m["capabilities"] && m["capabilities"].IsSequence()) {
                 info.capabilities.clear();

@@ -118,6 +118,7 @@ std::vector<std::string> capabilities_for(const std::string& runtime,
                                            const std::string& modality) {
     if (modality == "embedding") return {"embeddings"};
     if (runtime == "stable_diffusion_cpp") return {"image_generation"};
+    if (runtime == "ace_step_cpp") return {"audio_generation"};
     if (runtime == "whisper_cpp") return {"audio_transcription"};
     if (runtime == "sherpa_onnx") {
         return {modality == "audio_transcription" ? "audio_transcription" : "audio_speech"};

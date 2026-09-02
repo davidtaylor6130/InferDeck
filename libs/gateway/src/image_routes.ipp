@@ -198,8 +198,7 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     SlotGuard guard{&deps.coordinator, runtime_model, *slot};
     auto result = deps.coordinator.generate_images(runtime_model, *slot, request,
         [&req, &deps, &model_name, job](int progress) {
-            update_job(job, progress);
-            if (deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "image"}, {"progress", progress}}.dump());
+            if (update_job(job, progress) && deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "image"}, {"progress", progress}}.dump());
             return !req.is_connection_closed() && !job->cancelled->load();
         });
     if (!result) {

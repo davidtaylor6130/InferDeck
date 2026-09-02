@@ -82,7 +82,18 @@ if(EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
             -Wno-unused-parameter -Wno-unused-function -Wno-sign-conversion)
     endif()
 
+    target_sources(native_runtimes PRIVATE src/ace_step_backend.cpp)
+    target_include_directories(native_runtimes PRIVATE
+        "${INFERDECK_ACESTEP_ROOT}"
+        "${INFERDECK_ACESTEP_ROOT}/src"
+        "${INFERDECK_ACESTEP_ROOT}/vendor/yyjson")
     target_link_libraries(native_runtimes PRIVATE inferdeck-acestep-core)
+    target_compile_definitions(native_runtimes PUBLIC
+        INFERDECK_HAS_ACESTEP_CPP=1)
+    if(MSVC)
+        set_source_files_properties(src/ace_step_backend.cpp PROPERTIES
+            COMPILE_OPTIONS "/wd4505;/wd4996")
+    endif()
 endif()
 
 if(EXISTS "${INFERDECK_WHISPER_ROOT}/CMakeLists.txt")
@@ -140,6 +151,9 @@ if(INFERDECK_BUILD_TESTS)
                         "$<TARGET_FILE_DIR:native_runtime_tests>"
                 COMMENT "Copying sherpa-onnx runtime libraries for native tests")
         endif()
+    endif()
+    if(EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
+        target_sources(native_runtime_tests PRIVATE tests/test_ace_step.cpp)
     endif()
     target_link_libraries(native_runtime_tests PRIVATE native_runtimes Catch2::Catch2WithMain)
     add_test(NAME native_runtime_tests COMMAND native_runtime_tests)
