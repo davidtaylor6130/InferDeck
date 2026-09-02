@@ -52,12 +52,32 @@ Require-Text 'docs/architecture.md' @(
     'stream serialization and control YAML modules'
 )
 Require-Text 'docs/opencode-setup-guide.md' @(
-    'derives each model or alias context limit from the live InferDeck',
-    '100,000-token context'
+    'InferDeck model aliases',
+    'inferdeck/Normal',
+    'inferdeck/n8n-model'
 )
 Reject-Text 'docs/opencode-setup-guide.md' @(
     'LlamaEngine (in-process inference)',
-    '| `context` | 65536 |'
+    '| `context` | 65536 |',
+    'pnpm export:opencode',
+    'The exporter',
+    'exported provider'
 )
+foreach ($path in @(
+    'scripts/export-opencode-config.mjs',
+    'Testing/export-opencode-config.test.mjs'
+)) {
+    if (Test-Path -LiteralPath (Join-Path $Root $path)) {
+        throw "Obsolete OpenCode exporter file remains: $path"
+    }
+}
+$package = Read-ProjectFile 'package.json' | ConvertFrom-Json
+foreach ($script in @('export:opencode', 'test:opencode-export')) {
+    if ($package.scripts.PSObject.Properties.Name -contains $script) {
+        throw "Obsolete OpenCode package script remains: $script"
+    }
+}
+Reject-Text '.github/workflows/ci.yml' @('test:opencode-export')
+Reject-Text '.github/workflows/release.yml' @('test:opencode-export')
 
 'DOCUMENTATION_TRUTH_OK'
