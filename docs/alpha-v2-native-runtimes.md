@@ -8,12 +8,12 @@ The adapters are validated against these upstream revisions:
 - whisper.cpp `080bbbe85230f624f0b52127f1ae1218247989f9`
 - sherpa-onnx `v1.13.2` for Supertonic 3 and Parakeet TDT support
 
-Pin those revisions on the Windows validation machine. stable-diffusion.cpp and whisper.cpp are added as source trees so all three ggml users share InferDeck's already-linked ggml/Vulkan implementation rather than exporting duplicate ggml symbols. Run `scripts/setup-whisper-runtime.ps1` to install the pinned Whisper source at `runtime/whisper.cpp-src` and download the default `base.en` model. Clean InferDeck builds discover that standard source path automatically.
+stable-diffusion.cpp is a pinned top-level Git submodule. InferDeck builds its upstream sources unchanged while using the same ggml headers, library, and Vulkan backend as llama.cpp. Its nested ggml, WebP, and WebM submodules are not required. Run `scripts/setup-whisper-runtime.ps1` to install the pinned Whisper source at `runtime/whisper.cpp-src` and download the default `base.en` model. Clean InferDeck builds discover both standard source paths automatically.
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
   -DINFERDECK_BUILD_TESTS=ON `
-  -DINFERDECK_STABLE_DIFFUSION_ROOT=C:/src/stable-diffusion.cpp `
+  -DINFERDECK_REQUIRE_STABLE_DIFFUSION_CPP=ON `
   -DINFERDECK_REQUIRE_WHISPER_CPP=ON `
   -DINFERDECK_SHERPA_ONNX_ROOT=C:/src/sherpa-onnx-install
 cmake --build build --target inferdeck-gateway --config Release -j
@@ -32,6 +32,17 @@ Example model registry entries:
 
 ```yaml
 model_registry:
+  - name: stable-diffusion-v1-5-fp16
+    family: stable-diffusion-1.5
+    runtime: stable_diffusion_cpp
+    modality: image
+    capabilities: [image_generation]
+    n_slots: 1
+    vram_required_mb: 4096
+    artifacts:
+      model: "C:/models/image/v1-5-pruned-emaonly-fp16.safetensors"
+      backend: vulkan
+
   - name: whisper-base-en
     family: whisper
     runtime: whisper_cpp
@@ -78,6 +89,12 @@ model_registry:
       num_threads: "4"
 
 ```
+
+Image model weights are not bundled. The Windows/Vulkan compatibility check uses
+the 2.13 GB [Stable Diffusion 1.5 FP16 checkpoint](https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/blob/main/v1-5-pruned-emaonly-fp16.safetensors),
+SHA-256 `e9476a13728cd75d8279f6ec8bad753a66a1957ca375a1464dc63b37db6e3916`,
+under the CreativeML OpenRAIL-M model licence. Other models supported by the
+pinned stable-diffusion.cpp revision can use the same registry contract.
 
 The image endpoint returns PNG bytes through `b64_json` and retains no output.
 The speech endpoint streams runtime chunks and retains no audio. The
@@ -146,6 +163,9 @@ $env:INFERDECK_SUPERTONIC_TEST_MODEL_DIR = "C:/InferDeck/models/tts/supertonic-3
 $env:INFERDECK_WHISPER_TEST_MODEL = "E:/InferDeck/models/stt/whisper/ggml-base.en.bin"
 $env:INFERDECK_WHISPER_TEST_AUDIO = "runtime/whisper.cpp-src/samples/jfk.wav"
 ctest --test-dir build -C Release -R native_runtime_tests --output-on-failure
+powershell -File Testing/Test-ImageGeneration.ps1 `
+  -Model stable-diffusion-v1-5-fp16 `
+  -Output image-validation.png
 ```
 
 vLLM is not an eligible in-process runtime: it requires a Python/CUDA service and would violate InferDeck's no-subprocess, no-proxy constraint. The runtime registry can host additional native C/C++ providers without changing API routes or scheduling.

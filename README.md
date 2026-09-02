@@ -178,7 +178,7 @@ docs/                      API reference, architecture notes, deploy guide
 
 ### Clone
 
-`llama.cpp` and `Vulkan-Headers` are pinned Git submodules:
+`llama.cpp`, `Vulkan-Headers`, and `stable-diffusion.cpp` are pinned Git submodules:
 
 ```bash
 git clone --recurse-submodules https://github.com/davidtaylor6130/InferDeck.git
@@ -281,6 +281,11 @@ pnpm test:openai-contract
 python -m pip install -r Testing/requirements-openai-contract.txt
 python -m unittest -v Testing.openai_sdk_contract_test
 
+# Real image generation through a running gateway with a registered image model
+powershell -File Testing/Test-ImageGeneration.ps1 `
+  -Model stable-diffusion-v1-5-fp16 `
+  -Output image-validation.png
+
 # Real-model parity needs raw llama-server and InferDeck running with the same model
 pwsh -File tests/parity/record_baseline.ps1 -Model qwen3.6-27b
 pwsh -File tests/parity/run.ps1 `
@@ -297,7 +302,7 @@ pwsh -File tests/parity/run.ps1 `
 | `POST /v1/embeddings` | OpenAI-compatible float or base64 embeddings for registered embedding models |
 | `POST /v1/audio/transcriptions` | Request-scoped WAV-to-text via native Parakeet TDT or whisper.cpp models |
 | `POST /v1/audio/speech` | Request-scoped WAV or PCM output via native Supertonic 3 |
-| `POST /v1/images/generations` | Experimental, not yet fully tested; intended to provide base64 PNG generation when stable-diffusion.cpp is linked and an image model is registered |
+| `POST /v1/images/generations` | OpenAI-compatible base64 PNG generation through native stable-diffusion.cpp; requires a registered image model |
 | `GET /v1/models` · `GET /api/inferdeck/v1/health` · `GET /api/inferdeck/v1/metrics` · `GET /api/inferdeck/v1/stats/history` | model discovery, health, live metrics, and usage history |
 | `POST /api/inferdeck/v1/swap/to/:name` | async swap, `202` + SSE progress; `POST /api/inferdeck/v1/swap/cancel`; `GET /api/inferdeck/v1/swap/status` |
 | `GET /api/inferdeck/v1/status` · `GET /api/inferdeck/v1/jobs` · `GET /api/inferdeck/v1/logs` · `GET /api/inferdeck/v1/pricing` | dashboard data |
@@ -335,9 +340,10 @@ completions today.
   verification.
 - [x] **Text-to-speech** (`/v1/audio/speech`, Supertonic 3). The native runtime
   passes real-model and pinned OpenAI SDK verification.
-- [ ] **Image generation API and adapter** (`/v1/images/generations`). The
-  compile-gated stable-diffusion.cpp path exists, but the dependency and model
-  are not bundled and end-to-end testing is still outstanding.
+- [x] **Image generation API and adapter** (`/v1/images/generations`). The
+  pinned stable-diffusion.cpp backend builds in-process with shared ggml/Vulkan,
+  and the OpenAI endpoint passes real-model Windows/Vulkan validation. Model
+  weights remain a separate download under their own licences.
 - [ ] **Video generation** as local open-model pipelines mature, using
   long-running jobs with progress streamed over the existing SSE channel.
 - [ ] **Post-training and quantisation jobs**, including GGUF quantisation and LoRA
@@ -388,8 +394,10 @@ Suggestions and issues are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Acknowledgements
 
 InferDeck stands on [llama.cpp](https://github.com/ggml-org/llama.cpp) by
-Georgi Gerganov and contributors. The parity gate exists precisely because
-matching its quality is the bar.
+Georgi Gerganov and contributors, and
+[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) by Lee Jet
+and contributors. The parity gate exists precisely because matching upstream
+quality is the bar.
 
 ## License
 
