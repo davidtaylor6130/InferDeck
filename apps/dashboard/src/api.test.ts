@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  authenticateDashboard, cancelProfileBenchmark, getModels, getProfileBenchmark, optimizeProfile,
-  startProfileBenchmark, waitForActiveConfig, waitForStableConfig,
+  authenticateDashboard, cancelProfileBenchmark, generateImages, generateMusic,
+  getModels, getProfileBenchmark, optimizeProfile, startProfileBenchmark,
+  waitForActiveConfig, waitForStableConfig,
 } from './api';
 import type { ModelInfo } from './types';
 
@@ -134,6 +135,70 @@ describe('dashboard authentication', () => {
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({ token: 'local-network-secret' }),
+      }),
+    );
+  });
+});
+
+describe('dashboard media generation', () => {
+  it('uses control-session routes and returns image and music job metadata', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'X-InferDeck-Job-Id': '41' }),
+        json: async () => ({
+          created: 1,
+          output_format: 'png',
+          data: [{ b64_json: 'iVBORw==' }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          'X-InferDeck-Job-Id': '42',
+          'X-InferDeck-Seed': '1234',
+          'X-InferDeck-Audio-Duration-Seconds': '10',
+        }),
+        blob: async () => new Blob(['RIFF'], { type: 'audio/wav' }),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const image = await generateImages({
+      model: 'stable-diffusion',
+      prompt: 'a lighthouse',
+      size: '512x512',
+      n: 1,
+    });
+    const music = await generateMusic({
+      model: 'ace-step',
+      prompt: 'warm analogue synths',
+      lyrics: '',
+      duration: 10,
+      seed: 1234,
+      steps: 0,
+      guidance_scale: 0,
+    });
+
+    expect(image.jobId).toBe(41);
+    expect(music.jobId).toBe(42);
+    expect(music.seed).toBe(1234);
+    expect(music.audio.type).toBe('audio/wav');
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/inferdeck/v1/media/images/generations',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"prompt":"a lighthouse"'),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/inferdeck/v1/media/audio/generations',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"duration":10'),
       }),
     );
   });

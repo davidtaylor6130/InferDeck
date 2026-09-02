@@ -103,8 +103,11 @@ and the same dashboard. See the [roadmap](#roadmap).
   text and optional lyrics at `POST /api/inferdeck/v1/audio/generations` and
   returns one 48 kHz stereo PCM16 WAVE file. The direct synthesis path passes
   real-model Windows/Vulkan validation.
-- **Image generation API.** The compile-gated stable-diffusion.cpp backend at
-  `POST /v1/images/generations` passes real-model Windows/Vulkan validation.
+- **Native image generation.** The compile-gated stable-diffusion.cpp backend
+  at `POST /v1/images/generations` passes real-model Windows/Vulkan validation.
+- **Image and Music workspaces.** The dashboard can submit local generations,
+  cancel active jobs, show failures, preview PNG/WAV outputs, and download
+  persisted results.
 - **Native GGUF quantisation.** A control-plane job at
   `POST /api/inferdeck/v1/post-training/quantizations` calls llama.cpp
   in-process, accepts only unloaded managed GGUF sources, disables
@@ -118,9 +121,9 @@ and the same dashboard. See the [roadmap](#roadmap).
 React 19 + Vite + Tailwind, driven by one SSE connection with a bounded
 30-second status fallback. The task views separate Model Settings from model
 catalogue, installed-artifact management, server-owned usage pricing, and
-diagnostics. Voice
-capture and playback belong to API clients such as Open WebUI, not the
-administration dashboard.
+diagnostics. Dedicated Image and Music pages use the authenticated dashboard
+session and retain bounded output history. Voice capture, transcription, and
+speech playback belong to API clients such as Open WebUI.
 
 Loopback dashboard access is passwordless. LAN and encrypted-overlay access
 requires remote control to be enabled, an exact `control.origins` entry, and
@@ -330,6 +333,8 @@ pwsh -File tests/parity/run.ps1 `
 | `POST /v1/audio/speech` | Request-scoped WAV or PCM output via native Supertonic 3 |
 | `POST /v1/images/generations` | OpenAI-compatible base64 PNG generation through native stable-diffusion.cpp; requires a registered image model |
 | `POST /api/inferdeck/v1/audio/generations` | InferDeck text-to-music API through native acestep.cpp; returns one 48 kHz stereo PCM16 WAVE file |
+| `POST /api/inferdeck/v1/media/images/generations` · `POST /api/inferdeck/v1/media/audio/generations` | Dashboard-session generation routes used by the Image and Music workspaces |
+| `GET /api/inferdeck/v1/media/jobs` · `GET /api/inferdeck/v1/media/jobs/:id/outputs/:index` | Bounded generation attempt history and authenticated PNG/WAV output retrieval |
 | `GET /v1/models` · `GET /api/inferdeck/v1/health` · `GET /api/inferdeck/v1/metrics` · `GET /api/inferdeck/v1/stats/history` | model discovery, health, live metrics, and usage history |
 | `POST /api/inferdeck/v1/swap/to/:name` | async swap, `202` + SSE progress; `POST /api/inferdeck/v1/swap/cancel`; `GET /api/inferdeck/v1/swap/status` |
 | `GET /api/inferdeck/v1/status` · `GET /api/inferdeck/v1/jobs` · `GET /api/inferdeck/v1/logs` · `GET /api/inferdeck/v1/pricing` | dashboard data |
@@ -371,13 +376,16 @@ completions today.
   passes real-model and pinned OpenAI SDK verification.
 - [x] **Image generation API and adapter** (`/v1/images/generations`). The
   pinned stable-diffusion.cpp backend builds in-process with shared ggml/Vulkan,
-  and the OpenAI endpoint passes real-model Windows/Vulkan validation. Model
-  weights remain a separate download under their own licences.
+  and the OpenAI endpoint passes real-model Windows/Vulkan validation. The
+  dashboard includes generation, cancellation, preview, download, and
+  persisted attempt history. Model weights remain a separate download under
+  their own licences.
 - [x] **Music generation API and adapter**
   (`/api/inferdeck/v1/audio/generations`). The pinned acestep.cpp backend,
   shared queue, cancellation, PCM16 WAVE output, and public verifier pass
-  real-model Windows/Vulkan validation. Model weights remain a separate MIT
-  licensed download.
+  real-model Windows/Vulkan validation. The dashboard includes prompt, lyrics,
+  duration, seed, advanced controls, playback, download, and persisted attempt
+  history. Model weights remain a separate MIT licensed download.
 - [ ] **Video generation** as local open-model pipelines mature, using
   long-running jobs with progress streamed over the existing SSE channel.
 - [x] **Managed GGUF quantisation API.** The in-process llama.cpp path supports

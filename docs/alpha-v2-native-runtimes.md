@@ -141,13 +141,17 @@ A fixed-seed 10-second request produced exactly 480,000 stereo frames at
 The media job reached 100%, the request row recorded HTTP 200, all modules were
 evicted after use, and the queue returned to zero.
 
-The image endpoint returns PNG bytes through `b64_json` and retains no output.
+The OpenAI image endpoint returns PNG bytes through `b64_json`.
 `POST /api/inferdeck/v1/audio/generations` accepts `model`, `prompt`, optional
 `lyrics`, `duration`, `seed`, `steps`, and `guidance_scale`, then returns one
 48 kHz stereo PCM16 WAVE body. It is an InferDeck data-plane endpoint because
 OpenAI has no general music-generation API. Managed API keys and the legacy
 OpenAI bearer token can call it, but neither gains control authority. The
 resolved seed, media job ID, and encoded duration are response headers.
+The dashboard uses control-session media routes for both generators. Generation
+attempts and their PNG/WAV outputs are saved under `generated-media` beside the
+configured stats database. History is bounded to 100 jobs and 2 GB; InferDeck
+removes the oldest completed entries first. Running jobs are never pruned.
 The speech endpoint streams runtime chunks and retains no audio. The
 transcription endpoint accepts request-scoped PCM16 or float32 RIFF/WAVE input,
 including WAVE_FORMAT_EXTENSIBLE, and returns `json`, `text`, `verbose_json`,
@@ -157,9 +161,10 @@ detection across 25 European languages, punctuation, and capitalization. Image
 and transcription callbacks publish progress; active media jobs can be
 cancelled through the dashboard or `POST /api/inferdeck/v1/media/jobs/:id/cancel`.
 
-The dashboard is an administration surface only. It does not capture a
-microphone, transcribe recordings, synthesize speech, or play audio. Voice
-clients use the OpenAI-compatible endpoints directly.
+The dashboard includes Image and Music generation, output preview, playback,
+download, cancellation, and attempt history. It does not capture a microphone,
+transcribe recordings, or synthesize speech. Voice clients use the
+OpenAI-compatible endpoints directly.
 
 For Open WebUI, set both engines to `openai` and point them at InferDeck:
 

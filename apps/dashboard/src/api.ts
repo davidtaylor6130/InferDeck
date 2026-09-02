@@ -261,6 +261,50 @@ export interface MediaJob {
   modality: string;
   progress: number;
   state: string;
+  prompt: string;
+  parameters: Record<string, string | number | boolean>;
+  error: string;
+  created_at_unix_ms: number;
+  finished_at_unix_ms: number;
+  outputs: MediaJobOutput[];
+}
+
+export interface MediaJobOutput {
+  content_type: 'image/png' | 'audio/wav';
+  filename: string;
+  bytes: number;
+  url: string;
+}
+
+export interface ImageGenerationInput {
+  model: string;
+  prompt: string;
+  size: string;
+  n: number;
+}
+
+export interface ImageGenerationResult {
+  created: number;
+  output_format: 'png';
+  data: Array<{ b64_json: string }>;
+  jobId: number | null;
+}
+
+export interface MusicGenerationInput {
+  model: string;
+  prompt: string;
+  lyrics: string;
+  duration: number;
+  seed: number;
+  steps: number;
+  guidance_scale: number;
+}
+
+export interface MusicGenerationResult {
+  audio: Blob;
+  jobId: number | null;
+  seed: number | null;
+  durationSeconds: number | null;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -575,11 +619,89 @@ export async function unregisterConfiguredModel(model: string): Promise<{
 
 export async function getMediaJobs(): Promise<MediaJob[]> {
   const body = await getJson<{ jobs: MediaJob[] }>(`${CONTROL_API_BASE}/media/jobs`);
-  return body.jobs;
+  return Array.isArray(body.jobs) ? body.jobs : [];
 }
 
 export function cancelMediaJob(id: number): Promise<{ ok: boolean }> {
   return postJson<{ ok: boolean }>(`${CONTROL_API_BASE}/media/jobs/${id}/cancel`);
+}
+
+function mediaSignal(signal?: AbortSignal): AbortSignal {
+  return signal ?? AbortSignal.timeout(30 * 60 * 1000);
+}
+
+function responseInteger(value: string | null): number | null {
+  if (value == null || value.trim() === '') return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function responseNumber(value: string | null): number | null {
+  if (value == null || value.trim() === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export async function generateImages(
+  input: ImageGenerationInput,
+  signal?: AbortSignal,
+): Promise<ImageGenerationResult> {
+  const path = `${CONTROL_API_BASE}/media/images/generations`;
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    signal: mediaSignal(signal),
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const payload = (await response.json().catch(() => ({}))) as
+    Omit<ImageGenerationResult, 'jobId'> & {
+      error?: { message?: string };
+    };
+  if (!response.ok) {
+    throw new Error(payload.error?.message || `${path} responded ${response.status}`);
+  }
+  if (!Array.isArray(payload.data) || payload.output_format !== 'png') {
+    throw new Error('InferDeck returned an invalid image generation response');
+  }
+  return {
+    ...payload,
+    jobId: responseInteger(response.headers.get('X-InferDeck-Job-Id')),
+  };
+}
+
+export async function generateMusic(
+  input: MusicGenerationInput,
+  signal?: AbortSignal,
+): Promise<MusicGenerationResult> {
+  const path = `${CONTROL_API_BASE}/media/audio/generations`;
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    signal: mediaSignal(signal),
+    headers: { Accept: 'audio/wav, application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    throw new Error(payload.error?.message || `${path} responded ${response.status}`);
+  }
+  const audio = await response.blob();
+  if (audio.size === 0 || !audio.type.startsWith('audio/')) {
+    throw new Error('InferDeck returned an invalid music generation response');
+  }
+  return {
+    audio,
+    jobId: responseInteger(response.headers.get('X-InferDeck-Job-Id')),
+    seed: responseInteger(response.headers.get('X-InferDeck-Seed')),
+    durationSeconds: responseNumber(
+      response.headers.get('X-InferDeck-Audio-Duration-Seconds'),
+    ),
+  };
+}
+
+export function mediaOutputUrl(output: MediaJobOutput): string {
+  return `${API_BASE}${output.url}`;
 }
 
 export function swapTo(model: string): Promise<{ status: string }> {

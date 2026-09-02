@@ -11,6 +11,8 @@ import { OperatePage } from './pages/OperatePage';
 import { UsagePage } from './pages/UsagePage';
 import { SystemPage } from './pages/SystemPage';
 import { FutureWorkspacePage } from './pages/FutureWorkspacePage';
+import { ImagePage } from './pages/ImagePage';
+import { MusicPage } from './pages/MusicPage';
 import { compactModel, timeAgo } from './utils';
 import { INFERDECK_VERSION } from './version';
 import logoUrl from '../../../Assets/Logo.png';
@@ -46,10 +48,12 @@ export const DASHBOARD_PAGES: ReadonlyArray<DashboardPage> = [
   { id: 'dictation/models', label: 'Model Store', section: 'dictation' },
   { id: 'dictation/usage', label: 'Usage', section: 'dictation' },
   { id: 'dictation/diagnostics', label: 'Health & alerts', section: 'dictation' },
-  { id: 'image', label: 'Image', preview: true },
-  { id: 'music', label: 'Music', preview: true },
+  { id: 'image', label: 'Image' },
+  { id: 'music', label: 'Music' },
   { id: 'post-training', label: 'Post Training', preview: true },
 ];
+
+const CREATE_PAGE_IDS = new Set<PageId>(['image', 'music']);
 
 const LEGACY_ROUTES: Record<string, PageId> = {
   overview: 'home',
@@ -108,6 +112,16 @@ const Shell: React.FC = () => {
           ))}
           <div className="mt-5 border-t border-white/10 pt-4">
             <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
+              Create
+            </div>
+            <div className="flex flex-col gap-1">
+              {DASHBOARD_PAGES.filter(item => CREATE_PAGE_IDS.has(item.id)).map(({ id, label }) => (
+                <NavLink key={id} id={id} label={label} page={page} nested />
+              ))}
+            </div>
+          </div>
+          <div className="mt-5">
+            <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
               Planned
             </div>
             <div className="flex flex-col gap-1">
@@ -138,8 +152,8 @@ const Shell: React.FC = () => {
             {page === 'dictation/models' && <ModelsPage section="dictation" />}
             {page === 'dictation/usage' && <UsagePage section="dictation" />}
             {page === 'dictation/diagnostics' && <SystemPage section="dictation" />}
-            {page === 'image' && <FutureWorkspacePage area="image" />}
-            {page === 'music' && <FutureWorkspacePage area="music" />}
+            {page === 'image' && <ImagePage />}
+            {page === 'music' && <MusicPage />}
             {page === 'post-training' && <FutureWorkspacePage area="post-training" />}
           </div>
         </main>
@@ -229,6 +243,9 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
           </optgroup>
           <optgroup label="Dictation">
             {DASHBOARD_PAGES.filter(item => item.section === 'dictation').map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+          </optgroup>
+          <optgroup label="Create">
+            {DASHBOARD_PAGES.filter(item => CREATE_PAGE_IDS.has(item.id)).map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
           </optgroup>
           <optgroup label="Planned">
             {DASHBOARD_PAGES.filter(item => item.preview).map(({ id, label }) => <option key={id} value={id}>{label}</option>)}

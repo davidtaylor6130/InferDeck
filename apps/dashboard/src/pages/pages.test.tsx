@@ -11,6 +11,8 @@ import type { ProfileOptimizationCandidate } from '../api';
 import { UsagePage } from './UsagePage';
 import { parseDashboardLogLine, SystemPage } from './SystemPage';
 import { FutureWorkspacePage } from './FutureWorkspacePage';
+import { ImagePage } from './ImagePage';
+import { MusicPage } from './MusicPage';
 import type { StatsEvent, StatusPayload } from '../types';
 
 const stats: StatsEvent = {
@@ -79,6 +81,8 @@ const value: GatewayValue = {
     },
     { id: 'parakeet-tdt-0.6b-v3', family: 'parakeet', runtime: 'sherpa_onnx', runtime_available: true, modality: 'audio_transcription', context_size: 0, vram_required_mb: 0, n_slots: 1, has_vision: false, loaded: true },
     { id: 'supertonic-3', family: 'supertonic', runtime: 'sherpa_onnx', runtime_available: true, modality: 'audio_speech', context_size: 0, vram_required_mb: 0, n_slots: 1, has_vision: false, loaded: false },
+    { id: 'stable-diffusion-v1-5-fp16', family: 'stable-diffusion-1.5', runtime: 'stable_diffusion_cpp', runtime_available: true, modality: 'image', capabilities: ['image_generation'], context_size: 0, vram_required_mb: 4096, n_slots: 1, has_vision: false, loaded: false },
+    { id: 'ace-step-v1.5-turbo-q4', family: 'ace-step-1.5', runtime: 'ace_step_cpp', runtime_available: true, modality: 'audio_generation', capabilities: ['audio_generation'], context_size: 0, vram_required_mb: 8192, n_slots: 1, has_vision: false, loaded: false },
   ],
   swap: status.swap,
   activity: [],
@@ -196,13 +200,31 @@ describe('pages', () => {
     })).toBe('Qwen3.5-27B-GGUF-Qwen3.5-27B-Q4_K_M');
   });
 
-  it('keeps planned workspaces explicit and non-interactive', () => {
-    for (const area of ['image', 'music', 'post-training'] as const) {
-      const html = renderWith(<FutureWorkspacePage area={area} />);
-      expect(html).toContain('Planned workflow');
-      expect(html).toContain('No controls are active here yet');
-      expect(html).not.toContain('<button');
-    }
+  it('renders functional image and music generation workspaces with history', () => {
+    const image = renderWith(<ImagePage />);
+    const music = renderWith(<MusicPage />);
+
+    expect(image).toContain('Generate image');
+    expect(image).toContain('Describe the image to generate');
+    expect(image).toContain('stable-diffusion-v1-5-fp16');
+    expect(image).toContain('Image history');
+    expect(image).toContain('No image attempts yet');
+    expect(image).not.toContain('Planned workflow');
+
+    expect(music).toContain('Generate music');
+    expect(music).toContain('Describe the sound, mood, instruments, and tempo');
+    expect(music).toContain('ace-step-v1.5-turbo-q4');
+    expect(music).toContain('Advanced generation settings');
+    expect(music).toContain('Music history');
+    expect(music).toContain('No music attempts yet');
+    expect(music).not.toContain('Planned workflow');
+  });
+
+  it('keeps unfinished post-training dashboard work explicit and non-interactive', () => {
+    const html = renderWith(<FutureWorkspacePage area="post-training" />);
+    expect(html).toContain('Planned workflow');
+    expect(html).toContain('No controls are active here yet');
+    expect(html).not.toContain('<button');
   });
 
   it('Usage pages expose correctly scoped LLM and dictation economics', () => {
