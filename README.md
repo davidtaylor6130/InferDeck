@@ -93,14 +93,18 @@ and the same dashboard. See the [roadmap](#roadmap).
   `POST /v1/embeddings`. Responses is stateless; unsupported storage,
   background, and conversation fields are rejected explicitly.
 - **Strict OpenAI Core.** `/v1` exposes only the pinned OpenAI surface.
-  OpenAI-derivative and non-OpenAI routes are not registered.
+  OpenAI-derivative routes use their disabled-by-default compatibility prefix;
+  InferDeck-specific APIs stay under `/api/inferdeck/v1`.
 - **Native audio APIs.** CPU-only Parakeet
   TDT 0.6B v3 transcription at `POST /v1/audio/transcriptions` and in-process
   Supertonic 3 speech synthesis at `POST /v1/audio/speech` are release-built
   and live-verified end to end.
-- **Experimental image generation API.** A compile-gated
-  stable-diffusion.cpp path exists at `POST /v1/images/generations`, but it has
-  not yet been thoroughly tested end to end.
+- **Native music generation.** The compile-gated `ace_step_cpp` runtime accepts
+  text and optional lyrics at `POST /api/inferdeck/v1/audio/generations` and
+  returns one 48 kHz stereo PCM16 WAVE file. The direct synthesis path passes
+  real-model Windows/Vulkan validation.
+- **Image generation API.** The compile-gated stable-diffusion.cpp backend at
+  `POST /v1/images/generations` passes real-model Windows/Vulkan validation.
 - Discovery and operations endpoints: `GET /v1/models`, `GET /api/inferdeck/v1/health`,
   `GET /api/inferdeck/v1/metrics`, and `GET /api/inferdeck/v1/stats/history`.
 
@@ -287,6 +291,12 @@ powershell -File Testing/Test-ImageGeneration.ps1 `
   -Model stable-diffusion-v1-5-fp16 `
   -Output image-validation.png
 
+# Real music generation through a running gateway with a registered ACE-Step model
+powershell -File Testing/Test-AudioGeneration.ps1 `
+  -Model ace-step-v1.5-turbo-q4 `
+  -DurationSeconds 10 `
+  -Output audio-generation-validation.wav
+
 # Real-model parity needs raw llama-server and InferDeck running with the same model
 pwsh -File tests/parity/record_baseline.ps1 -Model qwen3.6-27b
 pwsh -File tests/parity/run.ps1 `
@@ -304,6 +314,7 @@ pwsh -File tests/parity/run.ps1 `
 | `POST /v1/audio/transcriptions` | Request-scoped WAV-to-text via native Parakeet TDT or whisper.cpp models |
 | `POST /v1/audio/speech` | Request-scoped WAV or PCM output via native Supertonic 3 |
 | `POST /v1/images/generations` | OpenAI-compatible base64 PNG generation through native stable-diffusion.cpp; requires a registered image model |
+| `POST /api/inferdeck/v1/audio/generations` | InferDeck text-to-music API through native acestep.cpp; returns one 48 kHz stereo PCM16 WAVE file |
 | `GET /v1/models` · `GET /api/inferdeck/v1/health` · `GET /api/inferdeck/v1/metrics` · `GET /api/inferdeck/v1/stats/history` | model discovery, health, live metrics, and usage history |
 | `POST /api/inferdeck/v1/swap/to/:name` | async swap, `202` + SSE progress; `POST /api/inferdeck/v1/swap/cancel`; `GET /api/inferdeck/v1/swap/status` |
 | `GET /api/inferdeck/v1/status` · `GET /api/inferdeck/v1/jobs` · `GET /api/inferdeck/v1/logs` · `GET /api/inferdeck/v1/pricing` | dashboard data |
@@ -322,10 +333,10 @@ single gateway that manages local AI workloads the way it manages chat
 completions today.
 
 **Hardening the core**
-- [x] **Shared request queue** across text, embeddings, image, speech, and
-  transcription. It supports priorities with ageing, cancellation, queue
-  position reporting, and preparation across model swaps. It is in memory, not
-  durable across gateway restarts.
+- [x] **Shared request queue** across text, embeddings, image, speech,
+  transcription, and music generation. It supports priorities with ageing,
+  cancellation, queue position reporting, and preparation across model swaps.
+  It is in memory, not durable across gateway restarts.
 - [x] **Recurrent-state checkpoints** for hybrid linear-attention models
   (e.g. Qwen3.6-A3B), so they get the same KV-cache reuse as full-attention
   models instead of re-prefilling every turn.
@@ -345,6 +356,11 @@ completions today.
   pinned stable-diffusion.cpp backend builds in-process with shared ggml/Vulkan,
   and the OpenAI endpoint passes real-model Windows/Vulkan validation. Model
   weights remain a separate download under their own licences.
+- [x] **Music generation API and adapter**
+  (`/api/inferdeck/v1/audio/generations`). The pinned acestep.cpp backend,
+  shared queue, cancellation, PCM16 WAVE output, and public verifier pass
+  real-model Windows/Vulkan validation. Model weights remain a separate MIT
+  licensed download.
 - [ ] **Video generation** as local open-model pipelines mature, using
   long-running jobs with progress streamed over the existing SSE channel.
 - [ ] **Post-training and quantisation jobs**, including GGUF quantisation and LoRA

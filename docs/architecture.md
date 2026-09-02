@@ -42,6 +42,7 @@ Modality interfaces add only their execution contract:
 - `IModel` for chat and Responses;
 - `IEmbeddingBackend` for embeddings;
 - `IImageBackend` for image generation;
+- `IAudioGenerationBackend` for music generation;
 - `ISpeechBackend` for text-to-speech;
 - `ITranscriptionBackend` for speech-to-text.
 
@@ -57,7 +58,8 @@ Routes dispatch through the coordinator and a typed modality interface. They nev
 6. Client disconnect or dashboard cancellation reaches the native runtime callback.
 7. The route streams or returns output, records metrics/SQLite/EventBus activity, releases the slot, and leaves model residency to policy.
 
-This lifecycle is shared by text, embeddings, image, TTS, and STT. A swap or load does not create a second modality-specific queue.
+This lifecycle is shared by text, embeddings, image, music generation, TTS,
+and STT. A swap or load does not create a second modality-specific queue.
 
 Successful STT reserves the configured default conversation model for the same client through the STT-to-chat hand-off. The matching chat runs at media priority, and TTS releases the reservation. `gateway.voice_session_grace_ms` bounds abandoned sessions; clients behind a shared address can send `X-InferDeck-Voice-Session` to provide a distinct key.
 
@@ -89,8 +91,13 @@ OpenAI-compatible routes:
 - `POST /v1/audio/transcriptions`
 - `GET /v1/models`
 
-`strict_openai` is the only Core profile. OpenAI-derivative and non-OpenAI
-routes are not registered. Core owns no non-OpenAI protocol.
+InferDeck data-plane routes:
+
+- `POST /api/inferdeck/v1/audio/generations`
+
+`strict_openai` is the only Core profile. It owns no non-OpenAI protocol.
+OpenAI-derivative routes use a separate disabled-by-default compatibility
+prefix, while InferDeck-specific contracts remain under `/api/inferdeck/v1`.
 
 InferDeck control routes cover model load/unload, swap status/cancellation, media job cancellation, metrics, history, configuration, model aliases, and the model store. Dashboard live state uses one SSE connection; there is no WebSocket layer.
 
@@ -154,7 +161,9 @@ InferDeck persists operational data only:
 - YAML configuration;
 - request/swap metrics and logs.
 
-Generated images, synthesized audio, uploaded audio, transcripts, chat output, and Responses state are request-scoped and are not retained.
+Generated images, generated music, synthesized audio, uploaded audio,
+transcripts, chat output, and Responses state are request-scoped and are not
+retained.
 
 ## Concurrency invariants
 
@@ -164,6 +173,8 @@ Generated images, synthesized audio, uploaded audio, transcripts, chat output, a
 - Streaming state outlives both its inference thread and HTTP provider.
 - Native cancellation callbacks must terminate work and release GPU capacity.
 - stable-diffusion.cpp generation is serialized while its upstream progress callback remains process-global.
+- acestep.cpp music generation uses one slot and strict module eviction; jobs
+  are serialized across ACE-Step models.
 - Runtime absence is visible; no unavailable path returns synthetic success.
 
 ## Source layout
@@ -174,7 +185,8 @@ apps/inferdeck-gateway/       composition root plus process, static-hosting and
 apps/dashboard/               React dashboard
 libs/model/                   contracts, registry, shared queue/coordinator
 libs/llama_cpp_wrapper/       in-process llama.cpp implementation
-libs/native_runtimes/         optional image, TTS, and STT adapters
+libs/native_runtimes/         optional image, music-generation, TTS, and STT
+                             adapters
 libs/gateway/                 endpoint adapters plus focused content parsing,
                              stream serialization and control YAML modules
 libs/observability/           GPU telemetry, metrics, SQLite

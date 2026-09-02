@@ -47,6 +47,7 @@ The paths below are the canonical Phase 4 routes.
 - `POST /v1/images/generations`
 - `POST /v1/audio/speech`
 - `POST /v1/audio/transcriptions`
+- `POST /api/inferdeck/v1/audio/generations`
 
 ### Managed client
 

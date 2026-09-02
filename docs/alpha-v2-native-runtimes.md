@@ -5,15 +5,23 @@ InferDeck registers a runtime only when its native library is linked into the ga
 The adapters are validated against these upstream revisions:
 
 - stable-diffusion.cpp `b5d812008eb7082a238fc589444544b3278187ae`
+- acestep.cpp `9761469d95fc204b5468623c68a1a2203e50b1f9`
 - whisper.cpp `080bbbe85230f624f0b52127f1ae1218247989f9`
 - sherpa-onnx `v1.13.2` for Supertonic 3 and Parakeet TDT support
 
-stable-diffusion.cpp is a pinned top-level Git submodule. InferDeck builds its upstream sources unchanged while using the same ggml headers, library, and Vulkan backend as llama.cpp. Its nested ggml, WebP, and WebM submodules are not required. Run `scripts/setup-whisper-runtime.ps1` to install the pinned Whisper source at `runtime/whisper.cpp-src` and download the default `base.en` model. Clean InferDeck builds discover both standard source paths automatically.
+stable-diffusion.cpp and acestep.cpp are pinned top-level Git submodules.
+InferDeck builds their reusable upstream sources against the same ggml headers,
+library, and Vulkan backend as llama.cpp. Their nested servers, command-line
+tools, and duplicate ggml copies are not built. Run
+`scripts/setup-whisper-runtime.ps1` to install the pinned Whisper source at
+`runtime/whisper.cpp-src` and download the default `base.en` model. Clean
+InferDeck builds discover the standard source paths automatically.
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
   -DINFERDECK_BUILD_TESTS=ON `
   -DINFERDECK_REQUIRE_STABLE_DIFFUSION_CPP=ON `
+  -DINFERDECK_REQUIRE_ACESTEP_CPP=ON `
   -DINFERDECK_REQUIRE_WHISPER_CPP=ON `
   -DINFERDECK_SHERPA_ONNX_ROOT=C:/src/sherpa-onnx-install
 cmake --build build --target inferdeck-gateway --config Release -j
@@ -42,6 +50,19 @@ model_registry:
     artifacts:
       model: "C:/models/image/v1-5-pruned-emaonly-fp16.safetensors"
       backend: vulkan
+
+  - name: ace-step-v1.5-turbo-q4
+    family: ace-step-1.5
+    runtime: ace_step_cpp
+    modality: audio_generation
+    capabilities: [audio_generation]
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 8192
+    artifacts:
+      text_encoder: "C:/models/audio/Qwen3-Embedding-0.6B-Q8_0.gguf"
+      dit: "C:/models/audio/acestep-v15-turbo-Q4_K_M.gguf"
+      vae: "C:/models/audio/vae-BF16.gguf"
 
   - name: whisper-base-en
     family: whisper
@@ -96,7 +117,37 @@ SHA-256 `e9476a13728cd75d8279f6ec8bad753a66a1957ca375a1464dc63b37db6e3916`,
 under the CreativeML OpenRAIL-M model licence. Other models supported by the
 pinned stable-diffusion.cpp revision can use the same registry contract.
 
+ACE-Step model weights are not bundled. The direct synthesis path needs one
+text encoder, one DiT, and one VAE GGUF from the MIT-licensed
+[ACE-Step 1.5 GGUF repository](https://huggingface.co/Serveurperso/ACE-Step-1.5-GGUF/tree/main).
+The language-model stage is optional upstream and is deliberately omitted from
+InferDeck's initial text-to-music path. `ace_step_cpp` uses strict model-store
+eviction and one slot, so one ACE module is resident at a time and music jobs
+are serialized.
+
+The Windows/Vulkan compatibility check pins repository revision
+`9b3707625776cc4cf775e9b12ab82f9fe48335ff` and these files:
+
+- `Qwen3-Embedding-0.6B-Q8_0.gguf`, 784,144,960 bytes, SHA-256
+  `972f23255e46adfe744a0eb9a0039f3c63988f65753b0968d776e8b27168c321`
+- `acestep-v15-turbo-Q4_K_M.gguf`, 1,445,710,272 bytes, SHA-256
+  `55b4d8514850f3d0f82536f37e99673aaf48df802b5ae5b153eea32a2e2daa5e`
+- `vae-BF16.gguf`, 337,420,928 bytes, SHA-256
+  `0599862ac5d15cd308e1d2e368373aea6c02e25ebd1737ad4a4562a0901b0ef8`
+
+A fixed-seed 10-second request produced exactly 480,000 stereo frames at
+48 kHz in 5.81 seconds. The 1,920,044-byte PCM16 WAVE had SHA-256
+`8660d7777276a7a3a4fa824c0e9b510121533a8d7005fcc3b23d61ecb8411645`.
+The media job reached 100%, the request row recorded HTTP 200, all modules were
+evicted after use, and the queue returned to zero.
+
 The image endpoint returns PNG bytes through `b64_json` and retains no output.
+`POST /api/inferdeck/v1/audio/generations` accepts `model`, `prompt`, optional
+`lyrics`, `duration`, `seed`, `steps`, and `guidance_scale`, then returns one
+48 kHz stereo PCM16 WAVE body. It is an InferDeck data-plane endpoint because
+OpenAI has no general music-generation API. Managed API keys and the legacy
+OpenAI bearer token can call it, but neither gains control authority. The
+resolved seed, media job ID, and encoded duration are response headers.
 The speech endpoint streams runtime chunks and retains no audio. The
 transcription endpoint accepts request-scoped PCM16 or float32 RIFF/WAVE input,
 including WAVE_FORMAT_EXTENSIBLE, and returns `json`, `text`, `verbose_json`,
@@ -166,6 +217,10 @@ ctest --test-dir build -C Release -R native_runtime_tests --output-on-failure
 powershell -File Testing/Test-ImageGeneration.ps1 `
   -Model stable-diffusion-v1-5-fp16 `
   -Output image-validation.png
+powershell -File Testing/Test-AudioGeneration.ps1 `
+  -Model ace-step-v1.5-turbo-q4 `
+  -DurationSeconds 10 `
+  -Output audio-generation-validation.wav
 ```
 
 vLLM is not an eligible in-process runtime: it requires a Python/CUDA service and would violate InferDeck's no-subprocess, no-proxy constraint. The runtime registry can host additional native C/C++ providers without changing API routes or scheduling.
