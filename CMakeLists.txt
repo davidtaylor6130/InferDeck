@@ -16,6 +16,19 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 option(INFERDECK_BUILD_TESTS "Build tests" OFF)
 option(INFERDECK_BUILD_WASM "Build WASM module" OFF)
+set(INFERDECK_STABLE_DIFFUSION_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/stable-diffusion.cpp"
+    CACHE PATH "stable-diffusion.cpp source tree")
+option(INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP
+       "Fail configuration when stable-diffusion.cpp is unavailable" OFF)
+
+if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
+    add_compile_definitions(GGML_MAX_NAME=128)
+elseif(INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP)
+    message(FATAL_ERROR
+            "stable-diffusion.cpp is required but unavailable: "
+            "${INFERDECK_STABLE_DIFFUSION_ROOT}")
+endif()
 
 if(INFERDECK_BUILD_TESTS)
     enable_testing()

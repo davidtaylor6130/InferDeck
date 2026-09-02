@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          submodules: recursive
+          submodules: true
       - shell: pwsh
         run: .\scripts\Test-ArchitecturePolicy.ps1 -SelfTest
       - shell: pwsh
@@ -57,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          submodules: recursive
+          submodules: true
       - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
         with:
           path: build/vcpkg_installed
@@ -88,7 +88,7 @@ jobs:
           $version = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationVersion
           if (!$version) { throw 'Visual Studio with MSBuild is unavailable' }
           $generator = if ($version.StartsWith('18.')) { 'Visual Studio 18 2026' } else { 'Visual Studio 17 2022' }
-          cmake -S . -B build -G $generator -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DINFERDECK_BUILD_TESTS=ON -DINFERDECK_REQUIRE_WHISPER_CPP=ON -DINFERDECK_SHERPA_ONNX_ROOT="$env:INFERDECK_SHERPA_ONNX_ROOT" -DINFERDECK_REQUIRE_SHERPA_ONNX=ON
+          cmake -S . -B build -G $generator -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DINFERDECK_BUILD_TESTS=ON -DINFERDECK_REQUIRE_STABLE_DIFFUSION_CPP=ON -DINFERDECK_REQUIRE_WHISPER_CPP=ON -DINFERDECK_SHERPA_ONNX_ROOT="$env:INFERDECK_SHERPA_ONNX_ROOT" -DINFERDECK_REQUIRE_SHERPA_ONNX=ON
       - shell: pwsh
         run: cmake --build build --config Release --parallel
       - shell: pwsh

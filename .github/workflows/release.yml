@@ -21,7 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          submodules: recursive
+          submodules: true
 
       - name: Resolve product version
         shell: pwsh
@@ -114,6 +114,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DINFERDECK_BUILD_TESTS=ON `
+            -DINFERDECK_REQUIRE_STABLE_DIFFUSION_CPP=ON `
             -DINFERDECK_REQUIRE_WHISPER_CPP=ON `
             -DINFERDECK_SHERPA_ONNX_ROOT="$env:INFERDECK_SHERPA_ONNX_ROOT" `
             -DINFERDECK_REQUIRE_SHERPA_ONNX=ON

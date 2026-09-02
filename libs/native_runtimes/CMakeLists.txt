@@ -13,7 +13,6 @@ if(WIN32)
     target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_WINDOWS_SAPI=1)
 endif()
 
-set(INFERDECK_STABLE_DIFFUSION_ROOT "" CACHE PATH "stable-diffusion.cpp source tree")
 set(INFERDECK_WHISPER_ROOT "${CMAKE_SOURCE_DIR}/runtime/whisper.cpp-src" CACHE PATH "whisper.cpp source tree")
 option(INFERDECK_REQUIRE_WHISPER_CPP "Fail configuration when whisper.cpp is unavailable" OFF)
 set(INFERDECK_SHERPA_ONNX_ROOT "" CACHE PATH "sherpa-onnx install prefix")
@@ -22,13 +21,20 @@ set(INFERDECK_SHERPA_ONNX_RUNTIME_DIR "${INFERDECK_SHERPA_ONNX_ROOT}/lib" CACHE 
 
 if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
     set(SD_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SD_WEBP OFF CACHE BOOL "" FORCE)
+    set(SD_WEBM OFF CACHE BOOL "" FORCE)
     set(SD_VULKAN ON CACHE BOOL "" FORCE)
     set(SD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     add_subdirectory("${INFERDECK_STABLE_DIFFUSION_ROOT}"
                      "${CMAKE_BINARY_DIR}/native/stable-diffusion" EXCLUDE_FROM_ALL)
+    target_include_directories(stable-diffusion BEFORE PRIVATE
+        "${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp")
     target_sources(native_runtimes PRIVATE src/stable_diffusion_backend.cpp)
     target_link_libraries(native_runtimes PRIVATE stable-diffusion)
     target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_STABLE_DIFFUSION_CPP=1)
+    if(MSVC)
+        target_compile_options(stable-diffusion PRIVATE /bigobj)
+    endif()
 endif()
 
 if(EXISTS "${INFERDECK_WHISPER_ROOT}/CMakeLists.txt")

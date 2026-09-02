@@ -4,3 +4,6 @@
 [submodule "libs/third_party/Vulkan-Headers"]
 	path = libs/third_party/Vulkan-Headers
 	url = https://github.com/KhronosGroup/Vulkan-Headers.git
+[submodule "libs/third_party/stable-diffusion.cpp"]
+	path = libs/third_party/stable-diffusion.cpp
+	url = https://github.com/leejet/stable-diffusion.cpp.git
