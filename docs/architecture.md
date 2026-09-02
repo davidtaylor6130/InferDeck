@@ -129,6 +129,30 @@ Model Settings owns runtime, capacity, pricing, sampler, and optimization contro
 
 Models owns stable aliases plus catalogue and installed-artifact operations. Catalogue filters combine name, runtime, modality, selected VRAM capacity, and Hugging Face download/like popularity. The active filter summary includes a one-step reset. Archive and permanent delete remain explicit, confirmed actions and refuse loaded or active models.
 
+## Post-training boundary
+
+InferDeck currently implements GGUF quantisation, not fine-tuning. A
+control-plane request starts one background call to llama.cpp's public
+`llama_model_quantize` API. The source must be an unloaded, managed, regular
+GGUF file inside the model-store root. The destination is server-derived inside
+that root, written as a new partial artifact, hashed, finalized without
+overwrite, added to the manifest, and registered as a separate model. Q4_K_M,
+Q5_K_M, Q6_K, and Q8_0 are supported. Requantisation is disabled.
+
+The upstream call has no progress or cancellation callback, so the API reports
+the job as non-cancellable and shutdown waits for it to finish. Full-model FP32
+training in the vendored example remains experimental, and the public backend
+does not expose a compatible LoRA training and save path. The capability route
+reports fine-tuning as unavailable rather than presenting an unsafe workflow.
+
+Quantisation atomically owns the shared CPU maintenance resource from admission
+until either installation or failure. This blocks competing CPU-backed model
+work, configuration mutation, and new background leases while leaving
+GPU-backed inference eligible. Background availability reports `maintenance`
+with a suggested report-back time. The measured benchmark and quantisation
+workers release only reservations they own, so one maintenance subsystem cannot
+clear the other's resource state.
+
 ## Throughput and usage semantics
 
 - One canonical request record feeds in-memory metrics, the SQLite ledger,
@@ -172,6 +196,8 @@ retained.
 - Slot release is idempotently owned by the route or stream state, never both.
 - Streaming state outlives both its inference thread and HTTP provider.
 - Native cancellation callbacks must terminate work and release GPU capacity.
+- Non-cancellable llama.cpp quantisation is limited to one job and joined on
+  shutdown so a partial model is never presented as installed.
 - stable-diffusion.cpp generation is serialized while its upstream progress callback remains process-global.
 - acestep.cpp music generation uses one slot and strict module eviction; jobs
   are serialized across ACE-Step models.

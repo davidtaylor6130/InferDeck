@@ -3,9 +3,11 @@
 #include "gateway/model_store.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <optional>
@@ -81,6 +83,22 @@ std::filesystem::path test_root() {
             "-" + std::to_string(suffix.fetch_add(1)));
 }
 
+std::optional<std::string> environment_value(const char* name) {
+#ifdef _WIN32
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || !value) {
+        return std::nullopt;
+    }
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value ? std::optional<std::string>(value) : std::nullopt;
+#endif
+}
+
 std::optional<gateway::StoreDownload> wait_for_terminal(
     gateway::ModelStore& store, std::uint64_t id) {
     for (int attempt = 0; attempt < 200; ++attempt) {
@@ -95,6 +113,122 @@ std::optional<gateway::StoreDownload> wait_for_terminal(
     }
     return std::nullopt;
 }
+
+std::optional<gateway::StoreQuantization> wait_for_quantization_terminal(
+    gateway::ModelStore& store, std::uint64_t id) {
+    for (int attempt = 0; attempt < 400; ++attempt) {
+        for (const auto& job : store.quantizations()) {
+            if (job.id != id) continue;
+            if (job.state == "failed" || job.state == "installed") {
+                return job;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return std::nullopt;
+}
+
+class RecordingQuantizer final : public gateway::IModelQuantizer {
+public:
+    foundation::Result<void> quantize(
+        const std::filesystem::path& source,
+        const std::filesystem::path& destination,
+        const std::string& quantization,
+        int threads) override {
+        {
+            std::lock_guard lock(mutex_);
+            source_ = source;
+            destination_ = destination;
+            quantization_ = quantization;
+            threads_ = threads;
+        }
+        std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+        output << "quantized";
+        return output
+            ? foundation::Ok()
+            : foundation::Err<void>(foundation::ErrorCode::IoError,
+                                    "fake quantizer could not write output");
+    }
+
+    [[nodiscard]] std::string quantization() const {
+        std::lock_guard lock(mutex_);
+        return quantization_;
+    }
+
+    [[nodiscard]] int threads() const {
+        std::lock_guard lock(mutex_);
+        return threads_;
+    }
+
+    [[nodiscard]] std::filesystem::path source() const {
+        std::lock_guard lock(mutex_);
+        return source_;
+    }
+
+    [[nodiscard]] std::filesystem::path destination() const {
+        std::lock_guard lock(mutex_);
+        return destination_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::filesystem::path source_;
+    std::filesystem::path destination_;
+    std::string quantization_;
+    int threads_{0};
+};
+
+class FailingQuantizer final : public gateway::IModelQuantizer {
+public:
+    foundation::Result<void> quantize(
+        const std::filesystem::path&, const std::filesystem::path&,
+        const std::string&, int) override {
+        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                     "source is not high precision");
+    }
+};
+
+class BlockingQuantizer final : public gateway::IModelQuantizer {
+public:
+    foundation::Result<void> quantize(
+        const std::filesystem::path&, const std::filesystem::path& destination,
+        const std::string&, int) override {
+        {
+            std::lock_guard lock(mutex_);
+            active_ = true;
+        }
+        changed_.notify_all();
+        std::unique_lock lock(mutex_);
+        changed_.wait(lock, [this] { return released_; });
+        lock.unlock();
+        std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+        output << "quantized";
+        return output
+            ? foundation::Ok()
+            : foundation::Err<void>(foundation::ErrorCode::IoError,
+                                    "fake quantizer could not write output");
+    }
+
+    [[nodiscard]] bool wait_for_active() {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(
+            lock, std::chrono::seconds(2), [this] { return active_; });
+    }
+
+    void release() {
+        {
+            std::lock_guard lock(mutex_);
+            released_ = true;
+        }
+        changed_.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool active_{false};
+    bool released_{false};
+};
 
 class ThrowingTransport final : public FakeTransport {
 public:
@@ -592,6 +726,171 @@ TEST_CASE("Model store never registers a corrupt artifact", "[model-store]") {
     }
     std::filesystem::remove_all(root);
 }
+
+#ifdef _WIN32
+TEST_CASE("Native quantizer produces a real GGUF artifact",
+          "[.][post-training][native-quantizer]") {
+    const auto source_value = environment_value("INFERDECK_QUANTIZATION_SOURCE");
+    const auto output_value = environment_value("INFERDECK_QUANTIZATION_OUTPUT");
+    if (!source_value || !output_value) {
+        SKIP("set INFERDECK_QUANTIZATION_SOURCE and INFERDECK_QUANTIZATION_OUTPUT");
+    }
+    const std::filesystem::path source(*source_value);
+    const std::filesystem::path output(*output_value);
+    REQUIRE(std::filesystem::is_regular_file(source));
+    REQUIRE_FALSE(std::filesystem::exists(output));
+
+    const auto quantizer = gateway::make_native_model_quantizer();
+    REQUIRE(quantizer);
+    const auto result = quantizer->quantize(source, output, "Q8_0", 1);
+    if (!result) INFO(result.error().message);
+    REQUIRE(result);
+    REQUIRE(std::filesystem::is_regular_file(output));
+    CHECK(std::filesystem::file_size(output) > 0);
+
+    std::ifstream input(output, std::ios::binary);
+    std::array<char, 4> signature{};
+    input.read(signature.data(), static_cast<std::streamsize>(signature.size()));
+    REQUIRE(input.gcount() == static_cast<std::streamsize>(signature.size()));
+    CHECK(std::string(signature.data(), signature.size()) == "GGUF");
+}
+
+TEST_CASE("Model store quantizes a managed GGUF without overwriting its source",
+          "[model-store][post-training]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto quantizer = std::make_unique<RecordingQuantizer>();
+    auto* recording = quantizer.get();
+    {
+        gateway::ModelStore store(
+            root, "", coordinator, std::make_unique<SuccessfulTransport>(),
+            std::move(quantizer));
+        const auto install = store.install(
+            "owner/source", "model.gguf", "llama_cpp", "text", "source-model");
+        REQUIRE(install);
+        const auto source_job = wait_for_terminal(store, *install);
+        REQUIRE(source_job);
+        REQUIRE(source_job->state == "installed");
+        const auto source_path = std::filesystem::path(source_job->installed_path);
+
+        const auto started = store.quantize(
+            "source-model", "source-model-q4", "Q4_K_M", 3);
+        REQUIRE(started);
+        const auto job = wait_for_quantization_terminal(store, *started);
+        REQUIRE(job);
+        INFO(job->error);
+        REQUIRE(job->state == "installed");
+        CHECK(job->quantization == "q4_k_m");
+        CHECK(job->output_size == 9);
+        CHECK(job->output_sha256.size() == 64);
+        CHECK(std::filesystem::exists(source_path));
+        CHECK(std::filesystem::exists(job->output_path));
+        CHECK_FALSE(std::filesystem::exists(job->output_path + ".partial"));
+        CHECK(registry.has("source-model"));
+        CHECK(registry.has("source-model-q4"));
+        CHECK(recording->source() == source_path);
+        CHECK(recording->destination().extension() == ".partial");
+        CHECK(recording->quantization() == "q4_k_m");
+        CHECK(recording->threads() == 3);
+        const auto manifest = store.installed();
+        REQUIRE(manifest.contains("source-model-q4"));
+        CHECK(manifest["source-model-q4"]["sourceModel"] == "source-model");
+        CHECK(manifest["source-model-q4"]["quantization"] == "q4_k_m");
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store cleans failed quantizations and releases the output name",
+          "[model-store][post-training]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    std::atomic<gateway::ComputeResource> maintenance_resource{
+        gateway::ComputeResource::None};
+    {
+        gateway::ModelStore store(
+            root, "", coordinator, std::make_unique<SuccessfulTransport>(),
+            std::make_unique<FailingQuantizer>(), &maintenance_resource);
+        CHECK_FALSE(store.quantize("missing", "output", "Q4_K_M"));
+        const auto install = store.install(
+            "owner/source", "model.gguf", "llama_cpp", "text", "source-model");
+        REQUIRE(install);
+        const auto source_job = wait_for_terminal(store, *install);
+        REQUIRE(source_job);
+        REQUIRE(source_job->state == "installed");
+        CHECK_FALSE(store.quantize(
+            "source-model", "source-model", "Q4_K_M"));
+        CHECK_FALSE(store.quantize(
+            "source-model", "unsafe/name", "Q4_K_M"));
+        CHECK_FALSE(store.quantize(
+            "source-model", "output-model", "IQ1_M"));
+
+        const auto first = store.quantize(
+            "source-model", "output-model", "Q8_0");
+        REQUIRE(first);
+        const auto failed = wait_for_quantization_terminal(store, *first);
+        REQUIRE(failed);
+        CHECK(failed->state == "failed");
+        CHECK(failed->error == "source is not high precision");
+        CHECK(maintenance_resource.load() == gateway::ComputeResource::None);
+        CHECK_FALSE(registry.has("output-model"));
+        CHECK_FALSE(store.installed().contains("output-model"));
+        CHECK_FALSE(std::filesystem::exists(
+            root / "llama_cpp" / "quantized" / "output-model"));
+
+        const auto retry = store.quantize(
+            "source-model", "output-model", "Q8_0");
+        REQUIRE(retry);
+        REQUIRE(wait_for_quantization_terminal(store, *retry));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store owns CPU maintenance while quantization is active",
+          "[model-store][post-training][background-lease]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    std::atomic<gateway::ComputeResource> maintenance_resource{
+        gateway::ComputeResource::None};
+    auto quantizer = std::make_unique<BlockingQuantizer>();
+    auto* control = quantizer.get();
+    {
+        gateway::ModelStore store(
+            root, "", coordinator, std::make_unique<SuccessfulTransport>(),
+            std::move(quantizer), &maintenance_resource);
+        const auto install = store.install(
+            "owner/source", "model.gguf", "llama_cpp", "text", "source-model");
+        REQUIRE(install);
+        const auto source_job = wait_for_terminal(store, *install);
+        REQUIRE(source_job);
+        REQUIRE(source_job->state == "installed");
+
+        maintenance_resource.store(gateway::ComputeResource::Gpu);
+        const auto occupied = store.quantize(
+            "source-model", "blocked-output", "Q8_0");
+        REQUIRE_FALSE(occupied);
+        CHECK(occupied.error().code == foundation::ErrorCode::Unavailable);
+        CHECK(maintenance_resource.load() == gateway::ComputeResource::Gpu);
+        maintenance_resource.store(gateway::ComputeResource::None);
+
+        const auto started = store.quantize(
+            "source-model", "quantized-output", "Q8_0");
+        REQUIRE(started);
+        const bool became_active = control->wait_for_active();
+        CHECK(became_active);
+        CHECK(maintenance_resource.load() == gateway::ComputeResource::Cpu);
+        control->release();
+        const auto completed = wait_for_quantization_terminal(store, *started);
+        REQUIRE(completed);
+        INFO(completed->error);
+        CHECK(completed->state == "installed");
+        CHECK(maintenance_resource.load() == gateway::ComputeResource::None);
+    }
+    std::filesystem::remove_all(root);
+}
+#endif
 
 TEST_CASE("Model store contains unexpected worker exceptions",
           "[model-store]") {

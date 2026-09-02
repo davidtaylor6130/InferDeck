@@ -81,6 +81,8 @@ The paths below are the canonical Phase 4 routes.
 - `GET /api/inferdeck/v1/jobs`
 - `GET /api/inferdeck/v1/logs`
 - `GET /api/inferdeck/v1/api-keys`
+- `GET /api/inferdeck/v1/post-training/capabilities`
+- `GET /api/inferdeck/v1/post-training/quantizations`
 
 ### Control write
 
@@ -106,11 +108,25 @@ The paths below are the canonical Phase 4 routes.
 - `POST /api/inferdeck/v1/api-keys`
 - `PATCH /api/inferdeck/v1/api-keys/:id`
 - `DELETE /api/inferdeck/v1/api-keys/:id`
+- `POST /api/inferdeck/v1/post-training/quantizations`
 
 All future `/api` mutations default to the control-write principal through the
 central classifier, even before they are added to this human-readable inventory.
 The route matrix test lists every current mutating operation so omissions fail
 review visibly.
+
+Quantisation is a filesystem-writing control operation.
+The request cannot provide a path. It selects an existing managed source and a safe model name;
+the server derives both staging and final paths under the model-store root.
+The existing output parent is reparse-resolved back into that root before a
+directory is created. Existing destinations are never replaced, and data-plane
+or managed-client keys do not gain access to the route.
+
+An accepted quantisation job owns the CPU maintenance resource until it reaches
+`installed` or `failed`. With no existing lease, managed-key background
+availability reports `maintenance`, a suggested report-back time, and
+`Retry-After`; new lease acquisition returns 409. This keeps the advisory
+background-work gate aligned with server-owned maintenance state.
 
 ## Configuration contract
 

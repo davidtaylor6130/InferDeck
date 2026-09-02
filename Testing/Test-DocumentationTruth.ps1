@@ -49,7 +49,19 @@ Require-Text 'docs/release-reproducibility.md' @(
 )
 Require-Text 'docs/architecture.md' @(
     'benchmark implementation modules',
-    'stream serialization and control YAML modules'
+    'stream serialization and control YAML modules',
+    'llama_model_quantize',
+    'does not expose a compatible LoRA training and save path'
+)
+Require-Text 'docs/control-plane-security.md' @(
+    'POST /api/inferdeck/v1/post-training/quantizations',
+    'The request cannot provide a path'
+)
+Require-Text 'docs/post-training.md' @(
+    'POST /api/inferdeck/v1/post-training/quantizations',
+    'suggestedReportBackAtUnixMs',
+    'Testing/Test-PostTrainingQuantization.ps1',
+    'Fine-tuning and LoRA adapter training are'
 )
 Require-Text 'docs/opencode-setup-guide.md' @(
     'InferDeck model aliases',

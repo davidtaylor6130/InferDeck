@@ -28,7 +28,7 @@
                                                httplib::Response& resp) {
         if (maintenance_mode_active(deps.gw)) {
             write_error(resp, 503, "maintenance_mode",
-                        "configuration cannot change during a measured benchmark");
+                        "configuration cannot change during maintenance work");
             return;
         }
         if (!deps.config_repository) {
@@ -79,7 +79,7 @@
                                                       httplib::Response& resp) {
         if (maintenance_mode_active(deps.gw)) {
             write_error(resp, 503, "maintenance_mode",
-                        "configuration cannot change during a measured benchmark");
+                        "configuration cannot change during maintenance work");
             return;
         }
         if (!deps.config_repository) {
@@ -134,7 +134,7 @@
                                                          httplib::Response& resp) {
         if (maintenance_mode_active(deps.gw)) {
             write_error(resp, 503, "maintenance_mode",
-                        "configuration cannot change during a measured benchmark");
+                        "configuration cannot change during maintenance work");
             return;
         }
         if (!deps.config_repository) {

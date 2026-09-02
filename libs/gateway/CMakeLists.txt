@@ -12,6 +12,7 @@ set(GATEWAY_SOURCES
     src/dashboard_routes.cpp
     src/metrics_builder.cpp
     src/model_store.cpp
+    src/model_quantizer.cpp
     src/audio_decoder.cpp
     src/media_routes.cpp
     src/profile_benchmark.cpp
@@ -41,6 +42,7 @@ target_link_libraries(gateway
         nlohmann_json::nlohmann_json
         httplib::httplib
     PRIVATE
+        llama
         yaml-cpp::yaml-cpp
         unofficial::sqlite3::sqlite3
 )

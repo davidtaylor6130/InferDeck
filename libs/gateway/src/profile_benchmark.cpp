@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <system_error>
 #include <tuple>
 
 namespace inferdeck::gateway {
@@ -41,7 +42,7 @@ ProfileBenchmarkManager::ProfileBenchmarkManager(
 ProfileBenchmarkManager::~ProfileBenchmarkManager() {
     cancel_requested_.store(true);
     if (worker_.joinable()) worker_.join();
-    maintenance_resource_.store(ComputeResource::None);
+    release_resource();
 }
 
 foundation::Result<ProfileBenchmarkSnapshot> ProfileBenchmarkManager::start(
@@ -73,6 +74,7 @@ foundation::Result<ProfileBenchmarkSnapshot> ProfileBenchmarkManager::start(
             foundation::ErrorCode::AlreadyExists,
             "InferDeck is already in maintenance mode");
     }
+    reserved_resource_.store(resource, std::memory_order_release);
     bool resource_busy = false;
     for (const auto& name : coordinator_.registry().list()) {
         const auto info = coordinator_.registry().get_info_result(name);
@@ -96,7 +98,7 @@ foundation::Result<ProfileBenchmarkSnapshot> ProfileBenchmarkManager::start(
         resource_busy = true;
     }
     if (resource_busy) {
-        maintenance_resource_.store(ComputeResource::None);
+        release_resource();
         return foundation::Err<ProfileBenchmarkSnapshot>(
             foundation::ErrorCode::Unavailable,
             "benchmark requires no active or queued work on the same compute resource");
@@ -113,10 +115,17 @@ foundation::Result<ProfileBenchmarkSnapshot> ProfileBenchmarkManager::start(
         state_.model = model.name;
         state_.started_unix_ms = unix_ms();
     }
-    worker_ = std::thread(
-        [this, model, input, candidate_limit] {
-            run(model, input, candidate_limit);
-        });
+    try {
+        worker_ = std::thread(
+            [this, model, input, candidate_limit] {
+                run(model, input, candidate_limit);
+            });
+    } catch (const std::system_error&) {
+        finish("failed", "Could not start measured benchmark worker", false);
+        return foundation::Err<ProfileBenchmarkSnapshot>(
+            foundation::ErrorCode::Unavailable,
+            "cannot start measured benchmark worker");
+    }
     return foundation::Ok(snapshot());
 }
 
@@ -172,7 +181,16 @@ void ProfileBenchmarkManager::finish(
         state_.restored = restored;
         state_.progress_pct = 100.0;
     }
-    maintenance_resource_.store(ComputeResource::None);
+    release_resource();
+}
+
+void ProfileBenchmarkManager::release_resource() noexcept {
+    const ComputeResource owned = reserved_resource_.exchange(
+        ComputeResource::None, std::memory_order_acq_rel);
+    if (owned == ComputeResource::None) return;
+    ComputeResource expected = owned;
+    (void)maintenance_resource_.compare_exchange_strong(
+        expected, ComputeResource::None);
 }
 
 std::vector<ProfileBenchmarkPrompt> ProfileBenchmarkManager::prompts() const {

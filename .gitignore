@@ -73,6 +73,8 @@ data/job-artifacts/*
 # Coverage
 coverage/
 .nyc_output/
+__pycache__/
+*.py[cod]
 
 # Config
 config/gateway.local.yaml

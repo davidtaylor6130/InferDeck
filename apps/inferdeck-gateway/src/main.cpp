@@ -140,8 +140,10 @@ int run_gateway(const fs::path& config_path) {
     if (cfg.vram_budget_mb > 0) {
         coordinator.set_vram_budget(cfg.vram_budget_mb, cfg.vram_safety_margin_mb);
     }
+    std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     ModelStore model_store(cfg.model_store_root, cfg.model_store_archive_root,
-                           cfg.model_store_hf_token, coordinator);
+                           cfg.model_store_hf_token, coordinator, {}, {},
+                           &maintenance_resource);
 
     observability::Metrics metrics;
     observability::GpuTelemetry gpu;
@@ -173,7 +175,6 @@ int run_gateway(const fs::path& config_path) {
 
     foundation::EventBus events;
     SwapTracker swap_tracker;
-    std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     GatewayDeps deps{coordinator, "15", cfg.auto_swap,
                      cfg.default_model,
                      cfg.voice_session_grace_ms,

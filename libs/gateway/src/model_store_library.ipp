@@ -11,6 +11,14 @@ Result<void> ModelStore::retire(const std::string& model_name, bool archive_arti
     {
         std::lock_guard lock(mutex_);
         if (!installed_.contains(model_name)) return Err<void>(ErrorCode::NotFound, "installed model not found");
+        for (const auto& [_, job] : quantizations_) {
+            if ((job.state == "queued" || job.state == "quantizing") &&
+                (job.source_model == model_name || job.output_model == model_name)) {
+                return Err<void>(
+                    ErrorCode::Unavailable,
+                    "model cannot be archived or deleted during quantization");
+            }
+        }
         entry = installed_.at(model_name);
     }
     if (coordinator_.is_loaded(model_name) || coordinator_.active_request_count(model_name) > 0) {

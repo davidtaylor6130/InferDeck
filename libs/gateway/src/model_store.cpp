@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <sstream>
 #include <unordered_set>
@@ -186,6 +187,60 @@ Result<void> replace_file(const std::filesystem::path& source,
     return Ok();
 }
 
+Result<void> install_new_file(const std::filesystem::path& source,
+                              const std::filesystem::path& destination) {
+    std::error_code exists_error;
+    if (std::filesystem::exists(destination, exists_error)) {
+        return Err<void>(ErrorCode::AlreadyExists,
+                         "quantized model artifact already exists");
+    }
+#ifdef _WIN32
+    if (!MoveFileExW(source.c_str(), destination.c_str(),
+                     MOVEFILE_WRITE_THROUGH)) {
+        const DWORD code = GetLastError();
+        return Err<void>(
+            code == ERROR_ALREADY_EXISTS || code == ERROR_FILE_EXISTS
+                ? ErrorCode::AlreadyExists : ErrorCode::IoError,
+            code == ERROR_ALREADY_EXISTS || code == ERROR_FILE_EXISTS
+                ? "quantized model artifact already exists"
+                : "cannot finalize quantized model artifact");
+    }
+#else
+    std::error_code error;
+    std::filesystem::rename(source, destination, error);
+    if (error) return Err<void>(ErrorCode::IoError, error.message());
+#endif
+    return Ok();
+}
+
+Result<void> create_confined_directory(
+    const std::filesystem::path& canonical_root,
+    const std::filesystem::path& directory) {
+    std::error_code error;
+    std::filesystem::create_directories(directory.parent_path(), error);
+    const auto parent = std::filesystem::weakly_canonical(
+        directory.parent_path(), error);
+    if (error || !std::filesystem::is_directory(parent, error) ||
+        !foundation::is_path_within(canonical_root, parent)) {
+        return Err<void>(ErrorCode::InvalidArgument,
+                         "quantization output parent escapes the model store");
+    }
+    if (!std::filesystem::create_directory(directory, error)) {
+        return Err<void>(
+            error ? ErrorCode::IoError : ErrorCode::AlreadyExists,
+            error ? error.message() : "quantization output path already exists");
+    }
+    const auto resolved = std::filesystem::weakly_canonical(directory, error);
+    if (error || !std::filesystem::is_directory(resolved, error) ||
+        !foundation::is_path_within(canonical_root, resolved)) {
+        std::error_code ignored;
+        std::filesystem::remove(directory, ignored);
+        return Err<void>(ErrorCode::InvalidArgument,
+                         "quantization output path escapes the model store");
+    }
+    return Ok();
+}
+
 Result<std::string> sha256_file(const std::filesystem::path& path) {
 #ifdef _WIN32
     BCRYPT_ALG_HANDLE algorithm = nullptr;
@@ -247,13 +302,34 @@ nlohmann::json to_json(const StoreDownload& download) {
     };
 }
 
+nlohmann::json to_json(const StoreQuantization& quantization) {
+    return {
+        {"id", quantization.id},
+        {"sourceModel", quantization.source_model},
+        {"outputModel", quantization.output_model},
+        {"quantization", quantization.quantization},
+        {"threads", quantization.threads},
+        {"state", quantization.state},
+        {"error", quantization.error},
+        {"outputPath", quantization.state == "installed"
+                           ? quantization.output_path : std::string{}},
+        {"outputSize", quantization.output_size},
+        {"outputSha256", quantization.output_sha256},
+        {"cancellable", false}
+    };
+}
+
 ModelStore::ModelStore(std::filesystem::path root, std::filesystem::path archive_root,
                        std::string token,
                        model::BackendCoordinator& coordinator,
-                       std::unique_ptr<IModelStoreTransport> transport)
+                       std::unique_ptr<IModelStoreTransport> transport,
+                       std::unique_ptr<IModelQuantizer> quantizer,
+                       std::atomic<ComputeResource>* maintenance_resource)
     : root_(std::move(root)), archive_root_(std::move(archive_root)),
       token_(std::move(token)), coordinator_(coordinator),
-      transport_(transport ? std::move(transport) : make_native_model_store_transport()) {
+      transport_(transport ? std::move(transport) : make_native_model_store_transport()),
+      quantizer_(quantizer ? std::move(quantizer) : make_native_model_quantizer()),
+      maintenance_resource_(maintenance_resource) {
     std::filesystem::create_directories(root_);
     std::filesystem::create_directories(archive_root_);
     load_manifest();
@@ -261,9 +337,12 @@ ModelStore::ModelStore(std::filesystem::path root, std::filesystem::path archive
 
 ModelStore::ModelStore(std::filesystem::path root, std::string token,
                        model::BackendCoordinator& coordinator,
-                       std::unique_ptr<IModelStoreTransport> transport)
+                       std::unique_ptr<IModelStoreTransport> transport,
+                       std::unique_ptr<IModelQuantizer> quantizer,
+                       std::atomic<ComputeResource>* maintenance_resource)
     : ModelStore(root, root.parent_path() / "archive", std::move(token),
-                 coordinator, std::move(transport)) {}
+                 coordinator, std::move(transport), std::move(quantizer),
+                 maintenance_resource) {}
 
 ModelStore::~ModelStore() {
     std::vector<std::thread> workers;
@@ -273,11 +352,25 @@ ModelStore::~ModelStore() {
         for (auto& [_, worker] : workers_) workers.push_back(std::move(worker));
     }
     for (auto& worker : workers) if (worker.joinable()) worker.join();
+    release_quantization_resource();
+}
+
+void ModelStore::release_quantization_resource() noexcept {
+    if (!quantization_resource_reserved_.exchange(
+            false, std::memory_order_acq_rel)) {
+        return;
+    }
+    if (!maintenance_resource_) return;
+    ComputeResource expected = ComputeResource::Cpu;
+    (void)maintenance_resource_->compare_exchange_strong(
+        expected, ComputeResource::None);
 }
 
 #include "model_store_discovery.ipp"
 
 #include "model_store_downloads.ipp"
+
+#include "model_store_quantization.ipp"
 
 #include "model_store_library.ipp"
 

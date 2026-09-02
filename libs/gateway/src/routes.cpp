@@ -435,7 +435,7 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
     if (maintenance_blocks_model(deps, target_name)) {
         return {503, make_error_json(
             503, "maintenance_mode",
-            "measured model optimization is using the same compute resource; retry after it restores the active profile")};
+            "maintenance work is using the same compute resource; retry when maintenance finishes")};
     }
     const auto info = deps.coordinator.registry().get_info_result(target_name);
     if (!info || !deps.coordinator.registry().has_factory(info->runtime)) {
@@ -497,7 +497,7 @@ EnsureLoadedResult ensure_model_loaded(
     const std::function<bool()>& cancelled) {
     if (maintenance_blocks_model(deps, model_name)) {
         return {false, 503, "maintenance_mode",
-                "measured model optimization is using the same compute resource; retry after it restores the active profile",
+                "maintenance work is using the same compute resource; retry when maintenance finishes",
                 foundation::ErrorCode::Unavailable};
     }
     if (deps.coordinator.is_loaded(model_name)) {

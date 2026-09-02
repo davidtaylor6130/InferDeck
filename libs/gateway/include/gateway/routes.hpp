@@ -5,6 +5,7 @@
 
 #include "foundation/event_bus.hpp"
 #include "gateway/api_key_store.hpp"
+#include "gateway/compute_resource.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
@@ -20,12 +21,6 @@
 #include <string>
 
 namespace inferdeck::gateway {
-
-enum class ComputeResource : std::uint8_t {
-    None,
-    Cpu,
-    Gpu,
-};
 
 using CompatibilityProfile = inference::CompatibilityProfile;
 

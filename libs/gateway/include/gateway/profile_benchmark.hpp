@@ -115,11 +115,13 @@ private:
     void update_stage(const std::string& stage, const std::string& message);
     void finish(const std::string& state, const std::string& message,
                 bool restored);
+    void release_resource() noexcept;
     std::vector<ProfileBenchmarkPrompt> prompts() const;
 
     model::BackendCoordinator& coordinator_;
     SwapTracker* swap_tracker_{nullptr};
     std::atomic<ComputeResource>& maintenance_resource_;
+    std::atomic<ComputeResource> reserved_resource_{ComputeResource::None};
     ProfileBenchmarkTrialRunner runner_;
     mutable std::mutex mutex_;
     ProfileBenchmarkSnapshot state_;

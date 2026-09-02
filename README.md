@@ -105,6 +105,11 @@ and the same dashboard. See the [roadmap](#roadmap).
   real-model Windows/Vulkan validation.
 - **Image generation API.** The compile-gated stable-diffusion.cpp backend at
   `POST /v1/images/generations` passes real-model Windows/Vulkan validation.
+- **Native GGUF quantisation.** A control-plane job at
+  `POST /api/inferdeck/v1/post-training/quantizations` calls llama.cpp
+  in-process, accepts only unloaded managed GGUF sources, disables
+  requantisation, and registers the finished model without replacing its
+  source.
 - Discovery and operations endpoints: `GET /v1/models`, `GET /api/inferdeck/v1/health`,
   `GET /api/inferdeck/v1/metrics`, and `GET /api/inferdeck/v1/stats/history`.
 
@@ -297,6 +302,16 @@ powershell -File Testing/Test-AudioGeneration.ps1 `
   -DurationSeconds 10 `
   -Output audio-generation-validation.wav
 
+# Prepare the pinned quantisation fixture without invoking llama.cpp
+powershell -File Testing/Test-PostTrainingQuantization.ps1 `
+  -RouteTests build/bin/Release/route_tests.exe `
+  -PrepareOnly
+
+# Real Q8_0 conversion; stop any existing InferDeck instance first
+powershell -File Testing/Test-PostTrainingQuantization.ps1 `
+  -RouteTests build/bin/Release/route_tests.exe `
+  -Output C:\tmp\inferdeck-quantization-validation.gguf
+
 # Real-model parity needs raw llama-server and InferDeck running with the same model
 pwsh -File tests/parity/record_baseline.ps1 -Model qwen3.6-27b
 pwsh -File tests/parity/run.ps1 `
@@ -323,6 +338,8 @@ pwsh -File tests/parity/run.ps1 `
 | `GET /api/inferdeck/v1/model-store/downloads` · `POST /api/inferdeck/v1/model-store/downloads` | list or start downloads |
 | `POST /api/inferdeck/v1/model-store/downloads/:id/cancel` · `POST /api/inferdeck/v1/model-store/downloads/:id/resume` | cancel or resume a download |
 | `POST /api/inferdeck/v1/model-store/remove` | remove an inactive model-store entry and its managed artefact |
+| `GET /api/inferdeck/v1/post-training/capabilities` | report the exact quantisation and fine-tuning capability boundary |
+| `GET` · `POST /api/inferdeck/v1/post-training/quantizations` | list or start one in-process managed GGUF quantisation job |
 | `GET` · `POST /api/inferdeck/v1/api-keys` · `PATCH` · `DELETE /api/inferdeck/v1/api-keys/:id` | create and manage hash-only client keys with server-owned queue priorities; plaintext is returned once |
 | `GET /api/inferdeck/v1/background/availability` · `POST /api/inferdeck/v1/background/lease` · `PATCH` · `DELETE /api/inferdeck/v1/background/lease/:id` | coordinate one persisted background-work lease after the configured quiet period; conflicts include a suggested report-back time |
 
@@ -363,9 +380,13 @@ completions today.
   licensed download.
 - [ ] **Video generation** as local open-model pipelines mature, using
   long-running jobs with progress streamed over the existing SSE channel.
-- [ ] **Post-training and quantisation jobs**, including GGUF quantisation and LoRA
-  fine-tuning launched and monitored from the dashboard, queued into GPU idle
-  time alongside inference.
+- [x] **Managed GGUF quantisation API.** The in-process llama.cpp path supports
+  Q4_K_M, Q5_K_M, Q6_K, and Q8_0 output, refuses requantisation and loaded
+  sources, stages output without overwrite, and records one background job.
+- [ ] **Fine-tuning and dashboard controls.** The vendored experimental trainer
+  can only perform full-model FP32 work and exposes no supported LoRA save API.
+  This remains unavailable until an upstream-compatible adapter workflow can
+  be implemented and verified without a subprocess.
 
 **Expanding the engine**
 - [x] **True parallel slots (continuous batching).** Decode multiple concurrent
@@ -404,6 +425,7 @@ Suggestions and issues are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 | --- | --- |
 | [`AGENTS.md`](AGENTS.md) | Engineering guide: build/test commands, architecture quick reference, concurrency invariants, design rules learned the hard way |
 | [`docs/architecture.md`](docs/architecture.md) | Layer-by-layer architecture notes |
+| [`docs/post-training.md`](docs/post-training.md) | Managed GGUF quantisation API, lifecycle, limits, and real-model verification |
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | Unattended Windows deployment (scheduled tasks + watchdog) |
 | [`docs/opencode-setup-guide.md`](docs/opencode-setup-guide.md) | Pointing opencode at InferDeck |
 | [`CHANGELOG.MD`](CHANGELOG.MD) | Release history |

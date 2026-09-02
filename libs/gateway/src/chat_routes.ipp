@@ -426,7 +426,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     const std::string& model_name = resolved_model->resolved;
     if (maintenance_blocks_model(deps, model_name)) {
         write_error(resp, 503, "maintenance_mode",
-                    "measured model optimization is using the same compute resource");
+                    "maintenance work is using the same compute resource");
         return;
     }
     const auto model_info = deps.coordinator.registry().get_info_result(model_name);

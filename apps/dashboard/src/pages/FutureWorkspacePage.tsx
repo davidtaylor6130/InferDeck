@@ -16,8 +16,8 @@ const AREAS: Record<FutureArea, { title: string; purpose: string; steps: string[
   },
   'post-training': {
     title: 'Post Training',
-    purpose: 'A future workspace for LoRA training and quantisation jobs scheduled around interactive inference workloads.',
-    steps: ['Choose a source model and training input', 'Review storage, memory, and time requirements', 'Run, pause, and inspect the resulting artefact'],
+    purpose: 'Native GGUF quantisation is available through the control API. Dashboard controls and fine-tuning remain planned.',
+    steps: ['Choose an unloaded managed GGUF source', 'Start a supported quantisation job through the API', 'Monitor the job and use the registered output model'],
   },
 };
 

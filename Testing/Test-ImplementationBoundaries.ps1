@@ -40,6 +40,18 @@ run_profile_benchmark_trial(', 'void write_dashboard_file(')
         MaximumLines = 220
         Required = @('inferdeck-acestep-core', 'src/pipeline-synth.cpp', 'src/model-store.cpp', 'ggml-vulkan')
         Forbidden = @('add_subdirectory("${INFERDECK_ACESTEP_ROOT}"', 'ace-server.cpp', 'ace-synth.cpp')
+    },
+    @{
+        Path = 'libs/gateway/src/model_quantizer.cpp'
+        MaximumLines = 100
+        Required = @('llama_model_quantize(', 'params.allow_requantize = false', 'generic_u8string()', 'make_native_model_quantizer')
+        Forbidden = @('llama_quantize(', 'system(', 'popen(')
+    },
+    @{
+        Path = 'libs/gateway/src/model_store_quantization.ipp'
+        MaximumLines = 420
+        Required = @('quantizer_->quantize(', 'install_new_file(', 'create_confined_directory(', 'managed source model', 'compare_exchange_strong(', 'release_quantization_resource')
+        Forbidden = @('remove_all(', 'system(', 'popen(', 'llama-server')
     }
 )
 

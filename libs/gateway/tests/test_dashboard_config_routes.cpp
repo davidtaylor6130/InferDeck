@@ -214,6 +214,39 @@ struct ConfigRouteServer {
 
 }
 
+TEST_CASE("Post-training routes report exact native capability boundaries",
+          "[gateway][dashboard][post-training]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+
+    const auto capabilities = client.Get(
+        "/api/inferdeck/v1/post-training/capabilities");
+    REQUIRE(capabilities);
+    REQUIRE(capabilities->status == 200);
+    const auto body = nlohmann::json::parse(capabilities->body);
+    CHECK(body["inProcess"] == true);
+    CHECK(body["quantization"]["available"] == true);
+    CHECK(body["quantization"]["requantization"] == false);
+    CHECK(body["quantization"]["cancellable"] == false);
+    CHECK(body["quantization"]["computeResource"] == "cpu");
+    CHECK(body["quantization"]["blocksNewBackgroundLeases"] == true);
+    CHECK(body["quantization"]["types"] ==
+          nlohmann::json::array({"Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"}));
+    CHECK(body["fineTuning"]["available"] == false);
+
+    const auto jobs = client.Get(
+        "/api/inferdeck/v1/post-training/quantizations");
+    REQUIRE(jobs);
+    CHECK(jobs->status == 503);
+    const auto start = client.Post(
+        "/api/inferdeck/v1/post-training/quantizations",
+        R"({"sourceModel":"source","outputModel":"output","quantization":"Q4_K_M"})",
+        "application/json");
+    REQUIRE(start);
+    CHECK(start->status == 503);
+}
+
 TEST_CASE("API key control routes create, reprioritize, list, and revoke",
           "[gateway][dashboard][api-key]") {
     TempConfig config;
@@ -379,6 +412,24 @@ TEST_CASE("Background lease acquisition waits for the configured quiet period",
     REQUIRE(key);
     const httplib::Headers headers{
         {"Authorization", "Bearer " + key->key}};
+    routes.maintenance_resource.store(ComputeResource::Cpu);
+    const auto maintenance = client.Get(
+        "/api/inferdeck/v1/background/availability", headers);
+    REQUIRE(maintenance);
+    REQUIRE(maintenance->status == 200);
+    const auto maintenance_body = nlohmann::json::parse(maintenance->body);
+    CHECK(maintenance_body["available"] == false);
+    CHECK(maintenance_body["reason"] == "maintenance");
+    CHECK(maintenance_body.contains("suggestedReportBackAtUnixMs"));
+    const auto maintenance_lease = client.Post(
+        "/api/inferdeck/v1/background/lease", headers,
+        R"({"durationSeconds":120})", "application/json");
+    REQUIRE(maintenance_lease);
+    REQUIRE(maintenance_lease->status == 409);
+    CHECK(nlohmann::json::parse(maintenance_lease->body)["reason"] ==
+          "maintenance");
+    routes.maintenance_resource.store(ComputeResource::None);
+
     const std::int64_t now = std::chrono::duration_cast<
         std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -933,6 +984,20 @@ TEST_CASE("Resetting an active configuration applies the stable baseline",
     CHECK(body["restartRequired"] == false);
     CHECK(routes.reloads.load() == 1);
     CHECK_FALSE(fs::exists(config.active));
+}
+
+TEST_CASE("Profile benchmark teardown preserves another maintenance owner",
+          "[gateway][dashboard][optimize][maintenance]") {
+    inferdeck::model::ModelRegistry registry;
+    BackendCoordinator coordinator{registry};
+    inferdeck::gateway::SwapTracker swap_tracker;
+    std::atomic<ComputeResource> maintenance_resource{ComputeResource::Cpu};
+    {
+        ProfileBenchmarkManager benchmark{
+            coordinator, &swap_tracker, maintenance_resource,
+            inferdeck::gateway::ProfileBenchmarkTrialRunner{}};
+    }
+    CHECK(maintenance_resource.load() == ComputeResource::Cpu);
 }
 
 TEST_CASE("Profile analysis returns a quality-first fitting candidate",
