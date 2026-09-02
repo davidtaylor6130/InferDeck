@@ -180,7 +180,7 @@ const Shell: React.FC = () => {
                 <div
                   id={controls}
                   hidden={collapsed}
-                  className="flex flex-col gap-1"
+                  className={sidebarNavigationClass(collapsed)}
                 >
                   {DASHBOARD_PAGES.filter(item => item.section === section).map(({ id, label: itemLabel }) => (
                     <NavLink key={id} id={id} label={itemLabel} page={page} nested />
@@ -239,6 +239,10 @@ const Shell: React.FC = () => {
     </div>
   );
 };
+
+export function sidebarNavigationClass(collapsed: boolean): string {
+  return collapsed ? 'hidden' : 'flex flex-col gap-1';
+}
 
 const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
   const { connection, stats, swap } = useGateway();

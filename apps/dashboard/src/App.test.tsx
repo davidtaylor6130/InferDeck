@@ -1,7 +1,7 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import App, { DASHBOARD_PAGES } from './App';
+import App, { DASHBOARD_PAGES, sidebarNavigationClass } from './App';
 import { INFERDECK_VERSION } from './version';
 
 describe('dashboard boundary', () => {
@@ -50,6 +50,11 @@ describe('dashboard boundary', () => {
     expect(html.match(/aria-expanded="true"/g)).toHaveLength(4);
     expect(html).toContain('href="#settings"');
     expect(html).toContain('API Settings');
+  });
+
+  it('removes collapsed AI division links from the rendered layout', () => {
+    expect(sidebarNavigationClass(true)).toBe('hidden');
+    expect(sidebarNavigationClass(false)).toBe('flex flex-col gap-1');
   });
 
   it('renders one grouped mobile page selector instead of scrolling tab rows', () => {
