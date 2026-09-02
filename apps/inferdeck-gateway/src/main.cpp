@@ -1,5 +1,6 @@
 ﻿#include <atomic>
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cctype>
 #include <csignal>
@@ -12,8 +13,10 @@
 #include <future>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -73,6 +76,18 @@ std::atomic<bool> g_default_model_loading{false};
 httplib::Server* g_server = nullptr;
 std::once_flag g_llama_init_once;
 constexpr int runtime_reload_result = 75;
+
+std::optional<std::uint64_t> parse_route_integer(
+    std::string_view text) {
+    if (text.empty()) return std::nullopt;
+    std::uint64_t value = 0;
+    const auto [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
 
 #include "process_runtime.ipp"
 #include "dashboard_static.ipp"
@@ -148,6 +163,19 @@ int run_gateway(const fs::path& config_path) {
     observability::Metrics metrics;
     observability::GpuTelemetry gpu;
     observability::StatsDb stats_db(cfg.stats_db_path);
+    fs::path media_history_parent =
+        fs::path(cfg.stats_db_path).parent_path();
+    if (media_history_parent.empty()) {
+        media_history_parent = "data";
+    }
+    const auto media_history = configure_media_history(
+        media_history_parent / "generated-media");
+    if (!media_history) {
+        LOG_WARN(
+            "media_history_unavailable", "path={} error={}",
+            (media_history_parent / "generated-media").string(),
+            media_history.error().message);
+    }
     auto api_keys = std::make_shared<ApiKeyStore>(cfg.api_keys_db_path);
     if (api_keys->healthy()) {
         LOG_INFO("api_key_store_opened", "db={}", api_keys->path());
@@ -539,6 +567,16 @@ int run_gateway(const fs::path& config_path) {
                          httplib::Response& resp) {
         handle_audio_generations(req, resp, deps);
     }));
+    server.Post(control_api_pattern("/media/images/generations"),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
+        handle_image_generations(req, resp, deps);
+    }));
+    server.Post(control_api_pattern("/media/audio/generations"),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
+        handle_audio_generations(req, resp, deps);
+    }));
     if (cfg.openai_derivative_compatibility_enabled) {
         server.Post(std::string(openai_derivative_route(
                         OpenAIDerivativeRoute::ChatCompletions).pattern),
@@ -570,10 +608,41 @@ int run_gateway(const fs::path& config_path) {
                         httplib::Response& resp) {
         write_json(resp, 200, {{"jobs", media_jobs()}});
     }));
+    server.Get(control_api_pattern(
+                   "/media/jobs/([0-9]+)/outputs/([0-9]+)"),
+               wrap([&](const httplib::Request& req,
+                        httplib::Response& resp) {
+        const auto id = parse_route_integer(req.matches[1].str());
+        const auto index = parse_route_integer(req.matches[2].str());
+        if (!id || !index ||
+            *index > std::numeric_limits<std::size_t>::max()) {
+            write_error(resp, 400, "invalid_media_output",
+                        "media job and output identifiers must be integers");
+            return;
+        }
+        auto output = media_job_output(
+            *id, static_cast<std::size_t>(*index));
+        if (!output) {
+            write_error(resp, 404, "media_output_not_found",
+                        output.error().message);
+            return;
+        }
+        resp.set_header("Content-Disposition", "inline");
+        resp.set_header(
+            "Cache-Control", "private, max-age=31536000, immutable");
+        resp.set_content(
+            std::move(output->body), output->content_type);
+    }));
     server.Post(control_api_pattern("/media/jobs/([0-9]+)/cancel"),
                 wrap([&](const httplib::Request& req,
                          httplib::Response& resp) {
-        auto result = cancel_media_job(static_cast<std::uint64_t>(std::stoull(req.matches[1].str())));
+        const auto id = parse_route_integer(req.matches[1].str());
+        if (!id) {
+            write_error(resp, 400, "invalid_media_job",
+                        "media job identifier must be an integer");
+            return;
+        }
+        auto result = cancel_media_job(*id);
         if (!result) {
             write_error(resp, result.error().code == foundation::ErrorCode::NotFound ? 404 : 409,
                         "media_cancel_failed", result.error().message);

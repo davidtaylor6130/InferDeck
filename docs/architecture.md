@@ -99,7 +99,10 @@ InferDeck data-plane routes:
 OpenAI-derivative routes use a separate disabled-by-default compatibility
 prefix, while InferDeck-specific contracts remain under `/api/inferdeck/v1`.
 
-InferDeck control routes cover model load/unload, swap status/cancellation, media job cancellation, metrics, history, configuration, model aliases, and the model store. Dashboard live state uses one SSE connection; there is no WebSocket layer.
+InferDeck control routes cover model load/unload, swap status/cancellation,
+dashboard image/music generation, media job cancellation and output retrieval,
+metrics, history, configuration, model aliases, and the model store. Dashboard
+live state uses one SSE connection; there is no WebSocket layer.
 
 Responses is stateless. Storage/background/conversation parameters are rejected rather than silently retained.
 
@@ -185,9 +188,10 @@ InferDeck persists operational data only:
 - YAML configuration;
 - request/swap metrics and logs.
 
-Generated images, generated music, synthesized audio, uploaded audio,
-transcripts, chat output, and Responses state are request-scoped and are not
-retained.
+Generated images and music are retained in a 100-job, 2 GB bounded media
+history beside the configured stats database. Synthesized speech, uploaded
+audio, transcripts, chat output, and Responses state remain request-scoped and
+are not retained.
 
 ## Concurrency invariants
 

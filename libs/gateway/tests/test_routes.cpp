@@ -2361,6 +2361,77 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     ts.stop();
 }
 
+TEST_CASE("Media history persists generated outputs and useful attempt details",
+          "[routes][media-history]") {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() /
+        ("inferdeck-media-history-" +
+         std::to_string(
+             std::chrono::steady_clock::now()
+                 .time_since_epoch()
+                 .count()));
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    REQUIRE(configure_media_history(root));
+
+    TestServer ts;
+    auto info = make_info("history-image-model");
+    info.runtime = "stable_diffusion_cpp";
+    info.modality = "image";
+    info.capabilities = {"image_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto response = client.Post(
+        "/v1/images/generations",
+        nlohmann::json{
+            {"model", info.name},
+            {"prompt", "a persistent lighthouse"},
+            {"size", "512x512"},
+            {"n", 2},
+        }.dump(),
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    ts.stop();
+
+    nlohmann::json jobs = media_jobs();
+    REQUIRE(jobs.size() == 1);
+    const std::uint64_t id = jobs[0]["id"];
+    CHECK(jobs[0]["model"] == info.name);
+    CHECK(jobs[0]["prompt"] == "a persistent lighthouse");
+    CHECK(jobs[0]["parameters"]["size"] == "512x512");
+    CHECK(jobs[0]["parameters"]["count"] == 2);
+    CHECK(jobs[0]["state"] == "completed");
+    CHECK(jobs[0]["progress"] == 100);
+    CHECK(jobs[0]["created_at_unix_ms"].get<std::int64_t>() > 0);
+    CHECK(jobs[0]["finished_at_unix_ms"].get<std::int64_t>() >=
+          jobs[0]["created_at_unix_ms"].get<std::int64_t>());
+    REQUIRE(jobs[0]["outputs"].size() == 2);
+    CHECK(jobs[0]["outputs"][0]["content_type"] == "image/png");
+    CHECK(jobs[0]["outputs"][0]["url"] ==
+          "/api/inferdeck/v1/media/jobs/" + std::to_string(id) +
+              "/outputs/0");
+
+    auto output = media_job_output(id, 0);
+    REQUIRE(output);
+    CHECK(output->content_type == "image/png");
+    CHECK_FALSE(output->body.empty());
+
+    REQUIRE(configure_media_history(root));
+    jobs = media_jobs();
+    REQUIRE(jobs.size() == 1);
+    CHECK(jobs[0]["id"] == id);
+    output = media_job_output(id, 0);
+    REQUIRE(output);
+    CHECK_FALSE(output->body.empty());
+
+    REQUIRE(configure_media_history({}));
+    std::filesystem::remove_all(root, ignored);
+}
+
 TEST_CASE("Strict Images separates unknown fields from model capabilities",
           "[routes][images][profile]") {
     TestServer ts;

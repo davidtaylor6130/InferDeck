@@ -1,6 +1,8 @@
 #include "gateway/media_routes.hpp"
 
 #include "audio_decoder.hpp"
+#include "foundation/json_utils.hpp"
+#include "foundation/logging.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9,13 +11,15 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
-#include <limits>
 #include <utility>
 
 namespace inferdeck::gateway {
@@ -28,21 +32,248 @@ void record_media(const GatewayDeps& deps, const std::string& model_name,
                   std::int64_t input_characters = 0,
                   RequestObservation observation = {});
 
+struct MediaOutputRecord {
+    std::string content_type;
+    std::string filename;
+    std::uint64_t bytes{0};
+    std::vector<std::byte> memory;
+};
+
 struct MediaJob {
     std::uint64_t id{0};
     std::string model;
     std::string modality;
+    std::string prompt;
+    nlohmann::json parameters{nlohmann::json::object()};
     int progress{0};
     std::string state{"running"};
+    std::string error;
+    std::int64_t created_at_unix_ms{0};
+    std::int64_t finished_at_unix_ms{0};
+    std::vector<MediaOutputRecord> outputs;
     std::shared_ptr<std::atomic<bool>> cancelled{std::make_shared<std::atomic<bool>>(false)};
 };
 
 std::mutex jobs_mutex;
-std::unordered_map<std::uint64_t, MediaJob> jobs;
+std::unordered_map<std::uint64_t, std::shared_ptr<MediaJob>> jobs;
 std::atomic<std::uint64_t> next_job_id{1};
+std::filesystem::path media_history_root;
+constexpr std::size_t max_media_history_jobs = 100;
+constexpr std::uint64_t max_media_history_bytes =
+    2ULL * 1024ULL * 1024ULL * 1024ULL;
 std::mutex decode_mutex;
 std::condition_variable decode_cv;
 bool decode_busy{false};
+
+std::int64_t current_unix_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+std::string prompt_summary(std::string text) {
+    std::replace(text.begin(), text.end(), '\r', ' ');
+    std::replace(text.begin(), text.end(), '\n', ' ');
+    if (text.size() > 512) {
+        text.resize(509);
+        text += "...";
+    }
+    return text;
+}
+
+nlohmann::json job_json(const MediaJob& job, bool include_urls) {
+    nlohmann::json outputs = nlohmann::json::array();
+    for (std::size_t index = 0; index < job.outputs.size(); ++index) {
+        const MediaOutputRecord& output = job.outputs[index];
+        nlohmann::json item{
+            {"content_type", output.content_type},
+            {"filename", output.filename},
+            {"bytes", output.bytes},
+        };
+        if (include_urls) {
+            item["url"] = "/api/inferdeck/v1/media/jobs/" +
+                std::to_string(job.id) + "/outputs/" +
+                std::to_string(index);
+        }
+        outputs.push_back(std::move(item));
+    }
+    return {
+        {"id", job.id},
+        {"model", job.model},
+        {"modality", job.modality},
+        {"prompt", job.prompt},
+        {"parameters", job.parameters},
+        {"progress", job.progress},
+        {"state", job.state},
+        {"error", job.error},
+        {"created_at_unix_ms", job.created_at_unix_ms},
+        {"finished_at_unix_ms", job.finished_at_unix_ms},
+        {"outputs", std::move(outputs)},
+    };
+}
+
+foundation::Result<void> persist_jobs_locked() {
+    if (media_history_root.empty()) return foundation::Ok();
+    nlohmann::json records = nlohmann::json::array();
+    std::vector<std::uint64_t> ids;
+    ids.reserve(jobs.size());
+    for (const auto& [id, _] : jobs) ids.push_back(id);
+    std::sort(ids.begin(), ids.end());
+    for (const std::uint64_t id : ids) {
+        records.push_back(job_json(*jobs.at(id), false));
+    }
+    return foundation::save_json_file(
+        media_history_root / "history.json",
+        nlohmann::json{{"version", 1}, {"jobs", std::move(records)}});
+}
+
+void persist_jobs_or_warn_locked() {
+    const foundation::Result<void> persisted = persist_jobs_locked();
+    if (!persisted) {
+        foundation::LOG_WARN(
+            "media_history_persist_failed", "path={} error={}",
+            (media_history_root / "history.json").string(),
+            persisted.error().message);
+    }
+}
+
+std::uint64_t history_bytes_locked() {
+    std::uint64_t total = 0;
+    for (const auto& [_, job] : jobs) {
+        for (const MediaOutputRecord& output : job->outputs) {
+            if (std::numeric_limits<std::uint64_t>::max() - total <
+                output.bytes) {
+                return std::numeric_limits<std::uint64_t>::max();
+            }
+            total += output.bytes;
+        }
+    }
+    return total;
+}
+
+void remove_job_outputs_locked(const MediaJob& job) {
+    if (media_history_root.empty()) return;
+    for (const MediaOutputRecord& output : job.outputs) {
+        std::error_code ignored;
+        std::filesystem::remove(
+            media_history_root / output.filename, ignored);
+    }
+}
+
+void prune_jobs_locked() {
+    while (jobs.size() > max_media_history_jobs ||
+           history_bytes_locked() > max_media_history_bytes) {
+        auto oldest = jobs.end();
+        for (auto candidate = jobs.begin(); candidate != jobs.end();
+             ++candidate) {
+            if (candidate->second->state == "running") continue;
+            if (oldest == jobs.end() ||
+                candidate->first < oldest->first) {
+                oldest = candidate;
+            }
+        }
+        if (oldest == jobs.end()) return;
+        remove_job_outputs_locked(*oldest->second);
+        jobs.erase(oldest);
+    }
+}
+
+struct PendingMediaOutput {
+    std::string content_type;
+    std::string extension;
+    const std::vector<std::byte>* bytes{nullptr};
+};
+
+foundation::Result<void> store_job_outputs(
+    const std::shared_ptr<MediaJob>& job,
+    const std::vector<PendingMediaOutput>& pending) {
+    if (!job) {
+        return foundation::Err<void>(
+            foundation::ErrorCode::InvalidArgument,
+            "media job is unavailable");
+    }
+    std::filesystem::path history_root;
+    {
+        std::lock_guard lock(jobs_mutex);
+        if (!jobs.contains(job->id)) {
+            return foundation::Err<void>(
+                foundation::ErrorCode::NotFound,
+                "media job not found");
+        }
+        history_root = media_history_root;
+    }
+    std::vector<MediaOutputRecord> staged;
+    std::vector<std::filesystem::path> created_files;
+    staged.reserve(pending.size());
+    const auto fail =
+        [&created_files](std::string message) {
+        for (const std::filesystem::path& path : created_files) {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+        return foundation::Err<void>(
+            foundation::ErrorCode::IoError, std::move(message));
+    };
+    for (std::size_t index = 0; index < pending.size(); ++index) {
+        const PendingMediaOutput& input = pending[index];
+        if (!input.bytes || input.bytes->empty()) {
+            return fail("generated media output is empty");
+        }
+        const std::string stem =
+            job->modality == "image" ? "image-" : "music-";
+        const std::string filename = stem + std::to_string(job->id) +
+            "-" + std::to_string(index + 1) + input.extension;
+        MediaOutputRecord output{
+            input.content_type,
+            filename,
+            static_cast<std::uint64_t>(input.bytes->size()),
+            {},
+        };
+        if (history_root.empty()) {
+            output.memory = *input.bytes;
+        } else {
+            const std::filesystem::path destination =
+                history_root / filename;
+            std::filesystem::path temporary = destination;
+            temporary += ".tmp";
+            std::ofstream stream(
+                temporary, std::ios::binary | std::ios::trunc);
+            if (!stream.is_open()) {
+                return fail(
+                    "cannot open generated media output for writing");
+            }
+            stream.write(
+                reinterpret_cast<const char*>(input.bytes->data()),
+                static_cast<std::streamsize>(input.bytes->size()));
+            stream.close();
+            if (stream.fail()) {
+                std::error_code ignored;
+                std::filesystem::remove(temporary, ignored);
+                return fail("cannot write generated media output");
+            }
+            std::error_code error;
+            std::filesystem::rename(temporary, destination, error);
+            if (error) {
+                std::filesystem::remove(temporary, error);
+                return fail(
+                    "cannot finalize generated media output: " +
+                    error.message());
+            }
+            created_files.push_back(destination);
+        }
+        staged.push_back(std::move(output));
+    }
+    std::lock_guard lock(jobs_mutex);
+    if (!jobs.contains(job->id) ||
+        history_root != media_history_root) {
+        return fail("media history changed while saving output");
+    }
+    remove_job_outputs_locked(*job);
+    job->outputs = std::move(staged);
+    prune_jobs_locked();
+    persist_jobs_or_warn_locked();
+    return foundation::Ok();
+}
 
 class DecodePermit {
 public:
@@ -93,35 +324,44 @@ foundation::Result<DecodePermit> acquire_decode_permit(
     return foundation::Ok(DecodePermit{});
 }
 
-std::shared_ptr<MediaJob> begin_job(const std::string& model, const std::string& modality) {
+std::shared_ptr<MediaJob> begin_job(
+    const std::string& model, const std::string& modality,
+    std::string prompt = {},
+    nlohmann::json parameters = nlohmann::json::object()) {
     auto job = std::make_shared<MediaJob>();
     job->id = next_job_id.fetch_add(1);
     job->model = model;
     job->modality = modality;
+    job->prompt = prompt_summary(std::move(prompt));
+    job->parameters = parameters.is_object()
+        ? std::move(parameters) : nlohmann::json::object();
+    job->created_at_unix_ms = current_unix_ms();
     std::lock_guard lock(jobs_mutex);
-    jobs[job->id] = *job;
+    jobs[job->id] = job;
+    persist_jobs_or_warn_locked();
     return job;
 }
 
 bool update_job(const std::shared_ptr<MediaJob>& job, int progress) {
+    if (!job) return false;
     const int bounded = std::clamp(progress, 0, 100);
     std::lock_guard lock(jobs_mutex);
     if (job->progress == bounded) return false;
     job->progress = bounded;
-    jobs[job->id] = *job;
     return true;
 }
 
-void finish_job(const std::shared_ptr<MediaJob>& job, const std::string& state) {
-    job->state = state;
-    if (state == "completed") job->progress = 100;
+void finish_job(
+    const std::shared_ptr<MediaJob>& job, const std::string& state,
+    std::string error = {}) {
+    if (!job) return;
     std::lock_guard lock(jobs_mutex);
-    jobs[job->id] = *job;
-    if (jobs.size() > 100) {
-        auto oldest = std::min_element(jobs.begin(), jobs.end(),
-            [](const auto& left, const auto& right) { return left.first < right.first; });
-        if (oldest != jobs.end()) jobs.erase(oldest);
-    }
+    job->state = state;
+    job->error = std::move(error);
+    job->finished_at_unix_ms = current_unix_ms();
+    if (state == "completed") job->progress = 100;
+    prune_jobs_locked();
+    persist_jobs_or_warn_locked();
 }
 
 struct SlotGuard {
@@ -480,6 +720,142 @@ nlohmann::json verbose_transcription(const model::TranscriptionResult& result,
 
 }
 
+foundation::Result<void> configure_media_history(
+    const std::filesystem::path& directory) {
+    std::lock_guard lock(jobs_mutex);
+    jobs.clear();
+    next_job_id.store(1);
+    media_history_root = directory;
+    if (media_history_root.empty()) return foundation::Ok();
+
+    std::error_code error;
+    std::filesystem::create_directories(media_history_root, error);
+    if (error) {
+        media_history_root.clear();
+        return foundation::Err<void>(
+            foundation::ErrorCode::IoError,
+            "cannot create media history directory: " + error.message());
+    }
+    const std::filesystem::path history_path =
+        media_history_root / "history.json";
+    const bool history_exists =
+        std::filesystem::exists(history_path, error);
+    if (error) {
+        media_history_root.clear();
+        return foundation::Err<void>(
+            foundation::ErrorCode::IoError,
+            "cannot inspect media history: " + error.message());
+    }
+    if (!history_exists) {
+        return foundation::Ok();
+    }
+    const foundation::Result<nlohmann::json> loaded =
+        foundation::load_json_file(history_path);
+    if (!loaded) {
+        media_history_root.clear();
+        return foundation::Err<void>(
+            loaded.error().code, loaded.error().message);
+    }
+    if (!loaded->is_object() || loaded->value("version", 0) != 1 ||
+        !loaded->contains("jobs") || !(*loaded)["jobs"].is_array()) {
+        media_history_root.clear();
+        return foundation::Err<void>(
+            foundation::ErrorCode::ParseError,
+            "media history has an unsupported schema");
+    }
+
+    bool changed = false;
+    std::uint64_t maximum_id = 0;
+    try {
+        for (const nlohmann::json& item : (*loaded)["jobs"]) {
+            if (!item.is_object()) continue;
+            const std::uint64_t id = item.value("id", std::uint64_t{0});
+            if (id == 0) continue;
+            auto job = std::make_shared<MediaJob>();
+            job->id = id;
+            job->model = item.value("model", "");
+            job->modality = item.value("modality", "");
+            job->prompt = item.value("prompt", "");
+            job->progress = std::clamp(item.value("progress", 0), 0, 100);
+            job->state = item.value("state", "failed");
+            job->error = item.value("error", "");
+            job->created_at_unix_ms =
+                item.value("created_at_unix_ms", std::int64_t{0});
+            job->finished_at_unix_ms =
+                item.value("finished_at_unix_ms", std::int64_t{0});
+            if (item.contains("parameters") &&
+                item["parameters"].is_object()) {
+                job->parameters = item["parameters"];
+            }
+            if (item.contains("outputs") && item["outputs"].is_array()) {
+                for (const nlohmann::json& stored : item["outputs"]) {
+                    if (!stored.is_object()) continue;
+                    const std::string filename =
+                        stored.value("filename", "");
+                    const std::string content_type =
+                        stored.value("content_type", "");
+                    const std::filesystem::path relative(filename);
+                    if (filename.empty() ||
+                        relative.filename().string() != filename ||
+                        (content_type != "image/png" &&
+                         content_type != "audio/wav")) {
+                        changed = true;
+                        continue;
+                    }
+                    const std::filesystem::path output_path =
+                        media_history_root / relative;
+                    const std::filesystem::file_status status =
+                        std::filesystem::symlink_status(
+                            output_path, error);
+                    if (error ||
+                        !std::filesystem::is_regular_file(status)) {
+                        error.clear();
+                        changed = true;
+                        continue;
+                    }
+                    const std::uint64_t bytes =
+                        std::filesystem::file_size(output_path, error);
+                    if (error || bytes == 0) {
+                        error.clear();
+                        changed = true;
+                        continue;
+                    }
+                    job->outputs.push_back(MediaOutputRecord{
+                        content_type, filename, bytes, {}});
+                }
+            }
+            if (job->state == "running") {
+                job->state = "failed";
+                job->error =
+                    "InferDeck restarted before this job completed.";
+                job->finished_at_unix_ms = current_unix_ms();
+                changed = true;
+            }
+            jobs[id] = std::move(job);
+            maximum_id = std::max(maximum_id, id);
+        }
+    } catch (const std::exception& exception) {
+        jobs.clear();
+        media_history_root.clear();
+        return foundation::Err<void>(
+            foundation::ErrorCode::ParseError,
+            std::string("invalid media history: ") + exception.what());
+    }
+    if (maximum_id == std::numeric_limits<std::uint64_t>::max()) {
+        jobs.clear();
+        media_history_root.clear();
+        return foundation::Err<void>(
+            foundation::ErrorCode::ParseError,
+            "media history job identifier is out of range");
+    }
+    next_job_id.store(maximum_id + 1);
+    const std::size_t before = jobs.size();
+    prune_jobs_locked();
+    changed = changed || jobs.size() != before;
+    if (changed) return persist_jobs_locked();
+    return foundation::Ok();
+}
+
 nlohmann::json media_jobs() {
     std::lock_guard lock(jobs_mutex);
     nlohmann::json result = nlohmann::json::array();
@@ -489,20 +865,67 @@ nlohmann::json media_jobs() {
     std::sort(ids.begin(), ids.end(), std::greater<>());
     for (const auto id : ids) {
         const auto& job = jobs.at(id);
-        result.push_back({{"id", job.id}, {"model", job.model}, {"modality", job.modality},
-                          {"progress", job.progress}, {"state", job.state}});
+        result.push_back(job_json(*job, true));
     }
     return result;
+}
+
+foundation::Result<MediaJobOutput> media_job_output(
+    std::uint64_t id, std::size_t index) {
+    MediaOutputRecord record;
+    std::filesystem::path history_root;
+    {
+        std::lock_guard lock(jobs_mutex);
+        const auto found = jobs.find(id);
+        if (found == jobs.end() ||
+            index >= found->second->outputs.size()) {
+            return foundation::Err<MediaJobOutput>(
+                foundation::ErrorCode::NotFound,
+                "media output not found");
+        }
+        record = found->second->outputs[index];
+        history_root = media_history_root;
+    }
+    MediaJobOutput output;
+    output.content_type = record.content_type;
+    output.filename = record.filename;
+    if (!record.memory.empty()) {
+        output.body.assign(
+            reinterpret_cast<const char*>(record.memory.data()),
+            record.memory.size());
+        return foundation::Ok(std::move(output));
+    }
+    if (history_root.empty()) {
+        return foundation::Err<MediaJobOutput>(
+            foundation::ErrorCode::NotFound,
+            "media output is unavailable");
+    }
+    std::ifstream stream(
+        history_root / record.filename, std::ios::binary);
+    if (!stream.is_open()) {
+        return foundation::Err<MediaJobOutput>(
+            foundation::ErrorCode::NotFound,
+            "media output file is unavailable");
+    }
+    output.body.assign(
+        std::istreambuf_iterator<char>{stream},
+        std::istreambuf_iterator<char>{});
+    if (output.body.empty()) {
+        return foundation::Err<MediaJobOutput>(
+            foundation::ErrorCode::IoError,
+            "media output file is empty");
+    }
+    return foundation::Ok(std::move(output));
 }
 
 foundation::Result<void> cancel_media_job(std::uint64_t id) {
     std::lock_guard lock(jobs_mutex);
     const auto job = jobs.find(id);
     if (job == jobs.end()) return foundation::Err<void>(foundation::ErrorCode::NotFound, "media job not found");
-    if (job->second.state != "running") {
+    if (job->second->state != "running") {
         return foundation::Err<void>(foundation::ErrorCode::InvalidArgument, "media job is not running");
     }
-    job->second.cancelled->store(true);
+    job->second->cancelled->store(true);
     return foundation::Ok();
 }
 

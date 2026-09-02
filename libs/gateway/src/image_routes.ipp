@@ -180,8 +180,17 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         write_error(resp, 404, "model_not_found", resolved_model.error().message);
         return;
     }
-    auto job = begin_job(model_name, "image");
-    if (derivative) {
+    auto job = begin_job(
+        model_name, "image", request.prompt,
+        nlohmann::json{
+            {"size", size},
+            {"count", request.count},
+            {"seed", request.seed},
+            {"steps", request.steps},
+            {"guidance_scale", request.guidance_scale},
+        });
+    if (derivative ||
+        req.path.starts_with("/api/inferdeck/v1/media/")) {
         resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
     }
     const std::string& runtime_model = resolved_model->resolved;
@@ -192,7 +201,9 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         write_error(resp, status, "image_admission_failed", slot.error().message);
         record_media(deps, model_name, 0, internal_status, -1,
                      0.0, 0, observation);
-        finish_job(job, internal_status == 499 ? "cancelled" : "failed");
+        finish_job(
+            job, internal_status == 499 ? "cancelled" : "failed",
+            slot.error().message);
         return;
     }
     SlotGuard guard{&deps.coordinator, runtime_model, *slot};
@@ -209,8 +220,23 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         write_error(resp, status, "image_generation_failed", result.error().message);
         record_media(deps, model_name, 0, internal_status, *slot,
                      0.0, 0, observation);
-        finish_job(job, cancelled ? "cancelled" : "failed");
+        finish_job(
+            job, cancelled ? "cancelled" : "failed",
+            result.error().message);
         return;
+    }
+    std::vector<PendingMediaOutput> history_outputs;
+    history_outputs.reserve(result->png_images.size());
+    for (const auto& image : result->png_images) {
+        history_outputs.push_back(
+            PendingMediaOutput{"image/png", ".png", &image});
+    }
+    const foundation::Result<void> stored =
+        store_job_outputs(job, history_outputs);
+    if (!stored) {
+        foundation::LOG_WARN(
+            "media_output_store_failed", "job_id={} error={}",
+            job->id, stored.error().message);
     }
     nlohmann::json data = nlohmann::json::array();
     for (const auto& image : result->png_images) data.push_back({{"b64_json", base64(image)}});

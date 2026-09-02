@@ -185,6 +185,15 @@ TEST_CASE("Route classification separates data and control principals",
     CHECK(classify_route(
               "POST", "/api/inferdeck/v1/audio/generations") ==
           RoutePrincipal::OpenAIDataPlane);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/media/images/generations") ==
+          RoutePrincipal::ControlWrite);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/media/audio/generations") ==
+          RoutePrincipal::ControlWrite);
+    CHECK(classify_route(
+              "GET", "/api/inferdeck/v1/media/jobs/1/outputs/0") ==
+          RoutePrincipal::ControlRead);
     CHECK(classify_route("GET", "/api/inferdeck/v1/status") ==
           RoutePrincipal::DashboardSession);
     CHECK(classify_route("GET", "/api/inferdeck/v1/usage/daily") ==
@@ -208,6 +217,8 @@ TEST_CASE("Every mutating administrative route requires the control principal",
     const std::pair<std::string_view, std::string_view> routes[] = {
         {"POST", "/api/inferdeck/v1/swap/to/model"},
         {"POST", "/api/inferdeck/v1/swap/cancel"},
+        {"POST", "/api/inferdeck/v1/media/images/generations"},
+        {"POST", "/api/inferdeck/v1/media/audio/generations"},
         {"POST", "/api/inferdeck/v1/media/jobs/1/cancel"},
         {"POST", "/api/inferdeck/v1/optimize/profile"},
         {"POST", "/api/inferdeck/v1/optimize/benchmark"},

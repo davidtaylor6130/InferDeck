@@ -69,6 +69,7 @@ The paths below are the canonical Phase 4 routes.
 - `GET /api/inferdeck/v1/metrics`
 - `GET /api/inferdeck/v1/stats/history`
 - `GET /api/inferdeck/v1/media/jobs`
+- `GET /api/inferdeck/v1/media/jobs/:id/outputs/:index`
 - `GET /api/inferdeck/v1/models`
 - `GET /api/inferdeck/v1/usage/daily`
 - `GET /api/inferdeck/v1/optimize/benchmark`
@@ -88,6 +89,8 @@ The paths below are the canonical Phase 4 routes.
 
 - `POST /api/inferdeck/v1/swap/to/:name`
 - `POST /api/inferdeck/v1/swap/cancel`
+- `POST /api/inferdeck/v1/media/images/generations`
+- `POST /api/inferdeck/v1/media/audio/generations`
 - `POST /api/inferdeck/v1/media/jobs/:id/cancel`
 - `POST /api/inferdeck/v1/optimize/profile`
 - `POST /api/inferdeck/v1/optimize/benchmark`

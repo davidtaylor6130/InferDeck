@@ -115,7 +115,15 @@ void handle_audio_generations(const httplib::Request& req,
     }
 
     const std::shared_ptr<MediaJob> job =
-        begin_job(model_name, "audio_generation");
+        begin_job(
+            model_name, "audio_generation", request.prompt,
+            nlohmann::json{
+                {"duration_seconds", request.duration_seconds},
+                {"seed", request.seed},
+                {"steps", request.steps},
+                {"guidance_scale", request.guidance_scale},
+                {"has_lyrics", !request.lyrics.empty()},
+            });
     resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
     const std::string& runtime_model = resolved_model->resolved;
     const foundation::Result<int> slot =
@@ -128,7 +136,9 @@ void handle_audio_generations(const httplib::Request& req,
                     slot.error().message);
         record_media(deps, model_name, 0.0f, internal_status, -1,
                      0.0, 0, observation);
-        finish_job(job, internal_status == 499 ? "cancelled" : "failed");
+        finish_job(
+            job, internal_status == 499 ? "cancelled" : "failed",
+            slot.error().message);
         return;
     }
 
@@ -161,10 +171,23 @@ void handle_audio_generations(const httplib::Request& req,
                     result.error().message);
         record_media(deps, model_name, 0.0f, internal_status, *slot,
                      0.0, 0, observation);
-        finish_job(job, cancelled ? "cancelled" : "failed");
+        finish_job(
+            job, cancelled ? "cancelled" : "failed",
+            result.error().message);
         return;
     }
 
+    const std::vector<PendingMediaOutput> history_outputs{
+        PendingMediaOutput{
+            "audio/wav", ".wav", &result->wav_bytes},
+    };
+    const foundation::Result<void> stored =
+        store_job_outputs(job, history_outputs);
+    if (!stored) {
+        foundation::LOG_WARN(
+            "media_output_store_failed", "job_id={} error={}",
+            job->id, stored.error().message);
+    }
     resp.set_header("X-InferDeck-Seed", std::to_string(result->seed));
     resp.set_header("X-InferDeck-Audio-Duration-Seconds",
                     std::to_string(result->output_audio_seconds));
