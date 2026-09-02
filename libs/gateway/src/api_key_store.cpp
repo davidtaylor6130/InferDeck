@@ -870,11 +870,13 @@ std::optional<AuthenticatedApiKey> ApiKeyStore::authenticate_bearer(
 
 int resolve_request_priority(const ApiKeyStore* store,
                              std::string_view authorization,
-                             int requested_priority) noexcept {
+                             int requested_priority,
+                             bool public_request) noexcept {
     if (store) {
         const auto principal = store->authenticate_bearer(authorization);
         if (principal) return principal->priority;
     }
+    if (public_request) return public_request_priority;
     return std::clamp(requested_priority, -100, 100);
 }
 

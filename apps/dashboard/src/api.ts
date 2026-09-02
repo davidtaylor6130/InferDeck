@@ -61,6 +61,18 @@ async function putJson<T>(path: string, body: unknown, timeoutMs = 30_000): Prom
   return payload;
 }
 
+async function patchJson<T>(path: string, body: unknown, timeoutMs = 30_000): Promise<T> {
+  const response = await fetch(API_BASE + path, {
+    method: 'PATCH',
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
+  if (!response.ok) throw new Error(payload?.error?.message || path + ' responded ' + response.status);
+  return payload;
+}
+
 async function deleteJson<T>(path: string, timeoutMs = 30_000, headers?: Record<string, string>): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     method: 'DELETE',
@@ -91,6 +103,33 @@ export interface ConfigApplyResult {
   hasActiveProfile: boolean;
   restartRequired: boolean;
   applyScheduled: boolean;
+}
+
+export interface ApiSettingsDocument {
+  allowPublicTraffic: boolean;
+  runningAllowPublicTraffic: boolean;
+  publicPriority: number;
+  activeRevision: string;
+  restartRequired: boolean;
+}
+
+export interface ApiSettingsApplyResult extends ApiSettingsDocument {
+  ok: boolean;
+  applyScheduled: boolean;
+}
+
+export interface ApiKeyRecord {
+  id: string;
+  name: string;
+  prefix: string;
+  priority: number;
+  createdAtUnixMs: number;
+  updatedAtUnixMs: number;
+  revokedAtUnixMs: number | null;
+}
+
+export interface CreatedApiKey extends ApiKeyRecord {
+  key: string;
 }
 
 export interface ProfileOptimizationInput {
@@ -464,6 +503,54 @@ export function deleteModelAlias(name: string, revision: string): Promise<{ ok: 
 
 export function getConfig(): Promise<ConfigDocument> {
   return getJson<ConfigDocument>(`${CONTROL_API_BASE}/config`);
+}
+
+export function getApiSettings(): Promise<ApiSettingsDocument> {
+  return getJson<ApiSettingsDocument>(CONTROL_API_BASE + '/api-settings');
+}
+
+export function saveApiSettings(
+  allowPublicTraffic: boolean,
+  revision: string,
+): Promise<ApiSettingsApplyResult> {
+  return putJson<ApiSettingsApplyResult>(CONTROL_API_BASE + '/api-settings', {
+    allowPublicTraffic,
+    revision,
+  });
+}
+
+export async function getApiKeys(): Promise<ApiKeyRecord[]> {
+  const body = await getJson<{ apiKeys?: ApiKeyRecord[] }>(
+    CONTROL_API_BASE + '/api-keys',
+  );
+  return Array.isArray(body.apiKeys) ? body.apiKeys : [];
+}
+
+export function createApiKey(
+  name: string,
+  priority: number,
+): Promise<CreatedApiKey> {
+  return postJson<CreatedApiKey>(CONTROL_API_BASE + '/api-keys', {
+    name,
+    priority,
+  });
+}
+
+export function updateApiKey(
+  id: string,
+  name: string,
+  priority: number,
+): Promise<ApiKeyRecord> {
+  return patchJson<ApiKeyRecord>(
+    CONTROL_API_BASE + '/api-keys/' + encodeURIComponent(id),
+    { name, priority },
+  );
+}
+
+export function revokeApiKey(id: string): Promise<Record<string, never>> {
+  return deleteJson<Record<string, never>>(
+    CONTROL_API_BASE + '/api-keys/' + encodeURIComponent(id),
+  );
 }
 
 export function saveConfig(yaml: string, revision: string): Promise<ConfigDocument & { ok: boolean }> {

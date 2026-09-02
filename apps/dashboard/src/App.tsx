@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { XMarkIcon } from '@heroicons/react/24/outline';
+import { ChevronRightIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { authenticateDashboard, getHealth, getPricing } from './api';
 import { Badge } from './components/ui';
 import { COST_STORAGE_KEY } from './cost';
@@ -13,12 +13,19 @@ import { SystemPage } from './pages/SystemPage';
 import { FutureWorkspacePage } from './pages/FutureWorkspacePage';
 import { ImagePage } from './pages/ImagePage';
 import { MusicPage } from './pages/MusicPage';
+import { ApiSettingsPage } from './pages/ApiSettingsPage';
+import {
+  loadCollapsedSidebarSections,
+  SIDEBAR_SECTION_STORAGE_KEY,
+  toggleCollapsedSidebarSection,
+} from './sidebarPreferences';
 import { compactModel, timeAgo } from './utils';
 import { INFERDECK_VERSION } from './version';
 import logoUrl from '../../../Assets/Logo.png';
 
 export type PageId =
   | 'home'
+  | 'settings'
   | 'llm/settings'
   | 'llm/models'
   | 'llm/usage'
@@ -48,6 +55,7 @@ interface DashboardPage {
 
 export const DASHBOARD_PAGES: ReadonlyArray<DashboardPage> = [
   { id: 'home', label: 'Home' },
+  { id: 'settings', label: 'API Settings' },
   { id: 'llm/settings', label: 'Model Settings', section: 'llm' },
   { id: 'llm/models', label: 'Model Store', section: 'llm' },
   { id: 'llm/usage', label: 'Usage', section: 'llm' },
@@ -104,12 +112,37 @@ const App: React.FC = () => (
 
 const Shell: React.FC = () => {
   const [page, setPage] = useState<PageId>(() => (typeof window === 'undefined' ? 'home' : pageFromHash()));
+  const [collapsedSections, setCollapsedSections] =
+    useState<DashboardSection[]>(() => {
+      if (typeof window === 'undefined') return [];
+      try {
+        return loadCollapsedSidebarSections(
+          window.localStorage.getItem(SIDEBAR_SECTION_STORAGE_KEY),
+        );
+      } catch {
+        return [];
+      }
+    });
 
   useEffect(() => {
     const onHashChange = () => setPage(pageFromHash());
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
+
+  const toggleSection = (section: DashboardSection) => {
+    setCollapsedSections(current => {
+      const next = toggleCollapsedSidebarSection(current, section);
+      try {
+        window.localStorage.setItem(
+          SIDEBAR_SECTION_STORAGE_KEY,
+          JSON.stringify(next),
+        );
+      } catch {
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="app-shell flex min-h-screen">
@@ -123,18 +156,39 @@ const Shell: React.FC = () => {
         </div>
         <nav className="flex flex-col" aria-label="Dashboard">
           <NavLink id="home" label="Home" page={page} />
-          {DASHBOARD_SECTIONS.map(section => (
-            <div key={section} className="mt-4">
-              <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
-                {sectionLabel(section)}
+          <NavLink id="settings" label="API Settings" page={page} />
+          {DASHBOARD_SECTIONS.map(section => {
+            const collapsed = collapsedSections.includes(section);
+            const label = sectionLabel(section);
+            const controls = 'sidebar-' + section + '-navigation';
+            return (
+              <div key={section} className="mt-4">
+                <button
+                  type="button"
+                  aria-expanded={!collapsed}
+                  aria-controls={controls}
+                  aria-label={(collapsed ? 'Show ' : 'Hide ') + label + ' navigation'}
+                  onClick={() => toggleSection(section)}
+                  className="mb-1 flex min-h-9 w-full items-center justify-between rounded px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted hover:bg-white/[0.04] hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
+                >
+                  <span>{label}</span>
+                  <ChevronRightIcon
+                    aria-hidden="true"
+                    className={'h-3.5 w-3.5 transition-transform ' + (collapsed ? '' : 'rotate-90')}
+                  />
+                </button>
+                <div
+                  id={controls}
+                  hidden={collapsed}
+                  className="flex flex-col gap-1"
+                >
+                  {DASHBOARD_PAGES.filter(item => item.section === section).map(({ id, label: itemLabel }) => (
+                    <NavLink key={id} id={id} label={itemLabel} page={page} nested />
+                  ))}
+                </div>
               </div>
-              <div className="flex flex-col gap-1">
-                {DASHBOARD_PAGES.filter(item => item.section === section).map(({ id, label }) => (
-                  <NavLink key={id} id={id} label={label} page={page} nested />
-                ))}
-              </div>
-            </div>
-          ))}
+            );
+          })}
           <div className="mt-5 border-t border-white/10 pt-4">
             <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
               Planned
@@ -159,6 +213,7 @@ const Shell: React.FC = () => {
         <main className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
           <div className="mx-auto max-w-[1280px]">
             {page === 'home' && <OverviewPage />}
+            {page === 'settings' && <ApiSettingsPage />}
             {page === 'llm/settings' && <OperatePage section="llm" />}
             {page === 'llm/models' && <ModelsPage section="llm" />}
             {page === 'llm/usage' && <UsagePage section="llm" />}
@@ -224,6 +279,14 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
               Settings
             </summary>
             <nav className="absolute right-0 z-40 mt-2 w-[min(18rem,calc(100vw-2rem))] border border-border-slate bg-[#07101d] shadow-deck" aria-label="Settings">
+              <a
+                href="#settings"
+                onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
+                className="block border-b border-white/10 px-4 py-3 hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-queue-blue"
+              >
+                <span className="block text-sm font-medium text-text-primary">API settings</span>
+                <span className="mt-0.5 block text-xs text-text-muted">Public access and managed client priorities</span>
+              </a>
               {DASHBOARD_SECTIONS.map(section => (
                 <a
                   key={section}
@@ -256,6 +319,7 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
           onChange={event => { window.location.hash = event.target.value; }}
         >
           <option value="home">Home</option>
+          <option value="settings">API Settings</option>
           {DASHBOARD_SECTIONS.map(section => (
             <optgroup key={section} label={sectionLabel(section)}>
               {DASHBOARD_PAGES.filter(item => item.section === section).map(({ id, label }) => <option key={id} value={id}>{label}</option>)}

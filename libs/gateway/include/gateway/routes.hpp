@@ -39,6 +39,7 @@ struct GatewayDeps {
     std::chrono::milliseconds swap_timeout{std::chrono::minutes{5}};
     std::shared_ptr<ApiKeyStore> api_keys;
     int background_idle_after_seconds{900};
+    bool public_data_plane_access{false};
 };
 
 struct RequestObservation {

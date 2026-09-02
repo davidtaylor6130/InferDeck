@@ -200,6 +200,7 @@ int run_gateway(const fs::path& config_path) {
     deps.api_keys = api_keys;
     deps.background_idle_after_seconds =
         cfg.background_idle_after_seconds;
+    deps.public_data_plane_access = !cfg.auth_required;
     auto derivative_deps = deps;
     derivative_deps.compatibility_profile =
         CompatibilityProfile::OpenAIDerivative;

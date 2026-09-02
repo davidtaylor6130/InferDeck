@@ -288,6 +288,64 @@ TEST_CASE("API key control routes create, reprioritize, list, and revoke",
     CHECK_FALSE(routes.api_keys->authenticate_bearer("Bearer " + key));
 }
 
+TEST_CASE("API settings safely persist public data-plane access",
+          "[gateway][dashboard][api-settings]") {
+    TempConfig config;
+    TempConfig::write(config.base,
+        "auth:\n"
+        "  required: true\n"
+        "  token: preserved-secret\n"
+        "gateway:\n"
+        "  auto_swap: true\n");
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+
+    const auto initial = client.Get("/api/inferdeck/v1/api-settings");
+    REQUIRE(initial);
+    REQUIRE(initial->status == 200);
+    const auto initial_body = nlohmann::json::parse(initial->body);
+    CHECK(initial_body["allowPublicTraffic"] == false);
+    CHECK(initial_body["runningAllowPublicTraffic"] == false);
+    CHECK(initial_body["publicPriority"] == -999999);
+    CHECK(initial->body.find("preserved-secret") == std::string::npos);
+
+    const std::string revision =
+        initial_body["activeRevision"].get<std::string>();
+    const auto updated = client.Put(
+        "/api/inferdeck/v1/api-settings",
+        nlohmann::json{{"allowPublicTraffic", true},
+                       {"revision", revision}}.dump(),
+        "application/json");
+    REQUIRE(updated);
+    REQUIRE(updated->status == 200);
+    const auto updated_body = nlohmann::json::parse(updated->body);
+    CHECK(updated_body["allowPublicTraffic"] == true);
+    CHECK(updated_body["publicPriority"] == -999999);
+    CHECK(updated_body["applyScheduled"] == true);
+    CHECK(routes.reloads.load() == 1);
+
+    const auto active = YAML::Load(TempConfig::read(config.active));
+    REQUIRE(active["auth"]);
+    CHECK(active["auth"]["required"].as<bool>() == false);
+    CHECK(active["auth"]["token"].as<std::string>() == "preserved-secret");
+    CHECK(active["gateway"]["auto_swap"].as<bool>() == true);
+
+    const auto stale = client.Put(
+        "/api/inferdeck/v1/api-settings",
+        nlohmann::json{{"allowPublicTraffic", false},
+                       {"revision", revision}}.dump(),
+        "application/json");
+    REQUIRE(stale);
+    CHECK(stale->status == 409);
+
+    const auto invalid = client.Put(
+        "/api/inferdeck/v1/api-settings",
+        R"({"allowPublicTraffic":true,"revision":7})",
+        "application/json");
+    REQUIRE(invalid);
+    CHECK(invalid->status == 400);
+}
+
 TEST_CASE("Background lease routes require managed keys and report conflicts",
           "[gateway][dashboard][background-lease]") {
     TempConfig config;

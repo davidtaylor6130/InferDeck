@@ -637,6 +637,7 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
 void register_dashboard_routes(httplib::Server& server, const DashboardDeps& deps,
                                const RouteWrapper& wrap) {
 #include "dashboard_api_key_routes.ipp"
+#include "dashboard_api_settings_routes.ipp"
 #include "dashboard_background_lease_routes.ipp"
 #include "dashboard_optimize_routes.ipp"
 #include "dashboard_post_training_routes.ipp"

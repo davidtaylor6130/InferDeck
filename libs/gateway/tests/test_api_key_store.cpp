@@ -26,6 +26,7 @@ using inferdeck::gateway::handle_create_api_key;
 using inferdeck::gateway::handle_list_api_keys;
 using inferdeck::gateway::handle_revoke_api_key;
 using inferdeck::gateway::handle_update_api_key;
+using inferdeck::gateway::public_request_priority;
 using inferdeck::gateway::resolve_request_priority;
 
 namespace {
@@ -180,6 +181,22 @@ TEST_CASE("Managed API keys grant data-plane access but never control access",
     CHECK(authorizer.authorize(RoutePrincipal::ManagedClient, bearer,
                                "127.0.0.1", "127.0.0.1:11434", false) ==
           AuthorizationStatus::AuthenticationRequired);
+}
+
+TEST_CASE("Anonymous public requests always use the fixed lowest priority",
+          "[auth][api-key][priority][public]") {
+    ApiKeyStore store(":memory:");
+    const auto created = store.create("managed client", 75);
+    REQUIRE(created);
+
+    CHECK(resolve_request_priority(
+              &store, "Bearer " + created->key, 100, true) == 75);
+    CHECK(resolve_request_priority(&store, "", 100, true) ==
+          public_request_priority);
+    CHECK(resolve_request_priority(
+              &store, "Bearer invalid", 100, true) ==
+          public_request_priority);
+    CHECK(resolve_request_priority(&store, "", 100, false) == 100);
 }
 
 TEST_CASE("API key handlers never list the one-time secret",

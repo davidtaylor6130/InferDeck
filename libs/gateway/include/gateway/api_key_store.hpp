@@ -11,6 +11,8 @@
 
 namespace inferdeck::gateway {
 
+inline constexpr int public_request_priority = -999999;
+
 struct ApiKeyRecord {
     std::string id;
     std::string name;
@@ -94,7 +96,7 @@ private:
 
 [[nodiscard]] int resolve_request_priority(
     const ApiKeyStore* store, std::string_view authorization,
-    int requested_priority) noexcept;
+    int requested_priority, bool public_request = false) noexcept;
 
 [[nodiscard]] std::string credential_fingerprint(
     std::string_view credential);

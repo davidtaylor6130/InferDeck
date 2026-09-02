@@ -1,5 +1,6 @@
 #include "gateway/media_routes.hpp"
 
+#include "gateway/auth.hpp"
 #include "audio_decoder.hpp"
 #include "foundation/json_utils.hpp"
 #include "foundation/logging.hpp"
@@ -473,7 +474,10 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
     };
     model::AcquireSlotOptions options;
     options.priority = resolve_request_priority(
-        deps.api_keys.get(), header_value(req, "Authorization"), 100);
+        deps.api_keys.get(), header_value(req, "Authorization"), 100,
+        deps.public_data_plane_access &&
+            classify_route(req.method, req.path) ==
+                RoutePrincipal::OpenAIDataPlane);
     options.cancelled = cancelled;
     options.prepare = [&deps, model_name, deadline, cancelled] {
         auto loaded = ensure_model_loaded(

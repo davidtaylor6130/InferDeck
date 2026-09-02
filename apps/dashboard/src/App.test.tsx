@@ -8,6 +8,7 @@ describe('dashboard boundary', () => {
   it('exposes Image and Music as complete dashboard divisions', () => {
     expect(DASHBOARD_PAGES).toEqual([
       { id: 'home', label: 'Home' },
+      { id: 'settings', label: 'API Settings' },
       { id: 'llm/settings', label: 'Model Settings', section: 'llm' },
       { id: 'llm/models', label: 'Model Store', section: 'llm' },
       { id: 'llm/usage', label: 'Usage', section: 'llm' },
@@ -39,6 +40,16 @@ describe('dashboard boundary', () => {
     const html = renderToStaticMarkup(<App />);
     expect(html).toContain(`InferDeck v${INFERDECK_VERSION}`);
     expect(html.indexOf(`InferDeck v${INFERDECK_VERSION}`)).toBeLessThan(html.indexOf('<main'));
+  });
+
+  it('renders every AI division as an independently collapsible sidebar group', () => {
+    const html = renderToStaticMarkup(<App />);
+    for (const section of ['LLM', 'Dictation', 'Image', 'Music']) {
+      expect(html).toContain('aria-label="Hide ' + section + ' navigation"');
+    }
+    expect(html.match(/aria-expanded="true"/g)).toHaveLength(4);
+    expect(html).toContain('href="#settings"');
+    expect(html).toContain('API Settings');
   });
 
   it('renders one grouped mobile page selector instead of scrolling tab rows', () => {

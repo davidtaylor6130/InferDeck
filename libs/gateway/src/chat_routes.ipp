@@ -161,7 +161,8 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     opts.timeout = std::chrono::minutes{5};
     opts.block = true;
     opts.priority = resolve_request_priority(
-        deps.api_keys.get(), header_value(req, "Authorization"), priority);
+        deps.api_keys.get(), header_value(req, "Authorization"), priority,
+        deps.public_data_plane_access);
     opts.reservation_key = acquired.reservation_key;
     if (acquired.voice_session_token) opts.priority = 100;
     opts.cancelled = cancelled;

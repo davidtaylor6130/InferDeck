@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  authenticateDashboard, cancelProfileBenchmark, generateImages, generateMusic,
-  getModels, getProfileBenchmark, optimizeProfile, startProfileBenchmark,
+  authenticateDashboard, cancelProfileBenchmark, createApiKey,
+  generateImages, generateMusic, getApiKeys, getApiSettings, getModels,
+  getProfileBenchmark, optimizeProfile, saveApiSettings, startProfileBenchmark,
+  updateApiKey,
   waitForActiveConfig, waitForStableConfig,
 } from './api';
 import type { ModelInfo } from './types';
@@ -121,7 +123,10 @@ describe('getModels', () => {
 
 describe('dashboard authentication', () => {
   it('exchanges the control token for an HTTP-only session', async () => {
-    const fetchMock = vi.fn(async () => ({
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
       ok: true,
       status: 200,
       json: async () => ({ ok: true }),
@@ -137,6 +142,84 @@ describe('dashboard authentication', () => {
         body: JSON.stringify({ token: 'local-network-secret' }),
       }),
     );
+  });
+});
+
+describe('API access settings', () => {
+  it('uses typed control routes for public access and managed keys', async () => {
+    const responses = [
+      {
+        allowPublicTraffic: false,
+        runningAllowPublicTraffic: false,
+        publicPriority: -999999,
+        activeRevision: 'rev-a',
+        restartRequired: false,
+      },
+      {
+        ok: true,
+        allowPublicTraffic: true,
+        runningAllowPublicTraffic: false,
+        publicPriority: -999999,
+        activeRevision: 'rev-b',
+        restartRequired: false,
+        applyScheduled: true,
+      },
+      { apiKeys: [] },
+      {
+        id: 'a'.repeat(32),
+        name: 'worker',
+        prefix: 'idk_1234',
+        priority: -20,
+        createdAtUnixMs: 1,
+        updatedAtUnixMs: 1,
+        revokedAtUnixMs: null,
+        key: 'one-time-key',
+      },
+      {
+        id: 'a'.repeat(32),
+        name: 'worker',
+        prefix: 'idk_1234',
+        priority: 40,
+        createdAtUnixMs: 1,
+        updatedAtUnixMs: 2,
+        revokedAtUnixMs: null,
+      },
+    ];
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
+      ok: true,
+      status: 200,
+      json: async () => responses.shift(),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect((await getApiSettings()).publicPriority).toBe(-999999);
+    expect((await saveApiSettings(true, 'rev-a')).activeRevision)
+      .toBe('rev-b');
+    expect(await getApiKeys()).toEqual([]);
+    expect((await createApiKey('worker', -20)).key).toBe('one-time-key');
+    expect((await updateApiKey('a'.repeat(32), 'worker', 40)).priority)
+      .toBe(40);
+
+    expect(fetchMock.mock.calls[0]?.[0])
+      .toContain('/api/inferdeck/v1/api-settings');
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      method: 'PUT',
+      body: JSON.stringify({
+        allowPublicTraffic: true,
+        revision: 'rev-a',
+      }),
+    });
+    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify({ name: 'worker', priority: -20 }),
+    });
+    expect(fetchMock.mock.calls[4]?.[1]).toMatchObject({
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'worker', priority: 40 }),
+    });
   });
 });
 

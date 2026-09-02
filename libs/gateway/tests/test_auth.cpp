@@ -202,6 +202,10 @@ TEST_CASE("Route classification separates data and control principals",
           RoutePrincipal::ControlRead);
     CHECK(classify_route("PUT", "/api/inferdeck/v1/config") ==
           RoutePrincipal::ControlWrite);
+    CHECK(classify_route("GET", "/api/inferdeck/v1/api-settings") ==
+          RoutePrincipal::ControlRead);
+    CHECK(classify_route("PUT", "/api/inferdeck/v1/api-settings") ==
+          RoutePrincipal::ControlWrite);
 }
 
 TEST_CASE("Dashboard session cookie parsing is exact", "[auth][dashboard]") {
@@ -234,6 +238,7 @@ TEST_CASE("Every mutating administrative route requires the control principal",
         {"DELETE", "/api/inferdeck/v1/model-aliases/stable-chat"},
         {"PUT", "/api/inferdeck/v1/config"},
         {"PUT", "/api/inferdeck/v1/config/active"},
+        {"PUT", "/api/inferdeck/v1/api-settings"},
         {"DELETE", "/api/inferdeck/v1/config/active"},
         {"POST", "/api/inferdeck/v1/models/load"},
         {"POST", "/api/inferdeck/v1/models/unload"},
