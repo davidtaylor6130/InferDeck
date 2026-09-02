@@ -182,6 +182,13 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                              "gateway.voice_session_grace_ms must be between 1000 and 120000");
             }
+            if (gateway["background_idle_after_seconds"] &&
+                (gateway["background_idle_after_seconds"].as<int>() < 60 ||
+                 gateway["background_idle_after_seconds"].as<int>() > 86400)) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "gateway.background_idle_after_seconds must be between 60 and 86400");
+            }
             if (gateway["n_batch"] && gateway["n_ubatch"] &&
                 gateway["n_ubatch"].as<int>() > gateway["n_batch"].as<int>()) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,

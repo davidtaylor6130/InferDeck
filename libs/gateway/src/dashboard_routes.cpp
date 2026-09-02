@@ -1,6 +1,7 @@
 #include "gateway/dashboard_routes.hpp"
 
 #include "gateway/api_key_routes.hpp"
+#include "gateway/background_lease_routes.hpp"
 #include "gateway/config_repository.hpp"
 #include "gateway/config_secrets.hpp"
 
@@ -626,6 +627,7 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
 void register_dashboard_routes(httplib::Server& server, const DashboardDeps& deps,
                                const RouteWrapper& wrap) {
 #include "dashboard_api_key_routes.ipp"
+#include "dashboard_background_lease_routes.ipp"
 #include "dashboard_optimize_routes.ipp"
 
 #include "dashboard_model_store_routes.ipp"

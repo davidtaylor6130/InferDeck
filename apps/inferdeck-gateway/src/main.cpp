@@ -180,6 +180,8 @@ int run_gateway(const fs::path& config_path) {
                      &metrics, &stats_db, &events, &swap_tracker,
                      &maintenance_resource};
     deps.api_keys = api_keys;
+    deps.background_idle_after_seconds =
+        cfg.background_idle_after_seconds;
     auto derivative_deps = deps;
     derivative_deps.compatibility_profile =
         CompatibilityProfile::OpenAIDerivative;

@@ -45,6 +45,7 @@ struct GatewayConfig {
     int vram_safety_margin_mb{1024};
     int max_queue_size{128};
     int voice_session_grace_ms{15000};
+    int background_idle_after_seconds{900};
     model::SamplingConfig sampling{};
     bool openai_derivative_compatibility_enabled{false};
     std::vector<model::ModelAlias> model_aliases{};

@@ -6,8 +6,9 @@ are waiting; queue age still prevents a low-priority client from waiting
 forever.
 
 Managed keys authenticate OpenAI data-plane routes such as
-`/v1/chat/completions`, `/v1/responses`, embeddings, images, and audio. They do
-not grant dashboard or control-plane access.
+`/v1/chat/completions`, `/v1/responses`, embeddings, images, and audio. They also
+authenticate the [background availability and lease API](background-leases.md).
+They do not grant dashboard or control-plane access.
 
 ## Storage
 

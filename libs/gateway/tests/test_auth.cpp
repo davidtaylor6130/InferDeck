@@ -162,6 +162,20 @@ TEST_CASE("Route classification separates data and control principals",
           RoutePrincipal::OpenAIDataPlane);
     CHECK(classify_route("POST", "/v1/chat/completions") ==
           RoutePrincipal::OpenAIDataPlane);
+    CHECK(classify_route(
+              "GET", "/api/inferdeck/v1/background/availability") ==
+          RoutePrincipal::ManagedClient);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/background/lease") ==
+          RoutePrincipal::ManagedClient);
+    CHECK(classify_route(
+              "PATCH",
+              "/api/inferdeck/v1/background/lease/0123456789abcdef0123456789abcdef") ==
+          RoutePrincipal::ManagedClient);
+    CHECK(classify_route(
+              "DELETE",
+              "/api/inferdeck/v1/background/lease/0123456789abcdef0123456789abcdef") ==
+          RoutePrincipal::ManagedClient);
     CHECK(classify_route("GET", "/api/inferdeck/v1/health") ==
           RoutePrincipal::ControlRead);
     CHECK(classify_route("GET", "/api/inferdeck/v1/swap/status") ==

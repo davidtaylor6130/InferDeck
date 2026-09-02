@@ -20,6 +20,7 @@ struct AuthConfig {
 enum class RoutePrincipal {
     PublicStatus,
     OpenAIDataPlane,
+    ManagedClient,
     DashboardSession,
     ControlRead,
     ControlWrite,
@@ -87,6 +88,11 @@ public:
                 return AuthorizationStatus::Granted;
             }
             return data_plane_.check(auth_header)
+                ? AuthorizationStatus::Granted
+                : AuthorizationStatus::AuthenticationRequired;
+        }
+        if (principal == RoutePrincipal::ManagedClient) {
+            return api_keys_ && api_keys_->authenticate_bearer(auth_header)
                 ? AuthorizationStatus::Granted
                 : AuthorizationStatus::AuthenticationRequired;
         }
@@ -184,6 +190,11 @@ inline RoutePrincipal classify_route(std::string_view method,
     }
     if (path.starts_with("/compat/openai-derivative/v1/")) {
         return RoutePrincipal::OpenAIDataPlane;
+    }
+    if (path == "/api/inferdeck/v1/background/availability" ||
+        path == "/api/inferdeck/v1/background/lease" ||
+        path.starts_with("/api/inferdeck/v1/background/lease/")) {
+        return RoutePrincipal::ManagedClient;
     }
     if (path == "/api/inferdeck/v1/status" ||
         path == "/api/inferdeck/v1/pricing" ||

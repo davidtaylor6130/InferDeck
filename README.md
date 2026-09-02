@@ -307,6 +307,7 @@ pwsh -File tests/parity/run.ps1 `
 | `POST /api/inferdeck/v1/model-store/downloads/:id/cancel` · `POST /api/inferdeck/v1/model-store/downloads/:id/resume` | cancel or resume a download |
 | `POST /api/inferdeck/v1/model-store/remove` | remove an inactive model-store entry and its managed artefact |
 | `GET` · `POST /api/inferdeck/v1/api-keys` · `PATCH` · `DELETE /api/inferdeck/v1/api-keys/:id` | create and manage hash-only client keys with server-owned queue priorities; plaintext is returned once |
+| `GET /api/inferdeck/v1/background/availability` · `POST /api/inferdeck/v1/background/lease` · `PATCH` · `DELETE /api/inferdeck/v1/background/lease/:id` | coordinate one persisted background-work lease after the configured quiet period; conflicts include a suggested report-back time |
 
 ## Roadmap
 

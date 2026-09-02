@@ -213,6 +213,7 @@ TEST_CASE("Repository gateway configuration keeps remote control disabled", "[co
     CHECK(config.host == "0.0.0.0");
     CHECK_FALSE(config.auth_required);
     CHECK(config.api_keys_db_path == "C:/InferDeck/data/api-keys.db");
+    CHECK(config.background_idle_after_seconds == 900);
     REQUIRE(config.cors_origins.size() == 1);
     CHECK(config.cors_origins.front() == "*");
     CHECK_FALSE(config.control_allow_remote);
@@ -463,6 +464,12 @@ model_registry:
     cached_prompt_price_per_million: -0.01
 )"));
     CHECK_FALSE(validate_config_text("gateway:\n  n_batch: 128\n  n_ubatch: 256\n"));
+    CHECK_FALSE(validate_config_text(
+        "gateway:\n  background_idle_after_seconds: 59\n"));
+    CHECK_FALSE(validate_config_text(
+        "gateway:\n  background_idle_after_seconds: 86401\n"));
+    CHECK(validate_config_text(
+        "gateway:\n  background_idle_after_seconds: 900\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\nauth:\n  required: true\n  token: secret\n"));
     CHECK_FALSE(validate_config_text("control:\n  allow_remote: true\n"));

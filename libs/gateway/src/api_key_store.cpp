@@ -6,6 +6,7 @@
 #include <cctype>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
@@ -194,6 +195,90 @@ foundation::Result<void> sqlite_failure(sqlite3* database,
                          (database ? sqlite3_errmsg(database) : "database unavailable"));
 }
 
+class SqliteTransaction {
+public:
+    explicit SqliteTransaction(sqlite3* database) : database_(database) {
+        active_ = database_ &&
+            sqlite3_exec(database_, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) ==
+                SQLITE_OK;
+    }
+
+    ~SqliteTransaction() {
+        if (active_) {
+            sqlite3_exec(database_, "ROLLBACK;", nullptr, nullptr, nullptr);
+        }
+    }
+
+    [[nodiscard]] bool started() const noexcept {
+        return active_;
+    }
+
+    bool commit() {
+        if (!active_) return false;
+        if (sqlite3_exec(database_, "COMMIT;", nullptr, nullptr, nullptr) !=
+            SQLITE_OK) {
+            return false;
+        }
+        active_ = false;
+        return true;
+    }
+
+private:
+    sqlite3* database_{nullptr};
+    bool active_{false};
+};
+
+foundation::Result<std::optional<BackgroundLeaseRecord>>
+read_active_background_lease(sqlite3* database, std::int64_t now_unix_ms) {
+    constexpr const char* delete_sql =
+        "DELETE FROM background_leases WHERE expires_at_unix_ms <= ?;";
+    sqlite3_stmt* expired = nullptr;
+    if (sqlite3_prepare_v2(
+            database, delete_sql, -1, &expired, nullptr) != SQLITE_OK) {
+        return Err<std::optional<BackgroundLeaseRecord>>(
+            ErrorCode::IoError, "cannot prepare expired background lease cleanup");
+    }
+    sqlite3_bind_int64(expired, 1, now_unix_ms);
+    const int delete_status = sqlite3_step(expired);
+    sqlite3_finalize(expired);
+    if (delete_status != SQLITE_DONE) {
+        return Err<std::optional<BackgroundLeaseRecord>>(
+            ErrorCode::IoError, "cannot remove expired background lease");
+    }
+
+    constexpr const char* select_sql =
+        "SELECT id, owner_key_id, acquired_at_unix_ms, expires_at_unix_ms "
+        "FROM background_leases WHERE singleton = 1;";
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(
+            database, select_sql, -1, &statement, nullptr) != SQLITE_OK) {
+        return Err<std::optional<BackgroundLeaseRecord>>(
+            ErrorCode::IoError, "cannot inspect background lease");
+    }
+    const int status = sqlite3_step(statement);
+    if (status == SQLITE_DONE) {
+        sqlite3_finalize(statement);
+        return Ok(std::optional<BackgroundLeaseRecord>{});
+    }
+    if (status != SQLITE_ROW) {
+        sqlite3_finalize(statement);
+        return Err<std::optional<BackgroundLeaseRecord>>(
+            ErrorCode::IoError, "cannot read background lease");
+    }
+    BackgroundLeaseRecord lease;
+    lease.id = column_text(statement, 0);
+    lease.owner_key_id = column_text(statement, 1);
+    lease.acquired_at_unix_ms = sqlite3_column_int64(statement, 2);
+    lease.expires_at_unix_ms = sqlite3_column_int64(statement, 3);
+    sqlite3_finalize(statement);
+    return Ok(std::optional<BackgroundLeaseRecord>{std::move(lease)});
+}
+
+bool valid_lease_window(std::int64_t now_unix_ms, std::int64_t duration_ms) {
+    return now_unix_ms >= 0 && duration_ms > 0 &&
+        now_unix_ms <= (std::numeric_limits<std::int64_t>::max)() - duration_ms;
+}
+
 }
 
 class ApiKeyStore::Impl {
@@ -218,6 +303,7 @@ public:
         constexpr const char* schema = R"SQL(
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
+PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -227,6 +313,14 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at_unix_ms INTEGER NOT NULL,
     updated_at_unix_ms INTEGER NOT NULL,
     revoked_at_unix_ms INTEGER
+);
+CREATE TABLE IF NOT EXISTS background_leases (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    id TEXT NOT NULL UNIQUE,
+    owner_key_id TEXT NOT NULL,
+    acquired_at_unix_ms INTEGER NOT NULL,
+    expires_at_unix_ms INTEGER NOT NULL,
+    FOREIGN KEY(owner_key_id) REFERENCES api_keys(id)
 );
 )SQL";
         if (sqlite3_exec(database, schema, nullptr, nullptr, nullptr) != SQLITE_OK ||
@@ -250,7 +344,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
         if (sqlite3_prepare_v2(database, sql, -1, &statement, nullptr) != SQLITE_OK) {
             return false;
         }
-        while (sqlite3_step(statement) == SQLITE_ROW) {
+        int status = SQLITE_ROW;
+        while ((status = sqlite3_step(statement)) == SQLITE_ROW) {
             const auto* blob = static_cast<const unsigned char*>(
                 sqlite3_column_blob(statement, 3));
             if (!blob || sqlite3_column_bytes(statement, 3) != 32) {
@@ -267,8 +362,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
             active_key.record.updated_at_unix_ms = sqlite3_column_int64(statement, 6);
             active.emplace(active_key.record.id, std::move(active_key));
         }
-        const bool complete = sqlite3_errcode(database) == SQLITE_OK ||
-            sqlite3_errcode(database) == SQLITE_DONE;
+        const bool complete = status == SQLITE_DONE;
         sqlite3_finalize(statement);
         return complete;
     }
@@ -393,7 +487,8 @@ foundation::Result<std::vector<ApiKeyRecord>> ApiKeyStore::list() const {
             ErrorCode::IoError, "cannot list API keys");
     }
     std::vector<ApiKeyRecord> records;
-    while (sqlite3_step(statement) == SQLITE_ROW) {
+    int status = SQLITE_ROW;
+    while ((status = sqlite3_step(statement)) == SQLITE_ROW) {
         ApiKeyRecord record;
         record.id = column_text(statement, 0);
         record.name = column_text(statement, 1);
@@ -407,6 +502,10 @@ foundation::Result<std::vector<ApiKeyRecord>> ApiKeyStore::list() const {
         records.push_back(std::move(record));
     }
     sqlite3_finalize(statement);
+    if (status != SQLITE_DONE) {
+        return Err<std::vector<ApiKeyRecord>>(
+            ErrorCode::IoError, "cannot complete API key listing");
+    }
     return Ok(std::move(records));
 }
 
@@ -471,6 +570,11 @@ foundation::Result<void> ApiKeyStore::revoke(std::string_view id) {
         return Err<void>(ErrorCode::Unavailable, "API key store is unavailable");
     }
     const std::string identifier(id);
+    SqliteTransaction transaction(impl_->database);
+    if (!transaction.started()) {
+        return sqlite_failure(impl_->database,
+                              "cannot begin API key revocation");
+    }
     constexpr const char* lookup_sql =
         "SELECT revoked_at_unix_ms FROM api_keys WHERE id = ?;";
     sqlite3_stmt* lookup = nullptr;
@@ -480,14 +584,24 @@ foundation::Result<void> ApiKeyStore::revoke(std::string_view id) {
     }
     sqlite3_bind_text(lookup, 1, identifier.c_str(), -1, SQLITE_TRANSIENT);
     const int lookup_status = sqlite3_step(lookup);
-    if (lookup_status != SQLITE_ROW) {
+    if (lookup_status == SQLITE_DONE) {
         sqlite3_finalize(lookup);
         return Err<void>(ErrorCode::NotFound, "API key not found");
+    }
+    if (lookup_status != SQLITE_ROW) {
+        sqlite3_finalize(lookup);
+        return sqlite_failure(impl_->database, "cannot inspect API key");
     }
     const bool already_revoked =
         sqlite3_column_type(lookup, 0) != SQLITE_NULL;
     sqlite3_finalize(lookup);
-    if (already_revoked) return Ok();
+    if (already_revoked) {
+        if (!transaction.commit()) {
+            return sqlite_failure(impl_->database,
+                                  "cannot complete API key revocation");
+        }
+        return Ok();
+    }
 
     constexpr const char* update_sql =
         "UPDATE api_keys SET revoked_at_unix_ms = ?, updated_at_unix_ms = ? "
@@ -503,10 +617,235 @@ foundation::Result<void> ApiKeyStore::revoke(std::string_view id) {
     sqlite3_bind_text(update_statement, 3, identifier.c_str(), -1, SQLITE_TRANSIENT);
     const int status = sqlite3_step(update_statement);
     sqlite3_finalize(update_statement);
-    if (status != SQLITE_DONE || sqlite3_changes(impl_->database) != 1) {
+    const int updated_rows = sqlite3_changes(impl_->database);
+    if (status != SQLITE_DONE || updated_rows != 1) {
         return sqlite_failure(impl_->database, "cannot revoke API key");
     }
+
+    constexpr const char* release_sql =
+        "DELETE FROM background_leases WHERE owner_key_id = ?;";
+    sqlite3_stmt* release_statement = nullptr;
+    if (sqlite3_prepare_v2(
+            impl_->database, release_sql, -1, &release_statement,
+            nullptr) != SQLITE_OK) {
+        return sqlite_failure(impl_->database,
+                              "cannot prepare revoked key lease release");
+    }
+    sqlite3_bind_text(
+        release_statement, 1, identifier.c_str(), -1, SQLITE_TRANSIENT);
+    const int release_status = sqlite3_step(release_statement);
+    sqlite3_finalize(release_statement);
+    if (release_status != SQLITE_DONE) {
+        return sqlite_failure(impl_->database,
+                              "cannot release revoked key lease");
+    }
+    if (!transaction.commit()) {
+        return sqlite_failure(impl_->database,
+                              "cannot complete API key revocation");
+    }
     impl_->active.erase(identifier);
+    return Ok();
+}
+
+foundation::Result<std::optional<BackgroundLeaseRecord>>
+ApiKeyStore::active_background_lease(std::int64_t now_unix_ms) {
+    if (now_unix_ms < 0) {
+        return Err<std::optional<BackgroundLeaseRecord>>(
+            ErrorCode::InvalidArgument, "lease time must not be negative");
+    }
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->is_healthy) {
+        return Err<std::optional<BackgroundLeaseRecord>>(
+            ErrorCode::Unavailable, "API key store is unavailable");
+    }
+    SqliteTransaction transaction(impl_->database);
+    if (!transaction.started()) {
+        return Err<std::optional<BackgroundLeaseRecord>>(
+            ErrorCode::IoError, "cannot begin background lease inspection");
+    }
+    auto lease = read_active_background_lease(
+        impl_->database, now_unix_ms);
+    if (!lease) return lease;
+    if (!transaction.commit()) {
+        return Err<std::optional<BackgroundLeaseRecord>>(
+            ErrorCode::IoError, "cannot complete background lease inspection");
+    }
+    return lease;
+}
+
+foundation::Result<BackgroundLeaseAcquireResult>
+ApiKeyStore::acquire_background_lease(std::string_view owner_key_id,
+                                      std::int64_t now_unix_ms,
+                                      std::int64_t duration_ms) {
+    if (!valid_lease_window(now_unix_ms, duration_ms)) {
+        return Err<BackgroundLeaseAcquireResult>(
+            ErrorCode::InvalidArgument, "background lease window is invalid");
+    }
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->is_healthy) {
+        return Err<BackgroundLeaseAcquireResult>(
+            ErrorCode::Unavailable, "API key store is unavailable");
+    }
+    const std::string owner(owner_key_id);
+    if (!impl_->active.contains(owner)) {
+        return Err<BackgroundLeaseAcquireResult>(
+            ErrorCode::NotFound, "active API key not found");
+    }
+    SqliteTransaction transaction(impl_->database);
+    if (!transaction.started()) {
+        return Err<BackgroundLeaseAcquireResult>(
+            ErrorCode::IoError, "cannot begin background lease acquisition");
+    }
+    const auto current = read_active_background_lease(
+        impl_->database, now_unix_ms);
+    if (!current) {
+        return Err<BackgroundLeaseAcquireResult>(
+            current.error().code, current.error().message);
+    }
+    if (*current) {
+        const auto state = (*current)->owner_key_id == owner
+            ? BackgroundLeaseAcquireState::Existing
+            : BackgroundLeaseAcquireState::Occupied;
+        if (!transaction.commit()) {
+            return Err<BackgroundLeaseAcquireResult>(
+                ErrorCode::IoError,
+                "cannot complete background lease acquisition");
+        }
+        return Ok(BackgroundLeaseAcquireResult{state, **current});
+    }
+
+    const auto identifier_bytes = secure_random(16);
+    if (!identifier_bytes) {
+        return Err<BackgroundLeaseAcquireResult>(
+            identifier_bytes.error().code, identifier_bytes.error().message);
+    }
+    BackgroundLeaseRecord lease;
+    lease.id = hex_encode(identifier_bytes->data(), identifier_bytes->size());
+    lease.owner_key_id = owner;
+    lease.acquired_at_unix_ms = now_unix_ms;
+    lease.expires_at_unix_ms = now_unix_ms + duration_ms;
+
+    constexpr const char* insert_sql =
+        "INSERT INTO background_leases("
+        "singleton, id, owner_key_id, acquired_at_unix_ms, expires_at_unix_ms) "
+        "VALUES(1, ?, ?, ?, ?);";
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(
+            impl_->database, insert_sql, -1, &statement, nullptr) != SQLITE_OK) {
+        return Err<BackgroundLeaseAcquireResult>(
+            ErrorCode::IoError, "cannot prepare background lease acquisition");
+    }
+    sqlite3_bind_text(statement, 1, lease.id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, lease.owner_key_id.c_str(), -1,
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement, 3, lease.acquired_at_unix_ms);
+    sqlite3_bind_int64(statement, 4, lease.expires_at_unix_ms);
+    const int status = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    if (status != SQLITE_DONE || !transaction.commit()) {
+        return Err<BackgroundLeaseAcquireResult>(
+            ErrorCode::IoError, "cannot persist background lease");
+    }
+    return Ok(BackgroundLeaseAcquireResult{
+        BackgroundLeaseAcquireState::Acquired, std::move(lease)});
+}
+
+foundation::Result<BackgroundLeaseRecord>
+ApiKeyStore::renew_background_lease(std::string_view owner_key_id,
+                                    std::string_view lease_id,
+                                    std::int64_t now_unix_ms,
+                                    std::int64_t duration_ms) {
+    if (!valid_lease_window(now_unix_ms, duration_ms)) {
+        return Err<BackgroundLeaseRecord>(
+            ErrorCode::InvalidArgument, "background lease window is invalid");
+    }
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->is_healthy) {
+        return Err<BackgroundLeaseRecord>(
+            ErrorCode::Unavailable, "API key store is unavailable");
+    }
+    const std::string owner(owner_key_id);
+    if (!impl_->active.contains(owner)) {
+        return Err<BackgroundLeaseRecord>(
+            ErrorCode::NotFound, "background lease not found");
+    }
+    SqliteTransaction transaction(impl_->database);
+    if (!transaction.started()) {
+        return Err<BackgroundLeaseRecord>(
+            ErrorCode::IoError, "cannot begin background lease renewal");
+    }
+    const auto current = read_active_background_lease(
+        impl_->database, now_unix_ms);
+    if (!current) {
+        return Err<BackgroundLeaseRecord>(
+            current.error().code, current.error().message);
+    }
+    if (!*current || (*current)->owner_key_id != owner ||
+        (*current)->id != lease_id) {
+        if (!transaction.commit()) {
+            return Err<BackgroundLeaseRecord>(
+                ErrorCode::IoError, "cannot complete background lease renewal");
+        }
+        return Err<BackgroundLeaseRecord>(
+            ErrorCode::NotFound, "background lease not found");
+    }
+
+    BackgroundLeaseRecord renewed = **current;
+    renewed.expires_at_unix_ms = now_unix_ms + duration_ms;
+    constexpr const char* update_sql =
+        "UPDATE background_leases SET expires_at_unix_ms = ? "
+        "WHERE singleton = 1 AND id = ? AND owner_key_id = ?;";
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(
+            impl_->database, update_sql, -1, &statement, nullptr) != SQLITE_OK) {
+        return Err<BackgroundLeaseRecord>(
+            ErrorCode::IoError, "cannot prepare background lease renewal");
+    }
+    sqlite3_bind_int64(statement, 1, renewed.expires_at_unix_ms);
+    sqlite3_bind_text(statement, 2, renewed.id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 3, owner.c_str(), -1, SQLITE_TRANSIENT);
+    const int status = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    const int updated_rows = sqlite3_changes(impl_->database);
+    if (status != SQLITE_DONE || updated_rows != 1 || !transaction.commit()) {
+        return Err<BackgroundLeaseRecord>(
+            ErrorCode::IoError, "cannot renew background lease");
+    }
+    return Ok(std::move(renewed));
+}
+
+foundation::Result<void>
+ApiKeyStore::release_background_lease(std::string_view owner_key_id,
+                                      std::string_view lease_id) {
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->is_healthy) {
+        return Err<void>(ErrorCode::Unavailable,
+                         "API key store is unavailable");
+    }
+    SqliteTransaction transaction(impl_->database);
+    if (!transaction.started()) {
+        return Err<void>(ErrorCode::IoError,
+                         "cannot begin background lease release");
+    }
+    constexpr const char* delete_sql =
+        "DELETE FROM background_leases "
+        "WHERE singleton = 1 AND id = ? AND owner_key_id = ?;";
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(
+            impl_->database, delete_sql, -1, &statement, nullptr) != SQLITE_OK) {
+        return Err<void>(ErrorCode::IoError,
+                         "cannot prepare background lease release");
+    }
+    const std::string identifier(lease_id);
+    const std::string owner(owner_key_id);
+    sqlite3_bind_text(statement, 1, identifier.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, owner.c_str(), -1, SQLITE_TRANSIENT);
+    const int status = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    if (status != SQLITE_DONE || !transaction.commit()) {
+        return Err<void>(ErrorCode::IoError,
+                         "cannot release background lease");
+    }
     return Ok();
 }
 

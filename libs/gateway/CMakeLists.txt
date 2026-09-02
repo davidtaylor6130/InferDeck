@@ -20,6 +20,7 @@ set(GATEWAY_SOURCES
     src/config_secrets.cpp
     src/api_key_store.cpp
     src/api_key_routes.cpp
+    src/background_lease_routes.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})

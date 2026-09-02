@@ -32,6 +32,24 @@ struct AuthenticatedApiKey {
     int priority{};
 };
 
+struct BackgroundLeaseRecord {
+    std::string id;
+    std::string owner_key_id;
+    std::int64_t acquired_at_unix_ms{};
+    std::int64_t expires_at_unix_ms{};
+};
+
+enum class BackgroundLeaseAcquireState {
+    Acquired,
+    Existing,
+    Occupied,
+};
+
+struct BackgroundLeaseAcquireResult {
+    BackgroundLeaseAcquireState state{BackgroundLeaseAcquireState::Acquired};
+    BackgroundLeaseRecord lease;
+};
+
 class ApiKeyStore final {
 public:
     explicit ApiKeyStore(std::string path);
@@ -54,6 +72,20 @@ public:
     [[nodiscard]] foundation::Result<void> revoke(std::string_view id);
     [[nodiscard]] std::optional<AuthenticatedApiKey> authenticate_bearer(
         std::string_view authorization) const;
+    [[nodiscard]] foundation::Result<std::optional<BackgroundLeaseRecord>>
+        active_background_lease(std::int64_t now_unix_ms);
+    [[nodiscard]] foundation::Result<BackgroundLeaseAcquireResult>
+        acquire_background_lease(std::string_view owner_key_id,
+                                 std::int64_t now_unix_ms,
+                                 std::int64_t duration_ms);
+    [[nodiscard]] foundation::Result<BackgroundLeaseRecord>
+        renew_background_lease(std::string_view owner_key_id,
+                               std::string_view lease_id,
+                               std::int64_t now_unix_ms,
+                               std::int64_t duration_ms);
+    [[nodiscard]] foundation::Result<void>
+        release_background_lease(std::string_view owner_key_id,
+                                 std::string_view lease_id);
 
 private:
     class Impl;

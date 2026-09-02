@@ -189,7 +189,7 @@ struct ConfigRouteServer {
                 return Ok();
             },
             nullptr,
-            [] { return std::int64_t{1}; },
+            [] { return std::int64_t{3600}; },
             &profile_benchmark,
             nullptr,
             config_repository,
@@ -253,6 +253,161 @@ TEST_CASE("API key control routes create, reprioritize, list, and revoke",
     REQUIRE(revoked);
     CHECK(revoked->status == 204);
     CHECK_FALSE(routes.api_keys->authenticate_bearer("Bearer " + key));
+}
+
+TEST_CASE("Background lease routes require managed keys and report conflicts",
+          "[gateway][dashboard][background-lease]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+    const auto first_key = routes.api_keys->create("first worker", -60);
+    const auto second_key = routes.api_keys->create("second worker", -40);
+    REQUIRE(first_key);
+    REQUIRE(second_key);
+    const httplib::Headers first_headers{
+        {"Authorization", "Bearer " + first_key->key}};
+    const httplib::Headers second_headers{
+        {"Authorization", "Bearer " + second_key->key}};
+    constexpr const char* availability_path =
+        "/api/inferdeck/v1/background/availability";
+    constexpr const char* lease_path =
+        "/api/inferdeck/v1/background/lease";
+
+    const auto unauthenticated = client.Get(availability_path);
+    REQUIRE(unauthenticated);
+    CHECK(unauthenticated->status == 401);
+
+    const auto too_short = client.Post(
+        lease_path, first_headers, R"({"durationSeconds":10})",
+        "application/json");
+    REQUIRE(too_short);
+    CHECK(too_short->status == 400);
+    const auto too_large = client.Post(
+        lease_path, first_headers,
+        R"({"durationSeconds":18446744073709551615})",
+        "application/json");
+    REQUIRE(too_large);
+    CHECK(too_large->status == 400);
+    const auto unknown_field = client.Post(
+        lease_path, first_headers, R"({"durationSeconds":120,"owner":"x"})",
+        "application/json");
+    REQUIRE(unknown_field);
+    CHECK(unknown_field->status == 400);
+
+    const auto available = client.Get(availability_path, first_headers);
+    REQUIRE(available);
+    REQUIRE(available->status == 200);
+    const auto available_body = nlohmann::json::parse(available->body);
+    CHECK(available_body["available"] == true);
+    CHECK(available_body["reason"] == "idle");
+
+    const auto acquired = client.Post(
+        lease_path, first_headers, R"({"durationSeconds":120})",
+        "application/json");
+    REQUIRE(acquired);
+    REQUIRE(acquired->status == 201);
+    CHECK(acquired->get_header_value("Cache-Control") == "no-store");
+    const auto acquired_body = nlohmann::json::parse(acquired->body);
+    CHECK(acquired_body["status"] == "acquired");
+    const std::string lease_id =
+        acquired_body["lease"]["id"].get<std::string>();
+    const std::int64_t original_expiry =
+        acquired_body["lease"]["expiresAtUnixMs"].get<std::int64_t>();
+
+    const auto conflict = client.Post(
+        lease_path, second_headers, R"({"durationSeconds":120})",
+        "application/json");
+    REQUIRE(conflict);
+    REQUIRE(conflict->status == 409);
+    CHECK_FALSE(conflict->get_header_value("Retry-After").empty());
+    const auto conflict_body = nlohmann::json::parse(conflict->body);
+    CHECK(conflict_body["reason"] == "lease_active");
+    CHECK(conflict_body.contains("suggestedReportBackAtUnixMs"));
+    CHECK(conflict_body.contains("expiresAtUnixMs"));
+    CHECK(conflict->body.find(first_key->record.id) == std::string::npos);
+    CHECK(conflict->body.find(first_key->record.name) == std::string::npos);
+    CHECK(conflict->body.find(lease_id) == std::string::npos);
+
+    const auto repeated = client.Post(
+        lease_path, first_headers, R"({"durationSeconds":240})",
+        "application/json");
+    REQUIRE(repeated);
+    REQUIRE(repeated->status == 200);
+    const auto repeated_body = nlohmann::json::parse(repeated->body);
+    CHECK(repeated_body["status"] == "existing");
+    CHECK(repeated_body["lease"]["id"] == lease_id);
+    CHECK(repeated_body["lease"]["expiresAtUnixMs"] == original_expiry);
+
+    const auto renewed = client.Patch(
+        std::string(lease_path) + "/" + lease_id, first_headers,
+        R"({"durationSeconds":180})", "application/json");
+    REQUIRE(renewed);
+    REQUIRE(renewed->status == 200);
+    const auto renewed_body = nlohmann::json::parse(renewed->body);
+    CHECK(renewed_body["lease"]["id"] == lease_id);
+    CHECK(renewed_body["lease"]["expiresAtUnixMs"].get<std::int64_t>() >
+          original_expiry);
+
+    const auto wrong_release = client.Delete(
+        std::string(lease_path) + "/" + lease_id, second_headers);
+    REQUIRE(wrong_release);
+    CHECK(wrong_release->status == 204);
+    const auto still_owned = client.Get(availability_path, first_headers);
+    REQUIRE(still_owned);
+    REQUIRE(still_owned->status == 200);
+    const auto still_owned_body = nlohmann::json::parse(still_owned->body);
+    CHECK(still_owned_body["reason"] == "lease_owned");
+    CHECK(still_owned_body["lease"]["id"] == lease_id);
+
+    const auto released = client.Delete(
+        std::string(lease_path) + "/" + lease_id, first_headers);
+    REQUIRE(released);
+    CHECK(released->status == 204);
+    const auto replacement = client.Post(
+        lease_path, second_headers, R"({"durationSeconds":120})",
+        "application/json");
+    REQUIRE(replacement);
+    CHECK(replacement->status == 201);
+}
+
+TEST_CASE("Background lease acquisition waits for the configured quiet period",
+          "[gateway][dashboard][background-lease]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+    const auto key = routes.api_keys->create("quiet worker", -60);
+    REQUIRE(key);
+    const httplib::Headers headers{
+        {"Authorization", "Bearer " + key->key}};
+    const std::int64_t now = std::chrono::duration_cast<
+        std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    routes.stats_db.record_request(
+        {now, "interactive-model", 10, 5, 100.0, 50.0, 200, 0});
+
+    const auto availability = client.Get(
+        "/api/inferdeck/v1/background/availability", headers);
+    REQUIRE(availability);
+    REQUIRE(availability->status == 200);
+    CHECK_FALSE(availability->get_header_value("Retry-After").empty());
+    const auto availability_body =
+        nlohmann::json::parse(availability->body);
+    CHECK(availability_body["available"] == false);
+    CHECK(availability_body["reason"] == "quiet_period");
+    CHECK(availability_body["requiredIdleSeconds"] == 900);
+    CHECK(availability_body["suggestedReportBackAtUnixMs"]
+              .get<std::int64_t>() > now);
+
+    const auto blocked = client.Post(
+        "/api/inferdeck/v1/background/lease", headers,
+        R"({"durationSeconds":120})", "application/json");
+    REQUIRE(blocked);
+    REQUIRE(blocked->status == 409);
+    CHECK_FALSE(blocked->get_header_value("Retry-After").empty());
+    const auto blocked_body = nlohmann::json::parse(blocked->body);
+    CHECK(blocked_body["error"]["code"] == "background_not_idle");
+    CHECK(blocked_body["reason"] == "quiet_period");
+    CHECK(blocked_body.contains("suggestedReportBackAtUnixMs"));
 }
 
 TEST_CASE("Active configuration save schedules an automatic runtime reload",

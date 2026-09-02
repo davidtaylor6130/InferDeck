@@ -43,6 +43,7 @@ struct GatewayDeps {
     CompatibilityProfile compatibility_profile{CompatibilityProfile::StrictOpenAI};
     std::chrono::milliseconds swap_timeout{std::chrono::minutes{5}};
     std::shared_ptr<ApiKeyStore> api_keys;
+    int background_idle_after_seconds{900};
 };
 
 struct RequestObservation {

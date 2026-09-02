@@ -119,6 +119,10 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["vram_safety_margin_mb"]) cfg.vram_safety_margin_mb = g["vram_safety_margin_mb"].as<int>();
         if (g["max_queue_size"]) cfg.max_queue_size = g["max_queue_size"].as<int>();
         if (g["voice_session_grace_ms"]) cfg.voice_session_grace_ms = g["voice_session_grace_ms"].as<int>();
+        if (g["background_idle_after_seconds"]) {
+            cfg.background_idle_after_seconds =
+                g["background_idle_after_seconds"].as<int>();
+        }
         if (g["sampling"]) parse_sampling(g["sampling"], cfg.sampling);
     }
     if (root["compatibility"]) {

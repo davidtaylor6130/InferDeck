@@ -59,6 +59,7 @@ gateway:
   swa_full: false
   truncate_prompt: true
   voice_session_grace_ms: 15000
+  background_idle_after_seconds: 900
 
   # Server-side sampler defaults (issue #42). These mirror stock llama-server:
   # DRY off and repeat_penalty neutral, so reasoning models (Qwen3 / Qwen3.6)

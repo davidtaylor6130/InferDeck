@@ -66,6 +66,12 @@ preserves surrounding YAML and comments.
 plaintext is returned only by the create endpoint and is never written to YAML
 or returned by the configuration API. See [Managed API keys](api-keys.md).
 
+`gateway.background_idle_after_seconds` sets the quiet period required before a
+managed client can acquire the global background lease. It accepts 60 to 86400
+seconds and defaults to 900. Lease records use the managed-key database and
+survive gateway restarts. See
+[Background availability and leases](background-leases.md).
+
 ## Atomicity and recovery
 
 Persistence writes a sibling temporary file, flushes it, and atomically replaces

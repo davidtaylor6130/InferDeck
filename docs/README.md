@@ -3,6 +3,7 @@
 - [`adr/`](adr/) - binding architecture decisions and decision template
 - [`control-plane-security.md`](control-plane-security.md) - route principals, authentication, CORS, request limits, and security probes
 - [`api-keys.md`](api-keys.md) - create, prioritize, use, and revoke managed client keys
+- [`background-leases.md`](background-leases.md) - check inactivity and coordinate low-priority background clients
 - [`openai-compatibility.md`](openai-compatibility.md) - pinned strict OpenAI baseline, supported subset, and explicit rejections
 - [`configuration-schema.md`](configuration-schema.md) - versioned schema and transactional migration
 - [`migration-0.8.md`](migration-0.8.md) - breaking routes, consumers, backups, activation, and rollback

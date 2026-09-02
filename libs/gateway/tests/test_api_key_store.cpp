@@ -159,11 +159,26 @@ TEST_CASE("Managed API keys grant data-plane access but never control access",
     CHECK(authorizer.authorize(RoutePrincipal::OpenAIDataPlane, bearer,
                                "192.168.1.20", "192.168.1.10:11434", false) ==
           AuthorizationStatus::Granted);
+    CHECK(authorizer.authorize(RoutePrincipal::ManagedClient, bearer,
+                               "192.168.1.20", "192.168.1.10:11434", false) ==
+          AuthorizationStatus::Granted);
+    CHECK(authorizer.authorize(RoutePrincipal::ManagedClient,
+                               "Bearer legacy-token", "127.0.0.1",
+                               "127.0.0.1:11434", false) ==
+          AuthorizationStatus::AuthenticationRequired);
+    CHECK(authorizer.authorize(RoutePrincipal::ManagedClient,
+                               "Bearer control-token", "127.0.0.1",
+                               "127.0.0.1:11434", false) ==
+          AuthorizationStatus::AuthenticationRequired);
     CHECK(authorizer.authorize(RoutePrincipal::ControlRead, bearer,
                                "192.168.1.20", "192.168.1.10:11434", false) ==
           AuthorizationStatus::AuthenticationRequired);
     CHECK(authorizer.authorize(RoutePrincipal::ControlWrite, bearer,
                                "192.168.1.20", "192.168.1.10:11434", false) ==
+          AuthorizationStatus::AuthenticationRequired);
+    REQUIRE(store->revoke(created->record.id));
+    CHECK(authorizer.authorize(RoutePrincipal::ManagedClient, bearer,
+                               "127.0.0.1", "127.0.0.1:11434", false) ==
           AuthorizationStatus::AuthenticationRequired);
 }
 

@@ -13,6 +13,7 @@ InferDeck assigns one principal to every API request before its handler runs.
 |---|---|---|
 | Public status | reserved for a future minimal liveness route | none |
 | OpenAI data plane | OpenAI inference and model discovery | configured `auth` bearer token or a managed API key |
+| Managed client | background availability and lease coordination | managed API key only |
 | Dashboard session | live status, pricing, and event stream | direct loopback only |
 | Control read | configuration, logs, jobs, metrics, model-store state | loopback, or remote control principal |
 | Control write | every operation that changes runtime, files, configuration, aliases, or jobs | loopback, or remote control principal |
@@ -27,10 +28,11 @@ to sharing that token with `control.allow_data_plane_token: true`, but the remot
 control token must still be non-empty and the configuration must explicitly
 acknowledge the shared principal.
 
-Managed `idk_` keys authenticate only the OpenAI data plane. They never satisfy
-dashboard or control authorization, even when remote control is enabled. The
-optional OpenAI-derivative profile uses a separate `/compat/*` path and the same
-data-plane bearer authentication; it is disabled by default.
+Managed `idk_` keys authenticate the OpenAI data plane and the background lease
+API. The legacy OpenAI token cannot call the lease API. Managed keys never
+satisfy dashboard or control authorization, even when remote control is
+enabled. The optional OpenAI-derivative profile uses a separate `/compat/*` path
+and the same data-plane bearer authentication; it is disabled by default.
 
 ## Route inventory
 
@@ -45,6 +47,13 @@ The paths below are the canonical Phase 4 routes.
 - `POST /v1/images/generations`
 - `POST /v1/audio/speech`
 - `POST /v1/audio/transcriptions`
+
+### Managed client
+
+- `GET /api/inferdeck/v1/background/availability`
+- `POST /api/inferdeck/v1/background/lease`
+- `PATCH /api/inferdeck/v1/background/lease/:id`
+- `DELETE /api/inferdeck/v1/background/lease/:id`
 
 ### Dashboard session
 
@@ -179,6 +188,7 @@ Request policy is enforced before handlers:
 |---|---:|---|
 | `GET`, `HEAD`, `OPTIONS` | none | none |
 | control-plane mutation | 2 MiB | `application/json` when a body is present |
+| managed-client lease mutation | 2 MiB | `application/json` when a body is present |
 | OpenAI transcription | 26 MiB total, with a 25 MiB file | `multipart/form-data` |
 | other OpenAI data-plane mutation | 16 MiB | `application/json` |
 | server hard ceiling | 26 MiB | endpoint rule still applies |
