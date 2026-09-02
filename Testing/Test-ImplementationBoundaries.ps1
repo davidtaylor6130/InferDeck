@@ -34,6 +34,12 @@ run_profile_benchmark_trial(', 'void write_dashboard_file(')
         MaximumLines = 800
         Required = @('dashboard_config_yaml.ipp')
         Forbidden = @('std::string replace_top_level_yaml_section(', 'foundation::Result<std::string> render_aliases(')
+    },
+    @{
+        Path = 'libs/native_runtimes/CMakeLists.txt'
+        MaximumLines = 220
+        Required = @('inferdeck-acestep-core', 'src/pipeline-synth.cpp', 'src/model-store.cpp', 'ggml-vulkan')
+        Forbidden = @('add_subdirectory("${INFERDECK_ACESTEP_ROOT}"', 'ace-server.cpp', 'ace-synth.cpp')
     }
 )
 

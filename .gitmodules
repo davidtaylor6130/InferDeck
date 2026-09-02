@@ -7,3 +7,6 @@
 [submodule "libs/third_party/stable-diffusion.cpp"]
 	path = libs/third_party/stable-diffusion.cpp
 	url = https://github.com/leejet/stable-diffusion.cpp.git
+[submodule "libs/third_party/acestep.cpp"]
+	path = libs/third_party/acestep.cpp
+	url = https://github.com/ServeurpersoCom/acestep.cpp.git

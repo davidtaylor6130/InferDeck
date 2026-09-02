@@ -37,6 +37,54 @@ if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
     endif()
 endif()
 
+if(EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
+    find_package(Threads REQUIRED)
+
+    add_library(inferdeck-acestep-yyjson STATIC
+        "${INFERDECK_ACESTEP_ROOT}/vendor/yyjson/yyjson.c")
+    target_include_directories(inferdeck-acestep-yyjson PUBLIC
+        "${INFERDECK_ACESTEP_ROOT}/vendor/yyjson")
+
+    add_library(inferdeck-acestep-core STATIC
+        "${INFERDECK_ACESTEP_ROOT}/src/request.cpp"
+        "${INFERDECK_ACESTEP_ROOT}/src/model-store.cpp"
+        "${INFERDECK_ACESTEP_ROOT}/src/pipeline-lm.cpp"
+        "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp"
+        "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth-ops.cpp"
+        "${INFERDECK_ACESTEP_ROOT}/src/pipeline-understand.cpp")
+    target_include_directories(inferdeck-acestep-core PRIVATE
+        "${INFERDECK_ACESTEP_ROOT}"
+        "${INFERDECK_ACESTEP_ROOT}/src"
+        "${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/ggml/include")
+    target_link_libraries(inferdeck-acestep-core PRIVATE
+        inferdeck-acestep-yyjson
+        ggml
+        Threads::Threads)
+    foreach(INFERDECK_ACESTEP_GGML_BACKEND IN ITEMS
+            ggml-base ggml-cpu ggml-vulkan)
+        if(TARGET ${INFERDECK_ACESTEP_GGML_BACKEND})
+            target_link_libraries(inferdeck-acestep-core PRIVATE
+                ${INFERDECK_ACESTEP_GGML_BACKEND})
+        endif()
+    endforeach()
+    target_compile_features(inferdeck-acestep-core PUBLIC cxx_std_17)
+
+    if(MSVC)
+        target_compile_definitions(inferdeck-acestep-core PRIVATE
+            _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(inferdeck-acestep-yyjson PRIVATE /W0 /utf-8 /FS)
+        target_compile_options(inferdeck-acestep-core PRIVATE
+            /W4 /wd4100 /wd4505 /utf-8 /FS)
+    else()
+        target_compile_options(inferdeck-acestep-yyjson PRIVATE -w)
+        target_compile_options(inferdeck-acestep-core PRIVATE
+            -Wall -Wextra -Wshadow -Wconversion
+            -Wno-unused-parameter -Wno-unused-function -Wno-sign-conversion)
+    endif()
+
+    target_link_libraries(native_runtimes PRIVATE inferdeck-acestep-core)
+endif()
+
 if(EXISTS "${INFERDECK_WHISPER_ROOT}/CMakeLists.txt")
     set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)

@@ -21,13 +21,27 @@ set(INFERDECK_STABLE_DIFFUSION_ROOT
     CACHE PATH "stable-diffusion.cpp source tree")
 option(INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP
        "Fail configuration when stable-diffusion.cpp is unavailable" OFF)
+set(INFERDECK_ACESTEP_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/acestep.cpp"
+    CACHE PATH "ACE-Step C++ source tree")
+option(INFERDECK_REQUIRE_ACESTEP_CPP
+       "Fail configuration when ACE-Step C++ is unavailable" OFF)
 
-if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
+if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" OR
+   EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
     add_compile_definitions(GGML_MAX_NAME=128)
-elseif(INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP)
+endif()
+if(NOT EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" AND
+   INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP)
     message(FATAL_ERROR
             "stable-diffusion.cpp is required but unavailable: "
             "${INFERDECK_STABLE_DIFFUSION_ROOT}")
+endif()
+if(NOT EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp" AND
+   INFERDECK_REQUIRE_ACESTEP_CPP)
+    message(FATAL_ERROR
+            "ACE-Step C++ is required but unavailable: "
+            "${INFERDECK_ACESTEP_ROOT}")
 endif()
 
 if(INFERDECK_BUILD_TESTS)

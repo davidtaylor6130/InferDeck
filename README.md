@@ -178,7 +178,8 @@ docs/                      API reference, architecture notes, deploy guide
 
 ### Clone
 
-`llama.cpp`, `Vulkan-Headers`, and `stable-diffusion.cpp` are pinned Git submodules:
+`llama.cpp`, `Vulkan-Headers`, `stable-diffusion.cpp`, and `acestep.cpp` are
+pinned Git submodules:
 
 ```bash
 git clone --recurse-submodules https://github.com/davidtaylor6130/InferDeck.git
@@ -396,7 +397,9 @@ Suggestions and issues are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 InferDeck stands on [llama.cpp](https://github.com/ggml-org/llama.cpp) by
 Georgi Gerganov and contributors, and
 [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) by Lee Jet
-and contributors. The parity gate exists precisely because matching upstream
+and contributors, and
+[acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) by its
+contributors. The parity gate exists precisely because matching upstream
 quality is the bar.
 
 ## License
