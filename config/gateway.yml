@@ -97,6 +97,33 @@ model_aliases:
     required_capabilities: [chat_completions, responses]
 
 model_registry:
+  - name: "stable-diffusion-v1-5-fp16"
+    family: "stable-diffusion-1.5"
+    runtime: "stable_diffusion_cpp"
+    modality: "image"
+    capabilities:
+      - "image_generation"
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 4096
+    artifacts:
+      model: "F:/InferDeck/models/image/stable-diffusion-v1-5/v1-5-pruned-emaonly-fp16.safetensors"
+      backend: "vulkan"
+
+  - name: "ace-step-v1.5-turbo-q4"
+    family: "ace-step-1.5"
+    runtime: "ace_step_cpp"
+    modality: "audio_generation"
+    capabilities:
+      - "audio_generation"
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 8192
+    artifacts:
+      text_encoder: "F:/InferDeck/models/audio/ace-step-v1.5/Qwen3-Embedding-0.6B-Q8_0.gguf"
+      dit: "F:/InferDeck/models/audio/ace-step-v1.5/acestep-v15-turbo-Q4_K_M.gguf"
+      vae: "F:/InferDeck/models/audio/ace-step-v1.5/vae-BF16.gguf"
+
   - name: "supertonic-3"
     family: "supertonic"
     runtime: "sherpa_onnx"
