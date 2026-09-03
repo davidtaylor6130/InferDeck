@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   authenticateDashboard, cancelProfileBenchmark, createApiKey,
   generateImages, generateMusic, getApiKeys, getApiSettings, getModels,
-  getProfileBenchmark, optimizeProfile, saveApiSettings, startProfileBenchmark,
+  getProfileBenchmark, optimizeProfile, saveApiSettings, searchStore,
+  startProfileBenchmark,
   updateApiKey,
   waitForActiveConfig, waitForStableConfig,
 } from './api';
@@ -18,6 +19,26 @@ function respondWith(body: unknown) {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('searchStore', () => {
+  it('sends the selected browse order, modality, runtime, and gated policy', async () => {
+    respondWith({ models: [] });
+
+    await searchStore(
+      '', 'stable_diffusion_cpp', 'image', 50, 'trending', false,
+    );
+
+    const fetchMock = vi.mocked(fetch);
+    const url = String(fetchMock.mock.calls[0]?.[0]);
+    expect(url).toContain('/api/inferdeck/v1/model-store/search?');
+    expect(url).toContain('q=');
+    expect(url).toContain('runtime=stable_diffusion_cpp');
+    expect(url).toContain('modality=image');
+    expect(url).toContain('sort=trending');
+    expect(url).toContain('includeGated=false');
+    expect(url).toContain('limit=50');
+  });
 });
 
 describe('getModels', () => {

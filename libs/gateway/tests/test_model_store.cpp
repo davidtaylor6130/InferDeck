@@ -22,10 +22,16 @@ class FakeTransport : public gateway::IModelStoreTransport {
 public:
     foundation::Result<nlohmann::json> get_json(
         const std::string& url, const std::string&) override {
-        if (url.find("?search=") != std::string::npos) {
+        if (url.find("/api/models?") != std::string::npos) {
             return foundation::Ok(nlohmann::json::array({
-                {{"id", "owner/text-GGUF"}, {"pipeline_tag", "text-generation"}, {"downloads", 12}},
-                {{"id", "owner/image"}, {"pipeline_tag", "text-to-image"}, {"downloads", 4}}
+                {{"id", "owner/text-GGUF"}, {"pipeline_tag", "text-generation"},
+                 {"downloads", 12}, {"siblings", nlohmann::json::array({
+                     {{"rfilename", "model.gguf"}}
+                 })}},
+                {{"id", "owner/image"}, {"pipeline_tag", "text-to-image"},
+                 {"downloads", 4}, {"siblings", nlohmann::json::array({
+                     {{"rfilename", "model.safetensors"}}
+                 })}}
             }));
         }
         if (url.find("owner/tts") != std::string::npos) {
@@ -73,6 +79,98 @@ public:
     }
 
     std::string last_url;
+};
+
+class CatalogueTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string&) override {
+        last_url = url;
+        return foundation::Ok(nlohmann::json::array({
+            {{"id", "owner/popular-GGUF"}, {"pipeline_tag", "text-generation"},
+             {"tags", nlohmann::json::array({"gguf", "license:apache-2.0"})},
+             {"downloads", 1000}, {"likes", 20}, {"trendingScore", 7},
+             {"lastModified", "2026-08-20T12:04:25.000Z"},
+             {"siblings", nlohmann::json::array({{{"rfilename", "popular-Q4_K_M.gguf"}}})}},
+            {{"id", "owner/trending-GGUF"}, {"pipeline_tag", "text-generation"},
+             {"tags", nlohmann::json::array({"gguf", "license:mit"})},
+             {"downloads", 500}, {"likes", 40}, {"trendingScore", 12},
+             {"lastModified", "2026-09-01T12:04:25.000Z"},
+             {"siblings", nlohmann::json::array({{{"rfilename", "trending-Q5_K_M.gguf"}}})}},
+            {{"id", "owner/gated-GGUF"}, {"pipeline_tag", "text-generation"},
+             {"tags", nlohmann::json::array({"gguf"})}, {"gated", true},
+             {"downloads", 5000}, {"likes", 80}, {"trendingScore", 30},
+             {"siblings", nlohmann::json::array({{{"rfilename", "gated-Q4_K_M.gguf"}}})}},
+            {{"id", "owner/python-only"}, {"pipeline_tag", "text-generation"},
+             {"downloads", 100000}, {"likes", 1000}, {"trendingScore", 100},
+             {"siblings", nlohmann::json::array({{{"rfilename", "pytorch_model.bin"}}})}},
+            {{"id", "owner/split-GGUF"}, {"pipeline_tag", "text-generation"},
+             {"tags", nlohmann::json::array({"gguf"})}, {"downloads", 2000},
+             {"siblings", nlohmann::json::array({
+                 {{"rfilename", "model-00001-of-00002.gguf"}},
+                 {{"rfilename", "model-00002-of-00002.gguf"}}
+             })}},
+            {{"id", "owner/image"}, {"pipeline_tag", "text-to-image"},
+             {"downloads", 3000}, {"trendingScore", 20},
+             {"siblings", nlohmann::json::array({{{"rfilename", "image.safetensors"}}})}},
+            {{"id", "owner/null-fields"}, {"pipeline_tag", nullptr},
+             {"downloads", nullptr}, {"likes", nullptr},
+             {"siblings", nullptr}}
+        }));
+    }
+
+    std::string last_url;
+};
+
+class ArtifactBoundaryTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string&) override {
+        const auto sibling = [](const std::string& name) {
+            return nlohmann::json{
+                {"rfilename", name},
+                {"lfs", {{"size", 4096}, {"sha256", std::string(64, 'a')}}},
+            };
+        };
+        if (url.find("owner/image") != std::string::npos) {
+            return foundation::Ok(nlohmann::json{
+                {"id", "owner/image"},
+                {"sha", "image-revision"},
+                {"pipeline_tag", "text-to-image"},
+                {"siblings", nlohmann::json::array({
+                    sibling("sd-v1-5.safetensors"),
+                    sibling("vae/model.safetensors"),
+                    sibling("text_encoder/model.safetensors"),
+                    sibling("unet/diffusion_pytorch_model.safetensors"),
+                    nlohmann::json{{"rfilename", nullptr}, {"lfs", nullptr}},
+                })},
+            });
+        }
+        if (url.find("owner/whisper") != std::string::npos) {
+            return foundation::Ok(nlohmann::json{
+                {"id", "owner/whisper"},
+                {"sha", "whisper-revision"},
+                {"pipeline_tag", "automatic-speech-recognition"},
+                {"siblings", nlohmann::json::array({
+                    sibling("ggml-base.en.bin"),
+                    sibling("whisper-base.gguf"),
+                    sibling("pytorch_model.bin"),
+                })},
+            });
+        }
+        return foundation::Ok(nlohmann::json{
+            {"id", "owner/text-GGUF"},
+            {"sha", "text-revision"},
+            {"pipeline_tag", "text-generation"},
+            {"siblings", nlohmann::json::array({
+                sibling("model-Q4_K_M.gguf"),
+                sibling("model-00001-of-00002.gguf"),
+                sibling("model-00002-of-00002.gguf"),
+                sibling("mmproj-model-f16.gguf"),
+                sibling("draft-mtp-Q4_K_M.gguf"),
+            })},
+        });
+    }
 };
 
 std::filesystem::path test_root() {
@@ -406,13 +504,18 @@ class AceStepBundleTransport final : public FakeTransport {
 public:
     foundation::Result<nlohmann::json> get_json(
         const std::string& url, const std::string&) override {
-        if (url.find("?search=") != std::string::npos) {
+        if (url.find("/api/models?") != std::string::npos) {
             return foundation::Ok(nlohmann::json::array({
                 {
                     {"id", "Serveurperso/ACE-Step-1.5-GGUF"},
                     {"pipeline_tag", "text-to-audio"},
                     {"tags", nlohmann::json::array({"ace-step", "gguf"})},
                     {"downloads", 100},
+                    {"siblings", nlohmann::json::array({
+                        {{"rfilename", "Qwen3-Embedding-0.6B-Q8_0.gguf"}},
+                        {{"rfilename", "acestep-v15-turbo-Q4_K_M.gguf"}},
+                        {{"rfilename", "vae-BF16.gguf"}}
+                    })},
                 },
             }));
         }
@@ -731,10 +834,107 @@ TEST_CASE("Model store ranks Hugging Face discovery by downloads",
     auto* recording = transport.get();
     {
         gateway::ModelStore store(root, "", coordinator, std::move(transport));
-        auto result = store.search("model", "", "");
+        auto result = store.search(
+            "model", "", "", 20, "downloads", false);
         REQUIRE(result);
         CHECK(recording->last_url.find("sort=downloads") != std::string::npos);
         CHECK(recording->last_url.find("sort=lastModified") == std::string::npos);
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store browses a compatible trending catalogue without a query",
+          "[model-store][catalogue]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto transport = std::make_unique<CatalogueTransport>();
+    auto* catalogue = transport.get();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        const auto result = store.search(
+            "", "llama_cpp", "text", 50, "trending", false);
+        REQUIRE(result);
+        REQUIRE(result->size() == 2);
+        CHECK((*result)[0]["id"] == "owner/trending-GGUF");
+        CHECK((*result)[0]["trendingScore"] == 12);
+        CHECK((*result)[0]["license"] == "mit");
+        CHECK((*result)[0]["format"] == "GGUF");
+        CHECK((*result)[0]["compatibleArtifacts"] == 1);
+        CHECK(catalogue->last_url.find("search=") == std::string::npos);
+        CHECK(catalogue->last_url.find("filter=gguf") != std::string::npos);
+        CHECK(catalogue->last_url.find("sort=trendingScore") != std::string::npos);
+        CHECK(catalogue->last_url.find("gated=false") != std::string::npos);
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store honours catalogue sort and gated visibility",
+          "[model-store][catalogue]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto transport = std::make_unique<CatalogueTransport>();
+    auto* catalogue = transport.get();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        const auto result = store.search(
+            "Qwen", "llama_cpp", "text", 50, "downloads", true);
+        REQUIRE(result);
+        REQUIRE(result->size() == 3);
+        CHECK((*result)[0]["id"] == "owner/gated-GGUF");
+        CHECK((*result)[1]["id"] == "owner/popular-GGUF");
+        CHECK(catalogue->last_url.find("search=Qwen") != std::string::npos);
+        CHECK(catalogue->last_url.find("sort=downloads") != std::string::npos);
+        CHECK(catalogue->last_url.find("gated=false") == std::string::npos);
+        CHECK_FALSE(store.search("", "llama_cpp", "text", 50, "invalid", false));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store default Music catalogue targets verified ACE-Step bundles",
+          "[model-store][catalogue][ace-step]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto transport = std::make_unique<AceStepBundleTransport>();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        const auto result = store.search(
+            "", "ace_step_cpp", "audio_generation", 50, "trending", false);
+        REQUIRE(result);
+        REQUIRE(result->size() == 1);
+        CHECK((*result)[0]["id"] == "Serveurperso/ACE-Step-1.5-GGUF");
+        CHECK((*result)[0]["format"] == "bundle");
+        CHECK((*result)[0]["compatibleArtifacts"] == 3);
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store inspection exposes only standalone native artifacts",
+          "[model-store][catalogue][artifact-boundary]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(
+            root, "", coordinator,
+            std::make_unique<ArtifactBoundaryTransport>());
+        const auto text = store.inspect("owner/text-GGUF");
+        REQUIRE(text);
+        REQUIRE(text->at("files").size() == 1);
+        CHECK(text->at("files")[0]["name"] == "model-Q4_K_M.gguf");
+
+        const auto image = store.inspect("owner/image");
+        REQUIRE(image);
+        REQUIRE(image->at("files").size() == 1);
+        CHECK(image->at("files")[0]["name"] == "sd-v1-5.safetensors");
+
+        const auto whisper = store.inspect("owner/whisper");
+        REQUIRE(whisper);
+        REQUIRE(whisper->at("files").size() == 2);
+        CHECK(whisper->at("files")[0]["name"] == "ggml-base.en.bin");
+        CHECK(whisper->at("files")[1]["name"] == "whisper-base.gguf");
     }
     std::filesystem::remove_all(root);
 }

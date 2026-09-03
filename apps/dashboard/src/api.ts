@@ -242,6 +242,10 @@ export interface StoreModel {
   lastModified?: string;
   hasVision?: boolean;
   recommended?: boolean;
+  trendingScore?: number;
+  license?: string;
+  format?: string;
+  compatibleArtifacts?: number;
 }
 
 export interface StoreFile {
@@ -658,10 +662,19 @@ export function waitForStableConfig(
   );
 }
 
-export async function searchStore(query: string, runtime = '', modality = '', limit = 50): Promise<StoreModel[]> {
+export async function searchStore(
+  query: string,
+  runtime = '',
+  modality = '',
+  limit = 50,
+  sort: 'trending' | 'downloads' | 'likes' | 'recent' = 'trending',
+  includeGated = false,
+): Promise<StoreModel[]> {
   const params = new URLSearchParams({ q: query, limit: String(limit) });
   if (runtime) params.set('runtime', runtime);
   if (modality) params.set('modality', modality);
+  params.set('sort', sort);
+  params.set('includeGated', String(includeGated));
   const body = await getJson<{ models: StoreModel[] }>(`${CONTROL_API_BASE}/model-store/search?${params}`);
   return body.models;
 }

@@ -1,21 +1,72 @@
 Result<nlohmann::json> ModelStore::search(const std::string& query,
                                           const std::string& runtime,
-                                          const std::string& modality, int limit) {
-    if (query.empty() || query.size() > 200 || limit < 1 || limit > 100) {
+                                          const std::string& modality, int limit,
+                                          const std::string& sort,
+                                          bool include_gated) {
+    const std::unordered_set<std::string> runtimes = {
+        "", "llama_cpp", "stable_diffusion_cpp", "ace_step_cpp",
+        "whisper_cpp", "sherpa_onnx"};
+    const std::unordered_set<std::string> modalities = {
+        "", "text", "embedding", "image", "audio_generation",
+        "audio_transcription", "audio_speech"};
+    const std::unordered_map<std::string, std::string> sort_fields = {
+        {"trending", "trendingScore"}, {"downloads", "downloads"},
+        {"likes", "likes"}, {"recent", "lastModified"}};
+    const auto sort_field = sort_fields.find(sort);
+    if (query.size() > 200 || limit < 1 || limit > 100 ||
+        !runtimes.contains(runtime) || !modalities.contains(modality) ||
+        sort_field == sort_fields.end()) {
         return Err<nlohmann::json>(ErrorCode::InvalidArgument, "invalid model search");
     }
-    auto response = transport_->get_json(
-        "https://huggingface.co/api/models?search=" + encode(query) +
-        "&full=true&sort=downloads&direction=-1&limit=" +
-        std::to_string(limit), token_);
+    std::string url = "https://huggingface.co/api/models?";
+    bool first_parameter = true;
+    const auto add_parameter = [&url, &first_parameter](
+                                   const std::string& key,
+                                   const std::string& value) {
+        if (!first_parameter) url += '&';
+        first_parameter = false;
+        url += key + '=' + encode(value);
+    };
+    std::string effective_query = query;
+    if (effective_query.empty() && runtime == "ace_step_cpp") {
+        effective_query = "ACE-Step";
+    } else if (effective_query.empty() && runtime == "whisper_cpp") {
+        effective_query = "whisper ggml";
+    } else if (effective_query.empty() && runtime == "sherpa_onnx") {
+        effective_query = modality == "audio_speech"
+            ? "sherpa onnx text to speech"
+            : "sherpa onnx speech recognition";
+    }
+    if (!effective_query.empty()) add_parameter("search", effective_query);
+    if (runtime == "llama_cpp" || runtime == "ace_step_cpp") {
+        add_parameter("filter", "gguf");
+    } else if (runtime == "stable_diffusion_cpp" || modality == "image") {
+        add_parameter("pipeline_tag", "text-to-image");
+    } else if (runtime == "whisper_cpp" ||
+               modality == "audio_transcription") {
+        add_parameter("pipeline_tag", "automatic-speech-recognition");
+    } else if (modality == "audio_speech") {
+        add_parameter("pipeline_tag", "text-to-speech");
+    }
+    if (!include_gated) add_parameter("gated", "false");
+    add_parameter("full", "true");
+    add_parameter("sort", sort_field->second);
+    add_parameter("direction", "-1");
+    add_parameter("limit", std::to_string(std::min(100, limit * 3)));
+    auto response = transport_->get_json(url, token_);
     if (!response) return Err<nlohmann::json>(response.error().code, response.error().message);
     nlohmann::json results = nlohmann::json::array();
     if (!response->is_array()) return Err<nlohmann::json>(ErrorCode::ParseError, "invalid model source response");
     for (const auto& item : *response) {
-        const std::string id = item.value("id", "");
-        const std::string pipeline = item.value("pipeline_tag", "");
-        if (id.empty()) continue;
-        const auto tags = item.value("tags", nlohmann::json::array());
+        if (!item.is_object()) continue;
+        const std::string id = catalogue_string(item, "id");
+        const std::string pipeline = catalogue_string(item, "pipeline_tag");
+        if (id.empty() || catalogue_boolean(item, "private") ||
+            (!include_gated && catalogue_item_is_gated(item))) continue;
+        const auto tags_value = item.find("tags");
+        const nlohmann::json tags =
+            tags_value != item.end() && tags_value->is_array()
+                ? *tags_value : nlohmann::json::array();
         const std::string searchable = lower(id + " " + tags.dump());
         std::string inferred_runtime = infer_runtime("", pipeline, searchable);
         if (lower(pipeline).find("automatic-speech-recognition") != std::string::npos &&
@@ -26,8 +77,18 @@ Result<nlohmann::json> ModelStore::search(const std::string& query,
         const std::string inferred_modality = infer_modality(inferred_runtime, pipeline);
         if (!runtime.empty() && inferred_runtime != runtime) continue;
         if (!modality.empty() && inferred_modality != modality) continue;
-        const auto downloads = item.value("downloads", 0);
-        const auto likes = item.value("likes", 0);
+        const auto siblings_value = item.find("siblings");
+        const nlohmann::json siblings =
+            siblings_value != item.end() && siblings_value->is_array()
+                ? *siblings_value : nlohmann::json::array();
+        const auto compatibility = catalogue_compatibility(
+            siblings, inferred_runtime, inferred_modality);
+        if (!compatibility) continue;
+        const auto downloads = catalogue_integer(item, "downloads");
+        const auto likes = catalogue_integer(item, "likes");
+        const auto trending_score = catalogue_number(item, "trendingScore");
+        const std::string last_modified =
+            catalogue_string(item, "lastModified");
         const bool has_vision =
             lower(pipeline).find("image-text") != std::string::npos ||
             lower(pipeline).find("visual-question") != std::string::npos ||
@@ -36,19 +97,43 @@ Result<nlohmann::json> ModelStore::search(const std::string& query,
         results.push_back({
             {"id", id}, {"pipeline", pipeline}, {"runtime", inferred_runtime},
             {"modality", inferred_modality}, {"downloads", downloads},
-            {"likes", likes}, {"private", item.value("private", false)},
-            {"gated", item.value("gated", nlohmann::json(false))},
-            {"lastModified", item.value("lastModified", "")},
+            {"likes", likes}, {"private", false},
+            {"gated", catalogue_item_is_gated(item)},
+            {"lastModified", last_modified},
+            {"trendingScore", trending_score},
+            {"license", catalogue_license(tags)},
+            {"format", compatibility->format},
+            {"compatibleArtifacts", compatibility->artifacts},
             {"hasVision", has_vision},
-            {"recommended", downloads >= 1000 || likes >= 25}
+            {"recommended", trending_score > 0 || downloads >= 1000 || likes >= 25}
         });
     }
-    std::sort(results.begin(), results.end(), [](const auto& left, const auto& right) {
+    std::sort(results.begin(), results.end(), [&sort](const auto& left, const auto& right) {
+        if (sort == "trending") {
+            const auto left_value = left.value("trendingScore", 0.0);
+            const auto right_value = right.value("trendingScore", 0.0);
+            if (left_value != right_value) return left_value > right_value;
+        } else if (sort == "likes") {
+            const auto left_value = left.value("likes", 0LL);
+            const auto right_value = right.value("likes", 0LL);
+            if (left_value != right_value) return left_value > right_value;
+        } else if (sort == "recent") {
+            const auto left_value = left.value("lastModified", "");
+            const auto right_value = right.value("lastModified", "");
+            if (left_value != right_value) return left_value > right_value;
+        } else {
+            const auto left_value = left.value("downloads", 0LL);
+            const auto right_value = right.value("downloads", 0LL);
+            if (left_value != right_value) return left_value > right_value;
+        }
         const auto left_downloads = left.value("downloads", 0LL);
         const auto right_downloads = right.value("downloads", 0LL);
         if (left_downloads != right_downloads) return left_downloads > right_downloads;
         return left.value("likes", 0LL) > right.value("likes", 0LL);
     });
+    if (results.size() > static_cast<std::size_t>(limit)) {
+        results.erase(results.begin() + limit, results.end());
+    }
     return Ok(std::move(results));
 }
 
@@ -57,12 +142,24 @@ Result<nlohmann::json> ModelStore::inspect(const std::string& repo) {
     auto response = transport_->get_json(
         "https://huggingface.co/api/models/" + repo + "?blobs=true", token_);
     if (!response) return Err<nlohmann::json>(response.error().code, response.error().message);
-    const std::string revision = response->value("sha", "main");
-    const std::string pipeline = response->value("pipeline_tag", "");
-    const auto tags = response->value("tags", nlohmann::json::array());
+    if (!response->is_object()) {
+        return Err<nlohmann::json>(
+            ErrorCode::ParseError, "invalid model source response");
+    }
+    std::string revision = catalogue_string(*response, "sha");
+    if (revision.empty()) revision = "main";
+    const std::string pipeline =
+        catalogue_string(*response, "pipeline_tag");
+    const auto tags_value = response->find("tags");
+    const nlohmann::json tags =
+        tags_value != response->end() && tags_value->is_array()
+            ? *tags_value : nlohmann::json::array();
     const std::string repository_searchable =
         lower(repo + " " + pipeline + " " + tags.dump());
-    const auto siblings = response->value("siblings", nlohmann::json::array());
+    const auto siblings_value = response->find("siblings");
+    const nlohmann::json siblings =
+        siblings_value != response->end() && siblings_value->is_array()
+            ? *siblings_value : nlohmann::json::array();
     const bool sherpa_asr_repository =
         lower(pipeline).find("automatic-speech-recognition") != std::string::npos &&
         std::any_of(siblings.begin(), siblings.end(), [](const auto& sibling) {
@@ -71,14 +168,28 @@ Result<nlohmann::json> ModelStore::inspect(const std::string& repo) {
         });
     nlohmann::json files = nlohmann::json::array();
     for (const auto& sibling : siblings) {
-        const std::string filename = sibling.value("rfilename", "");
+        const std::string filename =
+            catalogue_string(sibling, "rfilename");
         const std::string runtime = sherpa_asr_repository
             ? "sherpa_onnx"
             : infer_runtime(filename, pipeline, repository_searchable);
         if (filename.empty() || !compatible_extension(filename, runtime)) continue;
-        const auto lfs = sibling.value("lfs", nlohmann::json::object());
-        const std::uint64_t size = lfs.value("size", sibling.value("size", std::uint64_t{0}));
-        const std::string sha = lfs.value("sha256", lfs.value("oid", ""));
+        if ((runtime == "llama_cpp" && !is_primary_llama_artifact(filename)) ||
+            (runtime == "stable_diffusion_cpp" &&
+             !is_primary_image_artifact(filename)) ||
+            (runtime == "whisper_cpp" &&
+             !is_primary_whisper_artifact(filename))) {
+            continue;
+        }
+        const auto lfs_value = sibling.find("lfs");
+        const nlohmann::json lfs =
+            lfs_value != sibling.end() && lfs_value->is_object()
+                ? *lfs_value : nlohmann::json::object();
+        const std::uint64_t lfs_size = catalogue_unsigned(lfs, "size");
+        const std::uint64_t size = lfs_size > 0
+            ? lfs_size : catalogue_unsigned(sibling, "size");
+        std::string sha = catalogue_string(lfs, "sha256");
+        if (sha.empty()) sha = catalogue_string(lfs, "oid");
         const std::string modality = infer_modality(runtime, pipeline);
         files.push_back({
             {"repo", repo}, {"revision", revision}, {"name", filename},

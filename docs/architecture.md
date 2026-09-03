@@ -130,7 +130,7 @@ Each model can enable `optimization.schedule` with `window_start` and `window_en
 
 Model Settings owns runtime, capacity, pricing, sampler, and optimization controls. A completed optimization run is only a recommendation until the user selects **Use these values** and saves; **Discard results**, **Rerun**, closing, and cancellation never alter the active profile. Icon-only load, unload, settings, and close actions expose keyboard focus, accessible names, and tooltips.
 
-Models owns stable aliases plus catalogue and installed-artifact operations. Catalogue filters combine name, runtime, modality, selected VRAM capacity, and Hugging Face download/like popularity. The active filter summary includes a one-step reset. Archive and permanent delete remain explicit, confirmed actions and refuse loaded or active models.
+Each AI section owns a route-scoped Model Store with Discover, Downloads, and Installed views. Discover queries Hugging Face for locally compatible artifacts, defaults to trending results, and supports search, popularity or recency sorting, gated-model opt-in, and relevant runtime or VRAM filters. Repository inspection revalidates the exact standalone artifact or complete native bundle before installation. Archive and permanent delete remain explicit, confirmed actions and refuse loaded or active models.
 
 ## Post-training boundary
 

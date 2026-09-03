@@ -98,7 +98,9 @@ public:
 
     foundation::Result<nlohmann::json> search(
         const std::string& query, const std::string& runtime,
-        const std::string& modality, int limit = 20);
+        const std::string& modality, int limit = 20,
+        const std::string& sort = "trending",
+        bool include_gated = false);
     foundation::Result<nlohmann::json> inspect(const std::string& repo);
     foundation::Result<std::uint64_t> install(
         const std::string& repo, const std::string& filename,

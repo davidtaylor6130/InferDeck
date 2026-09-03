@@ -127,7 +127,7 @@ bool compatible_extension(const std::string& filename, const std::string& runtim
     if (runtime == "ace_step_cpp") return extension == ".gguf";
     if (runtime == "whisper_cpp") return extension == ".bin" || extension == ".gguf";
     if (runtime == "sherpa_onnx") {
-        return extension == ".onnx" || extension == ".bin" ||
+        return extension == ".onnx" || extension == ".ort" || extension == ".bin" ||
                extension == ".txt" || extension == ".json";
     }
     return false;
@@ -178,6 +178,202 @@ std::string infer_modality(const std::string& runtime, const std::string& pipeli
     }
     if (lower(pipeline).find("feature-extraction") != std::string::npos) return "embedding";
     return "text";
+}
+
+struct CatalogueCompatibility {
+    std::size_t artifacts{0};
+    std::string format;
+};
+
+std::string catalogue_string(const nlohmann::json& item, const char* key) {
+    if (!item.is_object()) return {};
+    const auto value = item.find(key);
+    return value != item.end() && value->is_string()
+        ? value->get<std::string>() : std::string{};
+}
+
+std::int64_t catalogue_integer(const nlohmann::json& item, const char* key) {
+    if (!item.is_object()) return 0;
+    const auto value = item.find(key);
+    if (value == item.end() ||
+        (!value->is_number_integer() && !value->is_number_unsigned())) {
+        return 0;
+    }
+    try {
+        return value->get<std::int64_t>();
+    } catch (...) {
+        return 0;
+    }
+}
+
+std::uint64_t catalogue_unsigned(const nlohmann::json& item, const char* key) {
+    if (!item.is_object()) return 0;
+    const auto value = item.find(key);
+    if (value == item.end() ||
+        (!value->is_number_integer() && !value->is_number_unsigned())) {
+        return 0;
+    }
+    try {
+        if (value->is_number_unsigned()) return value->get<std::uint64_t>();
+        const auto signed_value = value->get<std::int64_t>();
+        return signed_value > 0 ? static_cast<std::uint64_t>(signed_value) : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+double catalogue_number(const nlohmann::json& item, const char* key) {
+    if (!item.is_object()) return 0.0;
+    const auto value = item.find(key);
+    if (value == item.end() || !value->is_number()) return 0.0;
+    try {
+        return value->get<double>();
+    } catch (...) {
+        return 0.0;
+    }
+}
+
+bool catalogue_boolean(const nlohmann::json& item, const char* key) {
+    if (!item.is_object()) return false;
+    const auto value = item.find(key);
+    return value != item.end() && value->is_boolean() && value->get<bool>();
+}
+
+bool catalogue_item_is_gated(const nlohmann::json& item) {
+    const auto gated = item.find("gated");
+    if (gated == item.end() || gated->is_null()) return false;
+    if (gated->is_boolean()) return gated->get<bool>();
+    if (gated->is_string()) {
+        const std::string value = lower(gated->get<std::string>());
+        return !value.empty() && value != "false" && value != "none";
+    }
+    return true;
+}
+
+bool is_split_gguf(const std::string& name) {
+    const std::string filename = lower(
+        std::filesystem::path(name).filename().string());
+    return filename.ends_with(".gguf") &&
+           filename.find("-of-") != std::string::npos;
+}
+
+bool is_primary_llama_artifact(const std::string& name) {
+    if (!valid_artifact_path(name) || !compatible_extension(name, "llama_cpp") ||
+        is_split_gguf(name)) {
+        return false;
+    }
+    const std::string normalized = lower(name);
+    const std::string filename = lower(
+        std::filesystem::path(name).filename().string());
+    return !filename.starts_with("mmproj") &&
+           filename.find("-mmproj") == std::string::npos &&
+           normalized.find("/mtp/") == std::string::npos &&
+           filename.find("-mtp-") == std::string::npos;
+}
+
+bool is_primary_image_artifact(const std::string& name) {
+    if (!valid_artifact_path(name) ||
+        !compatible_extension(name, "stable_diffusion_cpp")) {
+        return false;
+    }
+    const std::string normalized = lower(name);
+    const std::string rooted = "/" + normalized;
+    const std::string filename = lower(
+        std::filesystem::path(name).filename().string());
+    for (const std::string_view component : {
+             "/vae/", "/text_encoder/", "/text_encoder_2/", "/clip/",
+             "/controlnet/", "/lora/", "/unet/", "/transformer/"}) {
+        if (rooted.find(component) != std::string::npos) return false;
+    }
+    return !filename.starts_with("vae") && !filename.starts_with("ae.") &&
+           !filename.starts_with("clip") &&
+           !filename.starts_with("text_encoder") &&
+           !filename.starts_with("pytorch_model") &&
+           !filename.starts_with("diffusion_pytorch_model");
+}
+
+bool is_primary_whisper_artifact(const std::string& name) {
+    if (!valid_artifact_path(name) ||
+        !compatible_extension(name, "whisper_cpp") || is_split_gguf(name)) {
+        return false;
+    }
+    const std::string filename = lower(
+        std::filesystem::path(name).filename().string());
+    const std::string extension = lower(
+        std::filesystem::path(filename).extension().string());
+    return extension == ".gguf" ||
+           (extension == ".bin" && filename.starts_with("ggml-"));
+}
+
+std::optional<CatalogueCompatibility> catalogue_compatibility(
+    const nlohmann::json& siblings, const std::string& runtime,
+    const std::string& modality) {
+    if (!siblings.is_array()) return std::nullopt;
+    std::size_t standalone_count = 0;
+    std::unordered_set<std::string> bundle_keys;
+    for (const auto& sibling : siblings) {
+        const std::string name = catalogue_string(sibling, "rfilename");
+        if (name.empty()) continue;
+        if (runtime == "llama_cpp" && is_primary_llama_artifact(name)) {
+            ++standalone_count;
+        } else if (runtime == "stable_diffusion_cpp" &&
+                   is_primary_image_artifact(name)) {
+            ++standalone_count;
+        } else if (runtime == "whisper_cpp" &&
+                   is_primary_whisper_artifact(name)) {
+            ++standalone_count;
+        } else if ((runtime == "sherpa_onnx" || runtime == "ace_step_cpp") &&
+                   valid_artifact_path(name) &&
+                   compatible_extension(name, runtime)) {
+            bundle_keys.insert(artifact_key(name));
+        }
+    }
+    if (runtime == "ace_step_cpp") {
+        if (bundle_keys.contains("text_encoder") &&
+            bundle_keys.contains("dit") && bundle_keys.contains("vae")) {
+            return CatalogueCompatibility{3, "bundle"};
+        }
+        return std::nullopt;
+    }
+    if (runtime == "sherpa_onnx") {
+        const auto contains_all = [&bundle_keys](
+                                      std::initializer_list<const char*> keys) {
+            return std::all_of(keys.begin(), keys.end(),
+                               [&bundle_keys](const char* key) {
+                                   return bundle_keys.contains(key);
+                               });
+        };
+        const bool complete_asr =
+            contains_all({"encoder", "decoder", "joiner", "tokens"});
+        const bool supertonic = bundle_keys.contains("duration_predictor") ||
+            bundle_keys.contains("text_encoder") ||
+            bundle_keys.contains("vector_estimator");
+        const bool complete_tts = supertonic
+            ? contains_all({"duration_predictor", "text_encoder",
+                            "vector_estimator", "vocoder", "tts_json",
+                            "unicode_indexer", "voice_style"})
+            : contains_all({"model", "tokens"});
+        const bool complete = modality == "audio_transcription"
+            ? complete_asr : complete_tts;
+        if (complete) {
+            return CatalogueCompatibility{bundle_keys.size(), "bundle"};
+        }
+        return std::nullopt;
+    }
+    if (standalone_count == 0) return std::nullopt;
+    const std::string format = runtime == "stable_diffusion_cpp"
+        ? "checkpoint" : runtime == "whisper_cpp" ? "whisper" : "GGUF";
+    return CatalogueCompatibility{standalone_count, format};
+}
+
+std::string catalogue_license(const nlohmann::json& tags) {
+    if (!tags.is_array()) return {};
+    for (const auto& tag : tags) {
+        if (!tag.is_string()) continue;
+        const std::string value = tag.get<std::string>();
+        if (lower(value).starts_with("license:")) return value.substr(8);
+    }
+    return {};
 }
 
 std::string infer_quantization(const std::string& filename) {
