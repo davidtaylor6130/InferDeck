@@ -1,5 +1,6 @@
 #include "model/fixed_backend.hpp"
 #include "model/imodel.hpp"
+#include "native_runtimes/image_memory_policy.hpp"
 #include "native_runtimes/png.hpp"
 
 #include <stable-diffusion.h>
@@ -85,6 +86,7 @@ public:
         params.n_threads = static_cast<int>(std::max(1U, std::thread::hardware_concurrency()));
         params.enable_mmap = true;
         params.flash_attn = true;
+        params.auto_fit = true;
         context_ = new_sd_ctx(&params);
         if (!context_ || !sd_ctx_supports_image_generation(context_)) {
             if (context_) free_sd_ctx(context_);
@@ -118,6 +120,10 @@ public:
         params.batch_count = request.count;
         params.sample_params.sample_steps = request.steps;
         params.sample_params.guidance.txt_cfg = request.guidance_scale;
+        const int vae_tile_size = image_vae_tile_size(request.width, request.height);
+        params.vae_tiling_params.enabled = vae_tile_size > 0;
+        params.vae_tiling_params.tile_size_x = vae_tile_size;
+        params.vae_tiling_params.tile_size_y = vae_tile_size;
         sd_image_t* images = nullptr;
         int count = 0;
         const auto started = std::chrono::steady_clock::now();

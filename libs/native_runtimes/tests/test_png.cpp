@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "native_runtimes/image_memory_policy.hpp"
 #include "native_runtimes/png.hpp"
 
 TEST_CASE("Native image runtime encodes valid PNG framing", "[native-runtimes]") {
@@ -12,4 +13,14 @@ TEST_CASE("Native image runtime encodes valid PNG framing", "[native-runtimes]")
     CHECK(std::to_integer<unsigned int>((*png)[2]) == 0x4e);
     CHECK(std::to_integer<unsigned int>((*png)[3]) == 0x47);
     CHECK(std::to_integer<unsigned int>((*png)[png->size() - 5]) == 0x44);
+}
+
+TEST_CASE("Native image runtime tiles VAE decode above 512 pixels",
+          "[native-runtimes][image]") {
+    using inferdeck::native_runtimes::image_vae_tile_size;
+    CHECK(image_vae_tile_size(512, 512) == 0);
+    CHECK(image_vae_tile_size(768, 512) == 256);
+    CHECK(image_vae_tile_size(512, 768) == 256);
+    CHECK(image_vae_tile_size(768, 768) == 256);
+    CHECK(image_vae_tile_size(1024, 1024) == 256);
 }
