@@ -6,6 +6,7 @@
 #include "pipeline-synth.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -85,6 +86,17 @@ struct AudioGuard {
     }
 };
 
+struct RetainedVramRefresh {
+    const ModelStore* store{};
+    std::atomic<std::size_t>* bytes{};
+
+    ~RetainedVramRefresh() {
+        if (bytes) {
+            bytes->store(store_vram_bytes(store), std::memory_order_relaxed);
+        }
+    }
+};
+
 class AceStepBackend final : public model::FixedBackend,
                              public model::IAudioGenerationBackend {
 public:
@@ -126,7 +138,7 @@ public:
             }
         }
         try {
-            store_ = store_create(EVICT_STRICT);
+            store_ = store_create(EVICT_NEVER);
             if (!store_) {
                 return foundation::Err<void>(
                     foundation::ErrorCode::Internal,
@@ -158,6 +170,8 @@ public:
                 "ACE-Step load failed");
         }
         set_loaded(true);
+        retained_vram_bytes_.store(
+            store_vram_bytes(store_), std::memory_order_relaxed);
         return foundation::Ok();
     }
 
@@ -167,6 +181,22 @@ public:
         release_context();
         return foundation::Ok();
     }
+
+    int additional_vram_reserve_mb() const override {
+        constexpr std::size_t bytes_per_mb = 1024U * 1024U;
+        const int required_mb = (std::max)(0, info_.vram_required_mb);
+        const std::size_t retained_bytes =
+            retained_vram_bytes_.load(std::memory_order_relaxed);
+        const std::size_t retained_mb =
+            retained_bytes / bytes_per_mb +
+            (retained_bytes % bytes_per_mb == 0 ? 0U : 1U);
+        if (retained_mb >= static_cast<std::size_t>(required_mb)) {
+            return 0;
+        }
+        return required_mb - static_cast<int>(retained_mb);
+    }
+
+    bool live_vram_accounting_complete() const override { return true; }
 
     foundation::Result<model::AudioGenerationResult> generate_audio(
         int, const model::AudioGenerationRequest& request,
@@ -186,6 +216,8 @@ public:
                 foundation::ErrorCode::NotLoaded,
                 "audio model is not loaded");
         }
+        RetainedVramRefresh retained_vram_refresh{
+            store_, &retained_vram_bytes_};
         try {
             AceRequest ace_request;
             request_init(&ace_request);
@@ -296,10 +328,12 @@ private:
             store_free(store_);
         }
         store_ = nullptr;
+        retained_vram_bytes_.store(0, std::memory_order_relaxed);
     }
 
     ModelStore* store_{nullptr};
     AceSynth* context_{nullptr};
+    std::atomic<std::size_t> retained_vram_bytes_{0};
     std::string text_encoder_path_;
     std::string dit_path_;
     std::string vae_path_;

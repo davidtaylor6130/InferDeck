@@ -58,6 +58,16 @@ Backends must implement the lifecycle-control overloads when an operation can
 block. The compatibility overload checks before and after synchronous work,
 but cannot interrupt an opaque third-party call by itself.
 
+GPU capacity admission prefers a fresh observed used/total VRAM sample. It
+reserves the configured safety margin plus any lazy runtime allocation not yet
+represented in that sample. Live headroom is accepted only when every resident
+GPU runtime reports complete accounting. Invalid or lifecycle-invalidated
+telemetry falls back to declared model footprints. With fresh telemetry and an
+incomplete runtime, the lower of declared availability and observed headroom
+with that runtime's full declared footprint reserved is used.
+Models in different admission pools may execute concurrently once resident;
+native load, resize, and eviction operations remain serialized.
+
 ## Voice sessions
 
 Voice priority is internal coordinator policy. A reservation requires both a

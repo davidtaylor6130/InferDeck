@@ -79,6 +79,7 @@ public:
   bool is_loaded() const noexcept override { return loaded_.load(); }
 
   int vram_usage_mb() const noexcept override;
+  bool live_vram_accounting_complete() const override { return true; }
   int n_slots() const noexcept override { return info_.n_slots; }
   int n_free_slots() const noexcept override;
   int min_slots() const noexcept override { return info_.min_slots; }

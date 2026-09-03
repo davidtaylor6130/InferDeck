@@ -26,6 +26,8 @@ bool is_independent_sidecar(const ModelInfo& info) {
     return !is_primary_model(info) && info.compute == ModelCompute::Cpu;
 }
 
+constexpr auto live_vram_observation_ttl = std::chrono::seconds{3};
+
 }
 bool BackendCoordinator::is_loaded(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -120,6 +122,32 @@ void BackendCoordinator::set_vram_budget(int total_mb, int safety_margin_mb) {
     if (changed) cv_.notify_all();
 }
 
+void BackendCoordinator::update_vram_observation(int used_mb, int total_mb) {
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const bool was_fresh = live_vram_observation_fresh_locked();
+        if (total_mb <= 0 || used_mb < 0) {
+            changed = observed_vram_total_mb_ != 0 ||
+                observed_vram_used_mb_ != 0 ||
+                observed_vram_at_ != time_point{};
+            observed_vram_used_mb_ = 0;
+            observed_vram_total_mb_ = 0;
+            observed_vram_at_ = {};
+        } else {
+            const int clamped_used_mb = std::min(used_mb, total_mb);
+            changed = !was_fresh ||
+                observed_vram_total_mb_ != total_mb ||
+                observed_vram_used_mb_ != clamped_used_mb;
+            observed_vram_total_mb_ = total_mb;
+            observed_vram_used_mb_ = clamped_used_mb;
+            observed_vram_at_ = clock::now();
+        }
+        if (changed) ++resource_generation_;
+    }
+    if (changed) cv_.notify_all();
+}
+
 int BackendCoordinator::vram_budget_mb() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return vram_budget_mb_;
@@ -157,7 +185,53 @@ int BackendCoordinator::estimated_vram_locked() const {
 
 int BackendCoordinator::available_vram_locked() const {
     if (vram_budget_mb_ <= 0) return 0;
-    return std::max(0, vram_budget_mb_ - vram_safety_margin_mb_ - estimated_vram_locked());
+    const int declared_available = std::max(
+        0, vram_budget_mb_ - vram_safety_margin_mb_ - estimated_vram_locked());
+    if (live_vram_observation_fresh_locked()) {
+        const int capacity =
+            std::min(vram_budget_mb_, observed_vram_total_mb_);
+        std::int64_t reserved = 0;
+        for (const auto& [_, backend] : instances_) {
+            if (!backend || !backend->is_loaded() ||
+                backend->estimate_vram_mb(backend->n_slots()) <= 0) continue;
+            reserved += backend->live_vram_accounting_complete()
+                ? std::max(0, backend->additional_vram_reserve_mb())
+                : std::max(0, backend->estimate_vram_mb(backend->n_slots()));
+        }
+        const std::int64_t available =
+            static_cast<std::int64_t>(capacity) -
+            static_cast<std::int64_t>(vram_safety_margin_mb_) -
+            static_cast<std::int64_t>(observed_vram_used_mb_) - reserved;
+        const int observed_available = static_cast<int>(
+            std::clamp<std::int64_t>(
+                available, 0, std::numeric_limits<int>::max()));
+        return live_vram_observation_usable_locked()
+            ? observed_available
+            : std::min(declared_available, observed_available);
+    }
+    return declared_available;
+}
+
+bool BackendCoordinator::live_vram_observation_fresh_locked() const {
+    return observed_vram_total_mb_ > 0 &&
+        observed_vram_at_ != time_point{} &&
+        clock::now() - observed_vram_at_ <= live_vram_observation_ttl;
+}
+
+bool BackendCoordinator::live_vram_observation_usable_locked() const {
+    if (!live_vram_observation_fresh_locked()) return false;
+    for (const auto& [_, backend] : instances_) {
+        if (backend && backend->is_loaded() &&
+            backend->estimate_vram_mb(backend->n_slots()) > 0 &&
+            !backend->live_vram_accounting_complete()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void BackendCoordinator::invalidate_vram_observation_locked() {
+    observed_vram_at_ = {};
 }
 
 void BackendCoordinator::select_primary_locked() {
@@ -199,7 +273,9 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
             return foundation::Ok();
         }
         if (vram_budget_mb_ <= 0 || available_vram_locked() >= required) {
-            last_resource_decision_ = name + " fits without rebalancing";
+            last_resource_decision_ = live_vram_observation_usable_locked()
+                ? name + " fits live GPU headroom"
+                : name + " fits configured VRAM budget";
             return foundation::Ok();
         }
     }
@@ -250,6 +326,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
             if (resized) {
                 last_resource_decision_ = "shrunk " + candidate + " to " +
                     std::to_string(next_slots) + " slots for " + name;
+                invalidate_vram_observation_locked();
                 ++resource_generation_;
             }
         }

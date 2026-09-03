@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <mutex>
 #include <thread>
@@ -35,12 +36,15 @@ public:
     std::function<void()> load_gate{};
     std::atomic<bool> loaded{false};
     std::atomic<int> vram_mb{4096};
+    std::atomic<int> additional_vram_mb{0};
+    std::atomic<bool> live_vram_accounting{true};
     std::atomic<int> max_slots{2};
     std::vector<int> busy_slots;
     std::vector<std::pair<int, InferenceRequest>> predictions;
     std::atomic<int> next_slot_to_assign{0};
     std::vector<CallRecord> calls;
     std::string text_to_return{"hello world"};
+    std::function<bool()> execution_gate{};
     std::mutex calls_mtx;
     ChatTemplateMeta chat_meta_{};
 
@@ -83,6 +87,12 @@ public:
 
     bool is_loaded() const override { return loaded.load(); }
     int vram_usage_mb() const override { return estimate_vram_mb(max_slots.load()); }
+    int additional_vram_reserve_mb() const override {
+        return additional_vram_mb.load();
+    }
+    bool live_vram_accounting_complete() const override {
+        return live_vram_accounting.load();
+    }
     int n_slots() const override { return max_slots.load(); }
     int min_slots() const override { return model_info.min_slots; }
     bool can_resize_slots() const override {
@@ -140,6 +150,10 @@ public:
 
     Result<InferenceResult> predict(int slot_id, const InferenceRequest& req) override {
         record("predict:" + std::to_string(slot_id));
+        if (execution_gate && !execution_gate()) {
+            return Err<InferenceResult>(ErrorCode::Timeout,
+                                        "execution rendezvous timed out");
+        }
         std::lock_guard<std::mutex> lock(calls_mtx);
         predictions.emplace_back(slot_id, req);
         InferenceResult r;
@@ -194,6 +208,25 @@ public:
         EmbeddingResult result;
         result.embeddings.resize(request.inputs.size(), std::vector<float>{1.0f, 2.0f});
         result.prompt_tokens = static_cast<int>(request.inputs.size());
+        return Ok(std::move(result));
+    }
+};
+
+class ImageBackendMock : public IBackendMock, public IImageBackend {
+public:
+    explicit ImageBackendMock(ModelInfo info) : IBackendMock(std::move(info)) {}
+
+    std::function<bool()> execution_gate{};
+
+    Result<ImageGenerationResult> generate_images(
+        int, const ImageGenerationRequest&,
+        const std::function<bool(int)>& = {}) override {
+        if (execution_gate && !execution_gate()) {
+            return Err<ImageGenerationResult>(ErrorCode::Timeout,
+                                              "execution rendezvous timed out");
+        }
+        ImageGenerationResult result;
+        result.png_images.push_back({std::byte{0x89}});
         return Ok(std::move(result));
     }
 };
@@ -964,6 +997,309 @@ TEST_CASE("BackendCoordinator: keeps two models resident when budget fits", "[mo
     REQUIRE(coordinator.get_loaded_model() == "b");
     REQUIRE(coordinator.get_loaded_models() == std::vector<std::string>{"a", "b"});
     REQUIRE(coordinator.vram_available_mb() == 0);
+}
+
+TEST_CASE("BackendCoordinator: live headroom preserves an overestimated resident model",
+          "[model][coordinator][residency][concurrency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 26000;
+    auto music = make_info("music");
+    music.role = ModelRole::Media;
+    music.modality = "audio_generation";
+    music.capabilities = {"audio_generation"};
+    music.n_slots = 1;
+    music.min_slots = 1;
+    music.vram_required_mb = 8000;
+    registry.register_model(chat);
+    registry.register_model(music);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+
+    REQUIRE(coordinator.swap_to("chat"));
+    coordinator.update_vram_observation(21000, 32000);
+    CHECK(coordinator.vram_available_mb() == 10000);
+    REQUIRE(coordinator.swap_to("music"));
+
+    CHECK(coordinator.is_loaded("chat"));
+    CHECK(coordinator.is_loaded("music"));
+    CHECK(coordinator.get_loaded_model() == "chat");
+    CHECK(coordinator.last_resource_decision() ==
+          "music fits live GPU headroom");
+}
+
+TEST_CASE("BackendCoordinator: invalid live VRAM falls back to declared capacity",
+          "[model][coordinator][residency][concurrency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 26000;
+    auto music = make_info("music");
+    music.role = ModelRole::Media;
+    music.modality = "audio_generation";
+    music.capabilities = {"audio_generation"};
+    music.n_slots = 1;
+    music.min_slots = 1;
+    music.vram_required_mb = 8000;
+    registry.register_model(chat);
+    registry.register_model(music);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+
+    REQUIRE(coordinator.swap_to("chat"));
+    coordinator.update_vram_observation(21000, 32000);
+    CHECK(coordinator.vram_available_mb() == 10000);
+    coordinator.update_vram_observation(-1, 32000);
+    CHECK(coordinator.vram_available_mb() == 5000);
+    REQUIRE(coordinator.swap_to("music"));
+
+    CHECK_FALSE(coordinator.is_loaded("chat"));
+    CHECK(coordinator.is_loaded("music"));
+}
+
+TEST_CASE("BackendCoordinator: incomplete live accounting uses declared capacity",
+          "[model][coordinator][residency][concurrency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        if (info.name == "image") {
+            backend->live_vram_accounting.store(false);
+        }
+        return backend;
+    });
+    auto image = make_info("image");
+    image.role = ModelRole::Media;
+    image.modality = "image";
+    image.capabilities = {"image_generation"};
+    image.n_slots = 1;
+    image.min_slots = 1;
+    image.vram_required_mb = 4000;
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 28000;
+    registry.register_model(image);
+    registry.register_model(chat);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+
+    REQUIRE(coordinator.swap_to("image"));
+    coordinator.update_vram_observation(2000, 32000);
+    CHECK(coordinator.vram_available_mb() == 25000);
+    REQUIRE(coordinator.swap_to("chat"));
+
+    CHECK_FALSE(coordinator.is_loaded("image"));
+    CHECK(coordinator.is_loaded("chat"));
+}
+
+TEST_CASE("BackendCoordinator: live headroom reserves lazy resident allocations",
+          "[model][coordinator][residency][concurrency]") {
+    ModelRegistry registry;
+    IModelMock* music_backend = nullptr;
+    registry.set_factory([&music_backend](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        if (info.name == "music") {
+            backend->additional_vram_mb.store(8000);
+            music_backend = backend.get();
+        }
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 21000;
+    auto music = make_info("music");
+    music.role = ModelRole::Media;
+    music.modality = "audio_generation";
+    music.capabilities = {"audio_generation"};
+    music.n_slots = 1;
+    music.min_slots = 1;
+    music.vram_required_mb = 8000;
+    registry.register_model(chat);
+    registry.register_model(music);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+
+    REQUIRE(coordinator.swap_to("chat"));
+    coordinator.update_vram_observation(21000, 32000);
+    REQUIRE(coordinator.swap_to("music"));
+    REQUIRE(music_backend != nullptr);
+    coordinator.update_vram_observation(21000, 32000);
+
+    CHECK(coordinator.vram_available_mb() == 2000);
+}
+
+TEST_CASE("BackendCoordinator: live pressure prevents unsafe co-residency",
+          "[model][coordinator][residency][concurrency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 4000;
+    auto image = make_info("image");
+    image.role = ModelRole::Media;
+    image.modality = "image";
+    image.capabilities = {"image_generation"};
+    image.n_slots = 1;
+    image.min_slots = 1;
+    image.vram_required_mb = 4000;
+    registry.register_model(chat);
+    registry.register_model(image);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+
+    REQUIRE(coordinator.swap_to("chat"));
+    coordinator.update_vram_observation(29000, 32000);
+    REQUIRE(coordinator.swap_to("image"));
+
+    CHECK_FALSE(coordinator.is_loaded("chat"));
+    CHECK(coordinator.is_loaded("image"));
+}
+
+TEST_CASE("BackendCoordinator: co-resident GPU models use independent admission pools",
+          "[model][coordinator][queue][residency][concurrency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 20000;
+    auto image = make_info("image");
+    image.role = ModelRole::Media;
+    image.modality = "image";
+    image.capabilities = {"image_generation"};
+    image.n_slots = 1;
+    image.min_slots = 1;
+    image.vram_required_mb = 4000;
+    registry.register_model(chat);
+    registry.register_model(image);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+    REQUIRE(coordinator.swap_to("chat"));
+    REQUIRE(coordinator.swap_to("image"));
+
+    const auto chat_slot = coordinator.acquire_slot("chat");
+    REQUIRE(chat_slot);
+    AcquireSlotOptions immediate;
+    immediate.block = false;
+    const auto image_slot = coordinator.acquire_slot("image", immediate);
+    REQUIRE(image_slot);
+    CHECK(coordinator.active_request_count() == 2);
+    CHECK(coordinator.active_request_count("chat") == 1);
+    CHECK(coordinator.active_request_count("image") == 1);
+    REQUIRE(coordinator.release_slot("image", *image_slot));
+    REQUIRE(coordinator.release_slot("chat", *chat_slot));
+}
+
+TEST_CASE("BackendCoordinator: co-resident model execution overlaps",
+          "[model][coordinator][execution][residency][concurrency]") {
+    ModelRegistry registry;
+    IModelMock* chat_backend = nullptr;
+    ImageBackendMock* image_backend = nullptr;
+    registry.set_factory(
+        [&chat_backend, &image_backend](const ModelInfo& info)
+            -> std::unique_ptr<IBackend> {
+            if (info.supports("image_generation")) {
+                auto backend = std::make_unique<ImageBackendMock>(info);
+                image_backend = backend.get();
+                return backend;
+            }
+            auto backend = std::make_unique<IModelMock>(info);
+            backend->vram_mb.store(info.vram_required_mb);
+            backend->max_slots.store(1);
+            backend->busy_slots.assign(1, 0);
+            chat_backend = backend.get();
+            return backend;
+        });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 20000;
+    auto image = make_info("image");
+    image.role = ModelRole::Media;
+    image.modality = "image";
+    image.capabilities = {"image_generation"};
+    image.n_slots = 1;
+    image.min_slots = 1;
+    image.vram_required_mb = 4000;
+    registry.register_model(chat);
+    registry.register_model(image);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+    REQUIRE(coordinator.swap_to("chat"));
+    REQUIRE(coordinator.swap_to("image"));
+    REQUIRE(chat_backend != nullptr);
+    REQUIRE(image_backend != nullptr);
+
+    std::mutex rendezvous_mutex;
+    std::condition_variable rendezvous_cv;
+    int arrivals = 0;
+    const auto rendezvous = [&] {
+        std::unique_lock<std::mutex> lock(rendezvous_mutex);
+        ++arrivals;
+        rendezvous_cv.notify_all();
+        return rendezvous_cv.wait_for(
+            lock, std::chrono::seconds{1}, [&] { return arrivals == 2; });
+    };
+    chat_backend->execution_gate = rendezvous;
+    image_backend->execution_gate = rendezvous;
+
+    const auto chat_slot = coordinator.acquire_slot("chat");
+    const auto image_slot = coordinator.acquire_slot("image");
+    REQUIRE(chat_slot);
+    REQUIRE(image_slot);
+    auto chat_execution = std::async(std::launch::async, [&] {
+        return coordinator.predict("chat", *chat_slot, InferenceRequest{});
+    });
+    auto image_execution = std::async(std::launch::async, [&] {
+        return coordinator.generate_images(
+            "image", *image_slot, ImageGenerationRequest{}, {});
+    });
+
+    REQUIRE(chat_execution.wait_for(std::chrono::seconds{2}) ==
+            std::future_status::ready);
+    REQUIRE(image_execution.wait_for(std::chrono::seconds{2}) ==
+            std::future_status::ready);
+    CHECK(chat_execution.get());
+    CHECK(image_execution.get());
+    REQUIRE(coordinator.release_slot("image", *image_slot));
+    REQUIRE(coordinator.release_slot("chat", *chat_slot));
 }
 
 TEST_CASE("BackendCoordinator: shrinks idle capacity before loading", "[model][coordinator][residency]") {

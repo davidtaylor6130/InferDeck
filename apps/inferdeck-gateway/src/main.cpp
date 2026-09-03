@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cctype>
 #include <csignal>
 #include <cstdint>
@@ -232,6 +233,12 @@ int run_gateway(const fs::path& config_path) {
             if (cfg.vram_budget_mb <= 0 && g.vram_total_mb > 0.0) {
                 coordinator.set_vram_budget(static_cast<int>(g.vram_total_mb),
                                             cfg.vram_safety_margin_mb);
+            }
+            if (g.available && g.vram_total_mb > 0.0 &&
+                g.vram_mb >= 0.0) {
+                coordinator.update_vram_observation(
+                    static_cast<int>(std::ceil(g.vram_mb)),
+                    static_cast<int>(g.vram_total_mb));
             }
             if (events.subscriber_count() > 0) {
                 const auto swap = swap_tracker.snapshot();

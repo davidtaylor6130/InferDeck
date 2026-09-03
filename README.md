@@ -73,11 +73,13 @@ and the same dashboard. See the [roadmap](#roadmap).
 
 - **In-process llama.cpp (Vulkan).** Direct C-API integration with no backend
   subprocess, proxy, or orphan process.
-- **Multi-model residency with async hot swap.** Models register in
-  `config/gateway.yml`; the coordinator admits resident models within the
-  configured single-GPU VRAM budget.
-  `POST /api/inferdeck/v1/swap/to/:name` drains active requests, unloads, loads the new
-  GGUF, and streams progress to the dashboard over SSE, with cancellation.
+- **Multi-model residency with concurrent execution.** Models register in
+  `config/gateway.yml`; the coordinator uses fresh GPU headroom when available
+  and declared footprints as a safe fallback. Fitting LLM, Image, and Music
+  runtimes stay resident and their independent admission pools can run
+  together. Lifecycle loads remain serialized.
+  `POST /api/inferdeck/v1/swap/to/:name` loads the selected model, evicts only
+  the idle capacity it needs, and streams progress to the dashboard over SSE.
 - **KV-cache reuse.** Longest-common-prefix prompt matching, so multi-turn
   agent sessions reuse full-attention KV state and hybrid recurrent
   checkpoints instead of re-prefilling the whole conversation each turn.
@@ -408,9 +410,10 @@ completions today.
 - [x] **Adaptive MTP decoding** for configured Qwen3.6 models at low
   concurrency, with ordinary continuous batching used outside the MTP window.
 - [ ] **Draft-model speculative decoding.** Only MTP is implemented.
-- [x] **Multi-model residency** when the detected or configured VRAM budget can
-  fit more than one model, with conservative single-resident behaviour when no
-  budget is known.
+- [x] **Multi-model residency and execution** when fresh observed GPU headroom
+  or declared footprints can fit more than one model. Independent resident
+  runtimes can accept work together; model load and eviction remain serialized
+  to protect the native backends.
 - [x] **Measured profile optimisation** using the in-house search and dashboard
   benchmark flow. It measures quality, throughput, load time, and peak VRAM
   before staging the recommended configuration.

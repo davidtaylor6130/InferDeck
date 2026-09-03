@@ -92,6 +92,7 @@ public:
     [[nodiscard]] std::vector<ResidencyInfo> residency() const;
     [[nodiscard]] int get_vram_usage() const;
     void set_vram_budget(int total_mb, int safety_margin_mb = 1024);
+    void update_vram_observation(int used_mb, int total_mb);
     [[nodiscard]] int vram_budget_mb() const;
     [[nodiscard]] int vram_available_mb() const;
     [[nodiscard]] std::string last_resource_decision() const;
@@ -207,6 +208,9 @@ private:
         const std::string& name);
     int estimated_vram_locked() const;
     int available_vram_locked() const;
+    bool live_vram_observation_fresh_locked() const;
+    bool live_vram_observation_usable_locked() const;
+    void invalidate_vram_observation_locked();
     void select_primary_locked();
 
     mutable std::mutex mutex_;
@@ -221,6 +225,9 @@ private:
     std::unordered_set<std::string> resizing_models_;
     int vram_budget_mb_{0};
     int vram_safety_margin_mb_{1024};
+    int observed_vram_used_mb_{0};
+    int observed_vram_total_mb_{0};
+    time_point observed_vram_at_{};
     std::string last_resource_decision_{};
     std::condition_variable cv_;
     std::deque<SlotWaiter> waiters_;

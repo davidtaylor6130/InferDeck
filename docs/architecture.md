@@ -53,13 +53,14 @@ Routes dispatch through the coordinator and a typed modality interface. They nev
 1. The route validates and bounds the complete request before admission.
 2. The shared coordinator queue records model, priority, arrival time, deadline, cancellation callback, and any client-scoped voice-session reservation.
 3. The head request asks the resource planner to make its model resident.
-4. The planner uses configured or DXGI-reported VRAM minus the safety margin. It may keep the current residents, shrink idle calibrated slot pools, evict an idle resident, or reject the request.
+4. The planner uses fresh observed GPU usage and total VRAM, capped by the configured budget and safety margin. It falls back to declared footprints when telemetry is stale or unavailable. It may keep the current residents, shrink idle calibrated slot pools, evict an idle resident, or reject the request.
 5. A slot increments the per-model and global active-request counts. Inference runs without holding the coordinator mutex.
 6. Client disconnect or dashboard cancellation reaches the native runtime callback.
 7. The route streams or returns output, records metrics/SQLite/EventBus activity, releases the slot, and leaves model residency to policy.
 
 This lifecycle is shared by text, embeddings, image, music generation, TTS,
 and STT. A swap or load does not create a second modality-specific queue.
+Resident models with independent admission pools may execute at the same time.
 
 Successful STT reserves the configured default conversation model for the same client through the STT-to-chat hand-off. The matching chat runs at media priority, and TTS releases the reservation. `gateway.voice_session_grace_ms` bounds abandoned sessions; clients behind a shared address can send `X-InferDeck-Voice-Session` to provide a distinct key.
 
@@ -67,7 +68,22 @@ Priority is preemptive at queue and swap boundaries. A native backend load that 
 
 ## Residency and automatic expansion
 
-`BackendCoordinator` can keep multiple models resident when their estimated footprints fit. `gateway.vram_budget_mb` overrides hardware detection; otherwise DXGI total VRAM activates multi-residency. `gateway.vram_safety_margin_mb` is always reserved.
+`BackendCoordinator` can keep multiple models resident when their actual
+headroom fits. The gateway refreshes used and total VRAM from telemetry; a
+sample expires after three seconds and every load, unload, or slot resize
+invalidates it. Live headroom is used only when every resident GPU runtime can
+account for its future peak. Otherwise the planner uses the more conservative
+of declared availability and observed pressure with the incomplete runtime's
+full declared footprint reserved.
+`gateway.vram_budget_mb` caps hardware detection and
+`gateway.vram_safety_margin_mb` is always reserved.
+
+Lazy native runtimes reserve their declared peak beyond memory already retained
+by the runtime. This prevents an unloaded phase from being double-spent while
+allowing warmed modules already present in the observed usage to count once.
+Execution uses independent per-model slots and does not hold the coordinator
+mutex. Lifecycle loads, resizes, and evictions remain serialized because
+overlapping native model initialization is unsafe.
 
 For a resident model with calibrated `vram_fixed_mb` and `vram_per_slot_mb`, the planner may reduce slots down to `min_slots`. It never guesses slot savings. Active models are not resized or evicted. If preparation fails, the coordinator preserves or restores the previous usable residency where possible and returns a typed error.
 

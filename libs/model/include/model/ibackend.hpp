@@ -74,6 +74,8 @@ public:
         (void)slots;
         return vram_usage_mb();
     }
+    virtual int additional_vram_reserve_mb() const { return 0; }
+    virtual bool live_vram_accounting_complete() const { return false; }
     virtual foundation::Result<void> resize_slots(int slots) {
         (void)slots;
         return foundation::Err<void>(foundation::ErrorCode::Unavailable,

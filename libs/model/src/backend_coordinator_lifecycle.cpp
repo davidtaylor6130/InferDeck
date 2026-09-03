@@ -110,13 +110,24 @@ foundation::Result<void> BackendCoordinator::load_with_lock_deadline(
     }
     const LifecycleControl control{deadline, cancelled};
     auto r = instance->load(control);
-    if (!r) return r;
+    if (!r) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (instance->estimate_vram_mb(instance->n_slots()) > 0) {
+                invalidate_vram_observation_locked();
+                ++resource_generation_;
+            }
+        }
+        cv_.notify_all();
+        return r;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (is_primary_model(instance->info())) {
             current_loaded_ = name;
         }
         if (instance->estimate_vram_mb(instance->n_slots()) > 0) {
+            invalidate_vram_observation_locked();
             ++resource_generation_;
         }
     }
@@ -212,7 +223,10 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
         }
         if (r) active_requests_by_model_.erase(name);
         draining_models_.erase(name);
-        if (r && released_vram > 0) ++resource_generation_;
+        if (r && released_vram > 0) {
+            invalidate_vram_observation_locked();
+            ++resource_generation_;
+        }
     }
     cv_.notify_all();
     return r;

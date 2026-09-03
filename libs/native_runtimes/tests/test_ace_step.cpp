@@ -26,6 +26,7 @@ TEST_CASE("ACE-Step runtime rejects incomplete artifact configuration",
     info.modality = "audio_generation";
     info.capabilities = {"audio_generation"};
     info.n_slots = 4;
+    info.vram_required_mb = 8192;
     registry.register_model(info);
 
     foundation::Result<std::unique_ptr<model::IBackend>> created =
@@ -35,6 +36,7 @@ TEST_CASE("ACE-Step runtime rejects incomplete artifact configuration",
                 created->get()) != nullptr);
     CHECK((*created)->info().n_slots == 1);
     CHECK((*created)->info().supports("audio_generation"));
+    CHECK((*created)->additional_vram_reserve_mb() == 8192);
     const foundation::Result<void> loaded = (*created)->load();
     REQUIRE_FALSE(loaded);
     CHECK(loaded.error().code == foundation::ErrorCode::InvalidArgument);

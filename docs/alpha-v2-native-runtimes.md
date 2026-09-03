@@ -121,9 +121,11 @@ ACE-Step model weights are not bundled. The direct synthesis path needs one
 text encoder, one DiT, and one VAE GGUF from the MIT-licensed
 [ACE-Step 1.5 GGUF repository](https://huggingface.co/Serveurperso/ACE-Step-1.5-GGUF/tree/main).
 The language-model stage is optional upstream and is deliberately omitted from
-InferDeck's initial text-to-music path. `ace_step_cpp` uses strict model-store
-eviction and one slot, so one ACE module is resident at a time and music jobs
-are serialized.
+InferDeck's initial text-to-music path. `ace_step_cpp` uses one slot, so music
+jobs are serialized. Its native model store keeps warmed modules resident until
+the coordinator evicts the Music runtime. Capacity admission reserves the
+unwarmed part of its declared peak so those lazy allocations cannot overcommit
+VRAM beside an active LLM or Image runtime.
 
 The Windows/Vulkan compatibility check pins repository revision
 `9b3707625776cc4cf775e9b12ab82f9fe48335ff` and these files:
