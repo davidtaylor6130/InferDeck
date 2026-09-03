@@ -24,3 +24,11 @@ TEST_CASE("Native image runtime tiles VAE decode above 512 pixels",
     CHECK(image_vae_tile_size(768, 768) == 256);
     CHECK(image_vae_tile_size(1024, 1024) == 256);
 }
+
+TEST_CASE("Native image runtime avoids oversized Vulkan convolution buffers",
+          "[native-runtimes][image]") {
+    using inferdeck::native_runtimes::image_use_direct_convolution;
+    CHECK(image_use_direct_convolution("vulkan"));
+    CHECK_FALSE(image_use_direct_convolution("cpu"));
+    CHECK_FALSE(image_use_direct_convolution(""));
+}

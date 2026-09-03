@@ -87,6 +87,9 @@ public:
         params.enable_mmap = true;
         params.flash_attn = true;
         params.auto_fit = true;
+        const bool use_direct_convolution = image_use_direct_convolution(backend_);
+        params.diffusion_conv_direct = use_direct_convolution;
+        params.vae_conv_direct = use_direct_convolution;
         context_ = new_sd_ctx(&params);
         if (!context_ || !sd_ctx_supports_image_generation(context_)) {
             if (context_) free_sd_ctx(context_);
