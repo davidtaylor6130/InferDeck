@@ -180,6 +180,12 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         write_error(resp, 404, "model_not_found", resolved_model.error().message);
         return;
     }
+    const auto info = deps.coordinator.registry().get_info_result(resolved_model->resolved);
+    if (!info || !info->supports("image_generation")) {
+        write_error(resp, 400, "unsupported_image_model",
+                    "model does not support image generation", "model");
+        return;
+    }
     auto job = begin_job(
         model_name, "image", request.prompt,
         nlohmann::json{

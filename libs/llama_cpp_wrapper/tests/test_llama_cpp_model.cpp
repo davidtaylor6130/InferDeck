@@ -336,6 +336,7 @@ TEST_CASE("StreamingToolCallState suppresses fallback after a tool delta", "[lla
 TEST_CASE("ContinuousBatchScheduler rejects work after stopping", "[llama][scheduler]") {
   ContinuousBatchScheduler scheduler(nullptr, nullptr, nullptr, 1);
   scheduler.stop();
+  CHECK_FALSE(scheduler.healthy());
 
   SlotTask task;
   scheduler.submit(&task);
@@ -409,7 +410,7 @@ TEST_CASE("SlotTask keeps checkpoint storage alive",
   SlotTask task;
   task.recurrent_checkpoint = checkpoint;
   task.recurrent_draft_checkpoint = draft_checkpoint;
-  task.recurrent_mtp_checkpoint = mtp_checkpoint;
+  task.recurrent_replay_checkpoint = mtp_checkpoint;
   checkpoint.reset();
   draft_checkpoint.reset();
   mtp_checkpoint.reset();
@@ -419,9 +420,9 @@ TEST_CASE("SlotTask keeps checkpoint storage alive",
   REQUIRE(task.recurrent_draft_checkpoint);
   REQUIRE(task.recurrent_draft_checkpoint->size() == 16);
   REQUIRE(task.recurrent_draft_checkpoint->front() == 5);
-  REQUIRE(task.recurrent_mtp_checkpoint);
-  REQUIRE(task.recurrent_mtp_checkpoint->size() == 8);
-  REQUIRE(task.recurrent_mtp_checkpoint->front() == 3);
+  REQUIRE(task.recurrent_replay_checkpoint);
+  REQUIRE(task.recurrent_replay_checkpoint->size() == 8);
+  REQUIRE(task.recurrent_replay_checkpoint->front() == 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +436,20 @@ namespace {
 std::string test_model_path() {
   const char* p = std::getenv("INFERDECK_TEST_MODEL");
   return p ? std::string(p) : std::string{};
+}
+
+LlamaCppConfig test_runtime_config()
+{
+  LlamaCppConfig config;
+  if (std::getenv("INFERDECK_TEST_CPU_ONLY") != nullptr)
+  {
+    config.n_gpu_layers = 0;
+    config.n_threads = 4;
+    config.kv_offload = false;
+    config.op_offload = false;
+    config.use_mmap = true;
+  }
+  return config;
 }
 
 std::string test_mtp_model_path() {
@@ -550,7 +565,7 @@ TEST_CASE("MTP recurrent checkpoint reuses an identical prompt",
   minfo.n_slots          = 1;
   minfo.context_size     = 512;
   minfo.vram_required_mb = 0;
-  LlamaCppConfig config;
+  LlamaCppConfig config = test_runtime_config();
   config.n_batch = 512;
   config.n_ubatch = 512;
   config.cache_type_k = "q4_0";
@@ -579,6 +594,266 @@ TEST_CASE("MTP recurrent checkpoint reuses an identical prompt",
   LlamaCppModel::shutdown_backend();
 }
 
+TEST_CASE("MTP multi-turn checkpoint preserves facts and matches cold inference",
+          "[llama][recurrent][mtp][mtp-fact-parity][.][requires_mtp_model]")
+{
+  const std::string gguf = test_mtp_model_path();
+  if (gguf.empty()) SKIP("INFERDECK_TEST_MTP_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+  ModelInfo info;
+  info.name = "mtp-fact-parity";
+  info.gguf_path = gguf;
+  info.n_slots = 1;
+  info.context_size = 8192;
+  info.reasoning.supported = true;
+  info.reasoning.efforts = {"none"};
+  info.reasoning.none_disables = true;
+  LlamaCppConfig config = test_runtime_config();
+  config.n_batch = 2048;
+  config.n_ubatch = 2048;
+  config.cache_type_k = "q4_0";
+  config.cache_type_v = "q4_0";
+  config.mtp_enabled = true;
+  config.mtp_draft_tokens = 2;
+  config.mtp_max_active_requests = 1;
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+
+  const std::string first_fact = "COPPER_FINCH_742";
+  const std::string changed_fact = "SILVER_OTTER_913";
+  std::string archive = "The project codename is " + first_fact + ".\nArchive notes: ";
+  for (int index = 0; index < 2048; ++index) archive += "entry ";
+  archive += "\nRemember the project codename. Reply with READY exactly 32 times, separated by spaces, and nothing else.";
+  InferenceRequest opening;
+  opening.messages = {
+      ChatMessage{"system", "Answer exactly as requested without explanations."},
+      ChatMessage{"user", archive}};
+  opening.max_output_tokens = 128;
+  opening.reasoning_effort = "none";
+  opening.enable_reasoning = false;
+  opening.sampling.temperature = 0.0f;
+  opening.sampling.seed = 742;
+  const foundation::Result<int> lease = model.acquire_slot();
+  REQUIRE(lease);
+  const foundation::Result<InferenceResult> warm = model.predict(*lease, opening);
+  REQUIRE(warm);
+  REQUIRE(warm->prompt_tokens > 2000);
+  REQUIRE(warm->text.find(first_fact) == std::string::npos);
+  REQUIRE(warm->completion_tokens >= 16);
+  REQUIRE(warm->completion_tokens > config.mtp_draft_tokens + 2);
+
+  const foundation::Result<InferenceResult> repeated = model.predict(*lease, opening);
+  REQUIRE(repeated);
+  INFO("repeat_prompt=" << repeated->prompt_tokens << " repeat_cached="
+       << repeated->cached_prompt_tokens << " warm_completion=" << warm->completion_tokens);
+  REQUIRE(repeated->cached_prompt_tokens >= warm->prompt_tokens - 32);
+  REQUIRE(repeated->cached_prompt_tokens < repeated->prompt_tokens - 1);
+  CHECK(repeated->text == warm->text);
+
+  InferenceRequest followup = opening;
+  followup.messages.push_back(ChatMessage{"assistant", warm->text});
+  followup.messages.push_back(ChatMessage{
+      "user", "What is the project codename? Reply with only the exact codename."});
+  const foundation::Result<InferenceResult> cached = model.predict(*lease, followup);
+  REQUIRE(cached);
+  INFO("warm_prompt=" << warm->prompt_tokens << " followup_prompt=" << cached->prompt_tokens
+       << " cached=" << cached->cached_prompt_tokens << " output=" << cached->text);
+  CHECK(cached->cached_prompt_tokens >= warm->prompt_tokens - 32);
+  CHECK(cached->mtp_drafted_tokens > 0);
+  const auto trimmed = [](const std::string& text)
+  {
+    const std::size_t begin = text.find_first_not_of(" \t\r\n");
+    return begin == std::string::npos ? std::string{} :
+        text.substr(begin, text.find_last_not_of(" \t\r\n") - begin + 1);
+  };
+  CHECK(trimmed(cached->text) == first_fact);
+  REQUIRE(model.release_slot(*lease));
+  REQUIRE(model.reset_all_slots());
+
+  const foundation::Result<int> cold_lease = model.acquire_slot();
+  REQUIRE(cold_lease);
+  const foundation::Result<InferenceResult> cold = model.predict(*cold_lease, followup);
+  REQUIRE(cold);
+  CHECK(cold->cached_prompt_tokens == 0);
+  CHECK(trimmed(cold->text) == first_fact);
+  CHECK(cached->text == cold->text);
+
+  InferenceRequest changed = followup;
+  const std::size_t fact_position = archive.find(first_fact);
+  REQUIRE(fact_position != std::string::npos);
+  archive.replace(fact_position, first_fact.size(), changed_fact);
+  changed.messages[1] = ChatMessage{"user", archive};
+  const foundation::Result<InferenceResult> changed_result = model.predict(*cold_lease, changed);
+  REQUIRE(changed_result);
+  INFO("changed_cached=" << changed_result->cached_prompt_tokens
+       << " changed_output=" << changed_result->text);
+  CHECK(changed_result->cached_prompt_tokens == 0);
+  CHECK(trimmed(changed_result->text) == changed_fact);
+  CHECK(changed_result->text.find(first_fact) == std::string::npos);
+  REQUIRE(model.release_slot(*cold_lease));
+  REQUIRE(model.unload());
+  LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("Concurrent turns preserve target checkpoints before solitary MTP resumes",
+          "[llama][recurrent][mtp][concurrent-cache][.][requires_mtp_model]")
+{
+  const std::string gguf = test_mtp_model_path();
+  if (gguf.empty()) SKIP("INFERDECK_TEST_MTP_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+  ModelInfo info;
+  info.name = "concurrent-target-cache";
+  info.gguf_path = gguf;
+  info.n_slots = 2;
+  info.context_size = 8192;
+  info.reasoning.supported = true;
+  info.reasoning.efforts = {"none"};
+  info.reasoning.none_disables = true;
+  LlamaCppConfig config = test_runtime_config();
+  config.n_batch = 512;
+  config.n_ubatch = 512;
+  config.cache_type_k = "q4_0";
+  config.cache_type_v = "q4_0";
+  config.mtp_enabled = true;
+  config.mtp_draft_tokens = 2;
+  config.mtp_max_active_requests = 1;
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+  const foundation::Result<int> keeper_slot = model.acquire_slot();
+  const foundation::Result<int> probe_slot = model.acquire_slot();
+  REQUIRE(keeper_slot);
+  REQUIRE(probe_slot);
+
+  InferenceRequest keeper_request;
+  keeper_request.messages = {ChatMessage{
+      "user", "Count every integer from 1 to 100000, one number per line. Do not abbreviate or explain. Continue until the output limit."}};
+  keeper_request.max_output_tokens = 4096;
+  keeper_request.reasoning_effort = "none";
+  keeper_request.enable_reasoning = false;
+  keeper_request.sampling.temperature = 0.0f;
+  keeper_request.sampling.seed = 913;
+  std::atomic<bool> cancel_keeper{false};
+  std::atomic<bool> keeper_started{false};
+  std::atomic<bool> keeper_finished{false};
+  std::future<foundation::Result<InferenceResult>> keeper = std::async(std::launch::async, [&]
+  {
+    foundation::Result<InferenceResult> result = model.predict_stream(
+        *keeper_slot, keeper_request, [&](const InferenceDelta& delta)
+        {
+          if (!delta.content.empty()) keeper_started.store(true);
+          return true;
+        }, &cancel_keeper);
+    keeper_finished.store(true);
+    return result;
+  });
+  struct CancelKeeperOnExit
+  {
+    std::atomic<bool>& flag;
+    ~CancelKeeperOnExit() { flag.store(true); }
+  } cancel_on_exit{cancel_keeper};
+  const std::chrono::seconds timeout{
+      std::getenv("INFERDECK_TEST_CPU_ONLY") ? 180 : 60};
+  const std::chrono::steady_clock::time_point start_deadline =
+      std::chrono::steady_clock::now() + timeout;
+  while (!keeper_started.load() && !keeper_finished.load() &&
+         std::chrono::steady_clock::now() < start_deadline)
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+  REQUIRE(keeper_started.load());
+  REQUIRE_FALSE(keeper_finished.load());
+
+  const std::string first_fact = "COPPER_FINCH_742";
+  const std::string changed_fact = "SILVER_OTTER_913";
+  std::string archive = "The project codename is " + first_fact + ".\nArchive notes: ";
+  for (int index = 0; index < 2048; ++index) archive += "entry ";
+  archive += "\nRemember the codename. Reply with READY exactly 16 times, separated by spaces, and nothing else.";
+  InferenceRequest opening = keeper_request;
+  opening.messages = {
+      ChatMessage{"system", "Answer exactly as requested without explanations."},
+      ChatMessage{"user", archive}};
+  opening.max_output_tokens = 64;
+  const foundation::Result<InferenceResult> warm = model.predict(*probe_slot, opening);
+  REQUIRE(warm);
+  REQUIRE_FALSE(keeper_finished.load());
+  REQUIRE(warm->prompt_tokens > 2000);
+  REQUIRE(warm->completion_tokens >= 8);
+  REQUIRE(warm->text.find(first_fact) == std::string::npos);
+  CHECK(warm->mtp_drafted_tokens == 0);
+  const foundation::Result<InferenceResult> repeated = model.predict(*probe_slot, opening);
+  REQUIRE(repeated);
+  REQUIRE_FALSE(keeper_finished.load());
+  INFO("repeat_prompt=" << repeated->prompt_tokens << " repeat_cached="
+       << repeated->cached_prompt_tokens);
+  CHECK(repeated->cached_prompt_tokens >= warm->prompt_tokens - 32);
+  CHECK(repeated->cached_prompt_tokens < repeated->prompt_tokens - 1);
+  CHECK(repeated->mtp_drafted_tokens == 0);
+  CHECK(repeated->text == warm->text);
+
+  InferenceRequest followup = opening;
+  followup.messages.push_back(ChatMessage{"assistant", warm->text});
+  followup.messages.push_back(ChatMessage{
+      "user", "What is the project codename? Reply with only the exact codename."});
+  const foundation::Result<InferenceResult> cached = model.predict(*probe_slot, followup);
+  REQUIRE(cached);
+  REQUIRE_FALSE(keeper_finished.load());
+  CHECK(cached->cached_prompt_tokens >= warm->prompt_tokens - 32);
+  CHECK(cached->mtp_drafted_tokens == 0);
+  const auto trimmed = [](const std::string& text)
+  {
+    const std::size_t begin = text.find_first_not_of(" \t\r\n");
+    return begin == std::string::npos ? std::string{} :
+        text.substr(begin, text.find_last_not_of(" \t\r\n") - begin + 1);
+  };
+  CHECK(trimmed(cached->text) == first_fact);
+  InferenceRequest changed = followup;
+  const std::size_t fact_position = archive.find(first_fact);
+  REQUIRE(fact_position != std::string::npos);
+  archive.replace(fact_position, first_fact.size(), changed_fact);
+  changed.messages[1] = ChatMessage{"user", archive};
+  const foundation::Result<InferenceResult> changed_result = model.predict(*probe_slot, changed);
+  REQUIRE(changed_result);
+  REQUIRE_FALSE(keeper_finished.load());
+  CHECK(changed_result->cached_prompt_tokens == 0);
+  CHECK(trimmed(changed_result->text) == changed_fact);
+
+  const foundation::Result<InferenceResult> survivor = model.predict_stream(
+      *probe_slot, changed, [&](const InferenceDelta& delta)
+      {
+        if (!delta.content.empty()) cancel_keeper.store(true);
+        return true;
+      });
+  REQUIRE(survivor);
+  REQUIRE(cancel_keeper.load());
+  CHECK(survivor->cached_prompt_tokens >= changed_result->prompt_tokens - 32);
+  CHECK(survivor->mtp_drafted_tokens == 0);
+  CHECK(trimmed(survivor->text) == changed_fact);
+  REQUIRE(keeper.wait_for(timeout) == std::future_status::ready);
+  REQUIRE(keeper.get());
+  REQUIRE(model.release_slot(*keeper_slot));
+  CHECK(model.execution_healthy());
+
+  const foundation::Result<InferenceResult> solitary = model.predict(*probe_slot, changed);
+  REQUIRE(solitary);
+  CHECK(solitary->cached_prompt_tokens == 0);
+  CHECK(solitary->mtp_drafted_tokens > 0);
+  CHECK(trimmed(solitary->text) == changed_fact);
+  REQUIRE(model.release_slot(*probe_slot));
+  REQUIRE(model.reset_all_slots());
+  const foundation::Result<int> cold_slot = model.acquire_slot();
+  REQUIRE(cold_slot);
+  const foundation::Result<InferenceResult> cold = model.predict(*cold_slot, followup);
+  REQUIRE(cold);
+  CHECK(cold->cached_prompt_tokens == 0);
+  CHECK(trimmed(cold->text) == first_fact);
+  CHECK(cold->text == cached->text);
+  REQUIRE(model.release_slot(*cold_slot));
+  REQUIRE(model.unload());
+  LlamaCppModel::shutdown_backend();
+}
+
 TEST_CASE("MTP cancellation is safe while another slot decodes",
           "[llama][scheduler][mtp][.][requires_mtp_model]") {
   const auto gguf = test_mtp_model_path();
@@ -592,7 +867,7 @@ TEST_CASE("MTP cancellation is safe while another slot decodes",
   minfo.n_slots = 2;
   minfo.context_size = 2048;
   minfo.vram_required_mb = 0;
-  LlamaCppConfig config;
+  LlamaCppConfig config = test_runtime_config();
   config.n_batch = 512;
   config.n_ubatch = 512;
   config.cache_type_k = "q4_0";
@@ -608,6 +883,8 @@ TEST_CASE("MTP cancellation is safe while another slot decodes",
   REQUIRE(first_slot.has_value());
   REQUIRE(second_slot.has_value());
 
+  const std::chrono::seconds timeout{
+      std::getenv("INFERDECK_TEST_CPU_ONLY") ? 180 : 60};
   std::atomic<bool> cancel_first{false};
   std::atomic<bool> first_started{false};
   std::atomic<bool> second_started{false};
@@ -632,7 +909,7 @@ TEST_CASE("MTP cancellation is safe while another slot decodes",
   });
 
   const auto first_deadline = std::chrono::steady_clock::now() +
-      std::chrono::seconds(60);
+      timeout;
   while (!first_started.load() &&
          std::chrono::steady_clock::now() < first_deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -652,9 +929,9 @@ TEST_CASE("MTP cancellation is safe while another slot decodes",
         nullptr);
   });
 
-  REQUIRE(first.wait_for(std::chrono::seconds(60)) ==
+  REQUIRE(first.wait_for(timeout) ==
           std::future_status::ready);
-  REQUIRE(second.wait_for(std::chrono::seconds(60)) ==
+  REQUIRE(second.wait_for(timeout) ==
           std::future_status::ready);
   CHECK(first.get().has_value());
   CHECK(second.get().has_value());
@@ -663,5 +940,404 @@ TEST_CASE("MTP cancellation is safe while another slot decodes",
   (void)lm.release_slot(*first_slot);
   (void)lm.release_slot(*second_slot);
   (void)lm.unload();
+  LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("Cache affinity reuses an idle sequence without moving busy work",
+          "[llama][affinity][.][requires_model]") {
+  const std::string gguf = test_model_path();
+  if (gguf.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+  ModelInfo info;
+  info.name = "cache-affinity";
+  info.gguf_path = gguf;
+  info.n_slots = 2;
+  info.context_size = 2048;
+  info.reasoning.supported = true;
+  info.reasoning.efforts = {"none"};
+  info.reasoning.none_disables = true;
+  LlamaCppConfig config = test_runtime_config();
+  config.mtp_enabled = std::getenv("INFERDECK_TEST_AFFINITY_MTP") != nullptr;
+  config.cache_type_k = "q4_0";
+  config.cache_type_v = "q4_0";
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+  InferenceRequest first;
+  first.messages = {ChatMessage{"user", std::string(600, 'A') + " Reply with exactly ALPHA."}};
+  first.max_output_tokens = 8;
+  first.reasoning_effort = "none";
+  first.enable_reasoning = false;
+  first.sampling.temperature = 0.0f;
+  InferenceRequest second = first;
+  second.messages = {ChatMessage{"user", std::string(600, 'B') + " Reply with exactly BRAVO."}};
+  const foundation::Result<int> first_slot = model.acquire_slot();
+  const foundation::Result<int> second_slot = model.acquire_slot();
+  REQUIRE(first_slot);
+  REQUIRE(second_slot);
+  const foundation::Result<InferenceResult> first_warm = model.predict(*first_slot, first);
+  REQUIRE(first_warm);
+  if (config.mtp_enabled) REQUIRE(first_warm->text.find("ALPHA") != std::string::npos);
+  const foundation::Result<InferenceResult> warm = model.predict(*second_slot, second);
+  REQUIRE(warm);
+  if (config.mtp_enabled) REQUIRE(warm->text.find("BRAVO") != std::string::npos);
+  REQUIRE(model.release_slot(*first_slot));
+  REQUIRE(model.release_slot(*second_slot));
+  for (const InferenceRequest* request : {&second, &first, &second}) {
+    const foundation::Result<int> lease = model.acquire_slot();
+    REQUIRE(lease);
+    const foundation::Result<InferenceResult> reused = model.predict(*lease, *request);
+    REQUIRE(reused);
+    INFO("prompt=" << reused->prompt_tokens << " cached=" << reused->cached_prompt_tokens);
+    CHECK(reused->cached_prompt_tokens >= reused->prompt_tokens - 16);
+    CHECK(reused->text == (request == &first ? first_warm->text : warm->text));
+    if (config.mtp_enabled)
+    {
+      CHECK(reused->mtp_drafted_tokens > 0);
+    }
+    REQUIRE(model.release_slot(*lease));
+  }
+  const foundation::Result<int> reserved_first = model.acquire_slot();
+  const foundation::Result<int> reserved_second = model.acquire_slot();
+  REQUIRE(reserved_first);
+  REQUIRE(reserved_second);
+  const foundation::Result<InferenceResult> reversed_first = model.predict(*reserved_first, first);
+  REQUIRE(reversed_first);
+  CHECK(reversed_first->cached_prompt_tokens >= reversed_first->prompt_tokens - 16);
+  CHECK(reversed_first->text == first_warm->text);
+  CHECK(model.slot_busy(*reserved_first));
+  CHECK(model.slot_busy(*reserved_second));
+  CHECK_FALSE(model.acquire_slot());
+  const foundation::Result<InferenceResult> reversed_second = model.predict(*reserved_second, second);
+  REQUIRE(reversed_second);
+  CHECK(reversed_second->cached_prompt_tokens >= reversed_second->prompt_tokens - 16);
+  CHECK(reversed_second->text == warm->text);
+  CHECK(model.slot_busy(*reserved_first));
+  CHECK(model.slot_busy(*reserved_second));
+  const foundation::Result<InferenceResult> bound_repeat = model.predict(*reserved_first, first);
+  REQUIRE(bound_repeat);
+  CHECK(bound_repeat->cached_prompt_tokens >= bound_repeat->prompt_tokens - 16);
+  CHECK(bound_repeat->text == first_warm->text);
+  CHECK(model.slot_busy(*reserved_second));
+  REQUIRE(model.release_slot(*reserved_first));
+  REQUIRE(model.release_slot(*reserved_second));
+  const foundation::Result<int> busy = model.acquire_slot();
+  const foundation::Result<int> other = model.acquire_slot();
+  REQUIRE(busy);
+  REQUIRE(other);
+  CHECK(model.slot_busy(*busy));
+  CHECK(model.slot_busy(*other));
+  REQUIRE(model.predict(*other, second));
+  CHECK(model.slot_busy(*busy));
+  REQUIRE(model.release_slot(*busy));
+  REQUIRE(model.release_slot(*other));
+  REQUIRE(model.reset_all_slots());
+  const foundation::Result<int> reset = model.acquire_slot();
+  REQUIRE(reset);
+  const foundation::Result<InferenceResult> cold = model.predict(*reset, second);
+  REQUIRE(cold);
+  CHECK(cold->cached_prompt_tokens == 0);
+  REQUIRE(model.release_slot(*reset));
+  REQUIRE(model.unload());
+  LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("History fitting bounds renders and preserves complete recent tool turns",
+          "[llama][history]")
+{
+  common_chat_templates_inputs inputs;
+  const auto append = [&](const std::string& role, const std::string& content)
+  {
+    common_chat_msg message;
+    message.role = role;
+    message.content = content;
+    inputs.messages.push_back(std::move(message));
+  };
+  append("system", "policy");
+  append("developer", "instructions");
+  for (int index = 0; index < 256; ++index)
+  {
+    append("user", "old question " + std::to_string(index));
+    append("assistant", "old answer");
+  }
+  append("user", "latest question");
+  append("assistant", "latest tool call");
+  append("tool", "latest result");
+  int renders = 0;
+  const std::size_t dropped = fit_chat_history(inputs,
+      [&](const common_chat_templates_inputs& candidate)
+      {
+        ++renders;
+        return candidate.messages.size() <= 5;
+      });
+  CHECK(dropped == 512);
+  CHECK(renders <= 11);
+  REQUIRE(inputs.messages.size() == 5);
+  CHECK(inputs.messages[0].content == "policy");
+  CHECK(inputs.messages[1].content == "instructions");
+  CHECK(inputs.messages[2].content == "latest question");
+  CHECK(inputs.messages.back().content == "latest result");
+  CHECK(fit_chat_history(inputs, [](const common_chat_templates_inputs&) { return false; }) == 0);
+  CHECK(inputs.messages.size() == 5);
+  CHECK(fit_chat_history(inputs, [](const common_chat_templates_inputs&) { return true; }) == 0);
+}
+
+TEST_CASE("Batch scheduling reserves decode capacity and rotates prompt service",
+          "[llama][scheduler][fairness]")
+{
+  SlotTask first;
+  SlotTask second;
+  SlotTask decoder;
+  decoder.prompt_done = true;
+  decoder.spec_draft = {4, 5};
+  std::vector<SlotTask*> tasks{&first, &second, &decoder};
+  CHECK(detail::prepare_batch_order(tasks, 16, 0) == 7);
+  CHECK(tasks.front() == &decoder);
+  CHECK(tasks[1] == &first);
+  tasks = {&first, &second, &decoder};
+  CHECK(detail::prepare_batch_order(tasks, 16, 1) == 7);
+  CHECK(tasks.front() == &decoder);
+  CHECK(tasks[1] == &second);
+  decoder.caller_cancel.store(true);
+  CHECK(detail::prepare_batch_order(tasks, 16, 0) == 8);
+  second.caller_stop.store(true);
+  CHECK(detail::prepare_batch_order(tasks, 16, 0) == 16);
+  tasks = {&first};
+  CHECK(detail::prepare_batch_order(tasks, 512, 0) == 512);
+  tasks = {&first, &second};
+  second.caller_stop.store(false);
+  CHECK(detail::prepare_batch_order(tasks, 1, 0) == 1);
+  CHECK(tasks.front() == &first);
+  tasks = {&first, &second};
+  CHECK(detail::prepare_batch_order(tasks, 1, 1) == 1);
+  CHECK(tasks.front() == &second);
+}
+
+TEST_CASE("Equal-share prefill keeps sequence order while constrained quotas rotate",
+          "[llama][scheduler][fairness][prefill-order]")
+{
+  SlotTask first;
+  SlotTask second;
+  SlotTask third;
+  SlotTask fourth;
+  first.slot_id = 0;
+  second.slot_id = 1;
+  third.slot_id = 2;
+  fourth.slot_id = 3;
+  const std::vector<SlotTask*> original{&third, &first, &fourth, &second};
+  for (std::size_t turn = 0; turn < original.size(); ++turn)
+  {
+    std::vector<SlotTask*> tasks = original;
+    CHECK(detail::prepare_batch_order(tasks, 2048, turn) == 512);
+    for (std::size_t index = 0; index < tasks.size(); ++index)
+    {
+      CHECK(tasks[index]->slot_id == static_cast<int>(index));
+    }
+    tasks = original;
+    CHECK(detail::prepare_batch_order(tasks, 2047, turn) == 512);
+    CHECK(tasks.front() == original[turn]);
+    tasks = original;
+    CHECK(detail::prepare_batch_order(tasks, 3, turn) == 1);
+    CHECK(tasks.front() == original[turn]);
+  }
+  SlotTask decoder;
+  decoder.slot_id = 4;
+  decoder.prompt_done = true;
+  std::vector<SlotTask*> mixed = original;
+  mixed.push_back(&decoder);
+  CHECK(detail::prepare_batch_order(mixed, 2049, 2) == 512);
+  CHECK(mixed.front() == &decoder);
+  for (std::size_t index = 1; index < mixed.size(); ++index)
+  {
+    CHECK(mixed[index]->slot_id == static_cast<int>(index - 1));
+  }
+  fourth.caller_cancel.store(true);
+  mixed = original;
+  CHECK(detail::prepare_batch_order(mixed, 2046, 1) == 682);
+  CHECK(mixed.front() == &first);
+}
+
+TEST_CASE("Decoder batches keep sequence order without starving smaller batches",
+          "[llama][scheduler][fairness][decoder-order]")
+{
+  SlotTask first;
+  SlotTask second;
+  SlotTask third;
+  first.slot_id = 0;
+  second.slot_id = 1;
+  third.slot_id = 2;
+  first.prompt_done = second.prompt_done = third.prompt_done = true;
+  SlotTask prompt_a;
+  SlotTask prompt_b;
+  bool served_a_first = false;
+  bool served_b_first = false;
+  for (std::size_t turn = 0; turn < 10; ++turn)
+  {
+    INFO("turn=" << turn);
+    std::vector<SlotTask*> decoding{&third, &first, &second};
+    CHECK(detail::prepare_batch_order(decoding, 3, turn) == 0);
+    CHECK(decoding == std::vector<SlotTask*>{&first, &second, &third});
+    std::vector<SlotTask*> mixed{&prompt_a, &third, &first, &prompt_b, &second};
+    CHECK(detail::prepare_batch_order(mixed, 7, turn) == 2);
+    CHECK(std::vector<SlotTask*>(mixed.begin(), mixed.begin() + 3) ==
+          std::vector<SlotTask*>{&first, &second, &third});
+    CHECK(((mixed[3] == &prompt_a && mixed[4] == &prompt_b) ||
+           (mixed[3] == &prompt_b && mixed[4] == &prompt_a)));
+    served_a_first = served_a_first || mixed[3] == &prompt_a;
+    served_b_first = served_b_first || mixed[3] == &prompt_b;
+  }
+  CHECK(served_a_first);
+  CHECK(served_b_first);
+  const std::vector<SlotTask*> original{&third, &first, &second};
+  for (std::size_t turn = 0; turn < 6; ++turn)
+  {
+    std::vector<SlotTask*> small = original;
+    CHECK(detail::prepare_batch_order(small, 1, turn) == 0);
+    CHECK(small.front() == original[turn % original.size()]);
+  }
+  first.spec_draft = {4, 5};
+  std::vector<SlotTask*> speculative = original;
+  CHECK(detail::prepare_batch_order(speculative, 4, 2) == 0);
+  CHECK(speculative.front() == &second);
+  speculative = original;
+  CHECK(detail::prepare_batch_order(speculative, 5, 2) == 0);
+  CHECK(speculative == std::vector<SlotTask*>{&first, &second, &third});
+}
+
+TEST_CASE("Mixed requests serve a short prompt before a long prefill finishes",
+          "[llama][mixed][.][requires_model]")
+{
+  const std::string gguf = test_model_path();
+  if (gguf.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+  ModelInfo info;
+  info.name = "mixed-prefill";
+  info.gguf_path = gguf;
+  info.n_slots = 2;
+  info.context_size = 8192;
+  info.reasoning.supported = true;
+  info.reasoning.efforts = {"none"};
+  info.reasoning.none_disables = true;
+  LlamaCppModel model(info, test_runtime_config());
+  REQUIRE(model.load());
+  const foundation::Result<int> long_slot = model.acquire_slot();
+  const foundation::Result<int> short_slot = model.acquire_slot();
+  REQUIRE(long_slot);
+  REQUIRE(short_slot);
+  InferenceRequest long_request;
+  std::string content;
+  for (int index = 0; index < 6000; ++index) content += "word ";
+  long_request.messages = {ChatMessage{"user", content + " Reply with OK."}};
+  long_request.max_output_tokens = 4;
+  long_request.reasoning_effort = "none";
+  long_request.enable_reasoning = false;
+  long_request.sampling.temperature = 0.0f;
+  InferenceRequest short_request;
+  short_request.messages = {ChatMessage{"user", "Reply with only SHORT_OK."}};
+  short_request.max_output_tokens = 8;
+  short_request.reasoning_effort = "none";
+  short_request.enable_reasoning = false;
+  short_request.sampling.temperature = 0.0f;
+  std::atomic<int> sequence{0};
+  std::atomic<int> long_first{0};
+  std::atomic<int> short_first{0};
+  std::future<foundation::Result<InferenceResult>> long_run = std::async(std::launch::async, [&]
+  {
+    return model.predict_stream(*long_slot, long_request, [&](const InferenceDelta& delta)
+    {
+      if (!delta.content.empty() && long_first.load() == 0) long_first.store(++sequence);
+      return true;
+    });
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const foundation::Result<InferenceResult> short_result = model.predict_stream(
+      *short_slot, short_request, [&](const InferenceDelta& delta)
+      {
+        if (!delta.content.empty() && short_first.load() == 0) short_first.store(++sequence);
+        return true;
+      });
+  const foundation::Result<InferenceResult> long_result = long_run.get();
+  REQUIRE(short_result);
+  REQUIRE(long_result);
+  CHECK(short_first.load() > 0);
+  CHECK(short_first.load() < long_first.load());
+  REQUIRE(model.release_slot(*long_slot));
+  REQUIRE(model.release_slot(*short_slot));
+  REQUIRE(model.reset_all_slots());
+  const foundation::Result<int> serial_slot = model.acquire_slot();
+  REQUIRE(serial_slot);
+  const foundation::Result<InferenceResult> serial = model.predict(*serial_slot, short_request);
+  REQUIRE(serial);
+  INFO("concurrent=" << short_result->text << " serial=" << serial->text);
+  CHECK_FALSE(short_result->text.empty());
+  CHECK(short_result->text == serial->text);
+  foundation::LOG_INFO("mixed_prefill_verification",
+      "long_prompt_ms={} short_first_token_ms={} short_first={} long_first={}",
+      long_result->prompt_duration_ms, short_result->first_token_duration_ms,
+      short_first.load(), long_first.load());
+  REQUIRE(model.release_slot(*serial_slot));
+  REQUIRE(model.unload());
+  LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("Non-stream cancellation during prompt processing preserves the peer",
+          "[llama][cancel-prefill][.][requires_model]") {
+  const std::string gguf = test_model_path();
+  if (gguf.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+  ModelInfo info;
+  info.name = "cancel-prefill";
+  info.gguf_path = gguf;
+  info.n_slots = 2;
+  info.context_size = 4096;
+  LlamaCppConfig config = test_runtime_config();
+  config.n_threads = 4;
+  config.n_batch = 64;
+  config.n_ubatch = 64;
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+  const auto first = model.acquire_slot();
+  const auto peer = model.acquire_slot();
+  REQUIRE(first);
+  REQUIRE(peer);
+  InferenceRequest short_request;
+  short_request.messages = {ChatMessage{"user", "Reply with only OK."}};
+  short_request.max_output_tokens = 4;
+  short_request.sampling.temperature = 0.0f;
+  const auto baseline = model.predict(*peer, short_request);
+  REQUIRE(baseline);
+  InferenceRequest long_request = short_request;
+  std::string words;
+  for (int index = 0; index < 3000; ++index) words += "word ";
+  long_request.messages = {ChatMessage{"user", words + " Reply with OK."}};
+  long_request.max_output_tokens = 512;
+  std::atomic<bool> cancelled{false};
+  std::future<foundation::Result<InferenceResult>> pending =
+      std::async(std::launch::async, [&] {
+        return model.predict_cancellable(*first, long_request, &cancelled);
+      });
+  std::this_thread::sleep_for(std::chrono::milliseconds{50});
+  const auto concurrent = model.predict(*peer, short_request);
+  cancelled.store(true);
+  const auto partial = pending.get();
+  REQUIRE(concurrent);
+  REQUIRE(partial);
+  CHECK(concurrent->text == baseline->text);
+  CHECK(partial->prompt_tokens < 3000);
+  CHECK(partial->prompt_duration_ms > 0);
+  CHECK(partial->generation_duration_ms == 0);
+  CHECK(partial->completion_tokens == 0);
+  REQUIRE(model.release_slot(*first));
+  REQUIRE(model.release_slot(*peer));
+  const auto reused = model.acquire_slot();
+  REQUIRE(reused);
+  const auto after = model.predict(*reused, short_request);
+  REQUIRE(after);
+  CHECK(after->text == baseline->text);
+  CHECK(model.execution_healthy());
+  REQUIRE(model.release_slot(*reused));
+  REQUIRE(model.unload());
   LlamaCppModel::shutdown_backend();
 }

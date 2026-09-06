@@ -8,6 +8,7 @@ describe('dashboard boundary', () => {
   it('exposes Image and Music as complete dashboard divisions', () => {
     expect(DASHBOARD_PAGES).toEqual([
       { id: 'home', label: 'Home' },
+      { id: 'requests', label: 'Requests' },
       { id: 'settings', label: 'API Settings' },
       { id: 'llm/settings', label: 'Model Settings', section: 'llm' },
       { id: 'llm/models', label: 'Model Store', section: 'llm' },

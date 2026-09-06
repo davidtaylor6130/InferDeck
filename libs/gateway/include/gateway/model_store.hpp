@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -141,6 +142,7 @@ private:
         std::uint64_t id, std::string state, std::string error = {});
     void release_quantization_resource() noexcept;
     void run(std::uint64_t id);
+    foundation::Result<void> begin_install_commit(std::uint64_t id);
     void run_bundle(std::uint64_t id, const StoreDownload& job,
                     const std::shared_ptr<std::atomic<bool>>& cancelled);
     void fail_job(std::uint64_t id, std::string error) noexcept;
@@ -170,6 +172,7 @@ private:
     std::unordered_map<std::uint64_t, std::thread> workers_;
     std::unordered_map<std::uint64_t, std::shared_ptr<std::atomic<bool>>> worker_done_;
     std::unordered_map<std::string, std::uint64_t> reserved_names_;
+    std::unordered_set<std::uint64_t> committing_installs_;
     nlohmann::json installed_{nlohmann::json::object()};
     std::mutex manifest_mutex_;
     std::uint64_t next_id_{1};

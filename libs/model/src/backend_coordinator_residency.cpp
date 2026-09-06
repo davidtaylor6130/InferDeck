@@ -36,6 +36,13 @@ bool BackendCoordinator::is_loaded(const std::string& name) const {
     return it->second->is_loaded();
 }
 
+bool BackendCoordinator::is_ready(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto backend = instances_.find(name);
+    return backend != instances_.end() && backend->second &&
+        backend->second->is_loaded() && backend->second->execution_healthy();
+}
+
 std::optional<std::string> BackendCoordinator::get_loaded_model() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return current_loaded_;

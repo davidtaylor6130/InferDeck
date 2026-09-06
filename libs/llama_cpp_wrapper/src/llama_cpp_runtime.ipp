@@ -7,7 +7,7 @@ void LlamaCppModel::init_backend() {
   if (!g_backend_initialized) {
     llama_backend_init();
     g_backend_initialized = true;
-    LOG_INFO("llama_backend_init", "Vulkan backend initialized");
+    LOG_INFO("llama_backend_init", "llama.cpp backends initialized");
   }
 }
 void LlamaCppModel::shutdown_backend() {
@@ -332,6 +332,9 @@ Result<void> LlamaCppModel::init_shared_context_locked() {
 
   slots_.clear();
   slots_.resize(n_slots);
+  for (int index = 0; index < n_slots; ++index) {
+    slots_[index].sequence_id = index;
+  }
 
   // Spawn the scheduler that owns the decode loop for this context.
   if (info_.supports("chat_completions")) {
@@ -442,11 +445,22 @@ int LlamaCppModel::n_free_slots() const noexcept {
   return free;
 }
 
+bool LlamaCppModel::execution_healthy() const {
+  std::lock_guard lock(mtx_);
+  return loaded_.load() && (!info_.supports("chat_completions") ||
+      (scheduler_ && scheduler_->healthy()));
+}
+
 Result<int> LlamaCppModel::acquire_slot() {
   std::lock_guard lk(mtx_);
   if (!loaded_.load()) {
     return Result<int>(std::unexpect,
         make_error(ErrorCode::Internal, "model not loaded"));
+  }
+  if (info_.supports("chat_completions") &&
+      (!scheduler_ || !scheduler_->healthy())) {
+    return Result<int>(std::unexpect,
+        make_error(ErrorCode::Unavailable, "model execution failed; reload required"));
   }
   for (int i = 0; i < static_cast<int>(slots_.size()); ++i) {
     if (!slots_[i].busy) {
@@ -466,6 +480,7 @@ Result<void> LlamaCppModel::release_slot(int slot_id) {
   }
   auto& slot = slots_[slot_id];
   slot.busy = false;
+  slot.sequence_bound = false;
   return Result<void>{};
 }
 
@@ -497,10 +512,11 @@ Result<void> LlamaCppModel::reset_all_slots() noexcept {
   }
   for (auto& s : slots_) {
     s.busy = false;
+    s.sequence_bound = false;
     s.last_prompt_tokens.clear();
     s.recurrent_checkpoint.reset();
     s.recurrent_draft_checkpoint.reset();
-    s.recurrent_mtp_checkpoint.reset();
+    s.recurrent_replay_checkpoint.reset();
     s.checkpoint_pos = 0;
     s.mtp_cache_synced = true;
   }

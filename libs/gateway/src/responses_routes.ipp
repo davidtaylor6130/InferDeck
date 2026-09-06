@@ -77,7 +77,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
             acquired->reservation_key,
             acquired->voice_session_token.value_or(0),
             deps.voice_session_grace_ms, std::move(observation));
-        auto result = session.run(parsed->generation);
+        auto result = session.run(parsed->generation, [&req] { return req.is_connection_closed(); });
         if (!result) {
             const auto error = map_openai_error(result.error().code);
             write_error(resp, error.status, error.code, result.error().message);

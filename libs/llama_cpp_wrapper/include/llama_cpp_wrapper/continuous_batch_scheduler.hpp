@@ -113,7 +113,7 @@ struct SlotTask {
     std::vector<int> last_prompt_tokens;      // previous call's tokens (KV reuse hint)
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_draft_checkpoint;
-    std::shared_ptr<const std::vector<uint8_t>> recurrent_mtp_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_replay_checkpoint;
     int checkpoint_pos{0};
     int checkpoint_capture_pos{0};
     common_sampler* sampler{nullptr};         // scheduler takes ownership; freed on completion
@@ -149,7 +149,7 @@ struct SlotTask {
     int out_cached_prompt_tokens{0};
     std::shared_ptr<const std::vector<uint8_t>> out_recurrent_checkpoint;
     std::shared_ptr<const std::vector<uint8_t>> out_recurrent_draft_checkpoint;
-    std::shared_ptr<const std::vector<uint8_t>> out_recurrent_mtp_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> out_recurrent_replay_checkpoint;
     int out_checkpoint_pos{0};
     bool out_mtp_cache_synced{true};
     float out_prompt_duration_ms{0.0f};
@@ -161,6 +161,10 @@ struct SlotTask {
     std::condition_variable out_cv;
     std::queue<TokenEvent> out_queue;
 };
+
+namespace detail {
+int prepare_batch_order(std::vector<SlotTask*>& tasks, int capacity, std::size_t turn);
+}
 
 // Central continuous-batching scheduler for one loaded model.
 // Owns the inference loop: collects tokens from all active SlotTasks each iteration,
@@ -194,6 +198,7 @@ public:
     void stop();
 
     llama_context* ctx() const noexcept { return ctx_; }
+    bool healthy() const noexcept { return !failed_.load() && !stop_.load(); }
 
 private:
     void run_loop();
@@ -216,6 +221,7 @@ private:
     std::condition_variable sub_cv_;
     std::vector<SlotTask*> active_;
     std::string terminal_error_;
+    std::atomic<bool> failed_{false};
     std::atomic<bool> stop_{false};
     std::thread thread_;
 };

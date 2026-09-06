@@ -265,7 +265,8 @@ model_registry:
     completion_price_per_million: 1.00
     gguf_path: "C:/Inferdeck/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf"
     mmproj_path: ""
-    n_slots: 2
+    n_slots: 3
+    min_slots: 2
     vram_required_mb: 26000
     context_size: 100096
     has_vision: false
@@ -288,7 +289,7 @@ model_registry:
     min_slots: 2
     vram_required_mb: 27000
     context_size: 100000
-    n_batch: 2048
+    n_batch: 4096
     n_ubatch: 2048
     cache_type_k: "q4_0"
     cache_type_v: "q4_0"

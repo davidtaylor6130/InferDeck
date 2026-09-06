@@ -20,6 +20,15 @@ Result<void> LlamaCppModel::drain_task(SlotTask& task, const OnToken& on_token) 
 }
 
 Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceRequest& req) {
+  return predict_cancellable(slot_id, req, nullptr);
+}
+
+Result<InferenceResult> LlamaCppModel::predict_cancellable(
+    int slot_id, const InferenceRequest& req, const std::atomic<bool>* cancel) {
+  if (cancel && cancel->load()) {
+    return Result<InferenceResult>(std::unexpect,
+        make_error(ErrorCode::Cancelled, "request cancelled"));
+  }
   if (slot_id < 0 || slot_id >= static_cast<int>(slots_.size())) {
     return Result<InferenceResult>(std::unexpect,
         make_error(ErrorCode::InvalidArgument, "slot_id out of range"));
@@ -44,14 +53,15 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
   bool string_stopped = false;
 
   SlotTask task;
-  task.slot_id             = slot_id;
+  task.ext_cancel = cancel;
+  task.slot_id             = setup.sequence_id;
   task.prompt_tokens       = setup.prompt_tokens;
   task.media_chunks        = std::move(setup.media_chunks);
   task.prompt_position_count = setup.prompt_position_count;
   task.last_prompt_tokens  = setup.last_prompt_tokens;
   task.recurrent_checkpoint = std::move(setup.recurrent_checkpoint);
   task.recurrent_draft_checkpoint = std::move(setup.recurrent_draft_checkpoint);
-  task.recurrent_mtp_checkpoint = std::move(setup.recurrent_mtp_checkpoint);
+  task.recurrent_replay_checkpoint = std::move(setup.recurrent_replay_checkpoint);
   task.checkpoint_pos       = setup.checkpoint_pos;
   task.checkpoint_capture_pos = setup.checkpoint_capture_pos;
   task.mtp_cache_synced    = setup.mtp_cache_synced;
@@ -111,9 +121,17 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
                                    decoded_ids.begin(), decoded_ids.end());
     slot.recurrent_checkpoint = std::move(task.out_recurrent_checkpoint);
     slot.recurrent_draft_checkpoint = std::move(task.out_recurrent_draft_checkpoint);
-    slot.recurrent_mtp_checkpoint = std::move(task.out_recurrent_mtp_checkpoint);
+    slot.recurrent_replay_checkpoint = std::move(task.out_recurrent_replay_checkpoint);
     slot.checkpoint_pos       = task.out_checkpoint_pos;
     slot.mtp_cache_synced     = task.out_mtp_cache_synced;
+    if (task.caller_cancel.load() || (task.ext_cancel && task.ext_cancel->load())) {
+      slot.last_prompt_tokens.clear();
+      slot.recurrent_checkpoint.reset();
+      slot.recurrent_draft_checkpoint.reset();
+      slot.recurrent_replay_checkpoint.reset();
+      slot.checkpoint_pos = 0;
+      slot.mtp_cache_synced = false;
+    }
   }
 
   log_slot_release(info_.name,
@@ -123,15 +141,14 @@ Result<InferenceResult> LlamaCppModel::predict(int slot_id, const InferenceReque
                    setup.n_ctx_seq);
 
   InferenceResult out;
-  out.prompt_tokens         = static_cast<int>(setup.prompt_tokens.size());
+  out.prompt_tokens         = std::min(task.prompt_pos, static_cast<int>(setup.prompt_tokens.size()));
   out.cached_prompt_tokens  = task.out_cached_prompt_tokens;
   out.completion_tokens     = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
   out.prompt_duration_ms = task.out_prompt_duration_ms;
   out.first_token_duration_ms = task.out_first_token_duration_ms;
-  out.generation_duration_ms = task.out_generation_duration_ms > 0.0f
-      ? task.out_generation_duration_ms
-      : out.duration_ms;
+  out.generation_duration_ms = task.generation_started
+      ? task.out_generation_duration_ms : 0.0f;
   out.tokens_per_second = detail::generation_tokens_per_second(
       out.completion_tokens, out.generation_duration_ms);
   out.mtp_drafted_tokens = task.n_drafted;
@@ -187,14 +204,14 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   bool string_stopped = false;
 
   SlotTask task;
-  task.slot_id            = slot_id;
+  task.slot_id             = setup.sequence_id;
   task.prompt_tokens      = setup.prompt_tokens;
   task.media_chunks       = std::move(setup.media_chunks);
   task.prompt_position_count = setup.prompt_position_count;
   task.last_prompt_tokens = setup.last_prompt_tokens;
   task.recurrent_checkpoint = std::move(setup.recurrent_checkpoint);
   task.recurrent_draft_checkpoint = std::move(setup.recurrent_draft_checkpoint);
-  task.recurrent_mtp_checkpoint = std::move(setup.recurrent_mtp_checkpoint);
+  task.recurrent_replay_checkpoint = std::move(setup.recurrent_replay_checkpoint);
   task.checkpoint_pos      = setup.checkpoint_pos;
   task.checkpoint_capture_pos = setup.checkpoint_capture_pos;
   task.mtp_cache_synced    = setup.mtp_cache_synced;
@@ -281,9 +298,17 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
                                    decoded_ids.begin(), decoded_ids.end());
     slot.recurrent_checkpoint = std::move(task.out_recurrent_checkpoint);
     slot.recurrent_draft_checkpoint = std::move(task.out_recurrent_draft_checkpoint);
-    slot.recurrent_mtp_checkpoint = std::move(task.out_recurrent_mtp_checkpoint);
+    slot.recurrent_replay_checkpoint = std::move(task.out_recurrent_replay_checkpoint);
     slot.checkpoint_pos       = task.out_checkpoint_pos;
     slot.mtp_cache_synced     = task.out_mtp_cache_synced;
+    if (task.caller_cancel.load() || (task.ext_cancel && task.ext_cancel->load())) {
+      slot.last_prompt_tokens.clear();
+      slot.recurrent_checkpoint.reset();
+      slot.recurrent_draft_checkpoint.reset();
+      slot.recurrent_replay_checkpoint.reset();
+      slot.checkpoint_pos = 0;
+      slot.mtp_cache_synced = false;
+    }
   }
 
   log_slot_release(info_.name,
@@ -293,15 +318,14 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
                    setup.n_ctx_seq);
 
   InferenceResult out;
-  out.prompt_tokens        = static_cast<int>(setup.prompt_tokens.size());
+  out.prompt_tokens        = std::min(task.prompt_pos, static_cast<int>(setup.prompt_tokens.size()));
   out.cached_prompt_tokens = task.out_cached_prompt_tokens;
   out.completion_tokens    = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
   out.prompt_duration_ms = task.out_prompt_duration_ms;
   out.first_token_duration_ms = task.out_first_token_duration_ms;
-  out.generation_duration_ms = task.out_generation_duration_ms > 0.0f
-      ? task.out_generation_duration_ms
-      : out.duration_ms;
+  out.generation_duration_ms = task.generation_started
+      ? task.out_generation_duration_ms : 0.0f;
   out.tokens_per_second = detail::generation_tokens_per_second(
       out.completion_tokens, out.generation_duration_ms);
   out.mtp_drafted_tokens = task.n_drafted;

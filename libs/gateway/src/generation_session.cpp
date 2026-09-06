@@ -53,10 +53,10 @@ GenerationSession::~GenerationSession() {
     finish_once(true, 499, "session_destroyed");
 }
 
-void GenerationSession::start(model::InferenceRequest request) {
-    inference_thread = std::thread([this, request = std::move(request)]() {
+void GenerationSession::start(model::InferenceRequest request, bool stream) {
+    inference_thread = std::thread([this, request = std::move(request), stream]() {
         try {
-            auto result = coordinator->predict_stream(
+            auto result = stream ? coordinator->predict_stream(
                 model_name, slot_id, request,
                 [this](const model::InferenceDelta& delta) {
                     if (aborted.load()) return false;
@@ -77,7 +77,8 @@ void GenerationSession::start(model::InferenceRequest request) {
                     cv.notify_one();
                     return !aborted.load();
                 },
-                &aborted);
+                &aborted)
+                : coordinator->predict(model_name, slot_id, request, &aborted);
             {
                 std::lock_guard lock(mtx);
                 if (result) {
@@ -112,40 +113,37 @@ void GenerationSession::start(model::InferenceRequest request) {
 }
 
 foundation::Result<model::InferenceResult> GenerationSession::run(
-    const model::InferenceRequest& request) {
-    try {
-        auto result = coordinator->predict(model_name, slot_id, request);
-        std::lock_guard lock(mtx);
-        inference_done = true;
-        if (result) {
-            final_result = std::make_shared<model::InferenceResult>(*result);
-        } else {
-            inference_error = true;
-            error_code = result.error().code;
-            error_msg = result.error().message;
-        }
-        return result;
-    } catch (const std::exception& error) {
-        std::lock_guard lock(mtx);
-        inference_done = true;
-        inference_error = true;
-        error_msg = error.what();
-        return foundation::Err<model::InferenceResult>(
-            foundation::ErrorCode::Internal, error.what());
-    } catch (...) {
-        std::lock_guard lock(mtx);
-        inference_done = true;
-        inference_error = true;
-        error_msg = "unknown exception";
-        return foundation::Err<model::InferenceResult>(
-            foundation::ErrorCode::Internal, error_msg);
+    const model::InferenceRequest& request, const std::function<bool()>& cancelled) {
+    if (cancelled && cancelled()) aborted.store(true);
+    start(request, false);
+    std::unique_lock lock(mtx);
+    while (!inference_done) {
+        lock.unlock();
+        if (cancelled && cancelled()) aborted.store(true);
+        lock.lock();
+        cv.wait_for(lock, std::chrono::milliseconds{50}, [this] {
+            return inference_done;
+        });
     }
+    lock.unlock();
+    if (inference_thread.joinable()) inference_thread.join();
+    if (cancelled && cancelled()) aborted.store(true);
+    if (aborted.load()) {
+        observation.error_code = "cancelled";
+        return foundation::Err<model::InferenceResult>(
+            foundation::ErrorCode::Cancelled, "request cancelled");
+    }
+    if (inference_error) {
+        return foundation::Err<model::InferenceResult>(error_code, error_msg);
+    }
+    return *final_result;
 }
 
 void GenerationSession::finish_once(bool aborted_stream, int fallback_status,
                                     const std::string& reason) {
     bool expected = false;
     if (!cleanup_done.compare_exchange_strong(expected, true)) return;
+    aborted_stream = aborted_stream || aborted.load();
     if (aborted_stream) aborted.store(true);
     cv.notify_all();
     if (inference_thread.joinable()) {
@@ -172,7 +170,7 @@ void GenerationSession::finish_once(bool aborted_stream, int fallback_status,
         status = aborted_stream ? 499
             : (error && fallback_status < 400 ? 500 : fallback_status);
         record_request(metrics, stats_db, events, requested_model,
-                       model::InferenceResult{}, status, slot_id,
+                       result ? *result : model::InferenceResult{}, status, slot_id,
                        0.0, 0, model_name, observation);
     }
     LOG_INFO("stream_recorded", "model={} slot_id={} status={} reason={}",

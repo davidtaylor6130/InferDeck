@@ -86,6 +86,7 @@ using ProfileBenchmarkTrialRunner = std::function<
         const model::ModelInfo&,
         const optimize::ProfileCandidate&,
         const std::vector<ProfileBenchmarkPrompt>&,
+    const std::vector<int>&,
         const std::atomic<bool>&,
         const ProfileBenchmarkProgress&)>;
 

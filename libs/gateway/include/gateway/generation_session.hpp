@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,9 +38,10 @@ public:
     GenerationSession(const GenerationSession&) = delete;
     GenerationSession& operator=(const GenerationSession&) = delete;
 
-    void start(model::InferenceRequest request);
+    void start(model::InferenceRequest request, bool stream = true);
     foundation::Result<model::InferenceResult> run(
-        const model::InferenceRequest& request);
+        const model::InferenceRequest& request,
+        const std::function<bool()>& cancelled = {});
     void finish_once(bool aborted_stream, int fallback_status,
                      const std::string& reason);
 

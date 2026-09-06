@@ -84,6 +84,7 @@ public:
     foundation::Result<void> swap_to(const std::string& name);
 
     [[nodiscard]] bool is_loaded(const std::string& name) const;
+    [[nodiscard]] bool is_ready(const std::string& name) const;
     [[nodiscard]] std::optional<std::string> get_loaded_model() const;
     [[nodiscard]] std::optional<std::string> selected_model() const;
     [[nodiscard]] ModelIdentitySnapshot identity_snapshot(
@@ -124,7 +125,8 @@ public:
         const std::string& key, const std::string& model) const;
 
     foundation::Result<InferenceResult> predict(
-        const std::string& name, int slot_id, const InferenceRequest& req);
+        const std::string& name, int slot_id, const InferenceRequest& req,
+        const std::atomic<bool>* cancel = nullptr);
 
     foundation::Result<InferenceResult> predict_stream(
         const std::string& name, int slot_id, const InferenceRequest& req,

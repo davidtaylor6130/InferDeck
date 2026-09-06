@@ -465,3 +465,90 @@ TEST_CASE("StatsDb: recent requests filter by profile and endpoint",
   CHECK(db.recent_requests(10, "strict_openai",
       "/compat/openai-derivative/v1/responses").empty());
 }
+
+TEST_CASE("StatsDb: transient write contention does not disable later history",
+          "[observability][stats][recovery]")
+{
+  const std::filesystem::path directory = test_helpers::make_temp_dir("statsdb_busy");
+  const std::string path = (directory / "stats.db").string();
+  StatsDb db(path);
+  db.record_request({1000, "existing", 10, 20, 500.0, 40.0, 200, 0});
+  const std::shared_ptr<const DashboardStatsSnapshot> before = db.dashboard_snapshot();
+  sqlite3* raw = nullptr;
+  REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+  const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> blocker(raw, sqlite3_close);
+  REQUIRE(sqlite3_exec(raw, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) == SQLITE_OK);
+  SECTION("request write")
+  {
+    db.record_request({2000, "blocked", 1, 1, 1.0, 1.0, 200, 0});
+  }
+  SECTION("swap write")
+  {
+    db.record_swap({2000, "existing", "blocked", 1.0, false, ""});
+  }
+  CHECK(db.healthy());
+  CHECK(db.dashboard_snapshot() == before);
+  REQUIRE(sqlite3_exec(raw, "ROLLBACK;", nullptr, nullptr, nullptr) == SQLITE_OK);
+  db.record_request({3000, "recovered", 1, 1, 1.0, 1.0, 200, 0});
+  db.record_swap({3000, "existing", "recovered", 1.0, true, ""});
+  CHECK(db.healthy());
+  CHECK(db.recent_requests().size() == 2);
+  REQUIRE(db.recent_swaps().size() == 1);
+  CHECK(db.recent_swaps()[0].to_model == "recovered");
+  CHECK(db.dashboard_snapshot() != before);
+}
+
+TEST_CASE("StatsDb: dashboard snapshot reuses and invalidates consistent aggregates",
+          "[observability][stats][snapshot]")
+{
+  StatsDb db(":memory:");
+  const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  db.record_request({now, "first", 100, 20, 30.0, 1.0, 200, 0,
+                     0.0, 0, 75, 20.0, 10.0, 2500.0});
+  const std::shared_ptr<const DashboardStatsSnapshot> first = db.dashboard_snapshot();
+  CHECK(db.dashboard_snapshot() == first);
+  REQUIRE(first->models.size() == 1);
+  REQUIRE(first->daily.size() == 1);
+  REQUIRE(first->monthly.size() == 1);
+  REQUIRE(first->hourly.size() == 1);
+  CHECK(first->models[0].cached_prompt_tokens == first->daily[0].cached_prompt_tokens);
+  CHECK(first->models[0].total_generation_duration_ms == first->monthly[0].generation_duration_ms);
+  CHECK(first->models[0].measured_prompt_tokens == first->hourly[0].measured_prompt_tokens);
+  db.record_request({now, "new-model", 7, 3, 1.0, 1.0, 200, 0});
+  const std::shared_ptr<const DashboardStatsSnapshot> second = db.dashboard_snapshot();
+  CHECK(second != first);
+  CHECK(first->models.size() == 1);
+  CHECK(second->models.size() == 2);
+  CHECK(second->monthly.size() == 2);
+  CHECK(second->daily.size() == 2);
+  CHECK(second->hourly.size() == 2);
+  CHECK(second->recent.size() == 2);
+}
+
+TEST_CASE("StatsDb: concurrent new models cannot split dashboard snapshots",
+          "[observability][stats][snapshot][concurrency]")
+{
+  StatsDb db(":memory:");
+  std::atomic<bool> started{false};
+  std::jthread writer([&]
+  {
+    while (!started.load()) std::this_thread::yield();
+    for (int index = 0; index < 40; ++index)
+    {
+      db.record_request({1000 + index, "model-" + std::to_string(index),
+                         10, 20, 1.0, 1.0, 200, 0});
+      std::this_thread::yield();
+    }
+  });
+  started = true;
+  for (int iteration = 0; iteration < 40; ++iteration)
+  {
+    const std::shared_ptr<const DashboardStatsSnapshot> snapshot = db.dashboard_snapshot();
+    CHECK(snapshot->models.size() == snapshot->monthly.size());
+    CHECK(snapshot->models.size() == snapshot->recent.size());
+    std::this_thread::yield();
+  }
+  writer.join();
+  CHECK(db.dashboard_snapshot()->models.size() == 40);
+}

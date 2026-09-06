@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   cancelMediaJob,
   getMediaJobs,
@@ -13,6 +13,8 @@ import {
   ProgressBar,
   SectionTitle,
 } from '../components/ui';
+
+import { usePolling } from '../usePolling';
 
 const DICTATION_MODALITIES = ['audio_speech', 'audio_transcription'];
 
@@ -68,30 +70,14 @@ export const MediaJobsPanel: React.FC<MediaJobsPanelProps> = ({
   const [loadError, setLoadError] = useState('');
   const filterKey = modalities.join(',');
 
-  useEffect(() => {
-    let active = true;
-    const refresh = async () => {
-      try {
-        const result = await getMediaJobs();
-        if (active) {
-          setJobs(result);
-          setLoadError('');
-        }
-      } catch (error) {
-        if (active) {
-          setLoadError(
-            error instanceof Error ? error.message : 'Media history is unavailable',
-          );
-        }
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(() => { void refresh(); }, 1000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [filterKey, refreshToken]);
+  const receiveJobs = useCallback((result: MediaJob[]) => {
+    setJobs(result);
+    setLoadError('');
+  }, []);
+  const failed = useCallback((error: unknown) => {
+    setLoadError(error instanceof Error ? error.message : 'Media history is unavailable');
+  }, []);
+  usePolling(getMediaJobs, receiveJobs, failed, 1000, `${filterKey}:${refreshToken}`);
 
   const visibleJobs = useMemo(
     () => jobs.filter(job => modalities.includes(job.modality)).slice(0, 20),

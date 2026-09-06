@@ -77,6 +77,7 @@ public:
       const inferdeck::model::LifecycleControl& control) override;
   inferdeck::foundation::Result<void> unload() override;
   bool is_loaded() const noexcept override { return loaded_.load(); }
+  bool execution_healthy() const override;
 
   int vram_usage_mb() const noexcept override;
   bool live_vram_accounting_complete() const override { return true; }
@@ -94,6 +95,10 @@ public:
 
   inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict(
       int slot_id, const inferdeck::model::InferenceRequest& req) override;
+  inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict_cancellable(
+      int slot_id, const inferdeck::model::InferenceRequest& req,
+      const std::atomic<bool>* cancel) override;
+
   inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict_stream(
       int slot_id, const inferdeck::model::InferenceRequest& req,
       const inferdeck::model::IModel::TokenCallback& callback,
@@ -109,24 +114,27 @@ public:
 private:
   // Per-slot bookkeeping (no llama_context here — all slots share shared_ctx_)
   struct SlotState {
+    int sequence_id{-1};
     bool busy{false};
+    bool sequence_bound{false};
     std::vector<int> last_prompt_tokens;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_draft_checkpoint;
-    std::shared_ptr<const std::vector<uint8_t>> recurrent_mtp_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_replay_checkpoint;
     int checkpoint_pos{0};
     bool mtp_cache_synced{true};
   };
 
   inferdeck::foundation::Result<void> init_shared_context_locked();
   // max_prompt_tokens > 0 enables history-aware truncation: oldest whole
-  // non-system messages are dropped (preserving recency + coherence) until the
+  // non-system turns are dropped (preserving recency + coherence) until the
   // templated prompt fits the budget. 0 disables truncation.
   inferdeck::foundation::Result<ChatTemplateResult> apply_chat_template(
       const inferdeck::model::InferenceRequest& req, int max_prompt_tokens = 0);
 
   // Per-inference setup: tokenize, KV-state snapshot, sampler construction.
   struct PredictSetup {
+    int sequence_id{-1};
     std::vector<llama_token> prompt_tokens;
     std::vector<SlotTask::MediaChunk> media_chunks;
     int prompt_position_count{0};
@@ -140,7 +148,7 @@ private:
     std::vector<int> last_prompt_tokens;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_draft_checkpoint;
-    std::shared_ptr<const std::vector<uint8_t>> recurrent_mtp_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_replay_checkpoint;
     int checkpoint_pos{0};
     int checkpoint_capture_pos{0};
     bool mtp_cache_synced{true};

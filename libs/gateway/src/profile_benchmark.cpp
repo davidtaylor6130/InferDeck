@@ -12,7 +12,38 @@ namespace {
 
 constexpr double minimum_vram_reserve_mb = 2048.0;
 constexpr double baseline_vram_tolerance_mb = 256.0;
+constexpr double minimum_performance_improvement = 1.02;
 
+bool preserves_measured_workloads(const ProfileBenchmarkTrialMetrics& candidate,
+                                  const ProfileBenchmarkTrialMetrics& baseline) {
+    const auto preserves_rate = [](double measured, double control) {
+        return std::isfinite(measured) && std::isfinite(control) &&
+            control > 0.0 && measured >= control;
+    };
+    if (!preserves_rate(candidate.prompt_tokens_per_second,
+                        baseline.prompt_tokens_per_second) ||
+        !preserves_rate(candidate.average_tokens_per_second,
+                        baseline.average_tokens_per_second)) {
+        return false;
+    }
+    if (baseline.concurrency.empty()) {
+        return preserves_rate(candidate.parallel_tokens_per_second,
+                              baseline.parallel_tokens_per_second);
+    }
+    for (const auto& control : baseline.concurrency) {
+        const auto measured = std::find_if(
+            candidate.concurrency.begin(), candidate.concurrency.end(),
+            [&control](const auto& workload) {
+                return workload.requests == control.requests;
+            });
+        if (measured == candidate.concurrency.end() ||
+            !preserves_rate(measured->aggregate_tokens_per_second,
+                            control.aggregate_tokens_per_second)) {
+            return false;
+        }
+    }
+    return true;
+}
 std::int64_t unix_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -320,6 +351,8 @@ void ProfileBenchmarkManager::run(
         }
 
         const auto suite = prompts();
+        std::vector<int> concurrency_levels{input.slots >= 2 ? 2 : 1};
+        if (input.slots > 2) concurrency_levels.push_back(std::min(4, input.slots));
         update_stage("baseline", "Measuring the current active profile");
         ProfileBenchmarkTrial baseline;
         baseline.candidate = active_candidate;
@@ -328,7 +361,7 @@ void ProfileBenchmarkManager::run(
             update_stage("baseline_" + stage, "Current profile: " + message);
         };
         auto baseline_metrics = runner_(
-            model, baseline.candidate, suite, cancel_requested_, baseline_progress);
+            model, baseline.candidate, suite, concurrency_levels, cancel_requested_, baseline_progress);
         if (!baseline_metrics) {
             baseline.error = baseline_metrics.error().message;
             {
@@ -381,7 +414,7 @@ void ProfileBenchmarkManager::run(
                          static_cast<double>(total)) * 90.0;
                 };
             auto measured =
-                runner_(model, selected[index], suite,
+                runner_(model, selected[index], suite, concurrency_levels,
                         cancel_requested_, progress);
             ProfileBenchmarkTrial trial;
             trial.candidate = selected[index];
@@ -514,14 +547,31 @@ void ProfileBenchmarkManager::run(
                             "Rejected because concurrent MTP drafting was not verified for every request");
                     }
                 }
-                if (trial.metrics.quality_score + 0.0001 <
-                    state_.baseline.metrics.quality_score) {
+                if (!std::isfinite(trial.metrics.quality_score) ||
+                    !std::isfinite(state_.baseline.metrics.quality_score) ||
+                    state_.baseline.metrics.quality_total <= 0 ||
+                    trial.metrics.quality_total != state_.baseline.metrics.quality_total ||
+                    trial.metrics.quality_passes < state_.baseline.metrics.quality_passes ||
+                    trial.metrics.quality_score + 0.0001 <
+                        state_.baseline.metrics.quality_score) {
                     trial.candidate.fits = false;
                     trial.candidate.reasons.push_back(
-                        "Rejected because correctness probes regressed from the current profile");
+                        "Rejected because correctness probes regressed or were incomplete");
+                }
+                if (!preserves_measured_workloads(
+                        trial.metrics, state_.baseline.metrics)) {
+                    trial.candidate.fits = false;
+                    trial.candidate.reasons.push_back(
+                        "Rejected because a baseline throughput workload regressed or was not measured");
+                }
+                if (!std::isfinite(trial.candidate.overall_score) ||
+                    trial.candidate.overall_score < minimum_performance_improvement) {
+                    trial.candidate.fits = false;
+                    trial.candidate.reasons.push_back(
+                        "Rejected because measured improvement was below 2 percent");
                 }
                 if (!trial.candidate.fits) {
-                    trial.candidate.overall_score *= 0.25;
+                    trial.candidate.overall_score = 0.0;
                 }
             }
             auto best = std::max_element(
@@ -545,9 +595,15 @@ void ProfileBenchmarkManager::run(
                 state_.has_recommendation = true;
             }
         }
-        if (!snapshot().has_recommendation) {
-            finish("failed",
-                   "Measured trials produced no faster candidate that preserved correctness and VRAM reserve",
+        const ProfileBenchmarkSnapshot completed = snapshot();
+        if (!completed.has_recommendation) {
+            const bool measured_candidate = std::any_of(
+                completed.trials.begin(), completed.trials.end(),
+                [](const ProfileBenchmarkTrial& trial) { return trial.completed; });
+            finish(measured_candidate ? "completed" : "failed",
+                   measured_candidate
+                       ? "Measured benchmark complete; no candidate improved on the current profile"
+                       : "Could not measure any candidate profile",
                    restored);
             return;
         }

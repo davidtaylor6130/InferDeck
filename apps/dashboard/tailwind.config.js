@@ -7,13 +7,13 @@ export default {
   theme: {
     extend: {
       colors: {
-        'void-black': '#050814',
-        'deck-navy': '#0B1220',
+        'void-black': '#000000',
+        'deck-navy': '#000000',
         'panel-slate': '#111827',
         'elevated-slate': '#162033',
         'card-highlight': '#1B2540',
         'border-slate': '#27344D',
-        'text-primary': '#F8FAFC',
+        'text-primary': '#FFFFFF',
         'text-secondary': '#94A3B8',
         'text-muted': '#64748B',
         'infer-violet': '#8B5CF6',

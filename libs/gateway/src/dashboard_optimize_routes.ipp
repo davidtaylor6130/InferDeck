@@ -157,6 +157,8 @@
                 body.value("cacheTypeK", std::string{"q8_0"});
             input.cache_type_v =
                 body.value("cacheTypeV", std::string{"q8_0"});
+            input.flash_attention =
+                body.value("flashAttention", std::string{"auto"});
             const auto started = deps.profile_benchmark->start(
                 info, input, body.value("candidateLimit", 3));
             if (!started) {

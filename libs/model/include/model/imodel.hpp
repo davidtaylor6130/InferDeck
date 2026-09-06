@@ -184,6 +184,15 @@ public:
     virtual foundation::Result<InferenceResult> predict(
         int slot_id, const InferenceRequest& req) = 0;
 
+    virtual foundation::Result<InferenceResult> predict_cancellable(
+        int slot_id, const InferenceRequest& req, const std::atomic<bool>* cancel) {
+        if (cancel && cancel->load()) {
+            return foundation::Err<InferenceResult>(foundation::ErrorCode::Cancelled,
+                                                    "request cancelled");
+        }
+        return predict(slot_id, req);
+    }
+
     // `cancel`, when non-null and set to true, requests that an in-flight
     // generation stop as soon as possible (checked between tokens / after
     // prefill). Defaulted so non-streaming implementations need not override.

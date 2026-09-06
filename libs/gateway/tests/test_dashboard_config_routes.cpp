@@ -19,6 +19,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
@@ -86,6 +87,7 @@ struct ConfigRouteServer {
         [this](const inferdeck::model::ModelInfo& info,
                const inferdeck::optimize::ProfileCandidate& candidate,
                const std::vector<ProfileBenchmarkPrompt>&,
+               const std::vector<int>& concurrency_levels,
                const std::atomic<bool>& cancel,
                const ProfileBenchmarkProgress& progress) {
             progress("quality", "fake measured quality probe");
@@ -115,8 +117,8 @@ struct ConfigRouteServer {
             result.quality_total = 3;
             result.prompt_tokens = 128;
             result.completion_tokens = 24;
-            for (const int requests : {2, 4}) {
-                if (requests > candidate.slots) continue;
+            for (const int requests : concurrency_levels) {
+
                 ProfileBenchmarkConcurrencyMetrics concurrency;
                 concurrency.requests = requests;
                 concurrency.aggregate_tokens_per_second =
@@ -143,10 +145,11 @@ struct ConfigRouteServer {
         [this](const inferdeck::model::ModelInfo& info,
                const inferdeck::optimize::ProfileCandidate& candidate,
                const std::vector<ProfileBenchmarkPrompt>& prompts,
+               const std::vector<int>& concurrency_levels,
                const std::atomic<bool>& cancel,
                const ProfileBenchmarkProgress& progress) {
             return benchmark_runner(
-                info, candidate, prompts, cancel, progress);
+                info, candidate, prompts, concurrency_levels, cancel, progress);
         }};
     httplib::Server server;
     std::thread thread;
@@ -1022,6 +1025,7 @@ TEST_CASE("Scheduled optimization starts once while the gateway is idle",
     CHECK(status->last_started_unix_ms > 0);
     CHECK(status->last_finished_unix_ms > 0);
     CHECK(status->last_outcome == "completed");
+    CHECK_FALSE(routes.profile_benchmark.snapshot().has_recommendation);
     const auto first_started = status->last_started_unix_ms;
     scheduler.evaluate();
     const auto repeated = scheduler.statuses();
@@ -1189,6 +1193,7 @@ TEST_CASE("Measured profile benchmark runs candidates and returns real metrics",
         {"nUbatch", 2048},
         {"cacheTypeK", "q4_0"},
         {"cacheTypeV", "q8_0"},
+        {"flashAttention", "off"},
         {"candidateLimit", 2},
     };
 
@@ -1211,7 +1216,8 @@ TEST_CASE("Measured profile benchmark runs candidates and returns real metrics",
     CHECK(body["baseline"]["completed"] == true);
     CHECK(body["baseline"]["qualityTotal"] == 3);
     CHECK(body["baseline"]["performanceIndex"] == 100.0);
-    REQUIRE(body["recommended"].is_object());
+    CHECK(body["baseline"]["flashAttention"] == "off");
+    CHECK(body["recommended"].is_null());
     CHECK(body["candidates"].size() == 2);
     CHECK(body["candidates"][0]["averageTokensPerSecond"].get<double>() > 0.0);
     CHECK(body["candidates"][0]["promptTokensPerSecond"].get<double>() > 0.0);
@@ -1355,4 +1361,149 @@ TEST_CASE("Measured benchmark blocks model changes and can be cancelled",
     CHECK_FALSE(inferdeck::gateway::maintenance_blocks_model(resource_deps, "test-27b"));
     CHECK(inferdeck::gateway::maintenance_blocks_model(resource_deps, "whisper-test"));
     routes.maintenance_resource.store(ComputeResource::None);
+}
+
+TEST_CASE("Measured benchmark only recommends a verified improvement",
+          "[gateway][dashboard][optimize][benchmark][improvement]") {
+    double prompt_ratio = 1.1;
+    double generation_ratio = 1.1;
+    double parallel_ratio = 1.1;
+    double quality = 1.0;
+    bool include_concurrency = true;
+    bool complete_quality = true;
+    bool valid_baseline = true;
+    bool expected = false;
+    bool baseline_failure = false;
+    bool candidate_failure = false;
+    SECTION("slower candidates") {
+        prompt_ratio = generation_ratio = parallel_ratio = 0.9;
+    }
+    SECTION("equal candidates") {
+        prompt_ratio = generation_ratio = parallel_ratio = 1.0;
+    }
+    SECTION("measurement noise") {
+        prompt_ratio = generation_ratio = parallel_ratio = 1.01;
+    }
+    SECTION("prompt regression hidden by faster generation") {
+        prompt_ratio = 0.9;
+        generation_ratio = 2.0;
+    }
+    SECTION("concurrency regression hidden by faster generation") {
+        parallel_ratio = 0.9;
+        generation_ratio = 2.0;
+    }
+    SECTION("missing concurrent workload") { include_concurrency = false; }
+    SECTION("quality regression") { quality = 0.9; }
+    SECTION("invalid baseline throughput") { valid_baseline = false; }
+    SECTION("nonfinite throughput") { generation_ratio = std::numeric_limits<double>::infinity(); }
+    SECTION("nonfinite quality") { quality = std::numeric_limits<double>::quiet_NaN(); }
+    SECTION("incomplete quality probes") { complete_quality = false; }
+    SECTION("baseline measurement failed") { baseline_failure = true; }
+    SECTION("candidate measurement failed") { candidate_failure = true; }
+    SECTION("verified improvement") { expected = true; }
+
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    int calls = 0;
+    routes.benchmark_runner = [&](const inferdeck::model::ModelInfo&,
+                                  const inferdeck::optimize::ProfileCandidate&,
+                                  const std::vector<ProfileBenchmarkPrompt>&,
+                                  const std::vector<int>&,
+                                  const std::atomic<bool>&,
+                                  const ProfileBenchmarkProgress&) {
+        const bool baseline = calls++ == 0;
+        if ((baseline && baseline_failure) || (!baseline && candidate_failure)) {
+            return inferdeck::foundation::Err<ProfileBenchmarkTrialMetrics>(
+                ErrorCode::Internal, "benchmark measurement failed");
+        }
+        ProfileBenchmarkTrialMetrics metrics;
+        metrics.prompt_tokens_per_second = 100.0 * (baseline ? (valid_baseline ? 1.0 : 0.0) : prompt_ratio);
+        metrics.average_tokens_per_second = 100.0 * (baseline ? 1.0 : generation_ratio);
+        metrics.parallel_tokens_per_second = 100.0 * (baseline ? 1.0 : parallel_ratio);
+        metrics.peak_vram_mb = 24000.0;
+        metrics.quality_score = baseline ? 1.0 : quality;
+        metrics.quality_passes = 3;
+        metrics.quality_total = baseline || complete_quality ? 3 : 2;
+        if (baseline || include_concurrency) {
+            ProfileBenchmarkConcurrencyMetrics concurrent;
+            concurrent.requests = 2;
+            concurrent.aggregate_tokens_per_second = metrics.parallel_tokens_per_second;
+            metrics.concurrency.push_back(concurrent);
+        }
+        return inferdeck::foundation::Ok(std::move(metrics));
+    };
+    inferdeck::model::ModelInfo model;
+    model.name = "improvement-test";
+    model.runtime = "llama_cpp";
+    model.n_slots = 4;
+    routes.registry.register_model(model);
+    inferdeck::optimize::ProfileInput input;
+    input.model = model.name;
+    input.total_vram_mb = 32768.0;
+    input.configured_vram_mb = 24000.0;
+    input.context_per_slot = 100000;
+    input.slots = 4;
+    input.min_slots = 4;
+    REQUIRE(routes.profile_benchmark.start(model, input, 1));
+    REQUIRE(routes.profile_benchmark.wait_for_completion(std::chrono::seconds{2}));
+    const auto result = routes.profile_benchmark.snapshot();
+    REQUIRE(result.trials.size() == (baseline_failure ? 0 : 1));
+    CHECK(result.state == (baseline_failure || candidate_failure ? "failed" : "completed"));
+    CHECK(result.restored);
+    CHECK(result.has_recommendation == expected);
+}
+
+TEST_CASE("Measured benchmark freezes request counts across slot reductions",
+          "[gateway][dashboard][optimize][benchmark][workloads]") {
+    for (const int baseline_slots : {2, 3, 4}) {
+        CAPTURE(baseline_slots);
+        TempConfig config;
+        ConfigRouteServer routes(config);
+        std::vector<std::vector<int>> workloads;
+        std::vector<int> measured_slots;
+        routes.benchmark_runner = [&](const inferdeck::model::ModelInfo&,
+                                      const inferdeck::optimize::ProfileCandidate& candidate,
+                                      const std::vector<ProfileBenchmarkPrompt>&,
+                                      const std::vector<int>& required_counts,
+                                      const std::atomic<bool>&,
+                                      const ProfileBenchmarkProgress&) {
+            const bool baseline = workloads.empty();
+            workloads.push_back(required_counts);
+            measured_slots.push_back(candidate.slots);
+            ProfileBenchmarkTrialMetrics result;
+            result.prompt_tokens_per_second = baseline ? 100.0 : 110.0;
+            result.average_tokens_per_second = baseline ? 100.0 : 110.0;
+            result.parallel_tokens_per_second = baseline ? 100.0 : 110.0;
+            result.peak_vram_mb = 24000.0;
+            result.quality_total = result.quality_passes = 3;
+            result.quality_score = 1.0;
+            for (const int requests : required_counts) {
+                ProfileBenchmarkConcurrencyMetrics concurrent;
+                concurrent.requests = requests;
+                concurrent.aggregate_tokens_per_second = result.parallel_tokens_per_second;
+                result.concurrency.push_back(concurrent);
+            }
+            return inferdeck::foundation::Ok(std::move(result));
+        };
+        inferdeck::model::ModelInfo model;
+        model.name = "slot-transition";
+        model.runtime = "llama_cpp";
+        model.n_slots = baseline_slots;
+        routes.registry.register_model(model);
+        inferdeck::optimize::ProfileInput input;
+        input.model = model.name;
+        input.total_vram_mb = 32768.0;
+        input.configured_vram_mb = 35000.0;
+        input.context_per_slot = 512;
+        input.slots = baseline_slots;
+        input.min_slots = 1;
+        REQUIRE(routes.profile_benchmark.start(model, input, 1));
+        REQUIRE(routes.profile_benchmark.wait_for_completion(std::chrono::seconds{2}));
+        const auto result = routes.profile_benchmark.snapshot();
+        REQUIRE(workloads.size() == 2);
+        CHECK(workloads[0] == workloads[1]);
+        CHECK(workloads[0].back() == baseline_slots);
+        CHECK(measured_slots[1] < measured_slots[0]);
+        CHECK(result.has_recommendation);
+    }
 }

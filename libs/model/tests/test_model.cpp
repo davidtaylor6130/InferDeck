@@ -35,6 +35,7 @@ public:
     std::atomic<bool> load_started{false};
     std::function<void()> load_gate{};
     std::atomic<bool> loaded{false};
+    std::atomic<bool> healthy{true};
     std::atomic<int> vram_mb{4096};
     std::atomic<int> additional_vram_mb{0};
     std::atomic<bool> live_vram_accounting{true};
@@ -86,6 +87,7 @@ public:
     }
 
     bool is_loaded() const override { return loaded.load(); }
+    bool execution_healthy() const override { return healthy.load(); }
     int vram_usage_mb() const override { return estimate_vram_mb(max_slots.load()); }
     int additional_vram_reserve_mb() const override {
         return additional_vram_mb.load();
@@ -554,6 +556,248 @@ TEST_CASE("BackendCoordinator: concurrent swaps serialize model loads", "[model]
     t2.join();
 
     REQUIRE(max_active_loads.load() == 1);
+}
+
+TEST_CASE("BackendCoordinator: load completion preserves an admitted slot",
+          "[model][coordinator][load-admission]")
+{
+    std::promise<void> published;
+    std::promise<void> resume_load;
+    std::future<void> ready = published.get_future();
+    std::future<void> resume = resume_load.get_future();
+
+    class PublishingLoadMock : public IModelMock
+    {
+    public:
+        PublishingLoadMock(ModelInfo info, std::promise<void>& published,
+                           std::future<void>& resume)
+            : IModelMock(std::move(info)), m_published(published), m_resume(resume)
+        {
+        }
+
+        Result<void> load() override
+        {
+            Result<void> result = IModelMock::load();
+            m_published.set_value();
+            m_resume.wait();
+            return result;
+        }
+
+        Result<void> reset_all_slots() override
+        {
+            busy_slots.assign(max_slots.load(), 0);
+            return Ok();
+        }
+
+        Result<InferenceResult> predict(
+            int slot_id, const InferenceRequest& request) override
+        {
+            if (!slot_busy(slot_id))
+            {
+                return Err<InferenceResult>(ErrorCode::InvalidArgument,
+                                            "slot not acquired");
+            }
+            return IModelMock::predict(slot_id, request);
+        }
+
+    private:
+        std::promise<void>& m_published;
+        std::future<void>& m_resume;
+    };
+
+    ModelRegistry registry;
+    registry.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IModel>
+    {
+        return std::make_unique<PublishingLoadMock>(info, published, resume);
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    Result<void> loaded = Err<void>(ErrorCode::Internal, "load not completed");
+    std::thread loader([&] { loaded = coordinator.load("a"); });
+    ready.wait();
+    AcquireSlotOptions options;
+    options.block = false;
+    Result<int> slot = coordinator.acquire_slot("a", options);
+    resume_load.set_value();
+    loader.join();
+
+    REQUIRE(loaded);
+    REQUIRE(slot);
+    CHECK(coordinator.active_request_count() == 1);
+    Result<InferenceResult> predicted = coordinator.predict("a", *slot, {});
+    REQUIRE(predicted);
+    CHECK(predicted->text == "hello world");
+    REQUIRE(coordinator.release_slot("a", *slot));
+    CHECK(coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("BackendCoordinator: failed resident recovery drains leases and preserves peers",
+          "[model][coordinator][failed-recovery]")
+{
+    std::atomic<int> created{0};
+    std::atomic<int> destroyed{0};
+    bool fail_replacement = false;
+    class RecoveringMock : public IModelMock
+    {
+    public:
+        RecoveringMock(ModelInfo info, std::atomic<int>& destroyed)
+            : IModelMock(std::move(info)), m_destroyed(destroyed)
+        {
+        }
+        ~RecoveringMock() override { ++m_destroyed; }
+    private:
+        std::atomic<int>& m_destroyed;
+    };
+    ModelRegistry registry;
+    registry.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IModel>
+    {
+        std::unique_ptr<IModelMock> backend;
+        if (info.name == "failed")
+        {
+            backend = std::make_unique<RecoveringMock>(info, destroyed);
+            backend->load_should_fail.store(++created > 1 && fail_replacement);
+        }
+        else
+        {
+            backend = std::make_unique<IModelMock>(info);
+        }
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(info.n_slots);
+        backend->busy_slots.assign(info.n_slots, 0);
+        return backend;
+    });
+    ModelInfo failed_info = make_info("failed");
+    failed_info.n_slots = 3;
+    failed_info.vram_required_mb = 4000;
+    ModelInfo peer_info = make_info("peer");
+    peer_info.vram_required_mb = 3000;
+    registry.register_model(failed_info);
+    registry.register_model(peer_info);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(8000, 0);
+    REQUIRE(coordinator.swap_to("failed"));
+    REQUIRE(coordinator.swap_to("peer"));
+    const IBackend* peer = coordinator.get_backend("peer");
+    const Result<int> first = coordinator.acquire_slot("failed");
+    const Result<int> second = coordinator.acquire_slot("failed");
+    const Result<int> peer_slot = coordinator.acquire_slot("peer");
+    REQUIRE(first);
+    REQUIRE(second);
+    REQUIRE(peer_slot);
+    IModelMock* failed = as_mock(const_cast<IModel*>(coordinator.get_model("failed")));
+    failed->healthy.store(false);
+    CHECK(coordinator.is_loaded("failed"));
+    CHECK_FALSE(coordinator.is_ready("failed"));
+    CHECK(coordinator.get_loaded_models() == std::vector<std::string>{"failed", "peer"});
+    CHECK(coordinator.get_vram_usage() == 7000);
+    AcquireSlotOptions immediate;
+    immediate.block = false;
+    const Result<int> rejected = coordinator.acquire_slot("failed", immediate);
+    CHECK_FALSE(rejected);
+    if (rejected) REQUIRE(coordinator.release_slot("failed", *rejected));
+
+    std::atomic<bool> cancel{false};
+    std::atomic<int> cancellation_checks{0};
+    std::atomic<bool> signalled{false};
+    std::promise<bool> drain_entered;
+    std::future<bool> draining = drain_entered.get_future();
+    std::future<Result<void>> recovery = std::async(std::launch::async, [&]
+    {
+        Result<void> result = coordinator.load_with_lock_deadline(
+            "failed", std::chrono::steady_clock::now() + std::chrono::seconds{5}, [&]
+            {
+                if (++cancellation_checks >= 2 && !signalled.exchange(true))
+                    drain_entered.set_value(true);
+                return cancel.load();
+            });
+        if (!signalled.exchange(true)) drain_entered.set_value(false);
+        return result;
+    });
+    CHECK(draining.get());
+    CHECK(destroyed.load() == 0);
+    CHECK(coordinator.active_request_count("failed") == 2);
+    CHECK(coordinator.get_vram_usage() == 7000);
+    CHECK(coordinator.get_backend("peer") == peer);
+    cancel.store(true);
+    const Result<void> cancelled = recovery.get();
+    CHECK_FALSE(cancelled);
+    if (!cancelled) CHECK(cancelled.error().code == ErrorCode::Cancelled);
+    CHECK(destroyed.load() == 0);
+    CHECK(coordinator.is_loaded("failed"));
+    REQUIRE(coordinator.release_slot("failed", *first));
+    REQUIRE(coordinator.release_slot("failed", *second));
+
+    SECTION("replacement succeeds") {}
+    SECTION("replacement load fails once") { fail_replacement = true; }
+    int preparations = 0;
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::seconds{5};
+    options.prepare = [&]
+    {
+        ++preparations;
+        return coordinator.swap_to_cancellable("failed", std::chrono::seconds{5});
+    };
+    const Result<int> replacement = coordinator.acquire_slot("failed", options);
+    CHECK(preparations == 1);
+    CHECK(created.load() == 2);
+    CHECK(destroyed.load() == 1);
+    CHECK(coordinator.get_backend("peer") == peer);
+    CHECK(coordinator.is_ready("peer"));
+    CHECK(coordinator.predict("peer", *peer_slot, {}));
+    if (fail_replacement)
+    {
+        CHECK_FALSE(replacement);
+        CHECK_FALSE(coordinator.is_loaded("failed"));
+        CHECK(coordinator.get_vram_usage() == 3000);
+    }
+    else
+    {
+        CHECK(replacement);
+        CHECK(coordinator.is_ready("failed"));
+        CHECK(coordinator.get_vram_usage() == 7000);
+        if (replacement) CHECK(coordinator.predict("failed", *replacement, {}));
+    }
+    if (replacement) REQUIRE(coordinator.release_slot("failed", *replacement));
+    REQUIRE(coordinator.release_slot("peer", *peer_slot));
+    CHECK(coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("BackendCoordinator: failed recovery preserves reduced slot capacity",
+          "[model][coordinator][failed-recovery-capacity]")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel>
+    {
+        std::unique_ptr<IModelMock> backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        return backend;
+    });
+    ModelInfo failed_info = make_info("failed");
+    failed_info.vram_fixed_mb = 3000;
+    failed_info.vram_per_slot_mb = 1000;
+    failed_info.vram_required_mb = 5000;
+    ModelInfo peer_info = make_info("peer");
+    peer_info.vram_required_mb = 5000;
+    registry.register_model(failed_info);
+    registry.register_model(peer_info);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.swap_to("failed"));
+    REQUIRE(coordinator.swap_to("peer"));
+    REQUIRE(coordinator.get_backend("failed")->n_slots() == 1);
+    REQUIRE(coordinator.get_vram_usage() == 9000);
+    const IBackend* peer = coordinator.get_backend("peer");
+    const Result<int> peer_slot = coordinator.acquire_slot("peer");
+    REQUIRE(peer_slot);
+    as_mock(const_cast<IModel*>(coordinator.get_model("failed")))->healthy.store(false);
+
+    REQUIRE(coordinator.swap_to("failed"));
+    CHECK(coordinator.is_ready("failed"));
+    CHECK(coordinator.get_backend("failed")->n_slots() == 1);
+    CHECK(coordinator.get_vram_usage() == 9000);
+    CHECK(coordinator.get_backend("peer") == peer);
+    CHECK(coordinator.predict("peer", *peer_slot, {}));
+    REQUIRE(coordinator.release_slot("peer", *peer_slot));
 }
 
 TEST_CASE("BackendCoordinator: acquire_slot returns slot id", "[model][coordinator]") {

@@ -18,6 +18,7 @@
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -330,6 +331,9 @@ public:
     std::atomic<bool> load_started{false};
     std::atomic<bool> load_should_fail{false};
     std::atomic<bool> block_until_cancel{false};
+    std::atomic<bool> block_nonstream_until_cancel{false};
+    std::atomic<int> nonstream_started{0};
+    std::atomic<bool> nonstream_saw_cancel{false};
     std::atomic<bool> block_media_until_cancel{false};
     std::atomic<bool> split_utf8{false};
     std::atomic<bool> context_error{false};
@@ -442,6 +446,30 @@ public:
         r.prompt_tokens = 3;
         r.completion_tokens = 4;
         return Ok(std::move(r));
+    }
+
+    Result<InferenceResult> predict_cancellable(
+        int slot, const InferenceRequest& request,
+        const std::atomic<bool>* cancel) override {
+        if (block_nonstream_until_cancel.load() && request.max_output_tokens == 123) {
+            nonstream_started.fetch_add(1);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (cancel && cancel->load()) {
+                    nonstream_saw_cancel.store(true);
+                    InferenceResult partial;
+                    partial.prompt_tokens = 20;
+                    partial.cached_prompt_tokens = 10;
+                    partial.completion_tokens = 2;
+                    partial.prompt_duration_ms = 40;
+                    partial.generation_duration_ms = 10;
+                    partial.duration_ms = 50;
+                    return Ok(std::move(partial));
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+        }
+        return predict(slot, request);
     }
 
     Result<InferenceResult> predict_stream(
@@ -856,6 +884,85 @@ bool wait_for_count(const std::atomic<int>& count, int minimum) {
 }
 
 } // namespace
+
+TEST_CASE("Disconnected generation requests are recorded as cancellations",
+          "[routes][cancel][disconnect]") {
+    for (const bool responses : {false, true}) {
+        for (const bool after_admission : {false, true}) {
+            INFO("responses=" << responses << " after_admission=" << after_admission);
+            TestServer server;
+            server.registry.register_model(make_info("disconnect-model"));
+            REQUIRE(server.coordinator.load("disconnect-model"));
+            const IModelMock* backend = dynamic_cast<const IModelMock*>(
+                server.coordinator.get_backend("disconnect-model"));
+            REQUIRE(backend);
+            httplib::Request request;
+            request.set_header("Content-Type", "application/json");
+            request.is_connection_closed = [backend, after_admission] {
+                return !after_admission || backend->last_max_tokens.load() != 0;
+            };
+            request.body = responses
+                ? R"({"model":"disconnect-model","input":"test","max_output_tokens":16})"
+                : R"({"model":"disconnect-model","messages":[{"role":"user","content":"test"}],"max_completion_tokens":16})";
+            httplib::Response response;
+            if (responses) handle_responses(request, response, server.make_deps());
+            else handle_chat_completions(request, response, server.make_deps());
+            CHECK(response.status == 499);
+            CHECK(server.coordinator.active_request_count() == 0);
+            CHECK(backend->n_free_slots() == backend->n_slots());
+            const auto history = server.stats_db.recent_requests(1);
+            REQUIRE(history.size() == 1);
+            CHECK(history.front().status_code == 499);
+        }
+    }
+}
+
+TEST_CASE("Non-stream disconnect cancels execution and preserves peer capacity",
+          "[routes][cancel][disconnect]") {
+    for (const bool responses : {false, true}) {
+        INFO("responses=" << responses);
+        TestServer server;
+        server.registry.register_model(make_info("cancel-running"));
+        REQUIRE(server.coordinator.load("cancel-running"));
+        IModelMock* backend = const_cast<IModelMock*>(dynamic_cast<const IModelMock*>(
+            server.coordinator.get_backend("cancel-running")));
+        REQUIRE(backend);
+        backend->block_nonstream_until_cancel.store(true);
+        std::atomic<bool> disconnected{false};
+        httplib::Request request;
+        request.set_header("Content-Type", "application/json");
+        request.is_connection_closed = [&] { return disconnected.load(); };
+        request.body = responses
+            ? R"({"model":"cancel-running","input":"test","max_output_tokens":123})"
+            : R"({"model":"cancel-running","messages":[{"role":"user","content":"test"}],"max_completion_tokens":123})";
+        httplib::Response response;
+        std::jthread worker([&] {
+            if (responses) handle_responses(request, response, server.make_deps());
+            else handle_chat_completions(request, response, server.make_deps());
+        });
+        const bool started = wait_for_count(backend->nonstream_started, 1);
+        disconnected.store(true);
+        worker.join();
+        REQUIRE(started);
+        CHECK(backend->nonstream_saw_cancel.load());
+        CHECK(response.status == 499);
+        CHECK(server.coordinator.active_request_count() == 0);
+        const auto history = server.stats_db.recent_requests(1);
+        REQUIRE(history.size() == 1);
+        CHECK(history.front().status_code == 499);
+        CHECK(history.front().completion_tokens == 2);
+        CHECK(history.front().prompt_duration_ms == 40);
+        const auto first = server.coordinator.acquire_slot("cancel-running");
+        const auto peer = server.coordinator.acquire_slot("cancel-running");
+        REQUIRE(first);
+        REQUIRE(peer);
+        const auto result = server.coordinator.predict("cancel-running", *peer, {});
+        REQUIRE(result);
+        CHECK(result->text == "Hello from model");
+        CHECK(server.coordinator.release_slot("cancel-running", *first));
+        CHECK(server.coordinator.release_slot("cancel-running", *peer));
+    }
+}
 
 TEST_CASE("Route manifest matches the pinned strict OpenAI snapshot",
           "[routes][manifest]") {
@@ -2433,6 +2540,61 @@ TEST_CASE("Media history persists generated outputs and useful attempt details",
     std::filesystem::remove_all(root, ignored);
 }
 
+TEST_CASE("Concurrent media history writes retain all terminal job states",
+          "[routes][media-history]") {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("inferdeck-media-concurrent-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct HistoryReset {
+        std::filesystem::path root;
+        ~HistoryReset() {
+            (void)configure_media_history({});
+            std::error_code ignored;
+            std::filesystem::remove_all(root, ignored);
+        }
+    } cleanup{root};
+    REQUIRE(configure_media_history(root));
+    TestServer ts;
+    auto info = make_info("concurrent-history-image");
+    info.runtime = "stable_diffusion_cpp";
+    info.modality = "image";
+    info.capabilities = {"image_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+    constexpr std::size_t request_count = 8;
+    std::array<int, request_count> statuses{};
+    std::vector<std::jthread> clients;
+    for (std::size_t index = 0; index < request_count; ++index) {
+        clients.emplace_back([&ts, &info, &statuses, index] {
+            httplib::Client client("127.0.0.1", ts.port);
+            client.set_read_timeout(10, 0);
+            const auto response = client.Post("/v1/images/generations",
+                nlohmann::json{{"model", info.name},
+                               {"prompt", "history " + std::to_string(index)},
+                               {"size", "512x512"}}.dump(), "application/json");
+            statuses[index] = response ? response->status : 0;
+        });
+    }
+    clients.clear();
+    ts.stop();
+    for (const int status : statuses) CHECK(status == 200);
+    const auto current = media_jobs();
+    REQUIRE(current.size() == request_count);
+    std::ifstream input(root / "history.json");
+    const auto persisted = nlohmann::json::parse(input);
+    REQUIRE(persisted["jobs"].size() == request_count);
+    for (const auto& job : persisted["jobs"]) {
+        CHECK(job["state"] == "completed");
+        CHECK(job["progress"] == 100);
+        CHECK(job["outputs"].size() == 1);
+    }
+    REQUIRE(configure_media_history(root));
+    const auto restored = media_jobs();
+    REQUIRE(restored.size() == current.size());
+    CHECK(restored == current);
+}
+
 TEST_CASE("Strict Images separates unknown fields from model capabilities",
           "[routes][images][profile]") {
     TestServer ts;
@@ -2542,6 +2704,54 @@ TEST_CASE("Strict Images separates unknown fields from model capabilities",
     REQUIRE(response.status == 200);
     CHECK(response.has_header("X-InferDeck-Job-Id"));
     CHECK(ts.coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("Image capability rejection precedes model loading on both API surfaces",
+          "[routes][images][image-capability-preflight]")
+{
+    for (const std::string path : {"/v1/images/generations",
+                                  "/api/inferdeck/v1/media/images/generations"})
+    {
+        INFO(path);
+        TestServer server;
+        std::atomic<int> creations{0};
+        server.registry.set_factory([&](const ModelInfo& info)
+        {
+            ++creations;
+            return std::make_unique<IModelMock>(info);
+        });
+        server.registry.register_model(make_info("resident-peer"));
+        server.registry.register_model(make_info("unloaded-text"));
+        REQUIRE(server.coordinator.load("resident-peer"));
+        const IBackend* peer = server.coordinator.get_backend("resident-peer");
+        const nlohmann::json initial_jobs = media_jobs();
+        GatewayDeps deps = server.make_deps();
+        deps.auto_swap = true;
+        httplib::Request request;
+        request.method = "POST";
+        request.path = path;
+        request.set_header("Content-Type", "application/json");
+        request.is_connection_closed = [] { return false; };
+        request.body = nlohmann::json{
+            {"model", "unloaded-text"}, {"prompt", "a lighthouse"},
+            {"size", "512x512"}}.dump();
+        httplib::Response response;
+        handle_image_generations(request, response, deps);
+
+        CHECK(response.status == 400);
+        CHECK(nlohmann::json::parse(response.body)["error"]["code"] ==
+              "unsupported_image_model");
+        CHECK(creations.load() == 1);
+        CHECK_FALSE(server.coordinator.is_loaded("unloaded-text"));
+        CHECK(server.coordinator.is_ready("resident-peer"));
+        CHECK(server.coordinator.get_backend("resident-peer") == peer);
+        CHECK(server.coordinator.get_loaded_model() == "resident-peer");
+        CHECK(server.swap_tracker.snapshot().target.empty());
+        CHECK(server.coordinator.active_request_count() == 0);
+        CHECK(server.coordinator.queued_request_count() == 0);
+        CHECK(media_jobs() == initial_jobs);
+        CHECK(server.stats_db.recent_requests(1).empty());
+    }
 }
 
 TEST_CASE("Image jobs can be cancelled through the shared tracker", "[routes][images][cancel]") {

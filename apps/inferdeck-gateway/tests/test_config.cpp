@@ -380,7 +380,7 @@ TEST_CASE("Repository Qwen 3.6 27B profile enables the measured adaptive MTP set
     CHECK(qwen->optimization.schedule_window_end == "04:00");
 }
 
-TEST_CASE("Repository gateway configuration reserves measured Qwen resources",
+TEST_CASE("Repository gateway configuration reserves measured target model resources",
           "[config][resources][vram]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "config" / "gateway.yml";
@@ -388,14 +388,25 @@ TEST_CASE("Repository gateway configuration reserves measured Qwen resources",
     const auto qwen35 = std::find_if(
         config.models.begin(), config.models.end(),
         [](const auto& model) { return model.name == "qwen3.6-35b-a3b"; });
+    const auto ornith = std::find_if(
+        config.models.begin(), config.models.end(),
+        [](const auto& model) { return model.name == "ornith-1.5-35b-a3b"; });
     const auto helper = std::find_if(
         config.models.begin(), config.models.end(),
         [](const auto& model) {
             return model.name == "qwen2.5-0.5b-instruct";
         });
     REQUIRE(qwen35 != config.models.end());
+    REQUIRE(ornith != config.models.end());
     REQUIRE(helper != config.models.end());
+    CHECK(qwen35->n_slots == 3);
+    CHECK(qwen35->min_slots == 2);
     CHECK(qwen35->vram_required_mb == 26000);
+    CHECK(ornith->n_slots == 4);
+    CHECK(ornith->min_slots == 2);
+    CHECK(ornith->vram_required_mb == 27000);
+    REQUIRE(ornith->n_batch);
+    CHECK(*ornith->n_batch == 4096);
     CHECK(helper->n_slots == 1);
     CHECK(helper->context_size == 4096);
     CHECK(helper->vram_required_mb == 900);

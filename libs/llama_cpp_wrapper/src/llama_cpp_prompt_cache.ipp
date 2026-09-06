@@ -49,42 +49,31 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
   }
 
   try {
-  auto chat_params = common_chat_templates_apply(chat_templates_, inputs);
-
-  // History-aware truncation (issue #38): rather than middle-dropping the raw
-  // token stream (which severs conversation history and defeats KV prefix
-  // reuse), drop the oldest *whole* non-system messages and re-template until
-  // the prompt fits the budget. The leading system block and the most recent
-  // turn are always preserved.
-  if (max_prompt_tokens > 0 && media.empty()) {
-    auto count_prompt_tokens = [&](const std::string& p) -> int {
-      if (p.empty()) return 0;
-      const int n = llama_tokenize(vocab_, p.data(), static_cast<int>(p.size()),
-                                   nullptr, 0, llama_vocab_get_add_bos(vocab_), true);
-      return n < 0 ? -n : n;
-    };
-    std::size_t sys_end = 0;
-    while (sys_end < inputs.messages.size() && inputs.messages[sys_end].role == "system")
-      ++sys_end;
-    int dropped = 0;
-    while (count_prompt_tokens(chat_params.prompt) >= max_prompt_tokens &&
-           inputs.messages.size() - sys_end > 1) {
-      inputs.messages.erase(inputs.messages.begin() + static_cast<std::ptrdiff_t>(sys_end));
-      ++dropped;
-      // Drop any now-orphaned tool results whose assistant tool_call was removed.
-      while (inputs.messages.size() - sys_end > 1 &&
-             inputs.messages[sys_end].role == "tool") {
-        inputs.messages.erase(inputs.messages.begin() + static_cast<std::ptrdiff_t>(sys_end));
-        ++dropped;
-      }
-      chat_params = common_chat_templates_apply(chat_templates_, inputs);
-    }
-    if (dropped > 0) {
+  common_chat_params chat_params;
+  if (max_prompt_tokens > 0 && media.empty())
+  {
+    int prompt_tokens = 0;
+    const std::size_t dropped = fit_chat_history(inputs,
+        [&](const common_chat_templates_inputs& candidate)
+        {
+          chat_params = common_chat_templates_apply(chat_templates_, candidate);
+          const std::string& prompt = chat_params.prompt;
+          const int count = llama_tokenize(vocab_, prompt.data(),
+              static_cast<int>(prompt.size()), nullptr, 0,
+              llama_vocab_get_add_bos(vocab_), true);
+          prompt_tokens = count < 0 ? -count : count;
+          return prompt_tokens < max_prompt_tokens;
+        });
+    if (dropped > 0)
+    {
       LOG_WARN("chat_history_truncated",
                "model={} dropped_messages={} kept_messages={} prompt_tokens={} budget={}",
-               info_.name, dropped, inputs.messages.size(),
-               count_prompt_tokens(chat_params.prompt), max_prompt_tokens);
+               info_.name, dropped, inputs.messages.size(), prompt_tokens, max_prompt_tokens);
     }
+  }
+  else
+  {
+    chat_params = common_chat_templates_apply(chat_templates_, inputs);
   }
 
   ChatTemplateMeta meta;
@@ -229,7 +218,8 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
     mtmd::bitmaps bitmaps;
     for (const auto& data : tmpl_res->media) {
       auto decoded = mtmd_helper_bitmap_init_from_buf(
-          mtmd_, data.data(), data.size(), false);
+          mtmd_, data.data(), data.size(), false,
+          mtmd_helper_init_opt_default());
       mtmd::bitmap bitmap(decoded.bitmap);
       mtmd_helper::video_ptr video(decoded.video_ctx);
       if (!bitmap.ptr) {
@@ -394,10 +384,54 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
   // Snapshot per-slot KV state under the mutex (scheduler may touch these after submit)
   {
     std::lock_guard lk(mtx_);
+    if (!has_media && !slots_[slot_id].sequence_bound)
+    {
+      const auto reusable_prefix = [&](const SlotState& slot) -> std::size_t
+      {
+        const int common = detail::recurrent_checkpoint_capture_pos(
+            s.prompt_tokens, slot.last_prompt_tokens);
+        if (llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_))
+        {
+          const auto usable = [&](const std::shared_ptr<const std::vector<uint8_t>>& checkpoint)
+          {
+            return detail::recurrent_checkpoint_usable(
+                checkpoint ? checkpoint->size() : 0, slot.checkpoint_pos,
+                common, static_cast<int>(s.prompt_tokens.size()));
+          };
+          if (!usable(slot.recurrent_checkpoint)) return 0;
+          return static_cast<std::size_t>(slot.checkpoint_pos);
+        }
+        return static_cast<std::size_t>(common);
+      };
+      int best_slot = slot_id;
+      std::size_t best_prefix = reusable_prefix(slots_[slot_id]);
+      for (int index = 0; index < static_cast<int>(slots_.size()); ++index)
+      {
+        if (slots_[index].sequence_bound) continue;
+        const std::size_t prefix = reusable_prefix(slots_[index]);
+        if (prefix > best_prefix)
+        {
+          best_slot = index;
+          best_prefix = prefix;
+        }
+      }
+      if (best_slot != slot_id)
+      {
+        const bool caller_busy = slots_[slot_id].busy;
+        const bool peer_busy = slots_[best_slot].busy;
+        std::swap(slots_[slot_id], slots_[best_slot]);
+        slots_[slot_id].busy = caller_busy;
+        slots_[best_slot].busy = peer_busy;
+        foundation::LOG_DEBUG("slot_cache_affinity", "model={} slot={} sequence={} common_tokens={}",
+                  info_.name, slot_id, slots_[slot_id].sequence_id, best_prefix);
+      }
+    }
+    slots_[slot_id].sequence_bound = true;
+    s.sequence_id          = slots_[slot_id].sequence_id;
     s.last_prompt_tokens   = slots_[slot_id].last_prompt_tokens;
     s.recurrent_checkpoint = slots_[slot_id].recurrent_checkpoint;
     s.recurrent_draft_checkpoint = slots_[slot_id].recurrent_draft_checkpoint;
-    s.recurrent_mtp_checkpoint = slots_[slot_id].recurrent_mtp_checkpoint;
+    s.recurrent_replay_checkpoint = slots_[slot_id].recurrent_replay_checkpoint;
     s.checkpoint_pos       = slots_[slot_id].checkpoint_pos;
     s.mtp_cache_synced     = slots_[slot_id].mtp_cache_synced;
   }

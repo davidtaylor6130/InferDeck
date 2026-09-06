@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronRightIcon, XMarkIcon } from '@heroicons/react/24/outline';
-import { authenticateDashboard, getHealth, getPricing } from './api';
+import { getHealth, getPricing } from './api';
+import { DashboardAccess, useDashboardAccess } from './components/DashboardAccess';
+import { RequestsPage } from './pages/RequestsPage';
 import { Badge } from './components/ui';
 import { COST_STORAGE_KEY } from './cost';
 import { DASHBOARD_SECTIONS, sectionLabel, type DashboardSection } from './dashboardSections';
@@ -25,6 +27,7 @@ import logoUrl from '../../../Assets/Logo.png';
 
 export type PageId =
   | 'home'
+  | 'requests'
   | 'settings'
   | 'llm/settings'
   | 'llm/models'
@@ -55,6 +58,7 @@ interface DashboardPage {
 
 export const DASHBOARD_PAGES: ReadonlyArray<DashboardPage> = [
   { id: 'home', label: 'Home' },
+  { id: 'requests', label: 'Requests' },
   { id: 'settings', label: 'API Settings' },
   { id: 'llm/settings', label: 'Model Settings', section: 'llm' },
   { id: 'llm/models', label: 'Model Store', section: 'llm' },
@@ -105,9 +109,9 @@ function pageFromHash(): PageId {
 }
 
 const App: React.FC = () => (
-  <GatewayProvider>
+  <DashboardAccess><GatewayProvider>
     <Shell />
-  </GatewayProvider>
+  </GatewayProvider></DashboardAccess>
 );
 
 const Shell: React.FC = () => {
@@ -156,6 +160,7 @@ const Shell: React.FC = () => {
         </div>
         <nav className="flex flex-col" aria-label="Dashboard">
           <NavLink id="home" label="Home" page={page} />
+          <NavLink id="requests" label="Requests" page={page} />
           <NavLink id="settings" label="API Settings" page={page} />
           {DASHBOARD_SECTIONS.map(section => {
             const collapsed = collapsedSections.includes(section);
@@ -213,6 +218,7 @@ const Shell: React.FC = () => {
         <main className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
           <div className="mx-auto max-w-[1280px]">
             {page === 'home' && <OverviewPage />}
+            {page === 'requests' && <RequestsPage />}
             {page === 'settings' && <ApiSettingsPage />}
             {page === 'llm/settings' && <OperatePage section="llm" />}
             {page === 'llm/models' && <ModelsPage section="llm" />}
@@ -246,6 +252,9 @@ export function sidebarNavigationClass(collapsed: boolean): string {
 
 const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
   const { connection, stats, swap } = useGateway();
+  const access = useDashboardAccess();
+  const [logoutError, setLogoutError] = useState('');
+  const [loggingOut, setLoggingOut] = useState(false);
   const loaded = stats?.loadedModel || '';
   const pageInfo = DASHBOARD_PAGES.find(item => item.id === page);
   const connectionTone = connection === 'connected' ? 'good' : connection === 'offline' ? 'critical' : 'warn';
@@ -278,6 +287,13 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
           >
             <Badge label={connectionLabel} tone={connectionTone} />
           </a>
+          {access?.remote && <>
+            <span className="hidden text-xs sm:inline">{access.remembered === true ? 'This browser is remembered' : access.remembered === false ? 'Signed in for this session' : 'Signed in'}</span>
+            <button className="min-h-11 border border-white/25 px-3 text-sm" disabled={loggingOut} onClick={() => {
+              setLoggingOut(true); setLogoutError('');
+              void access.logout().catch(reason => { setLogoutError(reason instanceof Error ? reason.message : 'Log out failed. Try again.'); setLoggingOut(false); });
+            }}>{loggingOut ? 'Logging out...' : 'Log out'}</button>
+          </>}
           <details className="relative z-30">
             <summary className="flex min-h-11 cursor-pointer items-center rounded border border-white/15 bg-white/[0.06] px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-white/[0.12] sm:min-h-10">
               Settings
@@ -314,6 +330,7 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
           </details>
         </div>
       </div>
+      {logoutError && <p role="alert" className="mt-2 text-sm text-danger-rose">{logoutError}</p>}
       <label className="mt-3 block md:hidden">
         <span className="sr-only">Dashboard page</span>
         <select
@@ -323,6 +340,7 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
           onChange={event => { window.location.hash = event.target.value; }}
         >
           <option value="home">Home</option>
+          <option value="requests">Requests</option>
           <option value="settings">API Settings</option>
           {DASHBOARD_SECTIONS.map(section => (
             <optgroup key={section} label={sectionLabel(section)}>
@@ -409,60 +427,13 @@ const NavLink: React.FC<{ id: PageId; label: string; page: PageId; nested?: bool
 );
 
 const ConnectionBanner: React.FC = () => {
-  const { connection, lastUpdatedAt } = useGateway();
-  const [token, setToken] = useState('');
-  const [authError, setAuthError] = useState('');
-  const [authenticating, setAuthenticating] = useState(false);
+  const { connection, lastUpdatedAt, refresh } = useGateway();
   if (connection === 'connected') return null;
-  const hostname = typeof window === 'undefined' ? '' : window.location.hostname;
-  const remote = hostname !== '' &&
-    hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1';
-  const tone = connection === 'offline' ? 'border-danger-rose/40 bg-danger-rose/10 text-danger-rose' : 'border-warning-amber/40 bg-warning-amber/10 text-warning-amber';
-  const message = connection === 'connecting'
-    ? 'Connecting to the gateway…'
-    : connection === 'reconnecting'
-      ? 'Event stream interrupted — reconnecting.'
-      : 'Gateway unreachable — retrying.';
-  const authenticate = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setAuthenticating(true);
-    setAuthError('');
-    try {
-      await authenticateDashboard(token);
-      window.location.reload();
-    } catch (error) {
-      setAuthError(error instanceof Error ? error.message : 'Dashboard authentication failed');
-      setAuthenticating(false);
-    }
-  };
-  return (
-    <div className={`border-b px-4 py-2 text-sm sm:px-6 ${tone}`}>
-      <span>{remote ? 'Remote dashboard authentication required.' : message}</span>
-      {lastUpdatedAt && <span className="ml-2 opacity-80">Data last updated {timeAgo(lastUpdatedAt)}.</span>}
-      {remote && (
-        <form className="mt-2 flex max-w-xl flex-wrap items-center gap-2" onSubmit={authenticate}>
-          <label className="sr-only" htmlFor="dashboard-token">Dashboard access token</label>
-          <input
-            id="dashboard-token"
-            type="password"
-            autoComplete="current-password"
-            value={token}
-            onChange={event => setToken(event.target.value)}
-            placeholder="Dashboard access token"
-            className="min-h-11 min-w-0 flex-1 rounded border border-white/20 bg-deck-navy px-3 text-text-primary sm:min-h-10 sm:min-w-64"
-          />
-          <button
-            type="submit"
-            disabled={authenticating || token.length === 0}
-            className="min-h-11 w-full rounded border border-current px-3 font-medium disabled:opacity-40 sm:min-h-10 sm:w-auto"
-          >
-            {authenticating ? 'Connecting…' : 'Connect'}
-          </button>
-          {authError && <span className="w-full text-xs">{authError}</span>}
-        </form>
-      )}
-    </div>
-  );
+  return <div className="border-b border-white/20 px-4 py-3 text-sm sm:px-6" role="status">
+    <span>{connection === 'connecting' ? 'Connecting to InferDeck.' : 'Gateway unavailable. Reconnecting.'}</span>
+    {lastUpdatedAt && <span className="ml-2">Data last updated {timeAgo(lastUpdatedAt)}.</span>}
+    <button className="ml-3 min-h-11 underline" onClick={() => { void refresh(); }}>Retry connection</button>
+  </div>;
 };
 
 export default App;

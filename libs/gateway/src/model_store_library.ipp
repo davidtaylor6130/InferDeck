@@ -32,6 +32,37 @@ Result<void> ModelStore::retire(const std::string& model_name, bool archive_arti
         foundation::is_path_within(path, root)) {
         return Err<void>(ErrorCode::InvalidArgument, "installed artifact is outside the model store");
     }
+    const auto overlaps = [&path](const std::filesystem::path& candidate) {
+        if (candidate.empty()) return false;
+        std::error_code path_error;
+        const auto canonical = std::filesystem::weakly_canonical(candidate, path_error);
+        return !path_error &&
+            (foundation::is_path_within(path, canonical) ||
+             foundation::is_path_within(canonical, path));
+    };
+    {
+        std::lock_guard lock(mutex_);
+        for (const auto& item : installed_.items()) {
+            if (item.key() != model_name &&
+                overlaps(item.value().value("path", ""))) {
+                return Err<void>(ErrorCode::Unavailable,
+                    "model artifact is shared with another installed model");
+            }
+        }
+    }
+    for (const std::string& other_name : coordinator_.registry().list()) {
+        if (other_name == model_name) continue;
+        const auto other = coordinator_.registry().get_info_result(other_name);
+        if (!other) continue;
+        bool shared = overlaps(other->gguf_path) || overlaps(other->mmproj_path);
+        for (const auto& [_, artifact] : other->artifacts) {
+            shared = shared || overlaps(artifact);
+        }
+        if (shared) {
+            return Err<void>(ErrorCode::Unavailable,
+                "model artifact is shared with another registered model");
+        }
+    }
     std::filesystem::path archived_path;
     if (archive_artifact) {
         const auto archive_root = std::filesystem::weakly_canonical(archive_root_, error);

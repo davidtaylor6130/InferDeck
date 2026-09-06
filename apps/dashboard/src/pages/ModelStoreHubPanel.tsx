@@ -15,6 +15,7 @@ import {
 import { Badge, Button, EmptyState, Panel, SectionTitle } from '../components/ui';
 import { modelBelongsToSection, sectionLabel, type DashboardSection } from '../dashboardSections';
 import { useGateway } from '../gateway';
+import { usePolling } from '../usePolling';
 import { formatBytes, formatDate, formatTokenCount } from '../utils';
 import { ModelStoreDownloadsView } from './ModelStoreDownloadsView';
 import { ModelStoreInstalledView } from './ModelStoreInstalledView';
@@ -62,14 +63,13 @@ export const ModelStoreHubPanel: React.FC<{ section: DashboardSection }> = ({ se
   const searchRequest = useRef(0);
   const inspectRequest = useRef(0);
 
-  const refresh = useCallback(async () => {
-    try {
-      const activity = await getStoreActivity();
-      setDownloads(activity.downloads);
-      setInstalled(activity.installed);
-      setLibrary(Array.isArray(activity.library) ? activity.library : []);
-    } catch {}
+  const receiveActivity = useCallback((activity: Awaited<ReturnType<typeof getStoreActivity>>) => {
+    setDownloads(activity.downloads);
+    setInstalled(activity.installed);
+    setLibrary(Array.isArray(activity.library) ? activity.library : []);
   }, []);
+  const activityFailed = useCallback(() => {}, []);
+  const refresh = usePolling(getStoreActivity, receiveActivity, activityFailed, 1500);
 
   const executeSearch = useCallback(async (
     nextQuery: string,
@@ -113,12 +113,6 @@ export const ModelStoreHubPanel: React.FC<{ section: DashboardSection }> = ({ se
     setVramCapacityGb('server');
     void executeSearch('', scope.runtime, scope.modality, 'trending', false);
   }, [section, executeSearch]);
-
-  useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => { void refresh(); }, 1500);
-    return () => clearInterval(timer);
-  }, [refresh]);
 
   const inspect = async (repo: string) => {
     const request = ++inspectRequest.current;

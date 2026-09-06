@@ -11,12 +11,27 @@ import { API_BASE } from './utils';
 
 const CONTROL_API_BASE = '/api/inferdeck/v1';
 
-export async function authenticateDashboard(token: string): Promise<void> {
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+export function isAuthenticationError(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403);
+}
+
+export async function logoutDashboard(): Promise<void> {
+  await deleteJson(`${CONTROL_API_BASE}/dashboard/session`);
+}
+
+export async function authenticateDashboard(token: string, remember = true): Promise<void> {
   const response = await fetch(`${API_BASE}${CONTROL_API_BASE}/dashboard/session`, {
     method: 'POST',
     signal: AbortSignal.timeout(15_000),
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ token, remember }),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as {
@@ -26,12 +41,12 @@ export async function authenticateDashboard(token: string): Promise<void> {
   }
 }
 
-async function getJson<T>(path: string, timeoutMs = 15_000): Promise<T> {
+async function getJson<T>(path: string, timeoutMs = 15_000, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     headers: { Accept: 'application/json' },
   });
-  if (!response.ok) throw new Error(`${path} responded ${response.status}`);
+  if (!response.ok) throw new ApiError(response.status, `${path} responded ${response.status}`);
   return (await response.json()) as T;
 }
 
@@ -437,27 +452,27 @@ function normalizeModel(value: unknown): ModelInfo | null {
   return normalized;
 }
 
-export function getStatus(): Promise<StatusPayload> {
-  return getJson<StatusPayload>(`${CONTROL_API_BASE}/status`);
+export function getStatus(signal?: AbortSignal): Promise<StatusPayload> {
+  return getJson<StatusPayload>(`${CONTROL_API_BASE}/status`, 15_000, signal);
 }
 
-export function getDailyUsage(): Promise<{
+export function getDailyUsage(signal?: AbortSignal): Promise<{
   dailyTokenUsage: MonthlyUsageRow[];
   dailyTokenUsageAllTime: boolean;
 }> {
-  return getJson(`${CONTROL_API_BASE}/usage/daily`);
+  return getJson(`${CONTROL_API_BASE}/usage/daily`, 15_000, signal);
 }
 
-export async function getModels(): Promise<ModelInfo[]> {
-  const body = await getJson<{ models?: unknown }>(`${CONTROL_API_BASE}/models`);
+export async function getModels(signal?: AbortSignal): Promise<ModelInfo[]> {
+  const body = await getJson<{ models?: unknown }>(`${CONTROL_API_BASE}/models`, 15_000, signal);
   if (!Array.isArray(body.models)) return [];
   return body.models
     .map(normalizeModel)
     .filter((model): model is ModelInfo => model !== null);
 }
 
-export async function getJobs(limit = 100): Promise<JobRecord[]> {
-  const body = await getJson<{ jobs: JobRecord[] }>(`${CONTROL_API_BASE}/jobs?limit=${limit}`);
+export async function getJobs(limit = 100, signal?: AbortSignal): Promise<JobRecord[]> {
+  const body = await getJson<{ jobs: JobRecord[] }>(`${CONTROL_API_BASE}/jobs?limit=${limit}`, 15_000, signal);
   return Array.isArray(body.jobs) ? body.jobs : [];
 }
 
@@ -690,12 +705,12 @@ export function installStoreModel(file: StoreFile, modelName: string): Promise<{
   });
 }
 
-export async function getStoreActivity(): Promise<{
+export async function getStoreActivity(signal?: AbortSignal): Promise<{
   downloads: StoreDownload[];
   installed: Record<string, InstalledStoreModel>;
   library: InstalledStoreModel[];
 }> {
-  return getJson(`${CONTROL_API_BASE}/model-store/downloads`);
+  return getJson(`${CONTROL_API_BASE}/model-store/downloads`, 15_000, signal);
 }
 
 export function controlStoreDownload(id: number, action: 'cancel' | 'resume'): Promise<{ ok: boolean }> {
@@ -718,8 +733,8 @@ export async function unregisterConfiguredModel(model: string): Promise<{
   });
 }
 
-export async function getMediaJobs(): Promise<MediaJob[]> {
-  const body = await getJson<{ jobs: MediaJob[] }>(`${CONTROL_API_BASE}/media/jobs`);
+export async function getMediaJobs(signal?: AbortSignal): Promise<MediaJob[]> {
+  const body = await getJson<{ jobs: MediaJob[] }>(`${CONTROL_API_BASE}/media/jobs`, 15_000, signal);
   return Array.isArray(body.jobs) ? body.jobs : [];
 }
 

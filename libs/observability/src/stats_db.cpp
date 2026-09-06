@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "foundation/path_utils.hpp"
+#include "foundation/logging.hpp"
 
 namespace inferdeck::observability {
 
@@ -247,6 +248,54 @@ void StatsDb::close() {
   healthy_ = false;
 }
 
+void StatsDb::finish_write(int result, const char* operation)
+{
+  if (result == SQLITE_DONE)
+  {
+    dashboard_cache_.reset();
+    return;
+  }
+  const int primary = result & 0xff;
+  const bool transient = primary == SQLITE_BUSY || primary == SQLITE_LOCKED;
+  foundation::LOG_WARN("stats_write_failed", "operation={} code={} transient={} error={}",
+                       operation, result, transient, sqlite3_errmsg(reinterpret_cast<sqlite3*>(db_)));
+  if (!transient)
+  {
+    healthy_ = false;
+    dashboard_cache_.reset();
+  }
+}
+
+std::shared_ptr<const DashboardStatsSnapshot> StatsDb::dashboard_snapshot() const
+{
+  std::lock_guard lk(mtx_);
+  if (!healthy_) return std::make_shared<const DashboardStatsSnapshot>();
+  const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+  if (dashboard_cache_ && now < dashboard_cache_expires_) return dashboard_cache_;
+  sqlite3* db = reinterpret_cast<sqlite3*>(db_);
+  throw_on_error(sqlite3_exec(db, "BEGIN;", nullptr, nullptr, nullptr), db, "begin dashboard snapshot");
+  try
+  {
+    std::shared_ptr<DashboardStatsSnapshot> snapshot = std::make_shared<DashboardStatsSnapshot>();
+    const std::int64_t timestamp = now_ms();
+    const std::int64_t today = timestamp / 86'400'000 * 86'400'000;
+    snapshot->models = model_usage_locked();
+    snapshot->monthly = monthly_usage_locked(0);
+    snapshot->daily = bucketed_usage_locked("%Y-%m-%d", today - 30LL * 86'400'000);
+    snapshot->hourly = bucketed_usage_locked("%Y-%m-%dT%H", timestamp - 24LL * 3'600'000);
+    snapshot->recent = recent_requests_locked(500, {}, {});
+    throw_on_error(sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr), db, "commit dashboard snapshot");
+    dashboard_cache_ = std::move(snapshot);
+    dashboard_cache_expires_ = now + std::chrono::seconds(30);
+    return dashboard_cache_;
+  }
+  catch (...)
+  {
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    throw;
+  }
+}
+
 void StatsDb::record_request(const RequestRow& row) {
   if (!healthy_) return;
   std::lock_guard lk(mtx_);
@@ -301,7 +350,8 @@ void StatsDb::record_request(const RequestRow& row) {
   sqlite3_bind_double(stmt, 29, std::max(0.0, row.output_audio_seconds));
   sqlite3_bind_int(stmt, 30, std::max(0, row.input_image_count));
   sqlite3_bind_int(stmt, 31, std::max(0, row.output_image_count));
-  if (sqlite3_step(stmt) != SQLITE_DONE) healthy_ = false;
+  finish_write(sqlite3_step(stmt), "record_request");
+  sqlite3_reset(stmt);
 }
 
 void StatsDb::record_swap(const SwapRow& row) {
@@ -317,15 +367,20 @@ void StatsDb::record_swap(const SwapRow& row) {
   sqlite3_bind_double(stmt, 4, std::isfinite(row.duration_ms) ? std::max(0.0, row.duration_ms) : 0.0);
   sqlite3_bind_int(stmt, 5, row.success ? 1 : 0);
   sqlite3_bind_text(stmt, 6, row.error.c_str(), -1, SQLITE_TRANSIENT);
-  if (sqlite3_step(stmt) != SQLITE_DONE) healthy_ = false;
+  finish_write(sqlite3_step(stmt), "record_swap");
+  sqlite3_reset(stmt);
 }
 
-std::vector<RequestRow> StatsDb::recent_requests(
-    int limit, const std::string& protocol_profile,
-    const std::string& endpoint) const {
+std::vector<RequestRow> StatsDb::recent_requests(int limit, const std::string& protocol_profile, const std::string& endpoint) const
+{
+  std::lock_guard lk(mtx_);
+  return recent_requests_locked(limit, protocol_profile, endpoint);
+}
+
+std::vector<RequestRow> StatsDb::recent_requests_locked(int limit, const std::string& protocol_profile, const std::string& endpoint) const
+{
   std::vector<RequestRow> out;
   if (!healthy_) return out;
-  std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
   std::string sql =
     "SELECT ts, model, prompt_tokens, completion_tokens, duration_ms, tps, status_code, slot_id, "
@@ -341,7 +396,9 @@ std::vector<RequestRow> StatsDb::recent_requests(
     if (!endpoint.empty()) sql += "endpoint=?";
   }
   sql += " ORDER BY id DESC LIMIT ?;";
-  if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return out;
+  throw_on_error(sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql.c_str(), -1, &stmt, nullptr),
+                 reinterpret_cast<sqlite3*>(db_), "prepare recent requests");
+  const std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(stmt, sqlite3_finalize);
   int parameter = 1;
   if (!protocol_profile.empty()) {
     sqlite3_bind_text(stmt, parameter++, protocol_profile.c_str(), -1, SQLITE_TRANSIENT);
@@ -350,7 +407,8 @@ std::vector<RequestRow> StatsDb::recent_requests(
     sqlite3_bind_text(stmt, parameter++, endpoint.c_str(), -1, SQLITE_TRANSIENT);
   }
   sqlite3_bind_int(stmt, parameter, std::clamp(limit, 1, 10'000));
-  while (sqlite3_step(stmt) == SQLITE_ROW) {
+  int result = SQLITE_OK;
+  while ((result = sqlite3_step(stmt)) == SQLITE_ROW) {
     RequestRow r;
     r.timestamp_unix_ms    = sqlite3_column_int64(stmt, 0);
     r.model                = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
@@ -385,7 +443,7 @@ std::vector<RequestRow> StatsDb::recent_requests(
     r.output_image_count = sqlite3_column_int(stmt, 30);
     out.push_back(std::move(r));
   }
-  sqlite3_finalize(stmt);
+  throw_on_error(result, reinterpret_cast<sqlite3*>(db_), "read usage query");
   return out;
 }
 
@@ -413,10 +471,16 @@ std::vector<SwapRow> StatsDb::recent_swaps(int limit) const {
   return out;
 }
 
-std::vector<ModelUsageRow> StatsDb::model_usage() const {
+std::vector<ModelUsageRow> StatsDb::model_usage() const
+{
+  std::lock_guard lk(mtx_);
+  return model_usage_locked();
+}
+
+std::vector<ModelUsageRow> StatsDb::model_usage_locked() const
+{
   std::vector<ModelUsageRow> out;
   if (!healthy_) return out;
-  std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
   const char* sql =
     "SELECT model, COUNT(*), "
@@ -435,8 +499,11 @@ std::vector<ModelUsageRow> StatsDb::model_usage() const {
     "COALESCE(SUM(input_image_count),0), "
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN output_image_count ELSE 0 END),0) "
     "FROM requests GROUP BY model ORDER BY MAX(ts) DESC;";
-  if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
-  while (sqlite3_step(stmt) == SQLITE_ROW) {
+  throw_on_error(sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr),
+                 reinterpret_cast<sqlite3*>(db_), "prepare usage query");
+  const std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(stmt, sqlite3_finalize);
+  int result = SQLITE_OK;
+  while ((result = sqlite3_step(stmt)) == SQLITE_ROW) {
     ModelUsageRow r;
     r.model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
     r.requests = sqlite3_column_int64(stmt, 1);
@@ -459,7 +526,7 @@ std::vector<ModelUsageRow> StatsDb::model_usage() const {
     r.output_image_count = sqlite3_column_int64(stmt, 18);
     out.push_back(std::move(r));
   }
-  sqlite3_finalize(stmt);
+  throw_on_error(result, reinterpret_cast<sqlite3*>(db_), "read usage query");
   return out;
 }
 
@@ -494,10 +561,16 @@ LifetimeTotals StatsDb::lifetime_totals() const {
   return totals;
 }
 
-std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
+std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const
+{
+  std::lock_guard lk(mtx_);
+  return monthly_usage_locked(months);
+}
+
+std::vector<UsageBucketRow> StatsDb::monthly_usage_locked(int months) const
+{
   std::vector<UsageBucketRow> out;
   if (!healthy_) return out;
-  std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
   const char* all_time_sql =
     "SELECT strftime('%Y-%m', ts / 1000, 'unixepoch') AS bucket, model, "
@@ -535,13 +608,16 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
     "WHERE ts >= ((strftime('%s','now','start of month', ?) * 1000)) "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
   const char* sql = months <= 0 ? all_time_sql : limited_sql;
-  if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
+  throw_on_error(sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr),
+                 reinterpret_cast<sqlite3*>(db_), "prepare usage query");
+  const std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(stmt, sqlite3_finalize);
   std::string modifier;
   if (months > 0) {
     modifier = "-" + std::to_string(months - 1) + " months";
     sqlite3_bind_text(stmt, 1, modifier.c_str(), -1, SQLITE_TRANSIENT);
   }
-  while (sqlite3_step(stmt) == SQLITE_ROW) {
+  int result = SQLITE_OK;
+  while ((result = sqlite3_step(stmt)) == SQLITE_ROW) {
     UsageBucketRow r;
     r.bucket = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
     r.model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
@@ -564,7 +640,7 @@ std::vector<UsageBucketRow> StatsDb::monthly_usage(int months) const {
     r.output_image_count = sqlite3_column_int64(stmt, 18);
     out.push_back(std::move(r));
   }
-  sqlite3_finalize(stmt);
+  throw_on_error(result, reinterpret_cast<sqlite3*>(db_), "read usage query");
   return out;
 }
 
@@ -580,10 +656,16 @@ std::vector<UsageBucketRow> StatsDb::hourly_usage(int hours) const {
   return bucketed_usage("%Y-%m-%dT%H", now_ms() - static_cast<std::int64_t>(hours) * 3'600'000);
 }
 
-std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_t since_ms) const {
+std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_t since_ms) const
+{
+  std::lock_guard lk(mtx_);
+  return bucketed_usage_locked(fmt, since_ms);
+}
+
+std::vector<UsageBucketRow> StatsDb::bucketed_usage_locked(const char* fmt, std::int64_t since_ms) const
+{
   std::vector<UsageBucketRow> out;
   if (!healthy_) return out;
-  std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
   const char* sql =
     "SELECT strftime(?, ts / 1000, 'unixepoch') AS bucket, model, "
@@ -602,10 +684,13 @@ std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_
     "COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN output_image_count ELSE 0 END),0) "
     "FROM requests WHERE ts >= ? "
     "GROUP BY bucket, model ORDER BY bucket ASC, model ASC;";
-  if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
+  throw_on_error(sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr),
+                 reinterpret_cast<sqlite3*>(db_), "prepare usage query");
+  const std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(stmt, sqlite3_finalize);
   sqlite3_bind_text(stmt, 1, fmt, -1, SQLITE_STATIC);
   sqlite3_bind_int64(stmt, 2, since_ms);
-  while (sqlite3_step(stmt) == SQLITE_ROW) {
+  int result = SQLITE_OK;
+  while ((result = sqlite3_step(stmt)) == SQLITE_ROW) {
     UsageBucketRow r;
     r.bucket = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
     r.model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
@@ -628,7 +713,7 @@ std::vector<UsageBucketRow> StatsDb::bucketed_usage(const char* fmt, std::int64_
     r.output_image_count = sqlite3_column_int64(stmt, 18);
     out.push_back(std::move(r));
   }
-  sqlite3_finalize(stmt);
+  throw_on_error(result, reinterpret_cast<sqlite3*>(db_), "read usage query");
   return out;
 }
 

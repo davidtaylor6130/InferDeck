@@ -489,77 +489,51 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
     for (auto it = system.begin(); it != system.end(); ++it) hardware[it.key()] = it.value();
 
     nlohmann::json usage = nlohmann::json::array();
-    std::unordered_map<std::string, observability::UsageBucketRow> canonical_usage;
-    for (const auto& bucket : stats_db.daily_usage(0)) {
-        auto& total = canonical_usage[bucket.model];
-        total.model = bucket.model;
-        total.prompt_tokens += bucket.prompt_tokens;
-        total.cached_prompt_tokens += bucket.cached_prompt_tokens;
-        total.completion_tokens += bucket.completion_tokens;
-        total.total_tokens += bucket.total_tokens;
-        total.requests += bucket.requests;
-        total.successful_requests += bucket.successful_requests;
-        total.measured_completion_tokens += bucket.measured_completion_tokens;
-        total.measured_prompt_tokens += bucket.measured_prompt_tokens;
-        total.generation_duration_ms += bucket.generation_duration_ms;
-        total.prompt_duration_ms += bucket.prompt_duration_ms;
-        total.peak_tokens_per_second = std::max(
-            total.peak_tokens_per_second, bucket.peak_tokens_per_second);
-        total.peak_prompt_tokens_per_second = std::max(
-            total.peak_prompt_tokens_per_second,
-            bucket.peak_prompt_tokens_per_second);
-        total.input_audio_seconds += bucket.input_audio_seconds;
-        total.input_characters += bucket.input_characters;
-        total.output_audio_seconds += bucket.output_audio_seconds;
-        total.input_image_count += bucket.input_image_count;
-        total.output_image_count += bucket.output_image_count;
-    }
+    const std::shared_ptr<const observability::DashboardStatsSnapshot> snapshot = stats_db.dashboard_snapshot();
     std::int64_t prompt_tokens = 0;
     std::int64_t completion_tokens = 0;
     std::int64_t requests = 0;
-    for (const auto& row : stats_db.model_usage()) {
-        const auto& canonical = canonical_usage.at(row.model);
-        prompt_tokens += canonical.prompt_tokens;
-        completion_tokens += canonical.completion_tokens;
-        requests += canonical.requests;
-        const double avg_tps = canonical.generation_duration_ms > 0.0
-            ? static_cast<double>(canonical.measured_completion_tokens) / (canonical.generation_duration_ms / 1000.0)
+    for (const auto& row : snapshot->models) {
+        prompt_tokens += row.prompt_tokens;
+        completion_tokens += row.completion_tokens;
+        requests += row.requests;
+        const double avg_tps = row.total_generation_duration_ms > 0.0
+            ? static_cast<double>(row.measured_completion_tokens) / (row.total_generation_duration_ms / 1000.0)
             : 0.0;
-        const double avg_prompt_tps = canonical.prompt_duration_ms > 0.0
-            ? static_cast<double>(canonical.measured_prompt_tokens) /
-                (canonical.prompt_duration_ms / 1000.0)
+        const double avg_prompt_tps = row.total_prompt_duration_ms > 0.0
+            ? static_cast<double>(row.measured_prompt_tokens) /
+                (row.total_prompt_duration_ms / 1000.0)
             : 0.0;
         usage.push_back({
             {"model", row.model},
-            {"requests", canonical.requests},
-            {"successfulRequests", canonical.successful_requests},
-            {"promptTokens", canonical.prompt_tokens},
-            {"cachedPromptTokens", canonical.cached_prompt_tokens},
-            {"completionTokens", canonical.completion_tokens},
-            {"measuredCompletionTokens", canonical.measured_completion_tokens},
-            {"measuredPromptTokens", canonical.measured_prompt_tokens},
-            {"totalTokens", canonical.total_tokens},
-            {"peakTokensPerSecond", canonical.peak_tokens_per_second},
+            {"requests", row.requests},
+            {"successfulRequests", row.successful_requests},
+            {"promptTokens", row.prompt_tokens},
+            {"cachedPromptTokens", row.cached_prompt_tokens},
+            {"completionTokens", row.completion_tokens},
+            {"measuredCompletionTokens", row.measured_completion_tokens},
+            {"measuredPromptTokens", row.measured_prompt_tokens},
+            {"totalTokens", row.prompt_tokens + row.completion_tokens},
+            {"peakTokensPerSecond", row.peak_tokens_per_second},
             {"avgTokensPerSecond", avg_tps},
-            {"peakPromptTokensPerSecond", canonical.peak_prompt_tokens_per_second},
+            {"peakPromptTokensPerSecond", row.peak_prompt_tokens_per_second},
             {"avgPromptTokensPerSecond", avg_prompt_tps},
-            {"generationDurationMs", canonical.generation_duration_ms},
+            {"generationDurationMs", row.total_generation_duration_ms},
             {"lastTimestampUnixMs", row.last_timestamp_unix_ms},
-            {"inputAudioSeconds", canonical.input_audio_seconds},
-            {"inputCharacters", canonical.input_characters},
-            {"outputAudioSeconds", canonical.output_audio_seconds},
-            {"inputImageCount", canonical.input_image_count},
-            {"outputImageCount", canonical.output_image_count}
+            {"inputAudioSeconds", row.input_audio_seconds},
+            {"inputCharacters", row.input_characters},
+            {"outputAudioSeconds", row.output_audio_seconds},
+            {"inputImageCount", row.input_image_count},
+            {"outputImageCount", row.output_image_count}
         });
     }
 
-    const auto monthly_rows = stats_db.monthly_usage();
-    auto monthly = usage_bucket_json(monthly_rows);
-    auto daily = usage_bucket_json(stats_db.daily_usage(31));
-    auto hourly = usage_bucket_json(stats_db.hourly_usage(24));
+    auto monthly = usage_bucket_json(snapshot->monthly);
+    auto daily = usage_bucket_json(snapshot->daily);
+    auto hourly = usage_bucket_json(snapshot->hourly);
 
     std::vector<double> latencies;
-    for (const auto& row : stats_db.recent_requests(500)) {
+    for (const auto& row : snapshot->recent) {
         if (row.status_code >= 200 && row.status_code < 300 && row.duration_ms > 0.0) {
             latencies.push_back(row.duration_ms);
         }

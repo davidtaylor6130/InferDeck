@@ -36,6 +36,7 @@ target_link_libraries(llama_cpp_wrapper
 
 if(MSVC)
     target_compile_options(llama_cpp_wrapper PRIVATE /W4 /utf-8 /FS)
+    set_property(SOURCE src/continuous_batch_scheduler.cpp APPEND PROPERTY COMPILE_OPTIONS /EHsc-)
     target_compile_definitions(llama_cpp_wrapper PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 else()
     target_compile_options(llama_cpp_wrapper PRIVATE -Wall -Wextra)

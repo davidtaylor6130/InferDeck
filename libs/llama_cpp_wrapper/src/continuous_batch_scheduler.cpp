@@ -18,6 +18,42 @@ using inferdeck::foundation::LOG_DEBUG;
 using inferdeck::foundation::LOG_INFO;
 using inferdeck::foundation::LOG_WARN;
 
+int detail::prepare_batch_order(std::vector<SlotTask*>& tasks, int capacity, std::size_t turn)
+{
+    if (tasks.empty()) return 0;
+    std::rotate(tasks.begin(), tasks.begin() + turn % tasks.size(), tasks.end());
+    const std::vector<SlotTask*>::iterator prompts_begin =
+        std::stable_partition(tasks.begin(), tasks.end(),
+            [](const SlotTask* task) { return task->prompt_done; });
+    int decode_tokens = 0;
+    int prompts = 0;
+    for (const SlotTask* task : tasks)
+    {
+        if (task->caller_cancel.load() || task->caller_stop.load() ||
+            (task->ext_cancel && task->ext_cancel->load())) continue;
+        if (task->prompt_done) decode_tokens += 1 + static_cast<int>(task->spec_draft.size());
+        else ++prompts;
+    }
+    if (decode_tokens <= capacity)
+    {
+        std::sort(tasks.begin(), prompts_begin,
+            [](const SlotTask* left, const SlotTask* right)
+            {
+                return left->slot_id < right->slot_id;
+            });
+    }
+    const int available = std::max(0, capacity - decode_tokens);
+    if (prompts > 0 && available >= prompts && available % prompts == 0)
+    {
+        std::sort(prompts_begin, tasks.end(),
+            [](const SlotTask* left, const SlotTask* right)
+            {
+                return left->slot_id < right->slot_id;
+            });
+    }
+    return prompts > 0 ? (available + prompts - 1) / prompts : 0;
+}
+
 ContinuousBatchScheduler::ContinuousBatchScheduler(
     llama_context* ctx,
     llama_model* model,
@@ -67,6 +103,7 @@ void ContinuousBatchScheduler::stop() {
 }
 
 void ContinuousBatchScheduler::submit(SlotTask* task) {
+    task->started_at = std::chrono::steady_clock::now();
     std::string error;
     {
         std::lock_guard lk(sub_mtx_);
@@ -114,6 +151,7 @@ void ContinuousBatchScheduler::push_event(SlotTask* task, TokenEvent ev) {
 }
 
 void ContinuousBatchScheduler::fail_all(std::string error) {
+    failed_.store(true);
     std::vector<SlotTask*> tasks;
     {
         std::lock_guard lk(sub_mtx_);
@@ -139,16 +177,18 @@ void ContinuousBatchScheduler::fail_all(std::string error) {
 void ContinuousBatchScheduler::init_task(SlotTask* task) {
     task->started_at = std::chrono::steady_clock::now();
     auto* mem = llama_get_memory(ctx_);
-    auto* draft_mem = draft_ctx_ ? llama_get_memory(draft_ctx_) : nullptr;
+    auto* draft_mem = task->mtp_eligible && draft_ctx_
+        ? llama_get_memory(draft_ctx_) : nullptr;
     const int seq_id = task->slot_id;
     const bool has_media = !task->media_chunks.empty();
-    task->mtp_eligible =
-        speculative_ != nullptr && !has_media &&
-        !task->capture_probabilities;
-    task->out_mtp_cache_synced = true;
+    task->out_mtp_cache_synced = !speculative_ || task->mtp_eligible;
     const auto clear_sequence = [&] {
         if (mem) llama_memory_seq_rm(mem, seq_id, 0, -1);
-        if (draft_mem) llama_memory_seq_rm(draft_mem, seq_id, 0, -1);
+        if (draft_ctx_) {
+            if (auto* memory = llama_get_memory(draft_ctx_)) {
+                llama_memory_seq_rm(memory, seq_id, 0, -1);
+            }
+        }
     };
 
     if (has_media) {
@@ -160,7 +200,7 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
         return;
     }
 
-    if (speculative_ && !task->mtp_cache_synced) {
+    if (task->mtp_eligible && !task->mtp_cache_synced) {
         clear_sequence();
         task->prompt_pos = 0;
         task->n_pos = 0;
@@ -211,13 +251,13 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
             physical_tokens, std::max(0, draft_pos_max + 1));
     }
     LOG_DEBUG("scheduler_cache_probe",
-              "slot={} common_tokens={} physical_tokens={} checkpoint_bytes={} draft_checkpoint_bytes={} mtp_checkpoint_bytes={} checkpoint_pos={} checkpoint_capture_pos={} prompt_tokens={}",
+              "slot={} common_tokens={} physical_tokens={} checkpoint_bytes={} draft_checkpoint_bytes={} replay_checkpoint_bytes={} checkpoint_pos={} checkpoint_capture_pos={} prompt_tokens={}",
               seq_id,
               n_past,
               physical_tokens,
               task->recurrent_checkpoint ? task->recurrent_checkpoint->size() : 0,
               task->recurrent_draft_checkpoint ? task->recurrent_draft_checkpoint->size() : 0,
-              task->recurrent_mtp_checkpoint ? task->recurrent_mtp_checkpoint->size() : 0,
+              task->recurrent_replay_checkpoint ? task->recurrent_replay_checkpoint->size() : 0,
               task->checkpoint_pos,
               task->checkpoint_capture_pos,
               static_cast<int>(task->prompt_tokens.size()));
@@ -228,7 +268,9 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
             n_past,
             static_cast<int>(task->prompt_tokens.size())) &&
         (!draft_mem ||
-         (detail::recurrent_checkpoint_usable(
+         (llama_get_ctx_other(draft_ctx_) != ctx_ &&
+          task->checkpoint_pos > 1 &&
+          detail::recurrent_checkpoint_usable(
               task->recurrent_draft_checkpoint
                   ? task->recurrent_draft_checkpoint->size()
                   : 0,
@@ -236,8 +278,8 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
               n_past,
               static_cast<int>(task->prompt_tokens.size())) &&
           detail::recurrent_checkpoint_usable(
-              task->recurrent_mtp_checkpoint
-                  ? task->recurrent_mtp_checkpoint->size()
+              task->recurrent_replay_checkpoint
+                  ? task->recurrent_replay_checkpoint->size()
                   : 0,
               task->checkpoint_pos,
               n_past,
@@ -245,8 +287,10 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
     if (task->checkpoint_pos == task->checkpoint_capture_pos &&
         checkpoint_usable) {
         task->out_recurrent_checkpoint = task->recurrent_checkpoint;
-        task->out_recurrent_draft_checkpoint = task->recurrent_draft_checkpoint;
-        task->out_recurrent_mtp_checkpoint = task->recurrent_mtp_checkpoint;
+        task->out_recurrent_draft_checkpoint = draft_mem
+            ? task->recurrent_draft_checkpoint : nullptr;
+        task->out_recurrent_replay_checkpoint = draft_mem
+            ? task->recurrent_replay_checkpoint : nullptr;
         task->out_checkpoint_pos = task->checkpoint_pos;
     }
     n_past = std::min(n_past, physical_tokens);
@@ -274,24 +318,35 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
         !draft_mem || llama_memory_seq_rm(draft_mem, seq_id, n_past, -1);
     if (!target_trimmed || !draft_trimmed) {
         if (checkpoint_usable) {
-            const size_t target_restored = llama_state_seq_set_data_ext(
-                ctx_,
-                task->recurrent_checkpoint->data(),
-                task->recurrent_checkpoint->size(),
-                seq_id,
-                LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-            bool restored = target_restored == task->recurrent_checkpoint->size();
+            const auto& initial_checkpoint = draft_mem
+                ? task->recurrent_replay_checkpoint : task->recurrent_checkpoint;
+            bool restored = llama_state_seq_set_data_ext(
+                ctx_, initial_checkpoint->data(), initial_checkpoint->size(),
+                seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == initial_checkpoint->size();
             if (restored && draft_mem) {
-                const size_t draft_restored = llama_state_seq_set_data_ext(
-                    draft_ctx_,
-                    task->recurrent_draft_checkpoint->data(),
-                    task->recurrent_draft_checkpoint->size(),
-                    seq_id,
-                    LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                common_speculative_set_state(
-                    speculative_, seq_id, *task->recurrent_mtp_checkpoint);
-                restored =
-                    draft_restored == task->recurrent_draft_checkpoint->size();
+                llama_token token = task->prompt_tokens[task->checkpoint_pos - 1];
+                llama_pos position = task->checkpoint_pos - 1;
+                int32_t sequence_count = 1;
+                llama_seq_id sequence = seq_id;
+                llama_seq_id* sequences = &sequence;
+                int8_t logits = 1;
+                llama_batch replay{1, &token, nullptr, &position,
+                                   &sequence_count, &sequences, &logits};
+                restored = llama_memory_seq_rm(
+                    mem, seq_id, task->checkpoint_pos - 1, -1) &&
+                    llama_memory_seq_rm(draft_mem, seq_id, 0, -1) &&
+                    llama_decode(ctx_, replay) == 0 &&
+                    common_speculative_process(speculative_, replay);
+                if (restored) {
+                    restored = llama_state_seq_set_data_ext(
+                        ctx_, task->recurrent_checkpoint->data(),
+                        task->recurrent_checkpoint->size(), seq_id,
+                        LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == task->recurrent_checkpoint->size() &&
+                        llama_state_seq_set_data_ext(
+                            draft_ctx_, task->recurrent_draft_checkpoint->data(),
+                            task->recurrent_draft_checkpoint->size(), seq_id,
+                            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == task->recurrent_draft_checkpoint->size();
+                }
             }
             if (restored) {
                 const bool target_checkpoint_trimmed = llama_memory_seq_rm(
@@ -341,6 +396,7 @@ void ContinuousBatchScheduler::run_loop() {
     llama_batch batch = llama_batch_init(n_batch_, 0, 1);
 
     try {
+      std::size_t batch_turn = 0;
       while (!stop_.load()) {
         // ---- Wait for work ----
         std::vector<SlotTask*> tasks;
@@ -355,14 +411,6 @@ void ContinuousBatchScheduler::run_loop() {
             tasks = active_;
         }
         if (tasks.empty()) continue;
-
-        // ---- Initialize newly submitted tasks ----
-        for (auto* t : tasks) {
-            if (!t->initialized) {
-                init_task(t);
-                t->initialized = true;
-            }
-        }
 
         std::vector<SlotTask*> runnable;
         runnable.reserve(tasks.size());
@@ -389,6 +437,13 @@ void ContinuousBatchScheduler::run_loop() {
             runnable.size(),
             mtp_max_active_requests_);
         for (auto* t : runnable) {
+            if (should_cancel(t) || t->caller_stop.load()) continue;
+            if (!t->initialized) {
+                t->mtp_eligible = mtp_window &&
+                    t->media_chunks.empty() && !t->capture_probabilities;
+                init_task(t);
+                t->initialized = true;
+            }
             t->mtp_eligible = detail::adaptive_mtp_request_eligible(
                 t->mtp_eligible,
                 speculative_ != nullptr,
@@ -469,11 +524,13 @@ void ContinuousBatchScheduler::run_loop() {
         }
 
         // ---- Build batch ----
+        const int prefill_limit = detail::prepare_batch_order(tasks, n_batch_, batch_turn++);
         batch.n_tokens = 0;
         bool process_mtp = false;
         std::vector<SlotTask*> cancelled;
         std::vector<SlotTask*> stopped;
         std::vector<SlotTask*> checkpoint_ready;
+        std::vector<SlotTask*> replay_checkpoint_ready;
 
         for (auto* t : tasks) {
             if (should_cancel(t)) {
@@ -531,7 +588,8 @@ void ContinuousBatchScheduler::run_loop() {
                 const int space = n_batch_ - batch.n_tokens;
                 if (space <= 0) continue; // batch full this iteration; retry next
 
-                int chunk = std::min(remaining, space);
+                int chunk = std::min({remaining, space, prefill_limit});
+                if (chunk <= 0) continue;
                 const auto next_media = std::find_if(
                     t->media_chunks.begin(), t->media_chunks.end(),
                     [t](const SlotTask::MediaChunk& media) {
@@ -540,6 +598,10 @@ void ContinuousBatchScheduler::run_loop() {
                 if (next_media != t->media_chunks.end()) {
                     chunk = std::min(
                         chunk, next_media->token_start - t->prompt_pos);
+                }
+                if (draft_ctx_ && llama_get_ctx_other(draft_ctx_) != ctx_ && t->mtp_eligible &&
+                    t->checkpoint_capture_pos - 1 > t->prompt_pos) {
+                    chunk = std::min(chunk, t->checkpoint_capture_pos - 1 - t->prompt_pos);
                 }
                 if (t->checkpoint_capture_pos > t->prompt_pos) {
                     chunk = std::min(
@@ -560,6 +622,10 @@ void ContinuousBatchScheduler::run_loop() {
                 }
                 t->prompt_pos += chunk;
                 t->n_pos += chunk;
+                if (draft_ctx_ && llama_get_ctx_other(draft_ctx_) != ctx_ && t->mtp_eligible && t->checkpoint_capture_pos > 1 &&
+                    t->prompt_pos == t->checkpoint_capture_pos - 1) {
+                    replay_checkpoint_ready.push_back(t);
+                }
                 if (t->prompt_pos == t->checkpoint_capture_pos) {
                     checkpoint_ready.push_back(t);
                 }
@@ -622,6 +688,11 @@ void ContinuousBatchScheduler::run_loop() {
                         std::chrono::steady_clock::now() -
                         t->generation_started_at).count();
             }
+            if (!t->generation_started) {
+                t->out_prompt_duration_ms =
+                    std::chrono::duration<float, std::milli>(
+                        std::chrono::steady_clock::now() - t->started_at).count();
+            }
             if (t->sampler) { common_sampler_free(t->sampler); t->sampler = nullptr; }
             TokenEvent ev; ev.is_done = true;
             push_event(t, ev);
@@ -656,47 +727,36 @@ void ContinuousBatchScheduler::run_loop() {
             break;
         }
 
-        for (auto* t : checkpoint_ready) {
-            const auto capture_context = [t](llama_context* context) {
-                const size_t size = llama_state_seq_get_size_ext(
-                    context,
-                    t->slot_id,
-                    LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                if (size == 0) {
-                    return std::shared_ptr<const std::vector<uint8_t>>{};
-                }
-                auto data = std::make_shared<std::vector<uint8_t>>(size);
-                const size_t written = llama_state_seq_get_data_ext(
-                    context,
-                    data->data(),
-                    size,
-                    t->slot_id,
-                    LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                return written == size
-                    ? std::shared_ptr<const std::vector<uint8_t>>(std::move(data))
-                    : std::shared_ptr<const std::vector<uint8_t>>{};
-            };
-            auto target_checkpoint = capture_context(ctx_);
-            if (!target_checkpoint) {
-                continue;
-            }
+        const auto capture_context = [](llama_context* context, int sequence) {
+            const size_t size = llama_state_seq_get_size_ext(
+                context, sequence, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            if (size == 0) return std::shared_ptr<const std::vector<uint8_t>>{};
+            auto data = std::make_shared<std::vector<uint8_t>>(size);
+            const size_t written = llama_state_seq_get_data_ext(
+                context, data->data(), size, sequence, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            return written == size
+                ? std::shared_ptr<const std::vector<uint8_t>>(std::move(data))
+                : std::shared_ptr<const std::vector<uint8_t>>{};
+        };
+        for (SlotTask* task : replay_checkpoint_ready) {
+            task->out_recurrent_replay_checkpoint = capture_context(ctx_, task->slot_id);
+        }
+        for (SlotTask* task : checkpoint_ready) {
+            std::shared_ptr<const std::vector<uint8_t>> target_checkpoint =
+                capture_context(ctx_, task->slot_id);
+            if (!target_checkpoint) continue;
             std::shared_ptr<const std::vector<uint8_t>> draft_checkpoint;
-            std::shared_ptr<const std::vector<uint8_t>> mtp_checkpoint;
-            if (draft_ctx_) {
-                draft_checkpoint = capture_context(draft_ctx_);
-                auto data = std::make_shared<std::vector<uint8_t>>();
-                if (common_speculative_get_state(
-                        speculative_, t->slot_id, *data)) {
-                    mtp_checkpoint = std::move(data);
-                }
-                if (!draft_checkpoint || !mtp_checkpoint) {
-                    continue;
-                }
+            if (draft_ctx_ && task->mtp_eligible) {
+                if (llama_get_ctx_other(draft_ctx_) == ctx_ ||
+                    !task->out_recurrent_replay_checkpoint) continue;
+                draft_checkpoint = capture_context(draft_ctx_, task->slot_id);
+                if (!draft_checkpoint) continue;
+            } else {
+                task->out_recurrent_replay_checkpoint.reset();
             }
-            t->out_recurrent_checkpoint = std::move(target_checkpoint);
-            t->out_recurrent_draft_checkpoint = std::move(draft_checkpoint);
-            t->out_recurrent_mtp_checkpoint = std::move(mtp_checkpoint);
-            t->out_checkpoint_pos = t->checkpoint_capture_pos;
+            task->out_recurrent_checkpoint = std::move(target_checkpoint);
+            task->out_recurrent_draft_checkpoint = std::move(draft_checkpoint);
+            task->out_checkpoint_pos = task->checkpoint_capture_pos;
         }
 
         // ---- Sample and push tokens ----

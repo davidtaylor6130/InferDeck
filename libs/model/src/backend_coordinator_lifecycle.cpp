@@ -88,17 +88,30 @@ foundation::Result<void> BackendCoordinator::load_with_lock_deadline(
         if (lifecycle_lock->try_lock()) break;
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
+    const LifecycleControl control{deadline, cancelled};
+    std::optional<int> recovery_slots;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto existing = instances_.find(name);
+        if (existing != instances_.end() && existing->second &&
+            existing->second->is_loaded()) {
+            if (existing->second->execution_healthy()) {
+                if (is_primary_model(existing->second->info())) {
+                    current_loaded_ = name;
+                }
+                return foundation::Ok();
+            }
+            recovery_slots = existing->second->n_slots();
+        }
+    }
+    if (recovery_slots) {
+        const auto unloaded = unload_with_control(name, control);
+        if (!unloaded) return unloaded;
+    }
     IBackend* instance = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto existing = instances_.find(name);
-        if (existing != instances_.end() && existing->second &&
-            existing->second->is_loaded()) {
-            if (is_primary_model(existing->second->info())) {
-                current_loaded_ = name;
-            }
-            return foundation::Ok();
-        }
+        const auto existing = instances_.find(name);
         if (existing == instances_.end() || !existing->second) {
             auto backend = registry_.create_result(name);
             if (!backend) {
@@ -108,7 +121,10 @@ foundation::Result<void> BackendCoordinator::load_with_lock_deadline(
         }
         instance = instances_.at(name).get();
     }
-    const LifecycleControl control{deadline, cancelled};
+    if (recovery_slots && instance->n_slots() != *recovery_slots) {
+        const auto resized = instance->resize_slots(*recovery_slots, control);
+        if (!resized) return resized;
+    }
     auto r = instance->load(control);
     if (!r) {
         {
@@ -132,7 +148,6 @@ foundation::Result<void> BackendCoordinator::load_with_lock_deadline(
         }
     }
     cv_.notify_all();
-    (void)instance->reset_all_slots();
     return foundation::Ok();
 }
 
@@ -233,7 +248,7 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
 }
 
 foundation::Result<void> BackendCoordinator::ensure_loaded(const std::string& name) {
-    if (is_loaded(name)) return foundation::Ok();
+    if (is_ready(name)) return foundation::Ok();
     return load(name);
 }
 
@@ -243,7 +258,7 @@ foundation::Result<void> BackendCoordinator::swap_to(const std::string& name) {
 
 foundation::Result<void> BackendCoordinator::swap_to_with_control(
     const std::string& name, const LifecycleControl& control) {
-  if (is_loaded(name)) return foundation::Ok();
+  if (is_ready(name)) return foundation::Ok();
   auto info = registry_.get_info_result(name);
   if (!info) return foundation::Err<void>(info.error().code, info.error().message);
   if (is_independent_sidecar(*info)) {
@@ -261,9 +276,12 @@ foundation::Result<void> BackendCoordinator::swap_to_with_control(
     }
     std::this_thread::sleep_for(std::chrono::milliseconds{10});
   }
-  if (is_loaded(name)) return foundation::Ok();
+  if (is_ready(name)) return foundation::Ok();
   auto priority_allowed = require_priority_session_allows(name);
   if (!priority_allowed) return priority_allowed;
+  if (is_loaded(name)) {
+    return load_with_lock_deadline(name, control.deadline, control.cancelled);
+  }
   if (vram_budget_mb() <= 0) {
     auto current = get_loaded_model();
     auto drain_r = current ? unload_with_control(*current, control)
@@ -334,7 +352,7 @@ foundation::Result<void> BackendCoordinator::swap_to_cancellable(
     reset_swap_cancel();
     return result;
   }
-  if (is_loaded(name)) return foundation::Ok();
+  if (is_ready(name)) return foundation::Ok();
   if (swap_cancel_.load()) {
     reset_swap_cancel();
     return foundation::Err(foundation::ErrorCode::Cancelled, "swap cancelled before start");

@@ -482,6 +482,23 @@ public:
     }
 };
 
+class LateCancelTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string& token) override {
+        return SuccessfulTransport{}.get_json(url, token);
+    }
+    foundation::Result<void> download(
+        const std::string& url, const std::string& token,
+        const std::filesystem::path& destination, std::uint64_t offset,
+        const std::function<bool(std::uint64_t)>& progress) override {
+        const auto result = FakeTransport::download(url, token, destination, offset, progress);
+        if (result && completed) completed();
+        return result;
+    }
+    std::function<void()> completed;
+};
+
 class SherpaBundleTransport : public FakeTransport {
 public:
     foundation::Result<nlohmann::json> get_json(
@@ -1038,6 +1055,103 @@ TEST_CASE("Model store never registers a corrupt artifact", "[model-store]") {
 }
 
 #ifdef _WIN32
+TEST_CASE("Model store honors cancellation after the last download callback",
+          "[model-store][cancellation]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        auto transport = std::make_unique<LateCancelTransport>();
+        auto* control = transport.get();
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        std::atomic<bool> accepted{false};
+        control->completed = [&store, &accepted] {
+            const auto jobs = store.downloads();
+            if (!jobs.empty()) accepted.store(static_cast<bool>(store.cancel(jobs.front().id)));
+        };
+        const auto install = store.install("owner/text-GGUF", "model.gguf",
+                                           "llama_cpp", "text", "late-cancel");
+        REQUIRE(install);
+        const auto cancelled = wait_for_terminal(store, *install);
+        REQUIRE(cancelled);
+        CHECK(accepted.load());
+        REQUIRE(cancelled->state == "cancelled");
+        CHECK_FALSE(registry.has("late-cancel"));
+        CHECK(store.installed().empty());
+        control->completed = {};
+        REQUIRE(store.resume(*install));
+        const auto installed = wait_for_terminal(store, *install);
+        REQUIRE(installed);
+        CHECK(installed->state == "installed");
+        CHECK_FALSE(store.cancel(*install));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store gives duplicate source installs independent files",
+          "[model-store][artifact-ownership]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<SuccessfulTransport>());
+        const auto first = store.install("owner/text-GGUF", "model.gguf",
+                                         "llama_cpp", "text", "first-copy");
+        const auto second = store.install("owner/text-GGUF", "model.gguf",
+                                          "llama_cpp", "text", "second-copy");
+        REQUIRE(first);
+        REQUIRE(second);
+        const auto first_job = wait_for_terminal(store, *first);
+        const auto second_job = wait_for_terminal(store, *second);
+        REQUIRE(first_job);
+        REQUIRE(second_job);
+        REQUIRE(first_job->state == "installed");
+        REQUIRE(second_job->state == "installed");
+        REQUIRE(first_job->installed_path != second_job->installed_path);
+        CHECK_FALSE(store.install("owner/text-GGUF", "model.gguf",
+                                  "llama_cpp", "text", "FIRST-COPY"));
+        REQUIRE(store.remove("first-copy"));
+        CHECK(std::filesystem::is_regular_file(second_job->installed_path));
+        CHECK(registry.has("second-copy"));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store protects legacy shared artifacts from retirement",
+          "[model-store][artifact-ownership]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    std::filesystem::create_directories(root);
+    const auto artifact = root / "shared.gguf";
+    std::ofstream(artifact, std::ios::binary) << "test";
+    nlohmann::json manifest = nlohmann::json::object();
+    for (const std::string name : {"first-copy", "second-copy"}) {
+        manifest[name] = {{"path", artifact.string()}, {"runtime", "llama_cpp"},
+                          {"modality", "text"}, {"size", 4}};
+    }
+    SECTION("legacy managed references") {}
+    SECTION("configured model shares the managed file") {
+        manifest.erase("second-copy");
+        model::ModelInfo other;
+        other.name = "second-copy";
+        other.gguf_path = artifact.string();
+        registry.register_model(other);
+    }
+    std::ofstream(root / "installed.json") << manifest.dump();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<SuccessfulTransport>());
+        CHECK_FALSE(store.remove("first-copy"));
+        CHECK_FALSE(store.archive("second-copy"));
+        CHECK(std::filesystem::is_regular_file(artifact));
+        CHECK(registry.has("first-copy"));
+        CHECK(registry.has("second-copy"));
+    }
+    std::filesystem::remove_all(root);
+}
+
 TEST_CASE("Native quantizer produces a real GGUF artifact",
           "[.][post-training][native-quantizer]") {
     const auto source_value = environment_value("INFERDECK_QUANTIZATION_SOURCE");
@@ -1337,7 +1451,7 @@ TEST_CASE("Model store aborts downloads exceeding validated size",
         CHECK_FALSE(control->progress_accepted.load());
         CHECK_FALSE(std::filesystem::exists(
             root / "llama_cpp" / "owner_text-GGUF" /
-            "model.gguf.partial"));
+            "oversized-model" / "model.gguf.partial"));
     }
     std::filesystem::remove_all(root);
 }

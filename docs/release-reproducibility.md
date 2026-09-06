@@ -16,7 +16,7 @@ The Windows release environment is pinned to:
   against SHA-256
   `48b132169b64fe65cdb0f20970195335a65354e73f1ea5373032c2a8bbad4297`;
 - vcpkg baseline `77df67cfff9c12ccfdb52284e07c87c75092f723`;
-- llama.cpp submodule `adb55e5148dc93bcdca7212a2d1df3ccc422959a`;
+- llama.cpp submodule `73a43d1f69345aee8bb186ef4b3172cef892f2e5`;
 - Vulkan-Headers submodule `015e25c3c91b70eb1a754d36fb14c4ba6ad9b0b9`;
 - sherpa-onnx `v1.13.2` Windows shared runtime archive, SHA-256
   `e1f9b7e6b17aec5a56ea1180ffd915a42eef86c7abf7a0749ddc530e0e0831e4`,

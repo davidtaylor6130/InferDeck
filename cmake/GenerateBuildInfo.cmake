@@ -2,6 +2,13 @@ if(NOT DEFINED OUTPUT OR NOT DEFINED SOURCE_DIR OR NOT DEFINED VERSION)
     message(FATAL_ERROR "OUTPUT, SOURCE_DIR, and VERSION are required")
 endif()
 
+if(DEFINED LOCAL_BUILD_NUMBER AND NOT LOCAL_BUILD_NUMBER STREQUAL "")
+    if(NOT LOCAL_BUILD_NUMBER MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR "Local build number must be a positive integer")
+    endif()
+    string(APPEND VERSION "-alpha-${LOCAL_BUILD_NUMBER}")
+endif()
+
 set(_revision "${REVISION_OVERRIDE}")
 set(_dirty "false")
 if(NOT _revision)

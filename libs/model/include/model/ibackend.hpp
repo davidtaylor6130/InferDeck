@@ -65,6 +65,7 @@ public:
         return unload();
     }
     virtual bool is_loaded() const = 0;
+    virtual bool execution_healthy() const { return true; }
     virtual int vram_usage_mb() const = 0;
     virtual int n_slots() const = 0;
     virtual int n_free_slots() const = 0;

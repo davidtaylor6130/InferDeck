@@ -1,4 +1,5 @@
-﻿#include <atomic>
+#include <semaphore>
+#include <atomic>
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -213,10 +214,11 @@ int run_gateway(const fs::path& config_path) {
             const model::ModelInfo& info,
             const optimize::ProfileCandidate& candidate,
             const std::vector<ProfileBenchmarkPrompt>& prompts,
+            const std::vector<int>& concurrency_levels,
             const std::atomic<bool>& cancel,
             const ProfileBenchmarkProgress& progress) {
             return run_profile_benchmark_trial(
-                cfg, gpu, info, candidate, prompts, cancel, progress);
+                cfg, gpu, info, candidate, prompts, concurrency_levels, cancel, progress);
         }};
     ProfileBenchmarkScheduler profile_benchmark_scheduler{
         profile_benchmark, coordinator, gpu};
@@ -489,6 +491,11 @@ int run_gateway(const fs::path& config_path) {
                         "dashboard token is required");
             return;
         }
+        if (body.contains("remember") && !body["remember"].is_boolean()) {
+            write_error(resp, 400, "invalid_request",
+                        "remember must be a boolean");
+            return;
+        }
         const auto token = body["token"].get<std::string>();
         if (!control_session.check("Bearer " + token)) {
             resp.set_header("WWW-Authenticate", "Bearer");
@@ -496,9 +503,19 @@ int run_gateway(const fs::path& config_path) {
                         "valid dashboard token required");
             return;
         }
+        std::string cookie = "inferdeck_control=" + token +
+            "; Path=/api/inferdeck/v1; HttpOnly; SameSite=Strict";
+        if (body.value("remember", false)) cookie += "; Max-Age=2592000";
+        resp.set_header("Set-Cookie", cookie);
+        resp.set_header("Cache-Control", "no-store");
+        resp.set_content(R"({"ok":true})", "application/json");
+    }));
+    server.Delete(dashboard_session_path,
+                  wrap([&](const httplib::Request&,
+                           httplib::Response& resp) {
         resp.set_header("Set-Cookie",
-                        "inferdeck_control=" + token +
-                        "; Path=/api/inferdeck/v1; HttpOnly; SameSite=Strict");
+                        "inferdeck_control=; Path=/api/inferdeck/v1; HttpOnly; SameSite=Strict; Max-Age=0");
+        resp.set_header("Cache-Control", "no-store");
         resp.set_content(R"({"ok":true})", "application/json");
     }));
 

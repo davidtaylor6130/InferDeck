@@ -7,9 +7,13 @@ target_include_directories(native_runtimes PUBLIC include)
 target_link_libraries(native_runtimes PUBLIC model foundation)
 target_compile_features(native_runtimes PUBLIC cxx_std_23)
 
+if(MSVC)
+    set_property(SOURCE src/stable_diffusion_backend.cpp APPEND PROPERTY COMPILE_OPTIONS /EHsc-)
+endif()
+
 if(WIN32)
     target_sources(native_runtimes PRIVATE src/windows_sapi_backend.cpp)
-    target_link_libraries(native_runtimes PRIVATE sapi ole32)
+    target_link_libraries(native_runtimes PRIVATE sapi ole32 windowscodecs)
     target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_WINDOWS_SAPI=1)
 endif()
 
@@ -154,6 +158,17 @@ if(INFERDECK_BUILD_TESTS)
     endif()
     if(EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
         target_sources(native_runtime_tests PRIVATE tests/test_ace_step.cpp)
+    endif()
+    if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/include/stable-diffusion.h")
+        add_executable(stable_diffusion_cleanup_tests
+            tests/test_stable_diffusion_cleanup.cpp
+            src/stable_diffusion_backend.cpp)
+        target_include_directories(stable_diffusion_cleanup_tests PRIVATE
+            include "${INFERDECK_STABLE_DIFFUSION_ROOT}/include")
+        target_link_libraries(stable_diffusion_cleanup_tests PRIVATE model foundation Catch2::Catch2WithMain)
+        target_compile_features(stable_diffusion_cleanup_tests PRIVATE cxx_std_23)
+        add_test(NAME stable_diffusion_cleanup_tests COMMAND stable_diffusion_cleanup_tests)
+        set_tests_properties(stable_diffusion_cleanup_tests PROPERTIES LABELS "unit")
     endif()
     target_link_libraries(native_runtime_tests PRIVATE native_runtimes Catch2::Catch2WithMain)
     add_test(NAME native_runtime_tests COMMAND native_runtime_tests)

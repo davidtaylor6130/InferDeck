@@ -7,13 +7,13 @@
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  --void-black: #0b1017;
-  --deck-navy: #101720;
+  --void-black: #000;
+  --deck-navy: #000;
   --panel-slate: #151e29;
   --elevated-slate: #1b2633;
   --card-highlight: #202d3c;
   --border-slate: #2b3949;
-  --text-primary: #f2f5f8;
+  --text-primary: #fff;
   --text-secondary: #b0bcc8;
   --text-muted: #7f8d9d;
   --infer-violet: #6e8fb5;

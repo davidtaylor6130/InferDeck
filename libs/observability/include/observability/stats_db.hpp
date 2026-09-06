@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <memory>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -74,6 +76,15 @@ struct LifetimeTotals {
   double total_duration_ms{};
 };
 
+struct DashboardStatsSnapshot
+{
+  std::vector<ModelUsageRow> models;
+  std::vector<UsageBucketRow> monthly;
+  std::vector<UsageBucketRow> daily;
+  std::vector<UsageBucketRow> hourly;
+  std::vector<RequestRow> recent;
+};
+
 class StatsDb {
 public:
   explicit StatsDb(const std::string& path);
@@ -96,12 +107,20 @@ public:
   std::vector<UsageBucketRow> daily_usage(int days = 30) const;
   std::vector<UsageBucketRow> hourly_usage(int hours = 24) const;
 
+  std::shared_ptr<const DashboardStatsSnapshot> dashboard_snapshot() const;
+
   bool healthy() const noexcept { return healthy_.load(); }
   const std::string& path() const noexcept { return path_; }
 
 private:
   void open();
   void close();
+  void finish_write(int result, const char* operation);
+  std::vector<RequestRow> recent_requests_locked(int limit, const std::string& protocol_profile,
+                                                const std::string& endpoint) const;
+  std::vector<ModelUsageRow> model_usage_locked() const;
+  std::vector<UsageBucketRow> monthly_usage_locked(int months) const;
+  std::vector<UsageBucketRow> bucketed_usage_locked(const char* fmt, std::int64_t since_ms) const;
   std::vector<UsageBucketRow> bucketed_usage(const char* fmt, std::int64_t since_ms) const;
 
   std::string path_;
@@ -110,6 +129,8 @@ private:
   void* swap_stmt_{nullptr};
   mutable std::mutex mtx_;
   std::atomic<bool> healthy_{false};
+  mutable std::shared_ptr<const DashboardStatsSnapshot> dashboard_cache_;
+  mutable std::chrono::steady_clock::time_point dashboard_cache_expires_;
 };
 
 }

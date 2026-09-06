@@ -10,7 +10,8 @@
 
 namespace inferdeck::model {
 foundation::Result<InferenceResult> BackendCoordinator::predict(
-    const std::string& name, int lease_id, const InferenceRequest& req) {
+    const std::string& name, int lease_id, const InferenceRequest& req,
+    const std::atomic<bool>* cancel) {
     IModel* inst = nullptr;
     int backend_slot = 0;
     {
@@ -33,7 +34,7 @@ foundation::Result<InferenceResult> BackendCoordinator::predict(
     }
     // Safe to call unlocked: the caller holds a slot, so unload() drains before
     // the instance can be destroyed.
-    return inst->predict(backend_slot, req);
+    return inst->predict_cancellable(backend_slot, req, cancel);
 }
 
 foundation::Result<InferenceResult> BackendCoordinator::predict_stream(

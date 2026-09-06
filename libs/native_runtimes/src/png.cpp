@@ -3,11 +3,42 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <sstream>
 #include <utility>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <wincodec.h>
+#include <wrl/client.h>
+#endif
 
 namespace inferdeck::native_runtimes {
 
 namespace {
+
+#ifdef _WIN32
+class ComApartment {
+public:
+    ComApartment() : result_(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {}
+    ~ComApartment() { if (SUCCEEDED(result_)) CoUninitialize(); }
+    bool available() const { return SUCCEEDED(result_) || result_ == RPC_E_CHANGED_MODE; }
+    HRESULT result() const { return result_; }
+private:
+    HRESULT result_;
+};
+
+foundation::Result<std::vector<std::byte>> png_error(
+    const char* operation, HRESULT status) {
+    std::ostringstream message;
+    message << operation << " (HRESULT 0x" << std::hex
+            << static_cast<unsigned long>(status) << ")";
+    return foundation::Err<std::vector<std::byte>>(
+        foundation::ErrorCode::Internal, message.str());
+}
+#else
 
 void append_u32(std::vector<std::byte>& output, std::uint32_t value) {
     output.push_back(static_cast<std::byte>((value >> 24) & 0xff));
@@ -44,6 +75,8 @@ std::uint32_t adler32(const std::vector<std::byte>& data) {
     return (b << 16) | a;
 }
 
+#endif
+
 }
 
 foundation::Result<std::vector<std::byte>> encode_png(
@@ -53,6 +86,72 @@ foundation::Result<std::vector<std::byte>> encode_png(
         return foundation::Err<std::vector<std::byte>>(foundation::ErrorCode::InvalidArgument,
                                                        "invalid image buffer");
     }
+#ifdef _WIN32
+    const ComApartment apartment;
+    if (!apartment.available()) {
+        return png_error("cannot initialize PNG encoder", apartment.result());
+    }
+    using Microsoft::WRL::ComPtr;
+    ComPtr<IWICImagingFactory> factory;
+    ComPtr<IStream> stream;
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    HRESULT status = CoCreateInstance(
+        CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(factory.GetAddressOf()));
+    if (SUCCEEDED(status)) status = CreateStreamOnHGlobal(nullptr, TRUE, stream.GetAddressOf());
+    if (SUCCEEDED(status)) status = factory->CreateEncoder(
+        GUID_ContainerFormatPng, nullptr, encoder.GetAddressOf());
+    if (SUCCEEDED(status)) status = encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache);
+    if (SUCCEEDED(status)) status = encoder->CreateNewFrame(frame.GetAddressOf(), nullptr);
+    if (SUCCEEDED(status)) status = frame->Initialize(nullptr);
+    if (SUCCEEDED(status)) status = frame->SetSize(width, height);
+    const WICPixelFormatGUID requested_format = channels == 3
+        ? GUID_WICPixelFormat24bppRGB : GUID_WICPixelFormat32bppRGBA;
+    WICPixelFormatGUID format = requested_format;
+    if (SUCCEEDED(status)) status = frame->SetPixelFormat(&format);
+    const UINT stride = static_cast<UINT>(width) * channels;
+    if (SUCCEEDED(status) && IsEqualGUID(format, requested_format)) {
+        status = frame->WritePixels(
+            static_cast<UINT>(height), stride, stride * static_cast<UINT>(height),
+            const_cast<BYTE*>(pixels));
+    } else if (SUCCEEDED(status)) {
+        ComPtr<IWICBitmap> bitmap;
+        ComPtr<IWICFormatConverter> converter;
+        status = factory->CreateBitmapFromMemory(
+            static_cast<UINT>(width), static_cast<UINT>(height), requested_format,
+            stride, stride * static_cast<UINT>(height), const_cast<BYTE*>(pixels),
+            bitmap.GetAddressOf());
+        if (SUCCEEDED(status)) status = factory->CreateFormatConverter(converter.GetAddressOf());
+        if (SUCCEEDED(status)) status = converter->Initialize(
+            bitmap.Get(), format, WICBitmapDitherTypeNone, nullptr, 0.0,
+            WICBitmapPaletteTypeCustom);
+        if (SUCCEEDED(status)) status = frame->WriteSource(converter.Get(), nullptr);
+    }
+    if (SUCCEEDED(status)) status = frame->Commit();
+    if (SUCCEEDED(status)) status = encoder->Commit();
+    STATSTG statistics{};
+    if (SUCCEEDED(status)) status = stream->Stat(&statistics, STATFLAG_NONAME);
+    if (FAILED(status) || statistics.cbSize.QuadPart == 0 ||
+        statistics.cbSize.QuadPart > std::numeric_limits<std::size_t>::max()) {
+        return png_error("Windows PNG encoding failed", FAILED(status) ? status : E_UNEXPECTED);
+    }
+    std::vector<std::byte> output(static_cast<std::size_t>(statistics.cbSize.QuadPart));
+    status = stream->Seek(LARGE_INTEGER{}, STREAM_SEEK_SET, nullptr);
+    std::size_t position = 0;
+    while (SUCCEEDED(status) && position < output.size()) {
+        const ULONG requested = static_cast<ULONG>(std::min<std::size_t>(
+            output.size() - position, std::numeric_limits<ULONG>::max()));
+        ULONG received = 0;
+        status = stream->Read(output.data() + position, requested, &received);
+        if (received != requested) status = E_FAIL;
+        position += received;
+    }
+    if (FAILED(status)) {
+        return png_error("cannot read encoded PNG", status);
+    }
+    return foundation::Ok(std::move(output));
+#else
     const std::size_t stride = static_cast<std::size_t>(width) * channels;
     std::vector<std::byte> filtered;
     filtered.reserve((stride + 1) * height);
@@ -90,6 +189,7 @@ foundation::Result<std::vector<std::byte>> encode_png(
     chunk(output, {'I', 'D', 'A', 'T'}, deflate);
     chunk(output, {'I', 'E', 'N', 'D'}, {});
     return foundation::Ok(std::move(output));
+#endif
 }
 
 }

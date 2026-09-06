@@ -1,3 +1,4 @@
+#include "foundation/logging.hpp"
 #include "model/fixed_backend.hpp"
 #include "model/imodel.hpp"
 #include "native_runtimes/image_memory_policy.hpp"
@@ -59,6 +60,20 @@ void progress_callback(int step, int steps, float, void* data) {
     }
 }
 
+struct GenerationResources {
+    explicit GenerationResources(ProgressState& state) {
+        sd_set_progress_callback(progress_callback, &state);
+    }
+    ~GenerationResources() {
+        sd_set_progress_callback(nullptr, nullptr);
+        if (images) free_sd_images(images, count);
+    }
+    GenerationResources(const GenerationResources&) = delete;
+    GenerationResources& operator=(const GenerationResources&) = delete;
+    sd_image_t* images{};
+    int count{};
+};
+
 class StableDiffusionBackend final : public model::FixedBackend, public model::IImageBackend {
 public:
     explicit StableDiffusionBackend(model::ModelInfo info)
@@ -68,9 +83,13 @@ public:
           clip_g_path_(artifact(info_, "clip_g")), t5xxl_path_(artifact(info_, "t5xxl")),
           backend_(artifact(info_, "backend", "vulkan")), max_vram_(artifact(info_, "max_vram")) {}
 
-    ~StableDiffusionBackend() override { release_context(); }
+    ~StableDiffusionBackend() override {
+        std::lock_guard generation_lock(generation_mutex);
+        release_context();
+    }
 
     foundation::Result<void> load() override {
+        std::lock_guard generation_lock(generation_mutex);
         set_loaded(false);
         release_context();
         if (model_path_.empty()) return foundation::Err<void>(foundation::ErrorCode::InvalidArgument, "stable-diffusion.cpp model artifact is missing");
@@ -86,7 +105,9 @@ public:
         params.n_threads = static_cast<int>(std::max(1U, std::thread::hardware_concurrency()));
         params.enable_mmap = true;
         params.flash_attn = true;
-        params.auto_fit = true;
+        params.auto_fit = backend_ == "vulkan";
+        foundation::LOG_INFO("image_backend_selection", "model={} backend={} auto_fit={}",
+                             info_.name, backend_, params.auto_fit);
         const bool use_direct_convolution = image_use_direct_convolution(backend_);
         params.diffusion_conv_direct = use_direct_convolution;
         params.vae_conv_direct = use_direct_convolution;
@@ -101,6 +122,7 @@ public:
     }
 
     foundation::Result<void> unload() override {
+        std::lock_guard generation_lock(generation_mutex);
         set_loaded(false);
         release_context();
         return foundation::Ok();
@@ -109,49 +131,53 @@ public:
     foundation::Result<model::ImageGenerationResult> generate_images(
         int, const model::ImageGenerationRequest& request,
         const std::function<bool(int)>& progress) override {
-        if (!context_) return foundation::Err<model::ImageGenerationResult>(foundation::ErrorCode::NotLoaded, "image model is not loaded");
         std::lock_guard generation_lock(generation_mutex);
-        ProgressState state{context_, &progress, false};
-        sd_set_progress_callback(progress_callback, &state);
-        sd_img_gen_params_t params;
-        sd_img_gen_params_init(&params);
-        params.prompt = request.prompt.c_str();
-        params.negative_prompt = request.negative_prompt.c_str();
-        params.width = request.width;
-        params.height = request.height;
-        params.seed = request.seed;
-        params.batch_count = request.count;
-        params.sample_params.sample_steps = request.steps;
-        params.sample_params.guidance.txt_cfg = request.guidance_scale;
-        const int vae_tile_size = image_vae_tile_size(request.width, request.height);
-        params.vae_tiling_params.enabled = vae_tile_size > 0;
-        params.vae_tiling_params.tile_size_x = vae_tile_size;
-        params.vae_tiling_params.tile_size_y = vae_tile_size;
-        sd_image_t* images = nullptr;
-        int count = 0;
-        const auto started = std::chrono::steady_clock::now();
-        const bool generated = generate_image(context_, &params, &images, &count);
-        sd_set_progress_callback(nullptr, nullptr);
-        if (state.cancelled.load() || !generated || !images || count < 1) {
-            if (images) free_sd_images(images, count);
-            return foundation::Err<model::ImageGenerationResult>(
-                state.cancelled.load() ? foundation::ErrorCode::Cancelled : foundation::ErrorCode::Internal,
-                state.cancelled.load() ? "image generation cancelled" : "stable-diffusion.cpp image generation failed");
-        }
-        model::ImageGenerationResult result;
-        for (int index = 0; index < count; ++index) {
-            auto png = encode_png(images[index].data, static_cast<int>(images[index].width),
-                                  static_cast<int>(images[index].height), static_cast<int>(images[index].channel));
-            if (!png) {
-                free_sd_images(images, count);
-                return foundation::Err<model::ImageGenerationResult>(png.error().code, png.error().message);
+        if (!context_) return foundation::Err<model::ImageGenerationResult>(foundation::ErrorCode::NotLoaded, "image model is not loaded");
+        try {
+            ProgressState state{context_, &progress, false};
+            GenerationResources resources(state);
+            sd_img_gen_params_t params;
+            sd_img_gen_params_init(&params);
+            params.prompt = request.prompt.c_str();
+            params.negative_prompt = request.negative_prompt.c_str();
+            params.width = request.width;
+            params.height = request.height;
+            params.seed = request.seed;
+            params.batch_count = request.count;
+            params.sample_params.sample_steps = request.steps;
+            params.sample_params.guidance.txt_cfg = request.guidance_scale;
+            const int vae_tile_size = image_vae_tile_size(request.width, request.height);
+            params.vae_tiling_params.enabled = vae_tile_size > 0;
+            params.vae_tiling_params.tile_size_x = vae_tile_size;
+            params.vae_tiling_params.tile_size_y = vae_tile_size;
+            const auto started = std::chrono::steady_clock::now();
+            const bool generated = generate_image(context_, &params, &resources.images, &resources.count);
+            if (state.cancelled.load() || !generated || !resources.images || resources.count < 1) {
+                return foundation::Err<model::ImageGenerationResult>(
+                    state.cancelled.load() ? foundation::ErrorCode::Cancelled : foundation::ErrorCode::Internal,
+                    state.cancelled.load() ? "image generation cancelled" : "stable-diffusion.cpp image generation failed");
             }
-            result.png_images.push_back(std::move(*png));
+            model::ImageGenerationResult result;
+            for (int index = 0; index < resources.count; ++index) {
+                auto png = encode_png(resources.images[index].data, static_cast<int>(resources.images[index].width),
+                                      static_cast<int>(resources.images[index].height), static_cast<int>(resources.images[index].channel));
+                if (!png) {
+                    return foundation::Err<model::ImageGenerationResult>(png.error().code, png.error().message);
+                }
+                result.png_images.push_back(std::move(*png));
+            }
+            result.duration_ms = std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - started).count();
+            return foundation::Ok(std::move(result));
+        } catch (const std::exception& error) {
+            return foundation::Err<model::ImageGenerationResult>(
+                foundation::ErrorCode::Internal,
+                std::string("stable-diffusion.cpp image generation failed: ") + error.what());
+        } catch (...) {
+            return foundation::Err<model::ImageGenerationResult>(
+                foundation::ErrorCode::Internal,
+                "stable-diffusion.cpp image generation failed");
         }
-        free_sd_images(images, count);
-        result.duration_ms = std::chrono::duration<float, std::milli>(
-            std::chrono::steady_clock::now() - started).count();
-        return foundation::Ok(std::move(result));
     }
 
 private:

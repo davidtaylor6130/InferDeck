@@ -62,6 +62,7 @@ run_profile_benchmark_trial(
     const model::ModelInfo& registered,
     const inferdeck::optimize::ProfileCandidate& candidate,
     const std::vector<inferdeck::gateway::ProfileBenchmarkPrompt>& prompts,
+    const std::vector<int>& concurrency_levels,
     const std::atomic<bool>& cancel,
     const inferdeck::gateway::ProfileBenchmarkProgress& progress) {
     using Metrics = inferdeck::gateway::ProfileBenchmarkTrialMetrics;
@@ -237,31 +238,45 @@ run_profile_benchmark_trial(
     measured.average_tokens_per_second =
         speed_result->tokens_per_second;
 
-    std::vector<int> concurrency_levels;
-    if (candidate.slots >= 2) concurrency_levels.push_back(2);
-    if (candidate.slots >= 4) {
-        concurrency_levels.push_back(4);
-    } else if (candidate.slots > 2) {
-        concurrency_levels.push_back(candidate.slots);
-    }
-    if (concurrency_levels.empty()) concurrency_levels.push_back(1);
     for (const int parallel_slots : concurrency_levels) {
         progress(
             "parallelism",
             "Measuring " + std::to_string(parallel_slots) +
                 " concurrent requests and MTP drafting");
+        std::counting_semaphore<> available_slots(candidate.slots);
         const auto parallel_started = std::chrono::steady_clock::now();
         std::vector<std::future<foundation::Result<model::InferenceResult>>> futures;
         futures.reserve(static_cast<std::size_t>(parallel_slots));
         for (int index = 0; index < parallel_slots; ++index) {
             futures.push_back(std::async(
                 std::launch::async,
-                [&, index, parallel_slots] {
+                [&, index, parallel_slots]() -> foundation::Result<model::InferenceResult> {
+                  try {
+                    while (!available_slots.try_acquire_for(std::chrono::milliseconds{100})) {
+                        if (cancel.load()) {
+                            return foundation::Err<model::InferenceResult>(
+                                foundation::ErrorCode::Cancelled, "benchmark cancelled while waiting for a slot");
+                        }
+                    }
+                    struct SlotGuard {
+                        inferdeck::llama_wrapper::LlamaCppModel* runtime;
+                        std::counting_semaphore<>* available;
+                        int slot{-1};
+                        ~SlotGuard() {
+                            if (slot >= 0) (void)runtime->release_slot(slot);
+                            available->release();
+                        }
+                    } guard{runtime.get(), &available_slots};
+                    if (cancel.load()) {
+                        return foundation::Err<model::InferenceResult>(
+                            foundation::ErrorCode::Cancelled, "benchmark cancelled before generation");
+                    }
                     auto slot = runtime->acquire_slot();
                     if (!slot) {
                         return foundation::Err<model::InferenceResult>(
                             slot.error().code, slot.error().message);
                     }
+                    guard.slot = *slot;
                     model::InferenceRequest request;
                     request.messages = {
                         {"system",
@@ -286,41 +301,44 @@ run_profile_benchmark_trial(
                             return !cancel.load();
                         },
                         &cancel);
-                    (void)runtime->release_slot(*slot);
                     return result;
+                  } catch (const std::exception& error) {
+                    return foundation::Err<model::InferenceResult>(
+                        foundation::ErrorCode::Internal, error.what());
+                  } catch (...) {
+                    return foundation::Err<model::InferenceResult>(
+                        foundation::ErrorCode::Internal, "benchmark request failed unexpectedly");
+                  }
                 }));
         }
         inferdeck::gateway::ProfileBenchmarkConcurrencyMetrics concurrency;
         concurrency.requests = parallel_slots;
         int parallel_tokens = 0;
-        double longest_generation_ms = 0.0;
+        std::optional<foundation::Error> first_error;
         double request_tps_total = 0.0;
         for (auto& future : futures) {
             auto result = future.get();
             if (!result) {
-                unload();
-                return foundation::Err<Metrics>(
-                    result.error().code, result.error().message);
+                if (!first_error) first_error = result.error();
+                continue;
             }
             measured.prompt_tokens += result->prompt_tokens;
             measured.completion_tokens += result->completion_tokens;
             parallel_tokens += result->completion_tokens;
-            longest_generation_ms = std::max(
-                longest_generation_ms,
-                static_cast<double>(result->generation_duration_ms));
             request_tps_total += result->tokens_per_second;
             concurrency.mtp_drafted_tokens += result->mtp_drafted_tokens;
             concurrency.mtp_accepted_tokens += result->mtp_accepted_tokens;
             if (result->mtp_drafted_tokens > 0) ++concurrency.mtp_requests;
         }
+        if (first_error) {
+            unload();
+            return foundation::Err<Metrics>(first_error->code, first_error->message);
+        }
         const auto parallel_finished = std::chrono::steady_clock::now();
         const double parallel_wall_seconds = std::chrono::duration<double>(
             parallel_finished - parallel_started).count();
-        const double parallel_seconds = longest_generation_ms > 0.0
-            ? longest_generation_ms / 1000.0
-            : parallel_wall_seconds;
-        concurrency.aggregate_tokens_per_second = parallel_seconds > 0.0
-            ? static_cast<double>(parallel_tokens) / parallel_seconds
+        concurrency.aggregate_tokens_per_second = parallel_wall_seconds > 0.0
+            ? static_cast<double>(parallel_tokens) / parallel_wall_seconds
             : 0.0;
         concurrency.average_request_tokens_per_second =
             request_tps_total / static_cast<double>(parallel_slots);

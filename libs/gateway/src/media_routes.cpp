@@ -56,9 +56,11 @@ struct MediaJob {
 };
 
 std::mutex jobs_mutex;
+std::mutex history_persistence_mutex;
 std::unordered_map<std::uint64_t, std::shared_ptr<MediaJob>> jobs;
 std::atomic<std::uint64_t> next_job_id{1};
 std::filesystem::path media_history_root;
+std::vector<std::filesystem::path> retired_media_outputs;
 constexpr std::size_t max_media_history_jobs = 100;
 constexpr std::uint64_t max_media_history_bytes =
     2ULL * 1024ULL * 1024ULL * 1024ULL;
@@ -113,28 +115,52 @@ nlohmann::json job_json(const MediaJob& job, bool include_urls) {
     };
 }
 
-foundation::Result<void> persist_jobs_locked() {
-    if (media_history_root.empty()) return foundation::Ok();
-    nlohmann::json records = nlohmann::json::array();
-    std::vector<std::uint64_t> ids;
-    ids.reserve(jobs.size());
-    for (const auto& [id, _] : jobs) ids.push_back(id);
-    std::sort(ids.begin(), ids.end());
-    for (const std::uint64_t id : ids) {
-        records.push_back(job_json(*jobs.at(id), false));
+foundation::Result<void> persist_jobs_serialized() {
+    std::filesystem::path history_root;
+    std::vector<MediaJob> snapshot;
+    std::vector<std::filesystem::path> retired_outputs;
+    {
+        std::lock_guard lock(jobs_mutex);
+        history_root = media_history_root;
+        if (history_root.empty()) return foundation::Ok();
+        snapshot.reserve(jobs.size());
+        for (const auto& [_, job] : jobs) snapshot.push_back(*job);
+        retired_outputs.swap(retired_media_outputs);
     }
-    return foundation::save_json_file(
-        media_history_root / "history.json",
+    std::sort(snapshot.begin(), snapshot.end(),
+        [](const MediaJob& left, const MediaJob& right) { return left.id < right.id; });
+    nlohmann::json records = nlohmann::json::array();
+    for (const MediaJob& job : snapshot) records.push_back(job_json(job, false));
+    const foundation::Result<void> saved = foundation::save_json_file(
+        history_root / "history.json",
         nlohmann::json{{"version", 1}, {"jobs", std::move(records)}});
+    if (!saved) {
+        std::lock_guard lock(jobs_mutex);
+        retired_media_outputs.insert(retired_media_outputs.end(),
+                                     retired_outputs.begin(), retired_outputs.end());
+        return saved;
+    }
+    for (const std::filesystem::path& path : retired_outputs) {
+        const bool retained = std::any_of(snapshot.begin(), snapshot.end(),
+            [&history_root, &path](const MediaJob& job) {
+                return std::any_of(job.outputs.begin(), job.outputs.end(),
+                    [&history_root, &path](const MediaOutputRecord& output) {
+                        return history_root / output.filename == path;
+                    });
+            });
+        if (retained) continue;
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+    }
+    return foundation::Ok();
 }
 
-void persist_jobs_or_warn_locked() {
-    const foundation::Result<void> persisted = persist_jobs_locked();
+void persist_jobs_or_warn() {
+    std::lock_guard persistence_lock(history_persistence_mutex);
+    const foundation::Result<void> persisted = persist_jobs_serialized();
     if (!persisted) {
         foundation::LOG_WARN(
-            "media_history_persist_failed", "path={} error={}",
-            (media_history_root / "history.json").string(),
-            persisted.error().message);
+            "media_history_persist_failed", "error={}", persisted.error().message);
     }
 }
 
@@ -155,9 +181,7 @@ std::uint64_t history_bytes_locked() {
 void remove_job_outputs_locked(const MediaJob& job) {
     if (media_history_root.empty()) return;
     for (const MediaOutputRecord& output : job.outputs) {
-        std::error_code ignored;
-        std::filesystem::remove(
-            media_history_root / output.filename, ignored);
+        retired_media_outputs.push_back(media_history_root / output.filename);
     }
 }
 
@@ -264,15 +288,17 @@ foundation::Result<void> store_job_outputs(
         }
         staged.push_back(std::move(output));
     }
-    std::lock_guard lock(jobs_mutex);
+    std::unique_lock lock(jobs_mutex);
     if (!jobs.contains(job->id) ||
         history_root != media_history_root) {
+        lock.unlock();
         return fail("media history changed while saving output");
     }
     remove_job_outputs_locked(*job);
     job->outputs = std::move(staged);
     prune_jobs_locked();
-    persist_jobs_or_warn_locked();
+    lock.unlock();
+    persist_jobs_or_warn();
     return foundation::Ok();
 }
 
@@ -337,9 +363,11 @@ std::shared_ptr<MediaJob> begin_job(
     job->parameters = parameters.is_object()
         ? std::move(parameters) : nlohmann::json::object();
     job->created_at_unix_ms = current_unix_ms();
-    std::lock_guard lock(jobs_mutex);
-    jobs[job->id] = job;
-    persist_jobs_or_warn_locked();
+    {
+        std::lock_guard lock(jobs_mutex);
+        jobs[job->id] = job;
+    }
+    persist_jobs_or_warn();
     return job;
 }
 
@@ -356,13 +384,14 @@ void finish_job(
     const std::shared_ptr<MediaJob>& job, const std::string& state,
     std::string error = {}) {
     if (!job) return;
-    std::lock_guard lock(jobs_mutex);
+    std::unique_lock lock(jobs_mutex);
     job->state = state;
     job->error = std::move(error);
     job->finished_at_unix_ms = current_unix_ms();
     if (state == "completed") job->progress = 100;
     prune_jobs_locked();
-    persist_jobs_or_warn_locked();
+    lock.unlock();
+    persist_jobs_or_warn();
 }
 
 struct SlotGuard {
@@ -727,8 +756,10 @@ nlohmann::json verbose_transcription(const model::TranscriptionResult& result,
 
 foundation::Result<void> configure_media_history(
     const std::filesystem::path& directory) {
-    std::lock_guard lock(jobs_mutex);
+    std::lock_guard persistence_lock(history_persistence_mutex);
+    std::unique_lock lock(jobs_mutex);
     jobs.clear();
+    retired_media_outputs.clear();
     next_job_id.store(1);
     media_history_root = directory;
     if (media_history_root.empty()) return foundation::Ok();
@@ -857,7 +888,8 @@ foundation::Result<void> configure_media_history(
     const std::size_t before = jobs.size();
     prune_jobs_locked();
     changed = changed || jobs.size() != before;
-    if (changed) return persist_jobs_locked();
+    lock.unlock();
+    if (changed) return persist_jobs_serialized();
     return foundation::Ok();
 }
 

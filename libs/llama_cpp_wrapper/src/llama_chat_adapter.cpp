@@ -226,4 +226,43 @@ foundation::Result<LlamaChatAdapterResult> adapt_generation_request(
     return foundation::Ok(std::move(result));
 }
 
+std::size_t fit_chat_history(
+    common_chat_templates_inputs& inputs,
+    const std::function<bool(const common_chat_templates_inputs&)>& fits)
+{
+    if (fits(inputs)) return 0;
+    std::size_t system_end = 0;
+    while (system_end < inputs.messages.size() &&
+           (inputs.messages[system_end].role == "system" ||
+            inputs.messages[system_end].role == "developer"))
+    {
+        ++system_end;
+    }
+    std::vector<std::size_t> boundaries;
+    for (std::size_t index = system_end + 1; index < inputs.messages.size(); ++index)
+    {
+        if (inputs.messages[index].role == "user") boundaries.push_back(index);
+    }
+    if (boundaries.empty()) return 0;
+    const std::vector<common_chat_msg> original = std::move(inputs.messages);
+    std::size_t current = 0;
+    const auto select_suffix = [&](std::size_t start)
+    {
+        inputs.messages.assign(original.begin(), original.begin() + system_end);
+        inputs.messages.insert(inputs.messages.end(), original.begin() + start, original.end());
+        current = start;
+        return fits(inputs);
+    };
+    std::size_t lower = 0;
+    std::size_t upper = boundaries.size() - 1;
+    while (lower < upper)
+    {
+        const std::size_t middle = lower + (upper - lower) / 2;
+        if (select_suffix(boundaries[middle])) upper = middle;
+        else lower = middle + 1;
+    }
+    if (current != boundaries[lower]) select_suffix(boundaries[lower]);
+    return boundaries[lower] - system_end;
+}
+
 }

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  authenticateDashboard, cancelProfileBenchmark, createApiKey,
-  generateImages, generateMusic, getApiKeys, getApiSettings, getModels,
+  ApiError, authenticateDashboard, isAuthenticationError, logoutDashboard, cancelProfileBenchmark, createApiKey,
+  generateImages, generateMusic, getApiKeys, getApiSettings, getModels, getMediaJobs, getStoreActivity,
   getProfileBenchmark, optimizeProfile, saveApiSettings, searchStore,
   startProfileBenchmark,
   updateApiKey,
@@ -143,7 +143,7 @@ describe('getModels', () => {
 });
 
 describe('dashboard authentication', () => {
-  it('exchanges the control token for an HTTP-only session', async () => {
+  it('requests a remembered HTTP-only dashboard session', async () => {
     const fetchMock = vi.fn(async (
       _input: RequestInfo | URL,
       _init?: RequestInit,
@@ -160,7 +160,7 @@ describe('dashboard authentication', () => {
       '/api/inferdeck/v1/dashboard/session',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ token: 'local-network-secret' }),
+        body: JSON.stringify({ token: 'local-network-secret', remember: true }),
       }),
     );
   });
@@ -484,5 +484,51 @@ describe('profile optimization', () => {
       '/api/inferdeck/v1/optimize/benchmark/cancel',
       expect.objectContaining({ method: 'POST' }),
     );
+  });
+});
+
+describe('polling request cancellation', () => {
+  it.each([getMediaJobs, getStoreActivity])('forwards caller cancellation and retains the timeout', async load => {
+    respondWith({ jobs: [], downloads: [], installed: {}, library: [] });
+    const timeout = new AbortController();
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(timeout.signal);
+    try {
+      const caller = new AbortController();
+      await load(caller.signal);
+      const signal = vi.mocked(fetch).mock.calls[0]?.[1]?.signal;
+      expect(signal?.aborted).toBe(false);
+      caller.abort();
+      expect(signal?.aborted).toBe(true);
+      await load(new AbortController().signal);
+      const timedSignal = vi.mocked(fetch).mock.calls[1]?.[1]?.signal;
+      expect(timedSignal?.aborted).toBe(false);
+      timeout.abort();
+      expect(timedSignal?.aborted).toBe(true);
+      expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+});
+
+
+describe('dashboard session controls', () => {
+  it('honours session-only login without persisting the key client-side', async () => {
+    respondWith({});
+    await authenticateDashboard('test-only-key', false);
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body)))
+      .toEqual({ token: 'test-only-key', remember: false });
+  });
+  it('logs out through the control session endpoint', async () => {
+    respondWith({});
+    await logoutDashboard();
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('/api/inferdeck/v1/dashboard/session');
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]?.method).toBe('DELETE');
+  });
+  it('distinguishes rejected access from a network or server failure', () => {
+    expect(isAuthenticationError(new ApiError(401, 'unauthorized'))).toBe(true);
+    expect(isAuthenticationError(new ApiError(403, 'forbidden'))).toBe(true);
+    expect(isAuthenticationError(new ApiError(503, 'unavailable'))).toBe(false);
+    expect(isAuthenticationError(new TypeError('Failed to fetch'))).toBe(false);
   });
 });

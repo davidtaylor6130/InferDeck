@@ -513,7 +513,9 @@ Result<void> create_confined_directory(
     return Ok();
 }
 
-Result<std::string> sha256_file(const std::filesystem::path& path) {
+Result<std::string> sha256_file(
+    const std::filesystem::path& path,
+    const std::shared_ptr<std::atomic<bool>>& cancelled = {}) {
 #ifdef _WIN32
     BCRYPT_ALG_HANDLE algorithm = nullptr;
     BCRYPT_HASH_HANDLE hash = nullptr;
@@ -537,6 +539,11 @@ Result<std::string> sha256_file(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     std::vector<char> buffer(1024 * 1024);
     while (input) {
+        if (cancelled && cancelled->load()) {
+            BCryptDestroyHash(hash);
+            BCryptCloseAlgorithmProvider(algorithm, 0);
+            return Err<std::string>(ErrorCode::Cancelled, "cancelled during checksum validation");
+        }
         input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const auto count = input.gcount();
         if (count > 0 && BCryptHashData(hash, reinterpret_cast<PUCHAR>(buffer.data()),
@@ -545,6 +552,11 @@ Result<std::string> sha256_file(const std::filesystem::path& path) {
             BCryptCloseAlgorithmProvider(algorithm, 0);
             return Err<std::string>(ErrorCode::IoError, "cannot hash model artifact");
         }
+    }
+    if (!input.eof()) {
+        BCryptDestroyHash(hash);
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+        return Err<std::string>(ErrorCode::IoError, "cannot read model artifact for checksum validation");
     }
     const auto status = BCryptFinishHash(hash, digest.data(), hash_size, 0);
     BCryptDestroyHash(hash);

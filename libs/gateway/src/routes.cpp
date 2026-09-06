@@ -445,7 +445,7 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
                 (info ? info->runtime : std::string("unknown")))};
     }
     auto current = deps.coordinator.get_loaded_model();
-    if (deps.coordinator.is_loaded(target_name)) {
+    if (deps.coordinator.is_ready(target_name)) {
         return {200, {{"status", "ready"},
                       {"model", model_name},
                       {"resolved_model", target_name},
@@ -500,7 +500,7 @@ EnsureLoadedResult ensure_model_loaded(
                 "maintenance work is using the same compute resource; retry when maintenance finishes",
                 foundation::ErrorCode::Unavailable};
     }
-    if (deps.coordinator.is_loaded(model_name)) {
+    if (deps.coordinator.is_ready(model_name)) {
         return {true, 200, "", "", foundation::ErrorCode::Ok};
     }
     if (!deps.auto_swap) {
@@ -540,7 +540,7 @@ EnsureLoadedResult ensure_model_loaded(
                     "request cancelled while loading model: " + model_name,
                     foundation::ErrorCode::Cancelled};
         }
-        if (deps.coordinator.is_loaded(model_name)) {
+        if (deps.coordinator.is_ready(model_name)) {
             return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
 
@@ -550,7 +550,7 @@ EnsureLoadedResult ensure_model_loaded(
             return swap_start_error(started);
         }
 
-        if (deps.coordinator.is_loaded(model_name)) {
+        if (deps.coordinator.is_ready(model_name)) {
             return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
         const auto wait_deadline = std::min(
@@ -559,7 +559,7 @@ EnsureLoadedResult ensure_model_loaded(
             continue;
         }
 
-        if (deps.coordinator.is_loaded(model_name)) {
+        if (deps.coordinator.is_ready(model_name)) {
             return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
         const auto snap = deps.swap_tracker->snapshot();

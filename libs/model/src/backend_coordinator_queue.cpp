@@ -41,6 +41,10 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             return foundation::Err<int>(foundation::ErrorCode::NotFound,
                                          "model not loaded: " + name);
         }
+        if (!it->second->execution_healthy()) {
+            return foundation::Err<int>(foundation::ErrorCode::Unavailable,
+                                         "model requires recovery: " + name);
+        }
         if (!waiters_.empty() || resizing_models_.contains(name) ||
             request_waits_for_priority_media_locked(name, opts.reservation_key) ||
             !admission_pool_allows_locked(name)) {
@@ -81,7 +85,9 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             continue;
         }
         auto it = instances_.find(name);
-        if (it == instances_.end() || !it->second || !it->second->is_loaded()) {
+        const bool resident = it != instances_.end() && it->second &&
+            it->second->is_loaded();
+        if (!resident || !it->second->execution_healthy()) {
             if (opts.prepare && waiter_is_next_locked(waiter_id, now)) {
                 auto waiter = std::find_if(waiters_.begin(), waiters_.end(),
                     [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
@@ -124,8 +130,10 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             }
             erase_waiter_locked(waiter_id);
             cv_.notify_all();
-            return foundation::Err<int>(foundation::ErrorCode::NotFound,
-                                         "model not loaded: " + name);
+            return foundation::Err<int>(
+                resident ? foundation::ErrorCode::Unavailable
+                         : foundation::ErrorCode::NotFound,
+                (resident ? "model requires recovery: " : "model not loaded: ") + name);
         }
         if (!resizing_models_.contains(name) && waiter_is_next_locked(waiter_id, now)) {
             auto slot = it->second->acquire_slot();
@@ -410,7 +418,7 @@ bool BackendCoordinator::waiter_is_actionable_locked(
     if (!admission_pool_allows_locked(waiter.model)) return false;
     const auto backend = instances_.find(waiter.model);
     if (backend == instances_.end() || !backend->second ||
-        !backend->second->is_loaded()) {
+        !backend->second->is_loaded() || !backend->second->execution_healthy()) {
         if (model_is_independent_sidecar_locked(waiter.model)) return true;
         const bool another_prepare = std::any_of(
             waiters_.begin(), waiters_.end(), [this, &waiter](const SlotWaiter& other) {
@@ -455,6 +463,12 @@ void BackendCoordinator::erase_waiter_locked(std::uint64_t id) {
 
 foundation::Result<int> BackendCoordinator::issue_lease_locked(
     const std::string& name, int backend_slot) {
+    const auto backend = instances_.find(name);
+    if (backend == instances_.end() || !backend->second ||
+        !backend->second->is_loaded() || !backend->second->execution_healthy()) {
+        return foundation::Err<int>(foundation::ErrorCode::Unavailable,
+                                     "model is not ready: " + name);
+    }
     if (!admission_pool_allows_locked(name)) {
         return foundation::Err<int>(
             foundation::ErrorCode::ResourceBusy,
