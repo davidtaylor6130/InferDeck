@@ -16,7 +16,7 @@ import {
   type ModelCostConfig,
   type TokenRange,
 } from '../cost';
-import { useGateway } from '../gateway';
+import { mergeDailyUsage, useGateway } from '../gateway';
 import { usePolling } from '../usePolling';
 import type { JobRecord, StatusPayload, LiveRequest } from '../types';
 import {
@@ -36,10 +36,19 @@ const ClientChip: React.FC<{ request: LiveRequest }> = ({ request }) => <span cl
   <span className="shrink-0 text-[10px] text-text-muted">p{request.priority}</span>
 </span>;
 
+export function overviewStatus(current: StatusPayload | null, live: StatusPayload | null): StatusPayload | null {
+  if (!live || !current?.dailyTokenUsageAllTime) return live ?? current;
+  return {
+    ...live,
+    dailyTokenUsage: mergeDailyUsage(current.dailyTokenUsage ?? [], live.dailyTokenUsage ?? []),
+    dailyTokenUsageAllTime: true,
+  };
+}
+
 export const OverviewPage: React.FC = () => {
   const { stats, statsHistory, status: gatewayStatus, models: gatewayModels, swap, activity, cancelSwap } = useGateway();
   const [liveStatus, setLiveStatus] = useState<StatusPayload | null>(null);
-  const status = liveStatus ?? gatewayStatus;
+  const status = overviewStatus(gatewayStatus, liveStatus);
   const models = liveStatus?.models ?? gatewayModels;
   const live = status?.queue.liveRequests ?? [];
   const waiting = live.filter(request => request.slotId < 0);

@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { parseDocument } from 'yaml';
 import { GatewayContext, type GatewayValue } from '../gateway';
-import { OverviewPage } from './OverviewPage';
+import { OverviewPage, overviewStatus } from './OverviewPage';
 import { ModelsPage } from './ModelsPage';
 import { defaultStoreModelName } from './ModelStoreHubPanel';
 import { OperatePage, stageProfileOptimization } from './OperatePage';
@@ -110,6 +110,25 @@ const renderWith = (node: React.ReactElement) =>
   renderToStaticMarkup(<GatewayContext.Provider value={value}>{node}</GatewayContext.Provider>);
 
 describe('pages', () => {
+  it('preserves complete cost history when live request polling refreshes', () => {
+    const complete = { ...status, dailyTokenUsageAllTime: true, dailyTokenUsage: [
+      { ...status.monthlyTokenUsage[0], bucket: '2026-06-01' },
+      { ...status.monthlyTokenUsage[0], bucket: '2026-09-08' },
+    ] };
+    const recent = { ...status, dailyTokenUsageAllTime: false,
+      dailyTokenUsage: [complete.dailyTokenUsage[1]], queue: { ...status.queue, running: 4 } };
+    const merged = overviewStatus(complete, recent)!;
+    expect(merged.dailyTokenUsageAllTime).toBe(true);
+    expect(merged.dailyTokenUsage).toEqual(complete.dailyTokenUsage);
+    expect(merged.queue.running).toBe(4);
+    const renderStatus = (payload: StatusPayload) => renderToStaticMarkup(
+      <GatewayContext.Provider value={{ ...value, status: payload }}><OverviewPage /></GatewayContext.Provider>);
+    const apiValue = (html: string) => html.split('API-equivalent value')[1]?.split('</div>')[0];
+    expect(apiValue(renderStatus(merged))).toBe(apiValue(renderStatus(complete)));
+    expect(overviewStatus(null, recent)).toBe(recent);
+    expect(overviewStatus(complete, null)).toBe(complete);
+  });
+
   it('Home leads with the current runtime, then combined health, usage, and activity', () => {
     const html = renderWith(<OverviewPage />);
     expect(html).toContain('Runtime now');
