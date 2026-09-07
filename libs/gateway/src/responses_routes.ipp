@@ -69,7 +69,8 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
             cache_reservation_key);
         if (!acquired) return;
         auto observation = observe_request(req, resp, deps, "text", false);
-        observation.queue_duration_ms = acquired->queue_duration_ms;
+        observation.live = acquired->live;
+    observation.queue_duration_ms = acquired->queue_duration_ms;
         observation.swap_load_duration_ms = acquired->swap_load_duration_ms;
         GenerationSession session(
             deps.coordinator, deps.metrics, deps.stats_db, deps.events,
@@ -95,6 +96,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
         cache_reservation_key);
     if (!acquired) return;
     auto observation = observe_request(req, resp, deps, "text", true);
+    observation.live = acquired->live;
     observation.queue_duration_ms = acquired->queue_duration_ms;
     observation.swap_load_duration_ms = acquired->swap_load_duration_ms;
     auto session = std::make_shared<GenerationSession>(

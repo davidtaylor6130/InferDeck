@@ -53,6 +53,7 @@ Result<InferenceResult> LlamaCppModel::predict_cancellable(
   bool string_stopped = false;
 
   SlotTask task;
+  task.progress = req.progress;
   task.ext_cancel = cancel;
   task.slot_id             = setup.sequence_id;
   task.prompt_tokens       = setup.prompt_tokens;
@@ -204,6 +205,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   bool string_stopped = false;
 
   SlotTask task;
+  task.progress = req.progress;
   task.slot_id             = setup.sequence_id;
   task.prompt_tokens      = setup.prompt_tokens;
   task.media_chunks       = std::move(setup.media_chunks);

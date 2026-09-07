@@ -47,13 +47,20 @@ GenerationSession::GenerationSession(
       reservation_key(std::move(reservation_key_value)),
       voice_session_token(voice_session_token_value),
       voice_session_grace_ms(voice_session_grace_ms_value),
-      observation(std::move(observation_value)) {}
+      observation(std::move(observation_value)) {
+    if (observation.live) {
+        observation.request_id = observation.live->request_id;
+        observation.api_key_id = observation.live->api_key_id;
+        observation.api_key_name = observation.live->api_key_name;
+    }
+}
 
 GenerationSession::~GenerationSession() {
     finish_once(true, 499, "session_destroyed");
 }
 
 void GenerationSession::start(model::InferenceRequest request, bool stream) {
+    if (observation.live) request.progress = observation.live->progress;
     inference_thread = std::thread([this, request = std::move(request), stream]() {
         try {
             auto result = stream ? coordinator->predict_stream(
@@ -173,6 +180,7 @@ void GenerationSession::finish_once(bool aborted_stream, int fallback_status,
                        result ? *result : model::InferenceResult{}, status, slot_id,
                        0.0, 0, model_name, observation);
     }
+    if (observation.live) observation.live->finished.store(true);
     LOG_INFO("stream_recorded", "model={} slot_id={} status={} reason={}",
              model_name, slot_id, status, reason);
     if (coordinator) {

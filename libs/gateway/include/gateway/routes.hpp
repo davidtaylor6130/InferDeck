@@ -45,6 +45,9 @@ struct GatewayDeps {
 struct RequestObservation {
     std::string request_id;
     std::string principal_class;
+    std::string api_key_id;
+    std::string api_key_name;
+    std::shared_ptr<observability::LiveRequest> live;
     std::string endpoint;
     std::string protocol_profile;
     std::string modality{"text"};
@@ -135,6 +138,7 @@ struct AcquiredGenerationSlot {
     std::optional<std::uint64_t> voice_session_token;
     double queue_duration_ms{};
     double swap_load_duration_ms{};
+    std::shared_ptr<observability::LiveRequest> live;
 };
 
 std::optional<AcquiredGenerationSlot> acquire_generation_slot(

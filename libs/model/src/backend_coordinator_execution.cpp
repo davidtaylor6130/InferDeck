@@ -34,6 +34,7 @@ foundation::Result<InferenceResult> BackendCoordinator::predict(
     }
     // Safe to call unlocked: the caller holds a slot, so unload() drains before
     // the instance can be destroyed.
+    if (req.progress) req.progress->slot.store(backend_slot);
     return inst->predict_cancellable(backend_slot, req, cancel);
 }
 
@@ -60,6 +61,7 @@ foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
         }
         backend_slot = *slot;
     }
+    if (req.progress) req.progress->slot.store(backend_slot);
     return inst->predict_stream(backend_slot, req, callback, cancel);
 }
 

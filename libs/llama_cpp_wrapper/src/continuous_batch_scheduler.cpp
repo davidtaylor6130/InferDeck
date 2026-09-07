@@ -917,6 +917,22 @@ void ContinuousBatchScheduler::run_loop() {
             }
         }
 
+        for (SlotTask* task : tasks) {
+            if (std::find(cancelled.begin(), cancelled.end(), task) != cancelled.end() ||
+                std::find(stopped.begin(), stopped.end(), task) != stopped.end()) continue;
+            if (!task->progress) continue;
+            const auto now = std::chrono::steady_clock::now();
+            task->progress->prompt_tokens.store(static_cast<int>(task->prompt_tokens.size()));
+            task->progress->processed_tokens.store(task->prompt_pos);
+            task->progress->cached_tokens.store(task->out_cached_prompt_tokens);
+            task->progress->output_tokens.store(task->n_generated);
+            task->progress->prompt_ms.store(task->generation_started ? task->out_prompt_duration_ms :
+                std::chrono::duration<double, std::milli>(now - task->started_at).count());
+            task->progress->generation_ms.store(task->generation_started ?
+                std::chrono::duration<double, std::milli>(now - task->generation_started_at).count() : 0.0);
+            task->progress->phase.store(task->prompt_done ? 3 : 2);
+        }
+
         // Remove completed slots from the active set, but keep their KV cache
         // intact so the next request on this slot can reuse the shared prefix
         // (init_task trims any divergent suffix). Wiping here forces a full

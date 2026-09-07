@@ -159,10 +159,31 @@ export interface MonthlyUsageRow {
   outputImageCount?: number;
 }
 
+export interface LiveRequest {
+  id: string;
+  model: string;
+  requestedModel: string;
+  apiKeyId: string;
+  apiKeyName: string;
+  endpoint: string;
+  priority: number;
+  slotId: number;
+  startedUnixMs: number;
+  elapsedMs: number;
+  phase: 'waiting' | 'loading' | 'prefill' | 'generating';
+  promptTokens: number;
+  processedTokens: number;
+  cachedTokens: number;
+  completionTokens: number;
+  promptTokensPerSecond: number | null;
+  tokensPerSecond: number | null;
+}
+
 export interface StatusPayload {
   status: string;
   queue: {
     running: number;
+    liveRequests?: LiveRequest[];
     queued?: number;
     gpuLocked: boolean;
     lockOwner: string;
@@ -211,6 +232,8 @@ export interface JobRecord {
   model: string;
   resolvedModel?: string;
   principalClass?: string;
+  apiKeyId?: string;
+  apiKeyName?: string;
   endpoint?: string;
   protocolProfile?: string;
   modality?: string;

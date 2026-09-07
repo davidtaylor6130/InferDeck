@@ -6,6 +6,7 @@ struct AcquiredChatSlot {
     std::optional<std::uint64_t> voice_session_token;
     double queue_duration_ms{};
     double swap_load_duration_ms{};
+    std::shared_ptr<observability::LiveRequest> live;
 };
 
 static constexpr std::array<std::string_view, 19>
@@ -144,6 +145,17 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     const std::string& requested_model, const std::string& model_name,
     std::string reservation_key) {
     AcquiredChatSlot acquired;
+    acquired.live = std::make_shared<observability::LiveRequest>();
+    const RequestObservation identity = observe_request(req, resp, deps, "text", false);
+    acquired.live->request_id = identity.request_id;
+    acquired.live->api_key_id = identity.api_key_id;
+    acquired.live->api_key_name = identity.api_key_name;
+    acquired.live->model = model_name;
+    acquired.live->requested_model = requested_model;
+    acquired.live->endpoint = req.path;
+    acquired.live->started_unix_ms = now_ms();
+    acquired.live->progress = std::make_shared<inference::RequestProgress>();
+
     const auto acquisition_started = std::chrono::steady_clock::now();
     const auto voice_key = request_client_key(req, deps);
     acquired.reservation_key = reservation_key.empty()
@@ -166,9 +178,13 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     opts.reservation_key = acquired.reservation_key;
     if (acquired.voice_session_token) opts.priority = 100;
     opts.cancelled = cancelled;
+    acquired.live->priority = opts.priority;
+    if (deps.metrics) deps.metrics->track_request(acquired.live);
     opts.prepare = [&deps, &model_name, deadline, cancelled, &acquired] {
         const auto started = std::chrono::steady_clock::now();
+        acquired.live->progress->phase.store(1);
         auto loaded = ensure_model_loaded(deps, model_name, deadline, cancelled);
+        acquired.live->progress->phase.store(0);
         acquired.swap_load_duration_ms += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();
         if (loaded.ok) return foundation::Ok();
@@ -177,6 +193,8 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     auto slot = deps.coordinator.acquire_slot(model_name, opts);
     if (slot) {
         acquired.slot_id = *slot;
+        acquired.live->progress->slot.store(*slot);
+        acquired.live->progress->phase.store(2);
         const auto total = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - acquisition_started).count();
         acquired.queue_duration_ms = std::max(
@@ -211,6 +229,9 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     const bool stream = body.is_object() && body.contains("stream") &&
         body["stream"].is_boolean() && body["stream"].get<bool>();
     RequestObservation observation = observe_request(req, resp, deps, "text", stream);
+    observation.request_id = acquired.live->request_id;
+    observation.api_key_id = acquired.live->api_key_id;
+    observation.api_key_name = acquired.live->api_key_name;
     observation.error_code = code;
     observation.swap_load_duration_ms = acquired.swap_load_duration_ms;
     observation.queue_duration_ms = std::max(
@@ -300,6 +321,7 @@ std::optional<AcquiredGenerationSlot> acquire_generation_slot(
         std::move(acquired->voice_session_token),
         acquired->queue_duration_ms,
         acquired->swap_load_duration_ms,
+        std::move(acquired->live),
     };
 }
 
@@ -581,6 +603,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         body.contains("service_tier") ? "default" : "";
 
     auto observation = observe_request(req, resp, deps, "text", stream);
+    observation.live = acquired->live;
     observation.queue_duration_ms = acquired->queue_duration_ms;
     observation.swap_load_duration_ms = acquired->swap_load_duration_ms;
     auto state = std::make_shared<GenerationSession>(

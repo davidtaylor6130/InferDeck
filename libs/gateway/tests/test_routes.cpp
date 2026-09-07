@@ -928,28 +928,40 @@ TEST_CASE("Non-stream disconnect cancels execution and preserves peer capacity",
             server.coordinator.get_backend("cancel-running")));
         REQUIRE(backend);
         backend->block_nonstream_until_cancel.store(true);
+        auto deps = server.make_deps();
+        deps.api_keys = std::make_shared<ApiKeyStore>(":memory:");
+        const auto key = deps.api_keys->create("CLI owner", 5);
+        REQUIRE(key);
         std::atomic<bool> disconnected{false};
         httplib::Request request;
         request.set_header("Content-Type", "application/json");
+        request.set_header("Authorization", "Bearer " + key->key);
         request.is_connection_closed = [&] { return disconnected.load(); };
         request.body = responses
             ? R"({"model":"cancel-running","input":"test","max_output_tokens":123})"
             : R"({"model":"cancel-running","messages":[{"role":"user","content":"test"}],"max_completion_tokens":123})";
         httplib::Response response;
         std::jthread worker([&] {
-            if (responses) handle_responses(request, response, server.make_deps());
-            else handle_chat_completions(request, response, server.make_deps());
+            if (responses) handle_responses(request, response, deps);
+            else handle_chat_completions(request, response, deps);
         });
         const bool started = wait_for_count(backend->nonstream_started, 1);
+        const auto live = server.metrics.live_requests();
+        const bool live_owner = live.size() == 1 && live[0]->api_key_name == "CLI owner" && live[0]->api_key_id == key->record.id;
         disconnected.store(true);
         worker.join();
         REQUIRE(started);
+        CHECK(live_owner);
+        CHECK(server.metrics.live_requests().empty());
         CHECK(backend->nonstream_saw_cancel.load());
         CHECK(response.status == 499);
         CHECK(server.coordinator.active_request_count() == 0);
         const auto history = server.stats_db.recent_requests(1);
         REQUIRE(history.size() == 1);
         CHECK(history.front().status_code == 499);
+        CHECK(history.front().api_key_name == "CLI owner");
+        CHECK(history.front().api_key_id == key->record.id);
+        CHECK(history.front().api_key_name != key->key);
         CHECK(history.front().completion_tokens == 2);
         CHECK(history.front().prompt_duration_ms == 40);
         const auto first = server.coordinator.acquire_slot("cancel-running");

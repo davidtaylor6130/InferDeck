@@ -149,16 +149,16 @@ const Shell: React.FC = () => {
   };
 
   return (
-    <div className="app-shell flex min-h-screen">
-      <aside className="hidden w-52 shrink-0 flex-col overflow-y-auto border-r border-border-slate bg-deck-navy px-4 py-5 md:flex">
-        <div className="mb-6 flex items-center gap-3 px-2">
+    <div className="app-shell flex h-dvh overflow-hidden">
+      <aside className="hidden w-56 shrink-0 flex-col border-r border-border-slate bg-deck-navy px-3 py-5 md:flex">
+        <div className="mb-5 flex items-center gap-3 px-2">
           <img src={logoUrl} alt="" className="h-9 w-9 rounded-md object-cover" />
           <div>
             <span className="text-base font-semibold text-text-primary">InferDeck</span>
             <span className="mt-0.5 block text-xs text-text-muted">Local inference</span>
           </div>
         </div>
-        <nav className="flex flex-col" aria-label="Dashboard">
+        <nav className="flex min-h-0 flex-1 flex-col overflow-y-auto" aria-label="Dashboard">
           <NavLink id="home" label="Home" page={page} />
           <NavLink id="requests" label="Requests" page={page} />
           <NavLink id="settings" label="API Settings" page={page} />
@@ -176,7 +176,8 @@ const Shell: React.FC = () => {
                   onClick={() => toggleSection(section)}
                   className="mb-1 flex min-h-9 w-full items-center justify-between rounded px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted hover:bg-white/[0.04] hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
                 >
-                  <span>{label}</span>
+                  <span className="flex items-center gap-2"><span className={`h-2.5 w-1 rounded ${section === 'llm' ? 'bg-queue-blue' : section === 'dictation' ? 'bg-warning-amber' : section === 'image' ? 'bg-infer-violet' : 'bg-gaming-orange'}`} /><span className="text-text-secondary">{label}</span></span>
+                  <span className="ml-auto mr-2 text-[10px] font-normal">{DASHBOARD_PAGES.filter(item => item.section === section).length}</span>
                   <ChevronRightIcon
                     aria-hidden="true"
                     className={'h-3.5 w-3.5 transition-transform ' + (collapsed ? '' : 'rotate-90')}
@@ -205,17 +206,14 @@ const Shell: React.FC = () => {
             </div>
           </div>
         </nav>
-        <div className="mt-auto px-2 pt-6 text-xs text-text-muted">
-          <span className="block">InferDeck v{INFERDECK_VERSION}</span>
-          <span className="mt-0.5 block text-[10px]">In-process runtime</span>
-        </div>
+        <SidebarAccount />
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <TopBar page={page} />
         <ConnectionBanner />
         <HealthNotices />
-        <main className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+        <main className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
           <div className="mx-auto max-w-[1280px]">
             {page === 'home' && <OverviewPage />}
             {page === 'requests' && <RequestsPage />}
@@ -249,6 +247,26 @@ const Shell: React.FC = () => {
 export function sidebarNavigationClass(collapsed: boolean): string {
   return collapsed ? 'hidden' : 'flex flex-col gap-1';
 }
+
+const SidebarAccount: React.FC = () => {
+  const access = useDashboardAccess();
+  const [error, setError] = useState('');
+  return <div className="shrink-0 pt-5">
+    <details className="relative">
+      <summary className="flex cursor-pointer list-none items-center gap-2.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-2 hover:bg-white/[0.08]">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-queue-blue/40 bg-queue-blue/15 text-queue-blue" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+        <span className="min-w-0 flex-1"><span className="block text-sm font-medium">{access?.remote ? 'Dashboard session' : 'Local access'}</span><span className="block truncate text-[11px] text-text-muted">{access?.remembered ? 'Remembered browser' : 'Dashboard administration'}</span></span>
+        <ChevronRightIcon className="h-3.5 w-3.5 text-text-muted" />
+      </summary>
+      <nav aria-label="Account" className="absolute bottom-full left-0 z-40 mb-1 w-full border border-border-slate bg-[#07101d] p-1 text-sm shadow-2xl">
+        <a href="#settings" className="block rounded px-3 py-2 hover:bg-white/[0.05]">API keys</a>
+        {access?.remote && <button className="w-full px-3 py-2 text-left hover:bg-white/[0.05]" onClick={() => { void access.logout().catch(() => setError('Log out failed. Try again.')); }}>Log out</button>}
+      </nav>
+    </details>
+    {error && <p role="alert" className="mt-2 text-xs text-danger-rose">{error}</p>}
+    <p className="mt-2 px-1 text-[10px] text-text-muted">InferDeck v{INFERDECK_VERSION} / In-process runtime</p>
+  </div>;
+};
 
 const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
   const { connection, stats, swap } = useGateway();
@@ -418,10 +436,11 @@ const NavLink: React.FC<{ id: PageId; label: string; page: PageId; nested?: bool
   <a
     href={`#${id}`}
     aria-current={page === id ? 'page' : undefined}
-    className={`rounded px-3 py-2 text-sm transition-colors ${nested ? 'pl-5' : ''} ${page === id
+    className={`relative rounded px-3 py-2 text-sm transition-colors ${nested ? 'pl-5' : ''} ${page === id
       ? 'bg-white/[0.07] font-medium text-text-primary'
       : 'text-text-secondary hover:bg-white/[0.04] hover:text-text-primary'}`}
   >
+    {page === id && <span className="absolute inset-y-1.5 left-0 w-0.5 rounded bg-queue-blue" />}
     {label}
   </a>
 );

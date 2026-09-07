@@ -58,6 +58,12 @@ RequestObservation observe_request(const httplib::Request& req,
     observation.principal_class =
         deps.api_keys && deps.api_keys->authenticate_bearer(authorization)
             ? "managed_api_key" : "openai_data_plane";
+    if (deps.api_keys) {
+        if (const auto key = deps.api_keys->authenticate_bearer(authorization)) {
+            observation.api_key_id = key->id;
+            observation.api_key_name = key->name;
+        }
+    }
     observation.endpoint = req.path;
     observation.protocol_profile =
         deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative
@@ -84,6 +90,8 @@ void record_request(observability::Metrics* metrics,
     rec.resolved_model = resolved_model_name.empty() ? rec.model : resolved_model_name;
     rec.request_id = observation.request_id;
     rec.principal_class = observation.principal_class;
+    rec.api_key_id = observation.api_key_id;
+    rec.api_key_name = observation.api_key_name;
     rec.endpoint = observation.endpoint;
     rec.protocol_profile = observation.protocol_profile;
     rec.modality = observation.modality;
@@ -145,6 +153,8 @@ void record_request(observability::Metrics* metrics,
             {"timestampUnixMs", rec.timestamp_unix_ms},
             {"requestId", rec.request_id},
             {"principalClass", rec.principal_class},
+            {"apiKeyId", rec.api_key_id},
+            {"apiKeyName", rec.api_key_name},
             {"endpoint", rec.endpoint},
             {"protocolProfile", rec.protocol_profile},
             {"modality", rec.modality},

@@ -310,6 +310,8 @@ nlohmann::json build_dashboard_jobs(const observability::StatsDb& stats_db,
             {"model", row.model},
             {"resolvedModel", row.resolved_model},
             {"principalClass", row.principal_class},
+            {"apiKeyId", row.api_key_id},
+            {"apiKeyName", row.api_key_name},
             {"endpoint", row.endpoint},
             {"protocolProfile", row.protocol_profile},
             {"modality", row.modality},
@@ -549,6 +551,28 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
         if (gpu_lock_owner.empty() || item.primary) gpu_lock_owner = item.name;
     }
     auto model_json = build_dashboard_models(coordinator);
+    nlohmann::json live_requests = nlohmann::json::array();
+    for (const auto& request : metrics.live_requests()) {
+        const auto& progress = *request->progress;
+        const int phase = progress.phase.load();
+        const int processed = progress.processed_tokens.load();
+        const int cached = progress.cached_tokens.load();
+        const double prompt_ms = progress.prompt_ms.load();
+        const double generation_ms = progress.generation_ms.load();
+        live_requests.push_back({
+            {"id", request->request_id}, {"model", request->model},
+            {"requestedModel", request->requested_model}, {"apiKeyId", request->api_key_id},
+            {"apiKeyName", request->api_key_name}, {"endpoint", request->endpoint},
+            {"priority", request->priority}, {"slotId", progress.slot.load()},
+            {"startedUnixMs", request->started_unix_ms},
+            {"elapsedMs", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - request->started).count()},
+            {"phase", phase == 0 ? "waiting" : phase == 1 ? "loading" : phase == 2 ? "prefill" : "generating"},
+            {"promptTokens", progress.prompt_tokens.load()}, {"processedTokens", processed},
+            {"cachedTokens", cached}, {"completionTokens", progress.output_tokens.load()},
+            {"promptTokensPerSecond", prompt_ms > 0 ? nlohmann::json(std::max(0, processed - cached) * 1000.0 / prompt_ms) : nlohmann::json(nullptr)},
+            {"tokensPerSecond", generation_ms > 0 ? nlohmann::json(progress.output_tokens.load() * 1000.0 / generation_ms) : nlohmann::json(nullptr)},
+        });
+    }
     nlohmann::json queued_requests = nlohmann::json::array();
     for (const auto& item : coordinator.queue()) {
         queued_requests.push_back({
@@ -566,6 +590,7 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
             {"running", coordinator.active_request_count()},
             {"queued", coordinator.queued_request_count()},
             {"requests", queued_requests},
+            {"liveRequests", live_requests},
             {"gpuLocked", gpu_locked},
             {"lockOwner", gpu_lock_owner},
             {"vramBudgetMb", coordinator.vram_budget_mb()},

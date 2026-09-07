@@ -129,7 +129,7 @@ TEST_CASE("StatsDb: existing token ledger is migrated without losing history",
   REQUIRE(sqlite3_prepare_v2(migrated_raw, "PRAGMA user_version;", -1,
                              &version, nullptr) == SQLITE_OK);
   REQUIRE(sqlite3_step(version) == SQLITE_ROW);
-  CHECK(sqlite3_column_int(version, 0) == 2);
+  CHECK(sqlite3_column_int(version, 0) == 3);
   sqlite3_finalize(version);
   sqlite3_close(migrated_raw);
   const auto rows = migrated.recent_requests(10);
@@ -338,6 +338,8 @@ TEST_CASE("StatsDb: canonical request dimensions round-trip",
   row.resolved_model = "real-model";
   row.request_id = "req-canonical";
   row.principal_class = "openai_data_plane";
+  row.api_key_id = "key-test-id";
+  row.api_key_name = "CLI agent";
   row.endpoint = "/v1/chat/completions";
   row.protocol_profile = "strict_openai";
   row.modality = "text";
@@ -370,6 +372,8 @@ TEST_CASE("StatsDb: canonical request dimensions round-trip",
   REQUIRE(rows.size() == 1);
   CHECK(rows[0].request_id == row.request_id);
   CHECK(rows[0].principal_class == row.principal_class);
+  CHECK(rows[0].api_key_id == row.api_key_id);
+  CHECK(rows[0].api_key_name == row.api_key_name);
   CHECK(rows[0].endpoint == row.endpoint);
   CHECK(rows[0].protocol_profile == row.protocol_profile);
   CHECK(rows[0].modality == row.modality);

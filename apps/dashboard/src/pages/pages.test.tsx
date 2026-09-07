@@ -113,19 +113,34 @@ describe('pages', () => {
   it('Home leads with the current runtime, then combined health, usage, and activity', () => {
     const html = renderWith(<OverviewPage />);
     expect(html).toContain('Runtime now');
-    expect(html).toContain('Current model');
+    expect(html).toContain('Resident models');
     expect(html).toContain('qwen3.6-35b-a3b');
     expect(html).toContain('Processing');
     expect(html).toContain('GPU utilization');
     expect(html).toContain('42%');
     expect(html).toContain('Lifetime tokens');
-    expect(html).toContain('p95 latency');
+    expect(html).toContain('Waiting');
+    expect(html).toContain('Recent activity');
     expect(html).toContain('Combined usage');
     expect(html).toContain('All services');
     expect(html).toContain('Recent activity');
     expect(html).toContain('API-equivalent value');
     expect(html).not.toContain('Open LLM');
     expect(html).not.toContain('Open Dictation');
+  });
+
+  it('shows authenticated owners and measured per-slot progress without exposing secrets', () => {
+    const progress = { id: 'request-1', model: 'qwen3.6-35b-a3b', requestedModel: 'Fast', apiKeyId: 'key-id', apiKeyName: 'n8n workflows', endpoint: '/v1/chat/completions', priority: 3, slotId: 0, startedUnixMs: 1, elapsedMs: 2500, phase: 'prefill' as const, promptTokens: 1000, processedTokens: 500, cachedTokens: 100, completionTokens: 0, promptTokensPerSecond: 200, tokensPerSecond: null };
+    const fixture = { ...value, status: { ...status, queue: { ...status.queue, liveRequests: [progress, { ...progress, id: 'queued-2', slotId: -1, phase: 'waiting' as const, apiKeyName: 'UAM' }] } } };
+    const html = renderToStaticMarkup(<GatewayContext.Provider value={fixture}><OverviewPage /></GatewayContext.Provider>);
+    expect(html).toContain('n8n workflows');
+    expect(html).toContain('UAM');
+    expect(html).toContain('PP tok/s');
+    expect(html).toContain('>200</td>');
+    expect(html).toContain('N/A');
+    expect(html).toContain('Slot ');
+    expect(html).toContain('Fast');
+    expect(html).not.toContain('API owner: not recorded');
   });
 
   it('every active division has section-scoped Model Settings', () => {

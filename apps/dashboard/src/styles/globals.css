@@ -303,3 +303,37 @@ summary:focus-visible {
     animation-iteration-count: 1 !important;
   }
 }
+
+.mock-home .mock-telemetry > div {
+  border-left: 0;
+  padding-left: 0;
+}
+.mock-home .mock-telemetry svg {
+  height: 3.5rem;
+  margin-top: .5rem;
+}
+.mock-home .mock-telemetry > div:nth-child(n + 3) {
+  border-top: 1px solid var(--border-slate);
+  padding-top: 1rem;
+}
+
+.mock-home .mock-telemetry > div {
+  display: flex;
+  flex-direction: column;
+}
+.mock-home .mock-telemetry svg {
+  margin-top: auto;
+  flex-shrink: 0;
+}
+
+body {
+  height: 100dvh;
+  overflow: hidden;
+}
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+html { height: 100%; overflow: hidden; }
+#root { position: relative; }

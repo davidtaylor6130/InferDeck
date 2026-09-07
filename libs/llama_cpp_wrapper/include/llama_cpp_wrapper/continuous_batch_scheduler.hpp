@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common.h"
+#include "inference/domain.hpp"
 #include "sampling.h"
 
 using llama_token = int32_t;
@@ -99,6 +100,7 @@ constexpr float generation_tokens_per_second(
 // then drains out_queue until a TokenEvent with is_done=true arrives.
 // The object MUST remain alive until after the done event is consumed.
 struct SlotTask {
+    std::shared_ptr<inference::RequestProgress> progress;
     // ---- Input (filled by caller before submit) ----
     int slot_id{-1};                          // also the llama sequence ID (0..n_slots-1)
     std::vector<llama_token> prompt_tokens;

@@ -4,10 +4,28 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <memory>
+#include <vector>
 #include <string>
 #include <unordered_map>
 
+namespace inferdeck::inference { struct RequestProgress; }
 namespace inferdeck::observability {
+
+struct LiveRequest {
+    std::string request_id;
+    std::string model;
+    std::string requested_model;
+    std::string api_key_id;
+    std::string api_key_name;
+    std::string endpoint;
+    int priority{};
+    std::int64_t started_unix_ms{};
+    std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+    std::shared_ptr<inference::RequestProgress> progress;
+    std::atomic<bool> finished{false};
+};
+
 
 struct RequestRecord {
   std::int64_t timestamp_unix_ms{};
@@ -27,6 +45,8 @@ struct RequestRecord {
   std::string resolved_model;
   std::string request_id;
   std::string principal_class;
+  std::string api_key_id;
+  std::string api_key_name;
   std::string endpoint;
   std::string protocol_profile;
   std::string modality;
@@ -91,8 +111,13 @@ public:
   std::int64_t last_gpu_sample_unix_ms() const noexcept { return last_gpu_ts_; }
 
   void reset();
+  void track_request(const std::shared_ptr<LiveRequest>& request);
+  std::vector<std::shared_ptr<LiveRequest>> live_requests() const;
+
 
 private:
+  mutable std::mutex live_mtx_;
+  mutable std::vector<std::weak_ptr<LiveRequest>> live_requests_;
   mutable std::mutex mtx_;
   std::unordered_map<std::string, ModelStats> by_model_;
 
