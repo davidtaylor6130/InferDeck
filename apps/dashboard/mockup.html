@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>InferDeck · mockup v4 (final)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = { theme: { extend: { colors: {
+    'deck-navy': '#000',
+    'border-slate': '#2b3949',
+    'text-primary': '#ffffff',
+    'text-secondary': '#b0bcc8',
+    'text-muted': '#7f8d9d',
+    'queue-blue': '#72a7d8',
+    'success-green': '#52b788',
+    'warning-amber': '#d9a441',
+    'danger-rose': '#df6b72',
+    'infer-violet': '#6e8fb5',
+    'gaming-orange': '#d68a45'
+  } } } };
+</script>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #000; color: #fff; font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; line-height: 1.5; }
+  * { box-sizing: border-box; }
+  .chev { transition: transform .15s ease; }
+  .open > .chev, .open .chev-toggle { transform: rotate(90deg); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: #0B1220; }
+  ::-webkit-scrollbar-thumb { background: #27344D; border-radius: 999px; }
+</style>
+</head>
+<body>
+
+<div class="border-b border-warning-amber/30 bg-warning-amber/10 px-6 py-2 text-sm text-warning-amber">
+  <div class="mx-auto max-w-[1280px]">
+    <p class="font-medium">Design mockup v4 — final state, ready for implementation.</p>
+    <p class="mt-1 text-warning-amber/90">Runtime now lists <b>all resident models</b> with clear <b>used/free slots</b> + <b>per-slot PP/TPS/elapsed</b>. Live/aggregate GPU·VRAM·temp·speed sparklines sit in the <b>right column under their matching stat</b>. <b>Recent activity moved up</b> into the right column (fills the blank). Lifetime row condensed to <b>3 stats</b>. App shell is viewport-locked so the <b>account card</b> stays bottom-left. Implementation handoff notes at the bottom.</p>
+  </div>
+</div>
+
+<div class="app-shell flex h-screen overflow-hidden">
+
+  <!-- SIDEBAR (V1-style: per-section accent, item counts, account card bottom-left) -->
+  <aside class="hidden w-56 shrink-0 flex-col overflow-y-auto border-r border-border-slate bg-deck-navy px-3 py-5 md:flex md:h-screen">
+    <div class="mb-5 flex items-center gap-3 px-2">
+      <div class="flex h-9 w-9 items-center justify-center rounded-md bg-queue-blue/20 font-mono text-xs font-semibold text-queue-blue">ID</div>
+      <div>
+        <span class="text-base font-semibold text-text-primary">InferDeck</span>
+        <span class="mt-0.5 block text-xs text-text-muted">Local inference</span>
+      </div>
+    </div>
+
+    <nav class="flex flex-col gap-1" aria-label="Dashboard" id="topNav">
+      <a href="#home" class="relative flex items-center rounded bg-white/[0.07] px-3 py-2 text-sm font-medium text-text-primary">
+        <span class="absolute inset-y-1.5 left-0 w-0.5 rounded bg-queue-blue"></span>Home
+      </a>
+      <a href="#requests" class="rounded px-3 py-2 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Requests</a>
+      <a href="#settings" class="rounded px-3 py-2 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">API Settings</a>
+    </nav>
+
+    <div class="mt-5 flex flex-col gap-4" id="sectionNav">
+      <!-- LLM (accent: queue-blue) -->
+      <div class="open" data-sec="llm" data-accent="queue-blue">
+        <button class="flex min-h-9 w-full items-center justify-between rounded px-3 text-[11px] font-semibold uppercase tracking-[0.14em] hover:bg-white/[0.04]">
+          <span class="flex items-center gap-2"><span class="h-2.5 w-1 rounded bg-queue-blue"></span><span class="text-text-secondary">LLM</span></span>
+          <span class="flex items-center gap-1.5"><span class="text-[10px] font-normal normal-case tracking-normal text-text-muted">4</span>
+          <svg class="chev h-3.5 w-3.5 rotate-90 text-text-muted" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.17 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg></span>
+        </button>
+        <div class="mt-1 flex flex-col gap-0.5">
+          <a href="#llm-settings" class="relative rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Model Settings</a>
+          <a href="#llm-models" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Model Store</a>
+          <a href="#llm-usage" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Usage</a>
+          <a href="#llm-diagnostics" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Health &amp; alerts</a>
+        </div>
+      </div>
+      <!-- Dictation (accent: warning-amber) -->
+      <div data-sec="dictation">
+        <button class="flex min-h-9 w-full items-center justify-between rounded px-3 text-[11px] font-semibold uppercase tracking-[0.14em] hover:bg-white/[0.04]">
+          <span class="flex items-center gap-2"><span class="h-2.5 w-1 rounded bg-warning-amber"></span><span class="text-text-secondary">Dictation</span></span>
+          <span class="flex items-center gap-1.5"><span class="text-[10px] font-normal normal-case tracking-normal text-text-muted">3</span>
+          <svg class="chev h-3.5 w-3.5 text-text-muted" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.17 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg></span>
+        </button>
+        <div class="hidden flex-col gap-0.5">
+          <a href="#dictation-settings" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Settings</a>
+          <a href="#dictation-models" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Model Store</a>
+          <a href="#dictation-usage" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Usage</a>
+        </div>
+      </div>
+      <!-- Image (accent: infer-violet) -->
+      <div data-sec="image">
+        <button class="flex min-h-9 w-full items-center justify-between rounded px-3 text-[11px] font-semibold uppercase tracking-[0.14em] hover:bg-white/[0.04]">
+          <span class="flex items-center gap-2"><span class="h-2.5 w-1 rounded bg-infer-violet"></span><span class="text-text-secondary">Image</span></span>
+          <span class="flex items-center gap-1.5"><span class="text-[10px] font-normal normal-case tracking-normal text-text-muted">3</span>
+          <svg class="chev h-3.5 w-3.5 text-text-muted" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.17 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg></span>
+        </button>
+        <div class="hidden flex-col gap-0.5">
+          <a href="#image-settings" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Settings</a>
+          <a href="#image-models" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Model Store</a>
+          <a href="#image-usage" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Usage</a>
+        </div>
+      </div>
+      <!-- Music (accent: gaming-orange) -->
+      <div data-sec="music">
+        <button class="flex min-h-9 w-full items-center justify-between rounded px-3 text-[11px] font-semibold uppercase tracking-[0.14em] hover:bg-white/[0.04]">
+          <span class="flex items-center gap-2"><span class="h-2.5 w-1 rounded bg-gaming-orange"></span><span class="text-text-secondary">Music</span></span>
+          <span class="flex items-center gap-1.5"><span class="text-[10px] font-normal normal-case tracking-normal text-text-muted">3</span>
+          <svg class="chev h-3.5 w-3.5 text-text-muted" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.17 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg></span>
+        </button>
+        <div class="hidden flex-col gap-0.5">
+          <a href="#music-settings" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Settings</a>
+          <a href="#music-models" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Model Store</a>
+          <a href="#music-usage" class="rounded px-3 py-1.5 pl-5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Usage</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-5 border-t border-white/10 pt-4">
+      <div class="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">Planned</div>
+      <div class="flex flex-col gap-0.5">
+        <a href="#post-training" class="rounded px-3 py-1.5 text-sm text-text-secondary hover:bg-white/[0.04] hover:text-text-primary">Post Training</a>
+      </div>
+    </div>
+
+    <!-- ACCOUNT CARD (bottom-left) -->
+    <div class="mt-auto pt-5">
+      <div class="relative" id="accountWrap">
+        <button id="accountBtn" class="flex w-full items-center gap-2.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-2 text-left hover:bg-white/[0.08]">
+          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-queue-blue/40 bg-queue-blue/15 text-queue-blue">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-sm font-medium text-text-primary">david@local</span>
+            <span class="block truncate text-[11px] text-text-muted">Owner · 5 API keys</span>
+          </span>
+          <svg class="chev-toggle h-3.5 w-3.5 text-text-muted" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/></svg>
+        </button>
+        <nav id="accountMenu" class="hidden absolute bottom-full left-0 z-40 mb-1 w-44 border border-border-slate bg-[#07101d] p-1 text-sm shadow-2xl" aria-label="Account">
+          <a href="#settings" class="block rounded px-3 py-2 text-text-secondary hover:bg-white/[0.05] hover:text-text-primary">Account</a>
+          <a href="#settings" class="block rounded px-3 py-2 text-text-secondary hover:bg-white/[0.05] hover:text-text-primary">API keys</a>
+          <a href="#" class="block rounded px-3 py-2 text-text-secondary hover:bg-white/[0.05] hover:text-text-primary">Log out</a>
+        </nav>
+      </div>
+      <p class="mt-2 px-1 text-[10px] text-text-muted">InferDeck v2.3.1 · In-process runtime</p>
+    </div>
+  </aside>
+
+  <div class="flex min-w-0 flex-1 flex-col">
+
+    <!-- TOP BAR -->
+    <header class="z-20 shrink-0 border-b border-border-slate bg-deck-navy px-4 py-3 sm:px-6">
+      <div class="flex min-w-0 items-center justify-between gap-3">
+        <h1 class="truncate text-base font-semibold text-text-primary">Home</h1>
+        <div class="flex shrink-0 items-center gap-2">
+          <span class="hidden text-xs text-text-secondary sm:inline">qwen3.6-27b</span>
+          <span title="Open Health &amp; alerts">
+            <span class="inline-flex items-center rounded bg-success-green/10 px-2 py-0.5 text-xs font-medium text-success-green">Live</span>
+          </span>
+          <details class="relative z-30">
+            <summary class="flex min-h-11 cursor-pointer items-center rounded border border-white/15 bg-white/[0.06] px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-white/[0.12] sm:min-h-10">Settings</summary>
+            <nav class="absolute right-0 z-40 mt-2 w-72 border border-border-slate bg-[#07101d] p-1 text-sm shadow-2xl" aria-label="Settings">
+              <a href="#settings" class="block rounded px-3 py-2 hover:bg-white/[0.05]">API settings</a>
+              <a href="#llm-settings" class="block rounded px-3 py-2 hover:bg-white/[0.05]">LLM settings</a>
+              <a href="#dictation-settings" class="block rounded px-3 py-2 hover:bg-white/[0.05]">Dictation settings</a>
+              <a href="#image-settings" class="block rounded px-3 py-2 hover:bg-white/[0.05]">Image settings</a>
+              <a href="#music-settings" class="block rounded px-3 py-2 hover:bg-white/[0.05]">Music settings</a>
+              <a href="#llm-diagnostics" class="block rounded px-3 py-2 hover:bg-white/[0.05]">Configuration &amp; recovery</a>
+            </nav>
+          </details>
+        </div>
+      </div>
+    </header>
+
+    <main class="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+      <div class="mx-auto max-w-[1280px] space-y-5">
+
+        <!-- RUNTIME NOW -->
+        <section class="border-t border-t-0 pt-0">
+          <div class="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-2">
+            <h2 class="min-w-0 text-base font-semibold text-text-primary">Runtime now <span class="text-xs font-normal text-text-muted">(up 3d 11h 42m)</span></h2>
+            <span class="inline-flex items-center rounded bg-success-green/10 px-2 py-0.5 text-xs font-medium text-success-green">Processing</span>
+          </div>
+          <div class="mt-4 grid gap-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(340px,0.7fr)] lg:items-start">
+            <div class="min-w-0 border-l-2 border-queue-blue pl-4" aria-live="polite">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-xs font-medium text-text-muted">Resident models</span>
+                <span id="residentCount" class="inline-flex items-center rounded bg-white/[0.04] px-2 py-0.5 text-xs font-medium text-text-secondary">3</span>
+              </div>
+              <div class="mt-1 divide-y divide-white/10" id="residentList"></div>
+
+              <div class="mt-3 border-t border-border-slate pt-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="text-xs font-medium text-text-muted">Waiting</span>
+                  <span class="text-xs text-text-muted" id="queueMeta">3 queued · oldest 82s</span>
+                </div>
+                <div class="mt-1 divide-y divide-white/10" id="queueList"></div>
+                <p class="mt-2 text-xs text-text-muted">Scheduler: queue p0 first; admit when a slot frees</p>
+              </div>
+            </div>
+
+            <div class="flex min-w-0 flex-col gap-4">
+              <div class="grid grid-cols-2 gap-x-5 gap-y-4">
+                <div class="min-w-0">
+                  <p class="text-xs text-text-muted">Processing</p>
+                  <p id="statProcessing" class="mt-0.5 font-semibold text-lg tabular-nums text-success-green">5</p>
+                  <p class="truncate text-xs text-text-muted">active requests</p>
+                </div>
+                <div class="min-w-0">
+                  <p class="text-xs text-text-muted">Queued</p>
+                  <p id="statQueued" class="mt-0.5 font-semibold text-lg tabular-nums text-queue-blue">3</p>
+                  <p class="truncate text-xs text-text-muted">waiting requests</p>
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-x-5 gap-y-4 border-t border-border-slate pt-4">
+                <div class="min-w-0">
+                  <p class="text-xs text-text-muted">GPU</p>
+                  <p id="statGpu" class="mt-0.5 font-semibold text-lg tabular-nums text-text-primary">71%</p>
+                  <p class="truncate text-xs text-text-muted">NVIDIA GeForce RTX 4090</p>
+                  <svg viewBox="0 0 220 64" class="mt-2 h-14 w-full" role="img" aria-label="GPU utilization sparkline">
+                    <path id="sparkGpuArea" fill="#60A5FA" opacity="0.1"></path>
+                    <path id="sparkGpuLine" fill="none" stroke="#60A5FA" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
+                  </svg>
+                </div>
+                <div class="min-w-0">
+                  <p class="text-xs text-text-muted">VRAM</p>
+                  <p id="statVram" class="mt-0.5 font-semibold text-lg tabular-nums text-text-primary">18.2 GB</p>
+                  <p class="truncate text-xs text-text-muted">of 24.0 GB</p>
+                  <svg viewBox="0 0 220 64" class="mt-2 h-14 w-full" role="img" aria-label="VRAM sparkline">
+                    <path id="sparkVramArea" fill="#8B5CF6" opacity="0.1"></path>
+                    <path id="sparkVramLine" fill="none" stroke="#8B5CF6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
+                  </svg>
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-x-5 gap-y-4 border-t border-border-slate pt-4">
+                <div class="min-w-0">
+                  <p class="text-xs text-text-muted">GPU temperature</p>
+                  <p id="sparkTempVal" class="mt-0.5 truncate font-semibold text-lg tabular-nums text-text-primary">72°C</p>
+                  <span class="mt-1 inline-flex items-center rounded bg-warning-amber/10 px-2 py-0.5 text-xs font-medium text-warning-amber">Warm</span>
+                  <svg viewBox="0 0 220 64" class="mt-2 h-14 w-full" role="img" aria-label="Temperature sparkline">
+                    <path id="sparkTempArea" fill="#F59E0B" opacity="0.1"></path>
+                    <path id="sparkTempLine" fill="none" stroke="#F59E0B" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
+                  </svg>
+                </div>
+                <div class="min-w-0">
+                  <p class="text-xs text-text-muted">Generation speed</p>
+                  <p id="sparkSpeedVal" class="mt-0.5 truncate font-semibold text-lg tabular-nums text-text-primary">34.2 t/s</p>
+                  <svg viewBox="0 0 220 64" class="mt-2 h-14 w-full" role="img" aria-label="Speed sparkline">
+                    <path id="sparkSpeedArea" fill="#22C55E" opacity="0.1"></path>
+                    <path id="sparkSpeedLine" fill="none" stroke="#22C55E" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
+                  </svg>
+                </div>
+              </div>
+              <p class="text-xs text-text-muted">Live system · aggregate · last 60 seconds</p>
+              <div class="border-t border-border-slate pt-4">
+                <h2 class="min-w-0 text-base font-semibold text-text-primary">Recent activity <span class="text-xs font-normal text-text-muted">(latest 3)</span></h2>
+                <div class="mt-2 divide-y divide-white/10" id="activityList"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-4 grid grid-cols-3 gap-4 border-t border-border-slate pt-4 sm:grid-cols-3">
+            <div class="min-w-0">
+              <p class="text-xs text-text-muted">Lifetime requests</p>
+              <p class="mt-0.5 font-semibold text-lg tabular-nums text-text-primary">48,213</p>
+            </div>
+            <div class="min-w-0">
+              <p class="text-xs text-text-muted">Lifetime tokens</p>
+              <p class="mt-0.5 font-semibold text-lg tabular-nums text-text-primary">61.4M</p>
+            </div>
+            <div class="min-w-0">
+              <p class="text-xs text-text-muted">API-equivalent value</p>
+              <p class="mt-0.5 font-semibold text-lg tabular-nums text-success-green">$318</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- USAGE -->
+        <section class="border-t border-border-slate pt-4 min-w-0">
+          <div class="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-2">
+            <h2 class="min-w-0 text-base font-semibold text-text-primary">Combined usage <span class="text-xs font-normal text-text-muted">(last 30 days · all services)</span></h2>
+            <div class="flex gap-1 text-xs">
+              <button class="rounded px-2 py-1 text-text-secondary hover:bg-white/[0.04]">24h</button>
+              <button class="rounded px-2 py-1 text-text-secondary hover:bg-white/[0.04]">7d</button>
+              <button class="rounded bg-white/[0.07] px-2 py-1 font-medium text-text-primary">30d</button>
+              <button class="rounded px-2 py-1 text-text-secondary hover:bg-white/[0.04]">All</button>
+            </div>
+          </div>
+          <div class="mt-3">
+            <svg viewBox="0 0 560 120" class="h-48 w-full" role="img" aria-label="Combined usage">
+              <line x1="0" y1="14" x2="560" y2="14" stroke="#2b3949" stroke-width="1" stroke-dasharray="3 4" opacity="0.5"></line>
+              <line x1="0" y1="62" x2="560" y2="62" stroke="#2b3949" stroke-width="1" stroke-dasharray="3 4" opacity="0.5"></line>
+              <path id="usageArea" fill="#72A7D8" opacity="0.1"></path>
+              <path id="usageLine" fill="none" stroke="#72A7D8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+            <div class="mt-1 flex justify-between text-[10px] text-text-muted"><span>May 8</span><span>May 22</span><span>Jun 6</span></div>
+          </div>
+        </section>
+
+        <!-- HANDOFF NOTES (not part of the UI) -->
+        <section class="border-t border-border-slate pt-4">
+          <div class="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-2">
+            <h2 class="min-w-0 text-base font-semibold text-text-muted">Handoff notes <span class="text-xs font-normal text-text-muted">(for implementation · not part of the UI)</span></h2>
+          </div>
+          <ol class="mt-3 list-decimal space-y-2 pl-5 text-sm text-text-secondary marker:text-text-muted">
+            <li><b class="text-text-primary">Runtime now → resident models.</b> Replace the single <code class="font-mono text-xs">loadedModel</code> with the <code class="font-mono text-xs">ModelInfo[]</code> resident list (already in the <code class="font-mono text-xs">models</code> payload). Per model: slot pips — used = filled green, free = dashed outline — plus busy/total and VRAM used.</li>
+            <li><b class="text-text-primary">Per-slot live rows.</b> Running requests grouped under their model/slot: client key, PP (<code class="font-mono text-xs">promptTokensPerSecond</code>), TPS (<code class="font-mono text-xs">tokensPerSecond</code>), elapsed. This is the live per-slot view that replaces the flat active-request list on Home; the Requests page stays as-is.</li>
+            <li><b class="text-text-primary">Waiting queue.</b> Use <code class="font-mono text-xs">status.queue.requests[]</code> (already exists: id, model, priority, position, queuedMs, remainingMs) plus a one-line reason (slots busy / not resident). <span class="text-warning-amber">Data gap:</span> queue entries need the auth principal — carry the resolved API key (name + priority) into each queue entry at admission.</li>
+            <li><b class="text-text-primary">API key chips.</b> Requests already carry <code class="font-mono text-xs">principalClass</code>; expose key name + priority (and prefix on expand) from <code class="font-mono text-xs">ApiKeyRecord</code>. Dashed chip = public / no key.</li>
+            <li><b class="text-text-primary">Sidebar.</b> Per-section accent (LLM blue, Dictation amber, Image violet, Music orange), item count on the header, collapse state persisted via the existing <code class="font-mono text-xs">sidebarPreferences</code>, active item gets a 2px accent left bar. Top-level links stay neutral.</li>
+            <li><b class="text-text-primary">Account card, bottom-left.</b> User icon + account name + role + API-key count + menu (Account / API keys / Log out), replacing the bare version block (version stays as a small line beneath). Feeds the existing <code class="font-mono text-xs">DashboardAccess</code> state.</li>
+            <li><b class="text-text-primary">App shell is viewport-locked.</b> The page must NOT scroll — the app shell is <code class="font-mono text-xs">h-screen overflow-hidden</code> and only <code class="font-mono text-xs">main</code> scrolls (<code class="font-mono text-xs">overflow-y-auto</code>). This keeps the sidebar (and its bottom-left account card) pinned to the viewport, not the page height. The top bar stays <code class="font-mono text-xs">shrink-0</code> (no sticky needed inside the fixed shell).</li>
+            <li><b class="text-text-primary">Live stats live in the right column.</b> The whole-machine (aggregate) GPU / VRAM / temp / speed sparklines sit under their matching headline stat in the "Runtime now" right column — not as a separate full-width section. Each headline stat is paired with its own sparkline (GPU util under GPU, VRAM under VRAM). Per-slot detail stays in the resident-model rows only.</li>
+          </ol>
+        </section>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<script>
+  const $ = s => document.querySelector(s);
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const fmtMb = mb => mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
+  const fmtTok = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n);
+
+  const KEYS = {
+    'opencode': { prio: 0, dot: '#52b788', name: 'opencode' },
+    'claude-code': { prio: 0, dot: '#52b788', name: 'claude-code' },
+    'open-webui': { prio: 1, dot: '#72a7d8', name: 'open-webui' },
+    'mcp-agent': { prio: 1, dot: '#72a7d8', name: 'mcp-agent' },
+    'web-console': { prio: 2, dot: '#d9a441', name: 'web-console' },
+    'public': { prio: 3, dot: null, name: 'public (no key)' }
+  };
+  const keyChip = id => {
+    const k = KEYS[id];
+    const dot = k.dot
+      ? '<span class="inline-block h-2 w-2 rounded-full" style="background:' + k.dot + '"></span>'
+      : '<span class="inline-block h-2 w-2 rounded-full border border-dashed border-white/40"></span>';
+    return '<span class="inline-flex max-w-full items-center gap-1.5 rounded border border-white/15 bg-white/[0.04] px-2 py-0.5 text-xs font-medium text-text-secondary">' + dot + '<span class="truncate">' + k.name + '</span><span class="shrink-0 text-[10px] text-text-muted">p' + (k.prio === 3 ? '∅' : k.prio) + '</span></span>';
+  };
+  const prioText = p => p === 0 ? 'text-success-green' : p === 1 ? 'text-queue-blue' : 'text-warning-amber';
+
+  // ── Resident models + per-slot live state ──────────────────────────
+  const models = [
+    { id: 'qwen3.6-27b', family: 'Qwen', primary: true, vramUsedMb: 17300, vramReqMb: 17800, context: 131072, loaded: '4h 12m ago',
+      slots: [
+        { key: 'opencode', phase: 'decode', pp: 0, tps: 58.4, elapsed: 42 },
+        { key: 'claude-code', phase: 'prefill', pp: 212, tps: 0, elapsed: 9 },
+        null
+      ] },
+    { id: 'mistral-small-24b', family: 'Mistral', primary: false, vramUsedMb: 9800, vramReqMb: 10200, context: 65536, loaded: '1d 2h ago',
+      slots: [
+        { key: 'open-webui', phase: 'decode', pp: 0, tps: 31.2, elapsed: 87 },
+        { key: 'mcp-agent', phase: 'prefill', pp: 96, tps: 0, elapsed: 6 }
+      ] },
+    { id: 'whisper-large-v3', family: 'Whisper', primary: false, note: 'Dictation', vramUsedMb: 3100, vramReqMb: 3200, context: 448, loaded: '2d ago',
+      slots: [
+        { key: 'public', phase: 'transcribe', pp: 0, tps: 0, elapsed: 31, note: '12.4s audio' }
+      ] }
+  ];
+  const queue = [
+    { id: 101, key: 'opencode', model: 'qwen3.6-27b', prio: 0, waited: 82, reason: 'slots free in ~18s' },
+    { id: 102, key: 'web-console', model: 'mistral-small-24b', prio: 2, waited: 34, reason: 'slots full (2/2 busy)' },
+    { id: 103, key: 'mcp-agent', model: 'gpt-oss-20b', prio: 1, waited: 5, reason: 'not resident — swap required' }
+  ];
+
+  const expanded = new Set();
+  const SLOT_GRID = 'grid grid-cols-[22px_minmax(0,1.15fr)_72px_72px_64px] items-center gap-x-3';
+  const pips = m => m.slots.map((s, i) => s
+    ? '<span class="inline-block h-3 w-3 rounded-[3px] bg-success-green shadow-[0_0_6px_rgba(82,183,136,0.55)]" title="Slot ' + (i + 1) + ': busy"></span>'
+    : '<span class="inline-block h-3 w-3 rounded-[3px] border border-dashed border-white/30" title="Slot ' + (i + 1) + ': free"></span>').join('');
+
+  function slotRow(m, s, i) {
+    return '<div class="' + SLOT_GRID + ' border-t border-white/[0.07] py-2">'
+      + '<span class="text-xs tabular-nums text-text-muted">' + (i + 1) + '</span>'
+      + '<span class="min-w-0">' + keyChip(s.key) + '</span>'
+      + '<span class="text-right text-sm tabular-nums ' + (s.pp ? 'text-text-primary' : 'text-text-muted') + '">' + (s.pp ? s.pp.toFixed(0) : '—') + '</span>'
+      + '<span class="text-right text-sm tabular-nums ' + (s.tps ? 'text-text-primary' : 'text-text-muted') + '">' + (s.tps ? s.tps.toFixed(1) : '—') + '</span>'
+      + '<span class="text-right text-sm tabular-nums text-text-primary" data-el="' + m.id + ':' + i + '">' + s.elapsed + 's</span>'
+      + '</div>';
+  }
+
+  function renderResident() {
+    $('#residentCount').textContent = models.length;
+    $('#residentList').innerHTML = models.map(m => {
+      const busy = m.slots.filter(Boolean).length;
+      const rows = m.slots.map((s, i) => s ? slotRow(m, s, i) : '').join('');
+      const slotHeader = '<div class="' + SLOT_GRID + ' py-1.5 text-[10px] font-medium uppercase tracking-wide text-text-muted">'
+        + '<span>#</span><span>Client (API key)</span>'
+        + '<span class="text-right">PP tok/s</span><span class="text-right">TPS tok/s</span>'
+        + '<span class="text-right">Elapsed</span></div>';
+      const detail = expanded.has(m.id) ? ''
+        : '<div class="hidden" data-detail="' + m.id + '"></div>';
+      return '<div class="group" data-model="' + m.id + '">'
+        + '<button data-tog="' + m.id + '" aria-expanded="' + expanded.has(m.id) + '" class="-mx-1 flex w-[calc(100%+8px)] flex-wrap items-center gap-x-3 gap-y-1 rounded px-1 py-2.5 text-left hover:bg-white/[0.02]">'
+        + '<span class="flex shrink-0 items-center gap-1">' + pips(m) + '</span>'
+        + '<span class="min-w-0 flex-1 truncate font-mono text-sm font-semibold text-text-primary">' + m.id + '</span>'
+        + '<span class="inline-flex items-center rounded bg-white/[0.04] px-2 py-0.5 text-xs font-medium text-text-secondary">' + m.family + '</span>'
+        + (m.primary ? '<span class="inline-flex items-center rounded bg-queue-blue/10 px-2 py-0.5 text-xs font-medium text-queue-blue">Primary</span>' : '')
+        + '<span class="text-xs tabular-nums text-text-secondary"><span class="text-text-primary">' + busy + '</span>/' + m.slots.length + ' active</span>'
+        + '<span class="hidden text-xs tabular-nums text-text-muted sm:inline">' + fmtMb(m.vramUsedMb) + '</span>'
+        + '<svg class="chev h-4 w-4 shrink-0 text-text-muted" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.17 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg>'
+        + '</button>'
+        + '<div class="border-t border-white/[0.07]">' + slotHeader + rows + '</div>'
+        + (expanded.has(m.id) ? '' : '')
+        + '</div>';
+    }).join('');
+    document.querySelectorAll('[data-tog]').forEach(btn => btn.addEventListener('click', () => {
+      const id = btn.dataset.tog;
+      expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+      renderResident();
+    }));
+    document.querySelectorAll('[data-tog]').forEach(btn => btn.parentElement.classList.toggle('open', expanded.has(btn.dataset.tog)));
+  }
+
+  // ── Waiting queue ──────────────────────────────────────────────────
+  const expandedQueue = new Set();
+  function renderQueue() {
+    $('#queueList').innerHTML = queue.map(q =>
+      '<div>'
+      + '<button data-q="' + q.id + '" aria-expanded="' + expandedQueue.has(q.id) + '" class="flex w-full flex-wrap items-center gap-x-3 gap-y-1 py-2 text-left hover:bg-white/[0.02]">'
+      + keyChip(q.key)
+      + '<span class="min-w-0 flex-1 truncate font-mono text-xs text-text-secondary">' + q.model + '</span>'
+      + '<span class="text-xs font-medium ' + prioText(q.prio) + '">p' + q.prio + '</span>'
+      + '<span data-wait="' + q.id + '" class="text-xs tabular-nums text-text-muted">' + q.waited + 's</span>'
+      + '<svg class="chev h-4 w-4 text-text-muted" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.17 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg>'
+      + '</button>'
+      + '<div data-qd="' + q.id + '" class="' + (expandedQueue.has(q.id) ? '' : 'hidden') + ' border-l border-queue-blue/40 pl-9">'
+      + '<p class="py-2 text-xs text-text-muted">Waiting: <span class="text-text-secondary">' + q.reason + '</span></p>'
+      + '</div>'
+      + '</div>').join('');
+    document.querySelectorAll('[data-q]').forEach(btn => btn.addEventListener('click', () => {
+      const id = btn.dataset.q;
+      expandedQueue.has(id) ? expandedQueue.delete(id) : expandedQueue.add(id);
+      document.querySelector('[data-qd="' + id + '"]').classList.toggle('hidden', !expandedQueue.has(id));
+      btn.parentElement.classList.toggle('open', expandedQueue.has(id));
+    }));
+  }
+
+  // ── Recent activity ────────────────────────────────────────────────
+  const activity = [
+    { tone: 'good', badge: 'Completed', label: 'qwen3.6-27b · 512 out / 2.4s', detail: 'opencode · /v1/chat/completions · 58.2 t/s', ago: '12s ago' },
+    { tone: 'good', badge: 'Completed', label: 'mistral-small-24b · 812 out / 21.8s', detail: 'open-webui · /v1/chat/completions', ago: '48s ago' },
+    { tone: 'critical', badge: 'Failed', label: 'gpt-oss-20b · 409 swap in progress', detail: 'mcp-agent · request rejected, retry after swap', ago: '1m ago' }
+  ];
+  const toneBadge = t => t === 'good' ? 'bg-success-green/10 text-success-green' : t === 'critical' ? 'bg-danger-rose/10 text-danger-rose' : t === 'warn' ? 'bg-warning-amber/10 text-warning-amber' : 'bg-queue-blue/10 text-queue-blue';
+  $('#activityList').innerHTML = activity.map(a =>
+    '<div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 py-2.5">'
+    + '<span class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ' + toneBadge(a.tone) + '">' + a.badge + '</span>'
+    + '<span class="justify-self-end text-xs text-text-muted">' + a.ago + '</span>'
+    + '<div class="col-span-2 min-w-0"><p class="truncate text-sm text-text-primary">' + a.label + '</p>'
+    + '<p class="truncate text-xs ' + (a.tone === 'critical' ? 'text-danger-rose' : 'text-text-muted') + '">' + a.detail + '</p></div>'
+    + '</div>').join('');
+
+  // ── Sparklines (aggregate) ─────────────────────────────────────────
+  const W = 220, H = 64;
+  function linePath(vals, max) {
+    if (!vals.length) return 'M 0 ' + H;
+    return vals.map((v, i) => {
+      const x = (W / (vals.length - 1)) * i;
+      const y = H - (clamp(v, 0, max) / max) * H;
+      return (i === 0 ? 'M' : 'L') + ' ' + x.toFixed(1) + ' ' + y.toFixed(1);
+    }).join(' ');
+  }
+  let gpuHist = Array.from({ length: 60 }, () => rand(40, 85));
+  let vramHist = Array.from({ length: 60 }, () => rand(17500, 19000));
+  let tempHist = Array.from({ length: 60 }, () => rand(65, 78));
+  let speedHist = Array.from({ length: 60 }, () => rand(25, 45));
+  function drawSpark(id, vals, max) {
+    const p = linePath(vals, max);
+    document.getElementById(id + 'Line').setAttribute('d', p);
+    document.getElementById(id + 'Area').setAttribute('d', p + ' L ' + W + ' ' + H + ' L 0 ' + H + ' Z');
+  }
+
+  // Usage chart (30 days)
+  const UW = 560, UH = 120;
+  const usage = Array.from({ length: 30 }, (_, i) => 400 + Math.round(rand(0, 300) + (i > 20 ? 200 : 0)));
+  const usageMax = Math.max(...usage) * 1.15;
+  const up = usage.map((v, i) => (i === 0 ? 'M' : 'L') + ' ' + ((UW / 29) * i).toFixed(1) + ' ' + (UH - (v / usageMax) * UH).toFixed(1)).join(' ');
+  $('#usageLine').setAttribute('d', up);
+  $('#usageArea').setAttribute('d', up + ' L ' + UW + ' ' + UH + ' L 0 ' + UH + ' Z');
+
+  // ── Sidebar: per-section collapse + account menu ───────────────────
+  document.querySelectorAll('#sectionNav [data-sec] > button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const wrap = btn.parentElement;
+      const sub = wrap.querySelector('.flex-col');
+      const isOpen = !sub.classList.contains('hidden');
+      sub.classList.toggle('hidden', isOpen);
+      sub.classList.toggle('flex', !isOpen);
+      wrap.classList.toggle('open', !isOpen);
+      const chev = btn.querySelector('.chev');
+      chev.classList.toggle('rotate-90', !isOpen);
+    });
+  });
+  const accountWrap = $('#accountWrap');
+  const accountMenu = $('#accountMenu');
+  $('#accountBtn').addEventListener('click', e => {
+    e.stopPropagation();
+    accountMenu.classList.toggle('hidden');
+    accountWrap.classList.toggle('open');
+  });
+  document.addEventListener('click', () => { accountMenu.classList.add('hidden'); accountWrap.classList.remove('open'); });
+
+  // ── Live tick ──────────────────────────────────────────────────────
+  let t = 0;
+  function tick() {
+    t += 1;
+    const gpu = clamp(gpuHist[59] + rand(-12, 12), 20, 98);
+    const vram = clamp(vramHist[59] + rand(-300, 300), 16000, 20500);
+    const temp = clamp(tempHist[59] + rand(-3, 3), 55, 88);
+    const speed = clamp(speedHist[59] + rand(-6, 6), 15, 60);
+    gpuHist = [...gpuHist.slice(1), gpu];
+    vramHist = [...vramHist.slice(1), vram];
+    tempHist = [...tempHist.slice(1), temp];
+    speedHist = [...speedHist.slice(1), speed];
+
+    models.forEach(m => m.slots.forEach(s => { if (s) { s.elapsed += 2; if (s.phase === 'decode') s.tps = clamp(s.tps + rand(-4, 4), 20, 70); } }));
+    queue.forEach(q => q.waited += 2);
+
+    const activeCount = models.reduce((n, m) => n + m.slots.filter(Boolean).length, 0);
+    $('#statGpu').textContent = Math.round(gpu) + '%';
+    $('#statVram').textContent = fmtMb(vram);
+    $('#sparkTempVal').textContent = Math.round(temp) + '°C';
+    $('#sparkSpeedVal').textContent = speed.toFixed(1) + ' t/s';
+    $('#statProcessing').textContent = activeCount;
+    $('#statQueued').textContent = queue.length;
+    $('#queueMeta').textContent = queue.length + ' queued · oldest ' + queue.reduce((mx, q) => Math.max(mx, q.waited), 0) + 's';
+
+    drawSpark('sparkGpu', gpuHist, 100);
+    drawSpark('sparkVram', vramHist, 24000);
+    drawSpark('sparkTemp', tempHist, 100);
+    drawSpark('sparkSpeed', speedHist, 60);
+    renderResident();
+    renderQueue();
+  }
+  renderResident();
+  renderQueue();
+  drawSpark('sparkGpu', gpuHist, 100);
+  drawSpark('sparkVram', vramHist, 24000);
+  drawSpark('sparkTemp', tempHist, 100);
+  drawSpark('sparkSpeed', speedHist, 60);
+  setInterval(tick, 2000);
+</script>
+</body>
+</html>
