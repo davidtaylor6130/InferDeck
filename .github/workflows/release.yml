@@ -182,6 +182,10 @@ jobs:
             throw "Unexpected packaged executable version output: $output"
           }
 
+      - name: Verify packaged HTTP and dashboard
+        shell: pwsh
+        run: .\Testing\Test-PackagedGateway.ps1 -Gateway dist\inferdeck-gateway.exe
+
       - name: Generate package metadata
         shell: pwsh
         run: .\scripts\New-ReleaseMetadata.ps1 -DistDir dist -OutputDir dist -VcpkgInstalledDir build\vcpkg_installed
