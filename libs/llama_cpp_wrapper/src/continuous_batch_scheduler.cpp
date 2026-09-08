@@ -42,7 +42,13 @@ int detail::prepare_batch_order(std::vector<SlotTask*>& tasks, int capacity, std
                 return left->slot_id < right->slot_id;
             });
     }
-    const int available = std::max(0, capacity - decode_tokens);
+    int available = std::max(0, capacity - decode_tokens);
+    if (decode_tokens > 0 && prompts > 0)
+    {
+        constexpr int mixed_prefill_budget = 1024;
+        const int mixed_quota = std::max(1, mixed_prefill_budget / prompts);
+        available = std::min(available, mixed_quota * prompts);
+    }
     if (prompts > 0 && available >= prompts && available % prompts == 0)
     {
         std::sort(prompts_begin, tasks.end(),
@@ -206,17 +212,6 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
         return;
     }
 
-    if (task->mtp_eligible && !task->mtp_cache_synced) {
-        clear_sequence();
-        task->prompt_pos = 0;
-        task->n_pos = 0;
-        task->out_cached_prompt_tokens = 0;
-        LOG_INFO("scheduler_mtp_resync",
-                 "slot={} prompt_tokens={}",
-                 seq_id, static_cast<int>(task->prompt_tokens.size()));
-        return;
-    }
-
     // Determine how many leading tokens are already in the KV cache
     int n_past = 0;
     if (!task->last_prompt_tokens.empty() && !task->prompt_tokens.empty()) {
@@ -234,6 +229,30 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
         }
     }
 
+    const int target_physical_tokens = mem
+        ? std::max(0, static_cast<int>(llama_memory_seq_pos_max(mem, seq_id)) + 1)
+        : 0;
+    if (task->mtp_eligible && !task->mtp_cache_synced) {
+        if (task->max_tokens > 0 && task->max_tokens <= draft_margin_ + 2 &&
+            std::min(n_past, target_physical_tokens) >= n_batch_) {
+            task->mtp_eligible = false;
+            task->out_mtp_cache_synced = false;
+            draft_mem = nullptr;
+            LOG_DEBUG("scheduler_mtp_deferred",
+                      "slot={} reason=short_cached_continuation max_tokens={}",
+                      seq_id, task->max_tokens);
+        } else {
+            clear_sequence();
+            task->prompt_pos = 0;
+            task->n_pos = 0;
+            task->out_cached_prompt_tokens = 0;
+            LOG_INFO("scheduler_mtp_resync",
+                     "slot={} prompt_tokens={}",
+                     seq_id, static_cast<int>(task->prompt_tokens.size()));
+            return;
+        }
+    }
+
     if (n_past <= 0 || !mem) {
         clear_sequence();
         task->prompt_pos = 0;
@@ -248,8 +267,7 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
     // entries, or with a SWA cache. Skipping past the real cache contents
     // would decode the tail against an empty KV and silently drop the earlier
     // context (system prompt, tool definitions, history) — see issue #43.
-    const int pos_max = static_cast<int>(llama_memory_seq_pos_max(mem, seq_id));
-    int physical_tokens = std::max(0, pos_max + 1);
+    int physical_tokens = target_physical_tokens;
     if (draft_mem) {
         const int draft_pos_max = static_cast<int>(
             llama_memory_seq_pos_max(draft_mem, seq_id));

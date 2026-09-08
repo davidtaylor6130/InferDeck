@@ -837,6 +837,15 @@ TEST_CASE("Concurrent turns preserve target checkpoints before solitary MTP resu
   REQUIRE(model.release_slot(*keeper_slot));
   CHECK(model.execution_healthy());
 
+  InferenceRequest tiny_followup = changed;
+  tiny_followup.max_output_tokens = config.mtp_draft_tokens + 2;
+  const foundation::Result<InferenceResult> tiny_cached =
+      model.predict(*probe_slot, tiny_followup);
+  REQUIRE(tiny_cached);
+  CHECK(tiny_cached->cached_prompt_tokens >= changed_result->prompt_tokens - 32);
+  CHECK(tiny_cached->mtp_drafted_tokens == 0);
+  CHECK(tiny_cached->completion_tokens > 0);
+
   const foundation::Result<InferenceResult> solitary = model.predict(*probe_slot, changed);
   REQUIRE(solitary);
   CHECK(solitary->cached_prompt_tokens == 0);
@@ -852,6 +861,15 @@ TEST_CASE("Concurrent turns preserve target checkpoints before solitary MTP resu
   CHECK(trimmed(cold->text) == first_fact);
   CHECK(cold->text == cached->text);
   REQUIRE(model.release_slot(*cold_slot));
+  REQUIRE(model.reset_all_slots());
+  const foundation::Result<int> tiny_cold_slot = model.acquire_slot();
+  REQUIRE(tiny_cold_slot);
+  const foundation::Result<InferenceResult> tiny_cold =
+      model.predict(*tiny_cold_slot, tiny_followup);
+  REQUIRE(tiny_cold);
+  CHECK(tiny_cold->cached_prompt_tokens == 0);
+  CHECK(tiny_cold->text == tiny_cached->text);
+  REQUIRE(model.release_slot(*tiny_cold_slot));
   REQUIRE(model.unload());
   LlamaCppModel::shutdown_backend();
 }
@@ -1115,6 +1133,36 @@ TEST_CASE("Batch scheduling reserves decode capacity and rotates prompt service"
   CHECK(tasks.front() == &second);
 }
 
+TEST_CASE("Mixed prefill bounds the delay before active decoders run again",
+          "[llama][scheduler][fairness][mixed-prefill-budget]")
+{
+  SlotTask decoder;
+  decoder.slot_id = 0;
+  decoder.prompt_done = true;
+  SlotTask first;
+  SlotTask second;
+  SlotTask third;
+  SlotTask fourth;
+  first.slot_id = 1;
+  second.slot_id = 2;
+  third.slot_id = 3;
+  fourth.slot_id = 4;
+  std::vector<SlotTask*> tasks{&first, &decoder};
+  CHECK(detail::prepare_batch_order(tasks, 2048, 0) == 1024);
+  tasks = {&fourth, &third, &decoder, &second, &first};
+  CHECK(detail::prepare_batch_order(tasks, 2048, 2) == 256);
+  for (std::size_t index = 0; index < tasks.size(); ++index)
+  {
+    CHECK(tasks[index]->slot_id == static_cast<int>(index));
+  }
+  tasks = {&third, &decoder, &second, &first};
+  CHECK(detail::prepare_batch_order(tasks, 2048, 1) == 341);
+  tasks = {&third, &second, &first};
+  CHECK(detail::prepare_batch_order(tasks, 2048, 0) == 683);
+  tasks = {&decoder, &first};
+  CHECK(detail::prepare_batch_order(tasks, 64, 0) == 63);
+}
+
 TEST_CASE("Equal-share prefill keeps sequence order while constrained quotas rotate",
           "[llama][scheduler][fairness][prefill-order]")
 {
@@ -1147,7 +1195,7 @@ TEST_CASE("Equal-share prefill keeps sequence order while constrained quotas rot
   decoder.prompt_done = true;
   std::vector<SlotTask*> mixed = original;
   mixed.push_back(&decoder);
-  CHECK(detail::prepare_batch_order(mixed, 2049, 2) == 512);
+  CHECK(detail::prepare_batch_order(mixed, 2049, 2) == 256);
   CHECK(mixed.front() == &decoder);
   for (std::size_t index = 1; index < mixed.size(); ++index)
   {
