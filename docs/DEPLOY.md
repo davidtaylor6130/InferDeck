@@ -1,6 +1,6 @@
 # InferDeck Windows deployment
 
-InferDeck deploys as one native executable plus a matched static dashboard.
+InferDeck deploys as one native executable, its runtime DLLs and a matched static dashboard.
 The live installation is outside the repository at `C:\InferDeck`.
 
 ## Authoritative boot target
@@ -19,6 +19,8 @@ Legacy InferDeck startup, logon, and watchdog tasks and the old
 `InferDeckGateway` service are disabled. Do not deploy through them. Reconfirm
 this state because boot configuration can drift independently of files.
 
+With `-c config\gateway.yml`, startup prefers `config\gateway.active.yml` when it exists and loads successfully. Dashboard configuration edits persist in that active profile. Back up both files and update the active profile when applying settings; changing only the bootstrap file may have no effect.
+
 ## Matched artifacts
 
 Build both artifacts from one source revision:
@@ -28,13 +30,9 @@ cmake --build build --target inferdeck-gateway --config Release --parallel
 pnpm --filter dashboard build
 ```
 
-Activate `build\bin\Release\inferdeck-gateway.exe` as
-`C:\InferDeck\inferdeck-gateway.exe` and
-`apps\inferdeck-gateway\static\` as `C:\InferDeck\static\`. The gateway
-The deployment unit is the executable, all runtime DLLs, the complete static directory, and the active configuration from one revision. Testing/Test-PackagedGateway.ps1 verifies an isolated packaged health and static path.
-resolves `static` relative to its executable. Never activate only one
-artifact. Remove stale hashed bundles from the staged static directory before
-the directory swap.
+Activate the executable, all runtime DLLs and the complete static directory from the same build. Preserve the installation's settings and validate any configuration changes before activation.
+
+The gateway resolves `static` relative to its executable. Copy `apps\inferdeck-gateway\static\` to `C:\InferDeck\static\` with the matching executable and DLLs. Remove stale hashed bundles from the staged directory before the directory swap. `Testing/Test-PackagedGateway.ps1` verifies an isolated package's health endpoint and served dashboard bytes.
 
 ## Prove build identity
 
