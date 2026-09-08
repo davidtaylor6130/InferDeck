@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -441,6 +442,7 @@ std::string test_model_path() {
 LlamaCppConfig test_runtime_config()
 {
   LlamaCppConfig config;
+  config.kv_unified = std::getenv("INFERDECK_TEST_KV_UNIFIED") != nullptr;
   if (std::getenv("INFERDECK_TEST_CPU_ONLY") != nullptr)
   {
     config.n_gpu_layers = 0;
@@ -1340,4 +1342,143 @@ TEST_CASE("Non-stream cancellation during prompt processing preserves the peer",
   REQUIRE(model.release_slot(*reused));
   REQUIRE(model.unload());
   LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("Unified pool preserves the configured request context limit", "[llama][pool][.][requires_model]") {
+  const std::string path = test_model_path();
+  if (path.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+  ModelInfo info;
+  info.name = "pool-context-limit";
+  info.context_pool_auto = std::getenv("INFERDECK_TEST_POOL_AUTO") != nullptr;
+  info.gguf_path = path;
+  info.n_slots = 2;
+  info.context_size = 512;
+  LlamaCppConfig config = test_runtime_config();
+  config.kv_unified = true;
+  config.truncate_prompt = false;
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+  const foundation::Result<int> slot = model.acquire_slot();
+  REQUIRE(slot);
+  InferenceRequest oversized;
+  std::string text;
+  for (int index = 0; index < 600; ++index) text += " hello";
+  oversized.messages = {ChatMessage{"user", text}};
+  oversized.max_output_tokens = 4;
+  const foundation::Result<InferenceResult> rejected = model.predict(*slot, oversized);
+  REQUIRE_FALSE(rejected);
+  CHECK(rejected.error().code == ErrorCode::ContextLengthExceeded);
+  CHECK(rejected.error().message.find("512") != std::string::npos);
+  InferenceRequest small;
+  small.messages = {ChatMessage{"user", "Say hello."}};
+  small.max_output_tokens = 4;
+  REQUIRE(model.predict(*slot, small));
+  REQUIRE(model.release_slot(*slot));
+  REQUIRE(model.unload());
+}
+
+TEST_CASE("Bounded unified pool serializes large requests and preserves outputs", "[llama][pool-admission][.][requires_model]") {
+  const std::string path = test_model_path();
+  if (path.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+  ModelInfo info;
+  info.name = "bounded-pool";
+  info.gguf_path = path;
+  info.n_slots = 4;
+  info.context_size = 2048;
+  info.context_pool_auto = std::getenv("INFERDECK_TEST_POOL_AUTO") != nullptr;
+  const char* pool_override = std::getenv("INFERDECK_TEST_POOL_CAPACITY");
+  info.context_pool_size = info.context_pool_auto ? 0 : (pool_override ? std::atoi(pool_override) : 2052);
+  LlamaCppConfig config = test_runtime_config();
+  config.kv_unified = true;
+  config.mtp_enabled = std::getenv("INFERDECK_TEST_AFFINITY_MTP") != nullptr;
+  config.mtp_draft_tokens = 2;
+  config.n_threads = 4;
+  config.n_batch = 256;
+  config.n_ubatch = 256;
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+  std::vector<InferenceRequest> requests;
+  const std::array<std::string, 4> expected{"2", "4", "6", "8"};
+  for (int index = 0; index < 4; ++index) {
+    InferenceRequest request;
+    std::string text;
+    for (int word = 0; word < 1200; ++word) text += " hello";
+    const int operand = index + 1;
+    text += "\nFinal task: calculate " + std::to_string(operand) +
+        " + " + std::to_string(operand) + ". Reply with the single digit " +
+        expected[index] + " only. The answer is " + expected[index] + ". /no_think";
+    request.messages = {ChatMessage{"user", std::move(text)}};
+    request.max_output_tokens = 16;
+    request.enable_reasoning = false;
+    request.sampling.temperature = 0.0f;
+    const foundation::Result<int> slot = model.acquire_slot();
+    REQUIRE(slot);
+    const foundation::Result<InferenceResult> result = model.predict(*slot, request);
+    REQUIRE(result);
+    REQUIRE(result->prompt_tokens > 1024);
+    INFO("serial index=" << index << " expected=" << expected[index]
+         << " actual=" << result->text);
+    CHECK(result->text == expected[index]);
+    requests.push_back(std::move(request));
+    REQUIRE(model.release_slot(*slot));
+  }
+  std::vector<int> slots;
+  std::array<std::atomic<bool>, 4> cancelled{};
+  std::vector<std::future<foundation::Result<InferenceResult>>> pending;
+  for (int index = 0; index < 4; ++index) {
+    const foundation::Result<int> slot = model.acquire_slot();
+    REQUIRE(slot);
+    slots.push_back(*slot);
+  }
+  for (int index = 0; index < 4; ++index) {
+    pending.push_back(std::async(std::launch::async, [&, index] {
+      return model.predict_cancellable(slots[index], requests[index], &cancelled[index]);
+    }));
+  }
+  const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds{120};
+  bool completed = true;
+  for (std::future<foundation::Result<InferenceResult>>& future : pending) {
+    if (future.wait_until(deadline) != std::future_status::ready) {
+      completed = false;
+      for (std::atomic<bool>& flag : cancelled) flag.store(true);
+      break;
+    }
+  }
+  CHECK(completed);
+  for (int index = 0; index < 4; ++index) {
+    const foundation::Result<InferenceResult> result = pending[index].get();
+    REQUIRE(result);
+    foundation::LOG_INFO(
+        "pool_admission_parity",
+        "index={} cached_tokens={} expected='{}' actual='{}'",
+        index, result->cached_prompt_tokens, expected[index], result->text);
+    INFO("concurrent index=" << index << " expected=" << expected[index]
+         << " actual=" << result->text
+         << " cached_tokens=" << result->cached_prompt_tokens);
+    CHECK(result->text == expected[index]);
+    REQUIRE(model.release_slot(slots[index]));
+  }
+  CHECK(model.execution_healthy());
+  REQUIRE(model.unload());
+}
+
+TEST_CASE("JSON object requests provide an explicit object constraint", "[llama][adapter][json-object]") {
+  inference::GenerationRequest request;
+  request.messages.emplace_back(inference::MessageRole::User, "Return JSON.");
+  request.output.kind = inference::StructuredOutputKind::JsonObject;
+  request.output.schema = "{}";
+  ModelInfo info;
+  info.name = "json-object";
+  const auto adapted = adapt_generation_request(request, info, LlamaChatAdapterOptions{});
+  REQUIRE(adapted);
+  CHECK(adapted->inputs.json_schema == R"({"type":"object"})");
+  request.output.kind = inference::StructuredOutputKind::JsonSchema;
+  request.output.schema = "{  }";
+  const auto unconstrained = adapt_generation_request(request, info, LlamaChatAdapterOptions{});
+  REQUIRE(unconstrained);
+  CHECK(unconstrained->inputs.json_schema == R"({"$comment":"Unconstrained JSON output"})");
 }

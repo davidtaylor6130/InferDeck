@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <string>
 #include <unordered_map>
@@ -362,6 +363,30 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 if (entry["context_size"] && entry["context_size"].as<int>() < 1) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "model context_size must be positive: " + name);
+                }
+                if (entry["kv_unified"]) (void)entry["kv_unified"].as<bool>();
+                if (entry["context_pool_auto"] && entry["context_pool_auto"].as<bool>() &&
+                    (!(entry["kv_unified"] && entry["kv_unified"].as<bool>()) ||
+                     (entry["context_pool_size"] && entry["context_pool_size"].as<int>() != 0))) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "context_pool_auto requires unified KV and no fixed pool size: " + name);
+                }
+                if (entry["context_pool_size"]) {
+                    const int pool_size = entry["context_pool_size"].as<int>();
+                    const int context_size = entry["context_size"]
+                        ? entry["context_size"].as<int>() : 65536;
+                    const bool unified = entry["kv_unified"] && entry["kv_unified"].as<bool>();
+                    const YAML::Node speculative = entry["speculative"];
+                    const bool mtp = speculative && speculative.IsMap() && speculative["type"] &&
+                        speculative["type"].as<std::string>() == "mtp";
+                    const int draft_margin = mtp
+                        ? (speculative["draft_tokens"] ? speculative["draft_tokens"].as<int>() : 2) : 0;
+                    if (pool_size < 0 || (pool_size > 0 &&
+                        (!unified || static_cast<std::int64_t>(pool_size) <
+                            static_cast<std::int64_t>(std::max(512, context_size)) + draft_margin))) {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                            "context_pool_size requires unified KV and capacity for one full request plus MTP draft tokens: " + name);
+                    }
                 }
                 const int model_batch = entry["n_batch"]
                     ? entry["n_batch"].as<int>()

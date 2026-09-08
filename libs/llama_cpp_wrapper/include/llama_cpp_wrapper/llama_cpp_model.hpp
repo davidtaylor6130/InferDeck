@@ -45,6 +45,8 @@ struct LlamaCppConfig {
   std::optional<int> n_gpu_layers{};
   std::string flash_attn{"auto"};
   bool kv_offload{true};
+  bool kv_unified{false};
+  int vram_safety_margin_mb{1024};
   bool op_offload{true};
   std::string cache_type_k{"q8_0"};
   std::string cache_type_v{"q8_0"};
@@ -125,7 +127,7 @@ private:
     bool mtp_cache_synced{true};
   };
 
-  inferdeck::foundation::Result<void> init_shared_context_locked();
+  inferdeck::foundation::Result<void> init_shared_context_locked(const llama_model_params& model_params, const inferdeck::model::LifecycleControl& control);
   // max_prompt_tokens > 0 enables history-aware truncation: oldest whole
   // non-system turns are dropped (preserving recency + coherence) until the
   // templated prompt fits the budget. 0 disables truncation.

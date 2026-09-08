@@ -117,6 +117,7 @@ Result<InferenceResult> LlamaCppModel::predict_cancellable(
   {
     std::lock_guard lk(mtx_);
     auto& slot = slots_[slot_id];
+    if (task.initialized) {
     slot.last_prompt_tokens.assign(setup.prompt_tokens.begin(), setup.prompt_tokens.end());
     slot.last_prompt_tokens.insert(slot.last_prompt_tokens.end(),
                                    decoded_ids.begin(), decoded_ids.end());
@@ -132,6 +133,7 @@ Result<InferenceResult> LlamaCppModel::predict_cancellable(
       slot.recurrent_replay_checkpoint.reset();
       slot.checkpoint_pos = 0;
       slot.mtp_cache_synced = false;
+    }
     }
   }
 
@@ -295,6 +297,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   {
     std::lock_guard lk(mtx_);
     auto& slot = slots_[slot_id];
+    if (task.initialized) {
     slot.last_prompt_tokens.assign(setup.prompt_tokens.begin(), setup.prompt_tokens.end());
     slot.last_prompt_tokens.insert(slot.last_prompt_tokens.end(),
                                    decoded_ids.begin(), decoded_ids.end());
@@ -310,6 +313,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       slot.recurrent_replay_checkpoint.reset();
       slot.checkpoint_pos = 0;
       slot.mtp_cache_synced = false;
+    }
     }
   }
 

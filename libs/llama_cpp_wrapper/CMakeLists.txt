@@ -10,6 +10,7 @@ add_library(llama_cpp_wrapper STATIC
     src/llama_cpp_model.cpp
     src/llama_chat_adapter.cpp
     src/continuous_batch_scheduler.cpp
+    src/context_pool_fit.cpp
 )
 
 target_include_directories(llama_cpp_wrapper PUBLIC
@@ -36,7 +37,7 @@ target_link_libraries(llama_cpp_wrapper
 
 if(MSVC)
     target_compile_options(llama_cpp_wrapper PRIVATE /W4 /utf-8 /FS)
-    set_property(SOURCE src/continuous_batch_scheduler.cpp APPEND PROPERTY COMPILE_OPTIONS /EHsc-)
+    set_property(SOURCE src/continuous_batch_scheduler.cpp src/llama_cpp_model.cpp src/context_pool_fit.cpp APPEND PROPERTY COMPILE_OPTIONS /EHsc-)
     target_compile_definitions(llama_cpp_wrapper PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 else()
     target_compile_options(llama_cpp_wrapper PRIVATE -Wall -Wextra)

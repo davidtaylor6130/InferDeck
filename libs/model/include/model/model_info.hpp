@@ -100,6 +100,9 @@ struct ModelInfo {
     int vram_fixed_mb{0};
     int vram_per_slot_mb{0};
     int context_size{65536};
+    bool kv_unified{false};
+    int context_pool_size{0};
+    bool context_pool_auto{false};
     std::optional<int> n_batch{};
     std::optional<int> n_ubatch{};
     std::string cache_type_k{};

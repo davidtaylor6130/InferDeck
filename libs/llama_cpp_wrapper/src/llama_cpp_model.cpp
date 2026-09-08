@@ -2,6 +2,7 @@
 #include "llama_cpp_wrapper/llama_chat_adapter.hpp"
 #include "llama_cpp_wrapper/streaming_tool_call_state.hpp"
 #include "llama_cpp_wrapper/continuous_batch_scheduler.hpp"
+#include "context_pool_fit.hpp"
 
 #include <algorithm>
 #include <array>

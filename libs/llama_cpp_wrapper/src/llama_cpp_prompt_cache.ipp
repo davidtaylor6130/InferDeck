@@ -183,7 +183,9 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
   // oldest messages (history-aware truncation, issue #38) before tokenizing.
   // Mirrors the reserve/target maths in maybe_truncate_prompt, which remains as
   // a hard safety net for the pathological single-oversized-message case.
-  const int loaded_n_ctx_seq = static_cast<int>(llama_n_ctx_seq(shared_ctx_));
+  const int loaded_n_ctx_seq = cfg_.kv_unified
+      ? std::min(std::max(512, info_.context_size), static_cast<int>(llama_n_ctx_seq(shared_ctx_)))
+      : static_cast<int>(llama_n_ctx_seq(shared_ctx_));
   const int n_ctx_seq = req.context_window
       ? std::min(loaded_n_ctx_seq, *req.context_window)
       : loaded_n_ctx_seq;

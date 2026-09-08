@@ -185,6 +185,9 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             info.vram_per_slot_mb = m["vram_per_slot_mb"] ? m["vram_per_slot_mb"].as<int>() : 0;
             info.context_size =
                 m["context_size"] ? m["context_size"].as<int>() : 65536;
+            if (m["kv_unified"]) info.kv_unified = m["kv_unified"].as<bool>();
+            if (m["context_pool_size"]) info.context_pool_size = m["context_pool_size"].as<int>();
+            if (m["context_pool_auto"]) info.context_pool_auto = m["context_pool_auto"].as<bool>();
             if (m["n_batch"]) info.n_batch = m["n_batch"].as<int>();
             if (m["n_ubatch"]) info.n_ubatch = m["n_ubatch"].as<int>();
             info.cache_type_k =

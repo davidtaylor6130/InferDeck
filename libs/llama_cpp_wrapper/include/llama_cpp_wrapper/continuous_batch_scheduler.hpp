@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -93,6 +94,21 @@ constexpr float generation_tokens_per_second(
         : 0.0f;
 }
 
+constexpr std::int64_t bounded_pool_reservation(
+    int prompt_positions, int max_tokens, int draft_margin) noexcept {
+    return static_cast<std::int64_t>(std::max(0, prompt_positions)) +
+           static_cast<std::int64_t>(std::max(0, max_tokens)) +
+           static_cast<std::int64_t>(std::max(0, draft_margin));
+}
+
+constexpr bool bounded_pool_can_admit(
+    std::int64_t reserved_positions,
+    std::int64_t candidate_positions,
+    std::int64_t capacity) noexcept {
+    return reserved_positions >= 0 && candidate_positions >= 0 &&
+           capacity > 0 && reserved_positions <= capacity - candidate_positions;
+}
+
 }
 
 // One in-flight inference request managed by the scheduler.
@@ -143,6 +159,8 @@ struct SlotTask {
     int n_drafted{0};
     int n_draft_accepted{0};
     bool mtp_eligible{false};
+    bool admitted{false};
+    std::int64_t reserved_positions{0};
     std::chrono::steady_clock::time_point started_at{};
     bool generation_started{false};
     std::chrono::steady_clock::time_point generation_started_at{};
@@ -186,7 +204,8 @@ public:
         const llama_vocab* vocab,
         int n_batch,
         int mtp_max_active_requests,
-        common_context_seq_rm_type draft_seq_rm_type);
+        common_context_seq_rm_type draft_seq_rm_type,
+        bool bounded_pool = false);
     ~ContinuousBatchScheduler();
 
     ContinuousBatchScheduler(const ContinuousBatchScheduler&) = delete;
@@ -205,6 +224,15 @@ public:
 private:
     void run_loop();
     void init_task(SlotTask* task);
+    void admit_bounded_pool_tasks(
+        const std::vector<SlotTask*>& tasks,
+        std::vector<SlotTask*>& runnable,
+        std::vector<std::pair<SlotTask*, std::string>>& rejected);
+    bool reclaim_bounded_pool_capacity(
+        const std::vector<SlotTask*>& tasks,
+        const SlotTask* candidate,
+        std::int64_t reserved,
+        std::int64_t required);
     void push_event(SlotTask* task, TokenEvent ev);
     bool should_cancel(const SlotTask* task) const noexcept;
     void fail_all(std::string error);
@@ -218,6 +246,10 @@ private:
     int n_batch_;
     int mtp_max_active_requests_;
     common_context_seq_rm_type draft_seq_rm_type_;
+    bool bounded_pool_;
+    int context_capacity_;
+    int draft_context_capacity_;
+    int draft_margin_;
 
     std::mutex sub_mtx_;
     std::condition_variable sub_cv_;

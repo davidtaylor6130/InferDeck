@@ -198,7 +198,7 @@ Result<void> LlamaCppModel::load(
     LOG_INFO("vision_projector_loaded",
              "model={} path={}", info_.name, resolved_mmproj_path_.string());
   }
-  auto ctx_res = init_shared_context_locked();
+  auto ctx_res = init_shared_context_locked(mparams, control);
   if (!ctx_res.has_value()) {
     if (speculative_) {
       common_speculative_free(speculative_);
@@ -230,17 +230,33 @@ Result<void> LlamaCppModel::load(
   return Result<void>{};
 }
 
-Result<void> LlamaCppModel::init_shared_context_locked() {
-  // One shared context for all slots.
-  // n_ctx = context_size * n_slots so each slot gets its own context window via sequence IDs.
-  // n_seq_max = n_slots so the KV cache can track each slot's sequence independently.
+Result<void> LlamaCppModel::init_shared_context_locked(
+    const llama_model_params& model_params,
+    const inferdeck::model::LifecycleControl& control) {
   const int n_slots = std::max(1, info_.n_slots);
   const int ctx_per_slot = std::max(512, info_.context_size);
-  const int total_ctx = ctx_per_slot * n_slots;
+  const int draft_margin = cfg_.mtp_enabled ? std::clamp(cfg_.mtp_draft_tokens, 1, 4) : 0;
+  if (info_.context_pool_auto && (!cfg_.kv_unified || info_.context_pool_size != 0)) {
+    return Result<void>(std::unexpect, make_error(ErrorCode::InvalidArgument,
+        "automatic context pool requires unified KV and no fixed pool size"));
+  }
+  if (info_.context_pool_size < 0 || (info_.context_pool_size > 0 &&
+      (!cfg_.kv_unified || static_cast<std::int64_t>(info_.context_pool_size) <
+          static_cast<std::int64_t>(ctx_per_slot) + draft_margin))) {
+    return Result<void>(std::unexpect, make_error(ErrorCode::InvalidArgument,
+        "shared context pool cannot fit the configured request limit and draft margin"));
+  }
+  const std::int64_t total_ctx_wide = info_.context_pool_size > 0
+      ? info_.context_pool_size : static_cast<std::int64_t>(ctx_per_slot) * n_slots;
+  if (total_ctx_wide > std::numeric_limits<int>::max()) {
+    return Result<void>(std::unexpect, make_error(ErrorCode::InvalidArgument, "context capacity exceeds supported range"));
+  }
+  int total_ctx = static_cast<int>(total_ctx_wide);
 
   llama_context_params cparams = llama_context_default_params();
   cparams.n_ctx      = static_cast<std::uint32_t>(total_ctx);
   cparams.n_seq_max  = static_cast<std::uint32_t>(n_slots);
+  cparams.kv_unified = cfg_.kv_unified;
   cparams.n_threads  = cfg_.n_threads;
   cparams.n_batch    = static_cast<std::uint32_t>(std::max(1, cfg_.n_batch));
   cparams.n_ubatch   = static_cast<std::uint32_t>(std::max(1, cfg_.n_ubatch));
@@ -256,38 +272,74 @@ Result<void> LlamaCppModel::init_shared_context_locked() {
       : 0;
 
   LOG_INFO("llama_shared_context_config",
-           "model={} n_slots={} ctx_per_slot={} total_ctx={} n_seq_max={} "
+           "model={} n_slots={} ctx_per_slot={} total_ctx={} n_seq_max={} kv_unified={} "
            "n_batch={} n_ubatch={} flash_attn={} kv_offload={} op_offload={} "
            "cache_type_k={} cache_type_v={} mtp_enabled={} mtp_draft_tokens={} mtp_max_active_requests={} swa_full={}",
-           info_.name, n_slots, ctx_per_slot, total_ctx, n_slots,
+           info_.name, n_slots, ctx_per_slot, total_ctx, n_slots, cfg_.kv_unified,
            cparams.n_batch, cparams.n_ubatch,
            cfg_.flash_attn, cfg_.kv_offload, cfg_.op_offload,
            cfg_.cache_type_k, cfg_.cache_type_v,
            cfg_.mtp_enabled, cfg_.mtp_draft_tokens,
            cfg_.mtp_max_active_requests, cfg_.swa_full);
 
-  shared_ctx_ = llama_init_from_model(model_, cparams);
-  if (shared_ctx_ == nullptr) {
-    return Result<void>(std::unexpect,
-        make_error(ErrorCode::OutOfMemory,
-                   "llama_init_from_model returned null (shared context, total_ctx=" +
-                   std::to_string(total_ctx) + ")"));
+  const std::int64_t minimum_wide = static_cast<std::int64_t>(ctx_per_slot) + draft_margin;
+  if (minimum_wide > std::numeric_limits<int>::max()) {
+    return Result<void>(std::unexpect, make_error(ErrorCode::InvalidArgument,
+        "context pool minimum exceeds supported range"));
   }
+  const int minimum_pool = static_cast<int>(minimum_wide);
+  if (info_.context_pool_auto) {
+    const Result<int> fitted = fit_context_pool(
+        resolved_gguf_path_, model_params, cparams, cfg_.mtp_enabled,
+        minimum_pool, std::max(minimum_pool, total_ctx), cfg_.vram_safety_margin_mb, control);
+    if (!fitted) return Result<void>(std::unexpect, fitted.error());
+    total_ctx = *fitted;
+    cparams.n_ctx = static_cast<std::uint32_t>(total_ctx);
+  }
+
+  for (int attempt = 0;; ++attempt) {
+    if (control.is_cancelled() || control.is_expired()) {
+      return Result<void>(std::unexpect, make_error(
+          control.is_cancelled() ? ErrorCode::Cancelled : ErrorCode::Timeout,
+          "context pool allocation cancelled or expired"));
+    }
+    std::string allocation_error;
+    try {
+      shared_ctx_ = llama_init_from_model(model_, cparams);
+      if (shared_ctx_ && cfg_.mtp_enabled) {
+        llama_context_params draft_params = cparams;
+        draft_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+        draft_params.n_rs_seq = 0;
+        draft_params.n_ubatch = std::min<std::uint32_t>(draft_params.n_ubatch, 512);
+        draft_ctx_ = llama_init_from_model(model_, draft_params);
+      }
+    } catch (const std::exception& error) {
+      allocation_error = error.what();
+    }
+    if (shared_ctx_ && (!cfg_.mtp_enabled || draft_ctx_) && allocation_error.empty()) break;
+    const bool missing_draft = shared_ctx_ && cfg_.mtp_enabled && !draft_ctx_;
+    if (draft_ctx_) { llama_free(draft_ctx_); draft_ctx_ = nullptr; }
+    if (shared_ctx_) { llama_free(shared_ctx_); shared_ctx_ = nullptr; }
+    if (!info_.context_pool_auto || total_ctx <= minimum_pool || attempt >= 8) {
+      return Result<void>(std::unexpect, make_error(
+          missing_draft && !info_.context_pool_auto ? ErrorCode::InvalidArgument : ErrorCode::OutOfMemory,
+          missing_draft && !info_.context_pool_auto
+              ? "MTP is enabled but the GGUF has no usable MTP head or sufficient memory"
+              : "shared context allocation failed at capacity " + std::to_string(total_ctx) +
+                  (allocation_error.empty() ? std::string{} : ": " + allocation_error)));
+    }
+    const int next_capacity = attempt == 7 ? minimum_pool
+        : minimum_pool + (total_ctx - minimum_pool) / 2;
+    LOG_WARN("context_pool_allocation_retry", "model={} requested={} next={}",
+             info_.name, total_ctx, next_capacity);
+    total_ctx = next_capacity;
+    cparams.n_ctx = static_cast<std::uint32_t>(total_ctx);
+  }
+  LOG_INFO("context_pool_allocated", "model={} automatic={} requested={} actual={} request_limit={}",
+           info_.name, info_.context_pool_auto, total_ctx, llama_n_ctx(shared_ctx_), ctx_per_slot);
 
   auto draft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
   if (cfg_.mtp_enabled) {
-    auto draft_params = cparams;
-    draft_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
-    draft_params.n_rs_seq = 0;
-    draft_params.n_ubatch = std::min<std::uint32_t>(
-        draft_params.n_ubatch, 512);
-    draft_ctx_ = llama_init_from_model(model_, draft_params);
-    if (draft_ctx_ == nullptr) {
-      return Result<void>(std::unexpect,
-          make_error(ErrorCode::InvalidArgument,
-                     "MTP is enabled but the GGUF has no usable MTP head"));
-    }
-
     (void)common_context_can_seq_rm(shared_ctx_);
     draft_seq_rm_type = common_context_can_seq_rm(draft_ctx_);
     if (draft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
@@ -347,7 +399,8 @@ Result<void> LlamaCppModel::init_shared_context_locked() {
         vocab_,
         cfg_.n_batch,
         cfg_.mtp_max_active_requests,
-        draft_seq_rm_type);
+        draft_seq_rm_type,
+        info_.context_pool_size > 0 || info_.context_pool_auto);
   }
 
   return Result<void>{};

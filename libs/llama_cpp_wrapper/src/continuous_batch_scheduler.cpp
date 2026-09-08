@@ -66,9 +66,10 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(
           nullptr,
           model,
           vocab,
-          n_batch,
-          1,
-          COMMON_CONTEXT_SEQ_RM_TYPE_NO) {}
+        n_batch,
+        1,
+        COMMON_CONTEXT_SEQ_RM_TYPE_NO,
+        false) {}
 
 ContinuousBatchScheduler::ContinuousBatchScheduler(
     llama_context* ctx,
@@ -79,7 +80,8 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(
     const llama_vocab* vocab,
     int n_batch,
     int mtp_max_active_requests,
-    common_context_seq_rm_type draft_seq_rm_type)
+    common_context_seq_rm_type draft_seq_rm_type,
+    bool bounded_pool)
     : ctx_(ctx),
       draft_ctx_(draft_ctx),
       speculative_(speculative),
@@ -88,7 +90,11 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(
       vocab_(vocab),
       n_batch_(n_batch),
       mtp_max_active_requests_(std::max(1, mtp_max_active_requests)),
-      draft_seq_rm_type_(draft_seq_rm_type) {
+      draft_seq_rm_type_(draft_seq_rm_type),
+      bounded_pool_(bounded_pool),
+      context_capacity_(ctx ? static_cast<int>(llama_n_ctx(ctx)) : 0),
+      draft_context_capacity_(draft_ctx ? static_cast<int>(llama_n_ctx(draft_ctx)) : 0),
+      draft_margin_(speculative ? std::max(0, common_speculative_n_max(speculative)) : 0) {
     thread_ = std::thread([this] { run_loop(); });
 }
 
@@ -390,6 +396,116 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
              seq_id, n_past, (int)task->prompt_tokens.size());
 }
 
+bool ContinuousBatchScheduler::reclaim_bounded_pool_capacity(
+    const std::vector<SlotTask*>& tasks,
+    const SlotTask* candidate,
+    std::int64_t reserved,
+    std::int64_t required) {
+    const int capacity = draft_ctx_
+        ? std::min(context_capacity_, draft_context_capacity_)
+        : context_capacity_;
+    const int sequence_count = static_cast<int>(llama_n_seq_max(ctx_));
+    std::vector<bool> protected_sequences(
+        static_cast<std::size_t>(sequence_count), false);
+    for (const auto* task : tasks) {
+        if (task->admitted && task->slot_id >= 0 &&
+            task->slot_id < sequence_count) {
+            protected_sequences[static_cast<std::size_t>(task->slot_id)] = true;
+        }
+    }
+    if (candidate->slot_id >= 0 && candidate->slot_id < sequence_count) {
+        protected_sequences[static_cast<std::size_t>(candidate->slot_id)] = true;
+    }
+    auto* target_memory = llama_get_memory(ctx_);
+    auto* draft_memory = draft_ctx_ ? llama_get_memory(draft_ctx_) : nullptr;
+    const auto idle_positions = [&](llama_memory_t memory) {
+        std::int64_t total = 0;
+        if (!memory) return total;
+        for (int sequence = 0; sequence < sequence_count; ++sequence) {
+            if (protected_sequences[static_cast<std::size_t>(sequence)]) continue;
+            total += std::max<std::int64_t>(0,
+                static_cast<std::int64_t>(
+                    llama_memory_seq_pos_max(memory, sequence)) + 1);
+        }
+        return total;
+    };
+    std::int64_t idle = std::max(
+        idle_positions(target_memory), idle_positions(draft_memory));
+    for (int sequence = 0;
+         sequence < sequence_count &&
+         !detail::bounded_pool_can_admit(reserved + idle, required, capacity);
+         ++sequence) {
+        if (protected_sequences[static_cast<std::size_t>(sequence)]) continue;
+        const bool had_target = target_memory &&
+            llama_memory_seq_pos_max(target_memory, sequence) >= 0;
+        const bool had_draft = draft_memory &&
+            llama_memory_seq_pos_max(draft_memory, sequence) >= 0;
+        if (!had_target && !had_draft) continue;
+        const bool target_cleared = !target_memory ||
+            (llama_memory_seq_rm(target_memory, sequence, 0, -1) &&
+             llama_memory_seq_pos_max(target_memory, sequence) < 0);
+        const bool draft_cleared = !draft_memory ||
+            (llama_memory_seq_rm(draft_memory, sequence, 0, -1) &&
+             llama_memory_seq_pos_max(draft_memory, sequence) < 0);
+        if (target_cleared && draft_cleared) {
+            LOG_INFO("scheduler_pool_evict", "sequence={}", sequence);
+        } else {
+            LOG_WARN("scheduler_pool_evict_failed",
+                     "sequence={} target_cleared={} draft_cleared={}",
+                     sequence, target_cleared, draft_cleared);
+        }
+        idle = std::max(
+            idle_positions(target_memory), idle_positions(draft_memory));
+    }
+    return detail::bounded_pool_can_admit(
+        reserved + idle, required, capacity);
+}
+
+void ContinuousBatchScheduler::admit_bounded_pool_tasks(
+    const std::vector<SlotTask*>& tasks,
+    std::vector<SlotTask*>& runnable,
+    std::vector<std::pair<SlotTask*, std::string>>& rejected) {
+    runnable.clear();
+    std::int64_t reserved = 0;
+    for (auto* task : tasks) {
+        if (!task->admitted) continue;
+        reserved += task->reserved_positions;
+        if (!should_cancel(task) && !task->caller_stop.load()) {
+            runnable.push_back(task);
+        }
+    }
+    const int capacity = draft_ctx_
+        ? std::min(context_capacity_, draft_context_capacity_)
+        : context_capacity_;
+    for (auto* candidate : tasks) {
+        if (candidate->admitted || should_cancel(candidate) ||
+            candidate->caller_stop.load()) continue;
+        const int prompt_positions = candidate->prompt_position_count > 0
+            ? candidate->prompt_position_count
+            : static_cast<int>(candidate->prompt_tokens.size());
+        const std::int64_t required = detail::bounded_pool_reservation(
+            prompt_positions, candidate->max_tokens, draft_margin_);
+        if (required > capacity) {
+            rejected.emplace_back(candidate, "request exceeds shared context pool");
+            continue;
+        }
+        if (!detail::bounded_pool_can_admit(reserved, required, capacity)) break;
+        if (!reclaim_bounded_pool_capacity(
+                tasks, candidate, reserved, required)) {
+            rejected.emplace_back(
+                candidate, "unable to reclaim shared context pool capacity");
+            continue;
+        }
+        candidate->admitted = true;
+        candidate->reserved_positions = required;
+        reserved += required;
+        runnable.push_back(candidate);
+        LOG_INFO("scheduler_pool_admit",
+                 "slot={} reserved_positions={} total_reserved={} capacity={}",
+                 candidate->slot_id, required, reserved, capacity);
+    }
+}
+
 void ContinuousBatchScheduler::run_loop() {
     // Allocate a reusable batch. Size is n_batch_ (covers all slots' tokens
     // in one iteration; typical n_batch=512 is ample for a handful of slots).
@@ -427,6 +543,39 @@ void ContinuousBatchScheduler::run_loop() {
                     speculative_, t->slot_id).drafting = false;
             }
         }
+        std::vector<std::pair<SlotTask*, std::string>> rejected;
+        if (bounded_pool_) {
+            admit_bounded_pool_tasks(tasks, runnable, rejected);
+            for (auto* task : tasks) {
+                if (!task->admitted && task->progress) {
+                    task->progress->phase.store(0);
+                }
+            }
+        }
+        if (!rejected.empty()) {
+            {
+                std::lock_guard lk(sub_mtx_);
+                for (const auto& item : rejected) {
+                    active_.erase(
+                        std::remove(active_.begin(), active_.end(), item.first),
+                        active_.end());
+                }
+            }
+            for (const auto& [task, error] : rejected) {
+                tasks.erase(std::remove(tasks.begin(), tasks.end(), task), tasks.end());
+                if (task->sampler) {
+                    common_sampler_free(task->sampler);
+                    task->sampler = nullptr;
+                }
+                LOG_WARN("scheduler_pool_reject",
+                         "slot={} error={}", task->slot_id, error);
+                TokenEvent event;
+                event.is_done = true;
+                event.is_error = true;
+                event.error_msg = error;
+                push_event(task, std::move(event));
+            }
+        }
 
         const bool has_media_request = std::any_of(
             runnable.begin(), runnable.end(), [](const SlotTask* task) {
@@ -439,6 +588,7 @@ void ContinuousBatchScheduler::run_loop() {
         for (auto* t : runnable) {
             if (should_cancel(t) || t->caller_stop.load()) continue;
             if (!t->initialized) {
+                if (t->progress) t->progress->phase.store(2);
                 t->mtp_eligible = mtp_window &&
                     t->media_chunks.empty() && !t->capture_probabilities;
                 init_task(t);
@@ -524,7 +674,15 @@ void ContinuousBatchScheduler::run_loop() {
         }
 
         // ---- Build batch ----
-        const int prefill_limit = detail::prepare_batch_order(tasks, n_batch_, batch_turn++);
+        const int prefill_limit =
+            detail::prepare_batch_order(runnable, n_batch_, batch_turn++);
+        std::vector<SlotTask*> ordered_tasks = runnable;
+        for (SlotTask* task : tasks) {
+            if (std::find(runnable.begin(), runnable.end(), task) == runnable.end()) {
+                ordered_tasks.push_back(task);
+            }
+        }
+        tasks = std::move(ordered_tasks);
         batch.n_tokens = 0;
         bool process_mtp = false;
         std::vector<SlotTask*> cancelled;
@@ -541,6 +699,7 @@ void ContinuousBatchScheduler::run_loop() {
                 stopped.push_back(t);
                 continue;
             }
+            if (bounded_pool_ && !t->admitted) continue;
 
             if (!t->prompt_done) {
                 while (t->prompt_pos < static_cast<int>(t->prompt_tokens.size()) &&
@@ -920,7 +1079,8 @@ void ContinuousBatchScheduler::run_loop() {
         for (SlotTask* task : tasks) {
             if (std::find(cancelled.begin(), cancelled.end(), task) != cancelled.end() ||
                 std::find(stopped.begin(), stopped.end(), task) != stopped.end()) continue;
-            if (!task->progress) continue;
+            if (!task->progress ||
+                (bounded_pool_ && !task->initialized)) continue;
             const auto now = std::chrono::steady_clock::now();
             task->progress->prompt_tokens.store(static_cast<int>(task->prompt_tokens.size()));
             task->progress->processed_tokens.store(task->prompt_pos);

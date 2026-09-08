@@ -3,6 +3,8 @@ inferdeck::llama_wrapper::LlamaCppConfig make_llama_config(
     const model::ModelInfo& info,
     const inferdeck::optimize::ProfileCandidate* candidate = nullptr) {
     inferdeck::llama_wrapper::LlamaCppConfig result;
+    result.kv_unified = info.kv_unified;
+    result.vram_safety_margin_mb = cfg.vram_safety_margin_mb;
     result.n_batch = candidate
         ? candidate->n_batch
         : info.n_batch.value_or(cfg.n_batch);

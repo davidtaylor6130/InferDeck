@@ -688,3 +688,51 @@ TEST_CASE("Active configuration is preferred and invalid profiles fall back safe
     std::error_code error;
     std::filesystem::remove_all(directory, error);
 }
+
+TEST_CASE("Unified KV configuration is opt-in and boolean", "[config][pool]") {
+    CHECK(validate_config_text("model_registry:\n  - name: pool\n    gguf_path: model.gguf\n    kv_unified: true\n"));
+    CHECK_FALSE(validate_config_text("model_registry:\n  - name: pool\n    gguf_path: model.gguf\n    kv_unified: invalid\n"));
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "inferdeck-pool-config.yml";
+    {
+        std::ofstream output(path);
+        output << "model_registry:\n  - name: pool\n    gguf_path: model.gguf\n    kv_unified: true\n  - name: split\n    gguf_path: model.gguf\n";
+    }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 2);
+    CHECK(config.models[0].kv_unified);
+    CHECK_FALSE(config.models[1].kv_unified);
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("Shared context capacity validates request and draft headroom", "[config][pool]") {
+    const std::string prefix = "model_registry:\n  - name: pool\n    gguf_path: model.gguf\n    context_size: 32768\n";
+    CHECK(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 65536\n"));
+    CHECK(validate_config_text(prefix + "    context_pool_size: 0\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    context_pool_size: 65536\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 32767\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    context_pool_size: -1\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 32768\n    speculative:\n      type: mtp\n      draft_tokens: 2\n"));
+    CHECK(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 32770\n    speculative:\n      type: mtp\n      draft_tokens: 2\n"));
+}
+
+TEST_CASE("Automatic shared pools require unified storage and no fixed size", "[config][pool]") {
+    const std::string prefix = "model_registry:\n  - name: pool\n    gguf_path: model.gguf\n";
+    CHECK(validate_config_text(prefix + "    kv_unified: true\n    context_pool_auto: true\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    context_pool_auto: true\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    kv_unified: true\n    context_pool_auto: true\n    context_pool_size: 65536\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    kv_unified: true\n    context_pool_auto: invalid\n"));
+}
+
+TEST_CASE("VRAM reserve accepts zero and rejects invalid sizes", "[config][pool][reserve]") {
+    CHECK(validate_config_text("gateway:\n  vram_safety_margin_mb: 0\n"));
+    CHECK(validate_config_text("gateway:\n  vram_safety_margin_mb: 1024\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  vram_safety_margin_mb: -1\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  vram_safety_margin_mb: 2147483648\n"));
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "inferdeck-reserve-config.yml";
+    {
+        std::ofstream output(path);
+        output << "gateway:\n  vram_safety_margin_mb: 0\n";
+    }
+    CHECK(load_config(path).vram_safety_margin_mb == 0);
+    std::filesystem::remove(path);
+}

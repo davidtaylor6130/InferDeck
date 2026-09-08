@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <nlohmann/json.hpp>
 
 namespace inferdeck::llama_wrapper {
 
@@ -216,12 +217,13 @@ foundation::Result<LlamaChatAdapterResult> adapt_generation_request(
     }
     if (request.output.kind == inference::StructuredOutputKind::Grammar) {
         inputs.grammar = request.output.schema;
-    } else if (request.output.kind ==
-                   inference::StructuredOutputKind::JsonObject ||
-               request.output.kind ==
-                   inference::StructuredOutputKind::JsonSchema) {
-        inputs.json_schema = request.output.schema.empty()
-            ? "{}" : request.output.schema;
+    } else if (request.output.kind == inference::StructuredOutputKind::JsonObject) {
+        inputs.json_schema = R"({"type":"object"})";
+    } else if (request.output.kind == inference::StructuredOutputKind::JsonSchema) {
+        const std::string schema_text = request.output.schema.empty() ? "{}" : request.output.schema;
+        const nlohmann::json schema = nlohmann::json::parse(schema_text, nullptr, false);
+        inputs.json_schema = schema.is_object() && schema.empty()
+            ? R"({"$comment":"Unconstrained JSON output"})" : schema_text;
     }
     return foundation::Ok(std::move(result));
 }
