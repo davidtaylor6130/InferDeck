@@ -16,7 +16,7 @@ namespace inferdeck::observability {
 
 namespace {
 
-constexpr int current_schema_version = 3;
+constexpr int current_schema_version = 4;
 
 void throw_on_error(int rc, sqlite3* db, const char* what) {
   if (rc != SQLITE_OK && rc != SQLITE_DONE && rc != SQLITE_ROW) {
@@ -154,7 +154,11 @@ void StatsDb::open() {
     "  to_model TEXT NOT NULL,"
     "  duration_ms REAL NOT NULL,"
     "  success INTEGER NOT NULL,"
-    "  error TEXT NOT NULL"
+    "  error TEXT NOT NULL,"
+    "  requested_model TEXT NOT NULL DEFAULT '',"
+    "  request_id TEXT NOT NULL DEFAULT '',"
+    "  api_key_id TEXT NOT NULL DEFAULT '',"
+    "  api_key_name TEXT NOT NULL DEFAULT ''"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);"
     "CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model);"
@@ -195,6 +199,10 @@ void StatsDb::open() {
          "ALTER TABLE requests ADD COLUMN output_audio_seconds REAL NOT NULL DEFAULT 0;",
          "ALTER TABLE requests ADD COLUMN input_image_count INTEGER NOT NULL DEFAULT 0;",
          "ALTER TABLE requests ADD COLUMN output_image_count INTEGER NOT NULL DEFAULT 0;",
+         "ALTER TABLE swaps ADD COLUMN requested_model TEXT NOT NULL DEFAULT '';",
+         "ALTER TABLE swaps ADD COLUMN request_id TEXT NOT NULL DEFAULT '';",
+         "ALTER TABLE swaps ADD COLUMN api_key_id TEXT NOT NULL DEFAULT '';",
+         "ALTER TABLE swaps ADD COLUMN api_key_name TEXT NOT NULL DEFAULT '';",
        }) {
     char* migration_error = nullptr;
     if (sqlite3_exec(reinterpret_cast<sqlite3*>(db_), migration, nullptr, nullptr,
@@ -208,7 +216,7 @@ void StatsDb::open() {
       }
     }
   }
-  if (sqlite3_exec(db, "PRAGMA user_version=3; COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+  if (sqlite3_exec(db, "PRAGMA user_version=4; COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
     sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
     healthy_ = false;
     return;
@@ -222,7 +230,7 @@ void StatsDb::open() {
     "first_token_duration_ms, output_audio_seconds, input_image_count, output_image_count, api_key_id, api_key_name) "
     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
   const char* swap_sql =
-    "INSERT INTO swaps (ts, from_model, to_model, duration_ms, success, error) VALUES (?,?,?,?,?,?);";
+    "INSERT INTO swaps (ts, from_model, to_model, duration_ms, success, error, requested_model, request_id, api_key_id, api_key_name) VALUES (?,?,?,?,?,?,?,?,?,?);";
   if (sqlite3_prepare_v2(db, request_sql, -1,
           reinterpret_cast<sqlite3_stmt**>(&request_stmt_), nullptr) != SQLITE_OK ||
       sqlite3_prepare_v2(db, swap_sql, -1,
@@ -371,6 +379,10 @@ void StatsDb::record_swap(const SwapRow& row) {
   sqlite3_bind_double(stmt, 4, std::isfinite(row.duration_ms) ? std::max(0.0, row.duration_ms) : 0.0);
   sqlite3_bind_int(stmt, 5, row.success ? 1 : 0);
   sqlite3_bind_text(stmt, 6, row.error.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 7, row.requested_model.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 8, row.request_id.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 9, row.api_key_id.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 10, row.api_key_name.c_str(), -1, SQLITE_TRANSIENT);
   finish_write(sqlite3_step(stmt), "record_swap");
   sqlite3_reset(stmt);
 }
@@ -459,7 +471,7 @@ std::vector<SwapRow> StatsDb::recent_swaps(int limit) const {
   std::lock_guard lk(mtx_);
   sqlite3_stmt* stmt = nullptr;
   const char* sql =
-    "SELECT ts, from_model, to_model, duration_ms, success, error FROM swaps "
+    "SELECT ts, from_model, to_model, duration_ms, success, error, requested_model, request_id, api_key_id, api_key_name FROM swaps "
     "ORDER BY id DESC LIMIT ?;";
   if (sqlite3_prepare_v2(reinterpret_cast<sqlite3*>(db_), sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
   sqlite3_bind_int(stmt, 1, std::clamp(limit, 1, 10'000));
@@ -471,6 +483,10 @@ std::vector<SwapRow> StatsDb::recent_swaps(int limit) const {
     r.duration_ms = sqlite3_column_double(stmt, 3);
     r.success = sqlite3_column_int(stmt, 4) != 0;
     r.error = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+    r.requested_model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
+    r.request_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
+    r.api_key_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+    r.api_key_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
     out.push_back(std::move(r));
   }
   sqlite3_finalize(stmt);

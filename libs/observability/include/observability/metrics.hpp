@@ -70,6 +70,10 @@ struct SwapRecord {
   double duration_ms{};
   bool success{};
   std::string error;
+  std::string requested_model;
+  std::string request_id;
+  std::string api_key_id;
+  std::string api_key_name;
 };
 
 struct ModelStats {

@@ -152,8 +152,16 @@ struct SwapStartResult {
     nlohmann::json body;
 };
 
+struct SwapAttribution {
+    std::string requested_model;
+    std::string request_id;
+    std::string api_key_id;
+    std::string api_key_name;
+};
+
 SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name,
-                                 bool defer_resource_busy = false);
+                                 bool defer_resource_busy = false,
+                                 SwapAttribution attribution = {});
 
 struct EnsureLoadedResult {
     bool ok{false};
@@ -171,7 +179,8 @@ EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
 EnsureLoadedResult ensure_model_loaded(
     const GatewayDeps& deps, const std::string& model_name,
     std::chrono::steady_clock::time_point deadline,
-    const std::function<bool()>& cancelled);
+    const std::function<bool()>& cancelled,
+    SwapAttribution attribution = {});
 
 void handle_models(const httplib::Request& req, httplib::Response& resp,
                    const GatewayDeps& deps);

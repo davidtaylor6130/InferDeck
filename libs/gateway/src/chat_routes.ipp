@@ -180,10 +180,10 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     opts.cancelled = cancelled;
     acquired.live->priority = opts.priority;
     if (deps.metrics) deps.metrics->track_request(acquired.live);
-    opts.prepare = [&deps, &model_name, deadline, cancelled, &acquired] {
+    opts.prepare = [&deps, &model_name, requested_model, deadline, cancelled, &acquired] {
         const auto started = std::chrono::steady_clock::now();
         acquired.live->progress->phase.store(1);
-        auto loaded = ensure_model_loaded(deps, model_name, deadline, cancelled);
+        auto loaded = ensure_model_loaded(deps, model_name, deadline, cancelled, SwapAttribution{requested_model, acquired.live->request_id, acquired.live->api_key_id, acquired.live->api_key_name});
         acquired.live->progress->phase.store(0);
         acquired.swap_load_duration_ms += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();

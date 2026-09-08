@@ -219,7 +219,8 @@ void record_swap(const GatewayDeps& deps,
                  const std::string& to_model,
                  double duration_ms,
                  bool success,
-                 const std::string& error) {
+                 const std::string& error,
+                 const SwapAttribution& attribution = {}) {
     observability::SwapRecord rec;
     rec.timestamp_unix_ms = now_ms();
     rec.from_model = from_model;
@@ -227,6 +228,10 @@ void record_swap(const GatewayDeps& deps,
     rec.duration_ms = duration_ms;
     rec.success = success;
     rec.error = error;
+    rec.requested_model = attribution.requested_model;
+    rec.request_id = attribution.request_id;
+    rec.api_key_id = attribution.api_key_id;
+    rec.api_key_name = attribution.api_key_name;
     if (deps.metrics) deps.metrics->record_swap(rec);
     if (deps.stats_db) {
         deps.stats_db->record_swap({
@@ -235,14 +240,19 @@ void record_swap(const GatewayDeps& deps,
             rec.to_model,
             rec.duration_ms,
             rec.success,
-            rec.error
+            rec.error,
+            rec.requested_model,
+            rec.request_id,
+            rec.api_key_id,
+            rec.api_key_name
         });
     }
 }
 
 void publish_model_event(const GatewayDeps& deps, const std::string& state,
                          const std::string& from, const std::string& to,
-                         double duration_ms, const std::string& error) {
+                         double duration_ms, const std::string& error,
+                         const SwapAttribution& attribution = {}) {
     if (!deps.events) return;
     deps.events->publish("model", nlohmann::json{
         {"state", state},
@@ -251,13 +261,18 @@ void publish_model_event(const GatewayDeps& deps, const std::string& state,
         {"durationMs", duration_ms},
         {"error", error},
         {"timestampUnixMs", now_ms()},
+        {"requestedModel", attribution.requested_model},
+        {"requestId", attribution.request_id},
+        {"apiKeyId", attribution.api_key_id},
+        {"apiKeyName", attribution.api_key_name},
     }.dump());
 }
 
 foundation::Result<void> perform_swap(const GatewayDeps& deps,
                                       const std::string& from,
                                       const std::string& target,
-                                      bool defer_resource_busy) {
+                                      bool defer_resource_busy,
+                                      const SwapAttribution& attribution) {
     LOG_INFO("swap_start", "from={} to={}", from, target);
     const auto start = std::chrono::steady_clock::now();
     foundation::Result<void> result;
@@ -278,11 +293,11 @@ foundation::Result<void> perform_swap(const GatewayDeps& deps,
     LOG_INFO("swap_complete", "to={} success={} duration_ms={} error={}",
              target, result.has_value(), elapsed, error);
     if (!deferred) {
-        record_swap(deps, from, target, elapsed, result.has_value(), error);
+        record_swap(deps, from, target, elapsed, result.has_value(), error, attribution);
     }
     publish_model_event(deps, result ? "ready" :
         (cancelled ? "cancelled" : deferred ? "waiting" : "failed"),
-                        from, target, elapsed, error);
+                        from, target, elapsed, error, attribution);
     if (deps.swap_tracker) {
         deps.swap_tracker->end(
             result.has_value(), error, cancelled,
@@ -435,7 +450,8 @@ bool maintenance_blocks_model(const GatewayDeps& deps,
 }
 
 SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name,
-                                 bool defer_resource_busy) {
+                                 bool defer_resource_busy,
+                                 SwapAttribution attribution) {
     const auto resolved = resolve_model_name(deps, model_name);
     if (!resolved) {
         return {404, make_error_json(404, "model_not_found",
@@ -468,13 +484,14 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
     }
 
     GatewayDeps deps_copy = deps;
+    const SwapAttribution attribution_copy = std::move(attribution);
     const std::string from = current.value_or("");
     std::string launch_error;
     const auto start_result = deps.swap_tracker->start(
         from, target_name, now_ms(),
-        [deps_copy, from, target_name, defer_resource_busy]() {
-            publish_model_event(deps_copy, "swapping", from, target_name, 0.0, "");
-            (void)perform_swap(deps_copy, from, target_name, defer_resource_busy);
+        [deps_copy, from, target_name, defer_resource_busy, attribution_copy]() {
+            publish_model_event(deps_copy, "swapping", from, target_name, 0.0, "", attribution_copy);
+            (void)perform_swap(deps_copy, from, target_name, defer_resource_busy, attribution_copy);
         },
         launch_error);
     if (start_result == SwapTracker::StartResult::Busy) {
@@ -504,7 +521,8 @@ EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
 EnsureLoadedResult ensure_model_loaded(
     const GatewayDeps& deps, const std::string& model_name,
     std::chrono::steady_clock::time_point deadline,
-    const std::function<bool()>& cancelled) {
+    const std::function<bool()>& cancelled,
+    SwapAttribution attribution) {
     if (maintenance_blocks_model(deps, model_name)) {
         return {false, 503, "maintenance_mode",
                 "maintenance work is using the same compute resource; retry when maintenance finishes",
@@ -554,7 +572,7 @@ EnsureLoadedResult ensure_model_loaded(
             return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
 
-        auto started = start_swap_async(deps, model_name, true);
+        auto started = start_swap_async(deps, model_name, true, attribution);
         if (started.status != 200 && started.status != 202 &&
             started.status != 409) {
             return swap_start_error(started);

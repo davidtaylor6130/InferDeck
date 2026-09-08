@@ -4128,6 +4128,88 @@ TEST_CASE("ensure_model_loaded: cold voice sidecar bypasses an active GPU swap",
     CHECK(coordinator.is_loaded("qwen"));
 }
 
+TEST_CASE("auto swap preserves request attribution in event and history", "[routes][swap][observability]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    registry.register_model(make_info("target"));
+    auto alias = ModelAlias{"target-alias", "target"};
+    REQUIRE(registry.set_alias(alias));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    observability::Metrics metrics;
+    observability::StatsDb stats(":memory:");
+    foundation::EventBus events;
+    auto subscription = events.subscribe();
+    GatewayDeps deps{coordinator, "10"};
+    deps.swap_tracker = &tracker;
+    deps.metrics = &metrics;
+    deps.stats_db = &stats;
+    deps.events = &events;
+
+    const SwapAttribution attribution{"target-alias", "req-auto-swap", "key-id", "CLI owner"};
+    REQUIRE(start_swap_async(deps, "target-alias", false, attribution).status == 202);
+    tracker.join();
+
+    const auto swaps = stats.recent_swaps(10);
+    REQUIRE(swaps.size() == 1);
+    CHECK(swaps[0].to_model == "target");
+    CHECK(swaps[0].requested_model == "target-alias");
+    CHECK(swaps[0].request_id == "req-auto-swap");
+    CHECK(swaps[0].api_key_id == "key-id");
+    CHECK(swaps[0].api_key_name == "CLI owner");
+
+    auto swapping = subscription->wait_for(std::chrono::milliseconds{100});
+    auto ready = subscription->wait_for(std::chrono::milliseconds{100});
+    REQUIRE(swapping);
+    REQUIRE(ready);
+    const auto ready_payload = nlohmann::json::parse(ready->data);
+    CHECK(ready_payload["state"] == "ready");
+    CHECK(ready_payload["requestedModel"] == "target-alias");
+    CHECK(ready_payload["requestId"] == "req-auto-swap");
+    CHECK(ready_payload["apiKeyId"] == "key-id");
+    CHECK(ready_payload["apiKeyName"] == "CLI owner");
+}
+TEST_CASE("failed auto swap preserves request attribution", "[routes][swap][observability]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->load_should_fail.store(true);
+        return backend;
+    });
+    registry.register_model(make_info("failed-target"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    observability::StatsDb stats(":memory:");
+    foundation::EventBus events;
+    auto subscription = events.subscribe();
+    GatewayDeps deps{coordinator, "10"};
+    deps.swap_tracker = &tracker;
+    deps.stats_db = &stats;
+    deps.events = &events;
+
+    const SwapAttribution attribution{"failed-alias", "req-failed-swap", "key-fail", "Failed owner"};
+    REQUIRE(start_swap_async(deps, "failed-target", false, attribution).status == 202);
+    tracker.join();
+
+    const auto swaps = stats.recent_swaps(10);
+    REQUIRE(swaps.size() == 1);
+    CHECK_FALSE(swaps[0].success);
+    CHECK(swaps[0].requested_model == "failed-alias");
+    CHECK(swaps[0].request_id == "req-failed-swap");
+    CHECK(swaps[0].api_key_id == "key-fail");
+    CHECK(swaps[0].api_key_name == "Failed owner");
+
+    auto swapping = subscription->wait_for(std::chrono::milliseconds{100});
+    auto failed = subscription->wait_for(std::chrono::milliseconds{100});
+    REQUIRE(swapping);
+    REQUIRE(failed);
+    const auto failed_payload = nlohmann::json::parse(failed->data);
+    CHECK(failed_payload["state"] == "failed");
+    CHECK(failed_payload["requestId"] == "req-failed-swap");
+    CHECK(failed_payload["apiKeyId"] == "key-fail");
+}
 TEST_CASE("SwapTracker owns the worker and joins it at destruction",
           "[routes][swap]") {
     ModelRegistry registry;

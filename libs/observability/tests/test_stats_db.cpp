@@ -129,7 +129,7 @@ TEST_CASE("StatsDb: existing token ledger is migrated without losing history",
   REQUIRE(sqlite3_prepare_v2(migrated_raw, "PRAGMA user_version;", -1,
                              &version, nullptr) == SQLITE_OK);
   REQUIRE(sqlite3_step(version) == SQLITE_ROW);
-  CHECK(sqlite3_column_int(version, 0) == 3);
+  CHECK(sqlite3_column_int(version, 0) == 4);
   sqlite3_finalize(version);
   sqlite3_close(migrated_raw);
   const auto rows = migrated.recent_requests(10);
@@ -281,7 +281,7 @@ TEST_CASE("StatsDb: record_swap persists and round-trips", "[observability][stat
   const auto path = (dir / "stats.db").string();
   StatsDb db(path);
   REQUIRE(db.healthy());
-  db.record_swap({1, "qwen3.6-27b", "qwen3-coder-next", 1500.0, true, ""});
+  db.record_swap({1, "qwen3.6-27b", "qwen3-coder-next", 1500.0, true, "", "qwen-alias", "req-swap", "key-id", "CLI owner"});
   db.record_swap({2, "qwen3-coder-next", "qwen3.6-27b", 0.0, false, "model_not_registered"});
   auto rows = db.recent_swaps(10);
   REQUIRE(rows.size() == 2);
@@ -292,6 +292,15 @@ TEST_CASE("StatsDb: record_swap persists and round-trips", "[observability][stat
   REQUIRE(rows[1].to_model == "qwen3-coder-next");
   REQUIRE(rows[1].success);
   REQUIRE(rows[1].duration_ms == 1500.0);
+  CHECK(rows[1].requested_model == "qwen-alias");
+  CHECK(rows[1].request_id == "req-swap");
+  CHECK(rows[1].api_key_id == "key-id");
+  CHECK(rows[1].api_key_name == "CLI owner");
+  StatsDb reopened(path);
+  const auto reopened_rows = reopened.recent_swaps(10);
+  REQUIRE(reopened_rows.size() == 2);
+  CHECK(reopened_rows[1].request_id == "req-swap");
+  CHECK(reopened_rows[1].api_key_name == "CLI owner");
 }
 
 TEST_CASE("StatsDb: recent_requests honors limit", "[observability][stats]") {
