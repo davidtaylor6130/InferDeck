@@ -44,6 +44,26 @@ def request_row(rows, request_id):
     if len(matches) != 1: raise AssertionError(f"expected one row for {request_id}, got {len(matches)}")
     return matches[0]
 
+def wait_queue(base, token, running, queued):
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        status, payload = call(base, "/api/inferdeck/v1/status", token=token, timeout=3)
+        if status == 200 and payload.get("queue", {}).get("running") == running and payload["queue"].get("queued") == queued:
+            return
+        time.sleep(.1)
+    raise AssertionError(f"queue did not settle at running={running}, queued={queued}")
+
+def open_request(port, key, request_id):
+    body = json.dumps({"model":"alias-a", "messages":[{"role":"user", "content":"Output the word benchmark 10000 times separated by spaces. Begin immediately."}], "max_tokens":1600, "temperature":0, "stream":False}).encode()
+    connection = socket.create_connection(("127.0.0.1", port), timeout=10)
+    try:
+        headers = f"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAuthorization: Bearer {key}\r\nX-Request-Id: {request_id}\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+        connection.sendall(headers + body)
+        return connection
+    except Exception:
+        connection.close()
+        raise
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gateway-exe", default="build/bin/Release/inferdeck-gateway.exe")
@@ -139,12 +159,32 @@ model_registry:
         swaps = [s for s in hist["swaps"] if s.get("requested_model") == "alias-a"]
         if len(swaps) != 1: raise AssertionError(f"expected attributed auto-swap, got {len(swaps)}")
         swap = swaps[0]; assert swap["request_id"] == success_id and swap["api_key_id"] == ka["id"] and swap["api_key_name"] == ka["name"]
+        running_id, queued_id = "client-attribution-running-cancel", "client-attribution-queued-cancel"
+        with open_request(port, ka["key"], running_id) as running:
+            wait_queue(base, control, 1, 0)
+            with open_request(port, kb["key"], queued_id) as queued:
+                wait_queue(base, control, 1, 1)
+                queued.shutdown(socket.SHUT_RDWR)
+            wait_queue(base, control, 1, 0)
+            running.shutdown(socket.SHUT_RDWR)
+        wait_queue(base, control, 0, 0)
+        _, cancelled = call(base, "/api/inferdeck/v1/stats/history?limit=100", token=control)
+        cancel_rows = []
+        for rid, key in ((running_id, ka), (queued_id, kb)):
+            row = request_row(cancelled["requests"], rid)
+            assert row["api_key_id"] == key["id"] and row["api_key_name"] == key["name"]
+            assert row["model"] == "alias-a" and row["resolved_model"] == "target-a"
+            cancel_rows.append(row)
+        _, jobs = call(base, "/api/inferdeck/v1/jobs?limit=100", token=control)
+        for rid in (running_id, queued_id):
+            job = next(row for row in jobs["jobs"] if row["id"] == rid)
+            assert job["httpStatus"] == 499
         proc.terminate(); proc.wait(15)
         proc = subprocess.Popen([str(exe), "-c", str(cfg)], cwd=str(work), env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         wait_ready(base, proc, control)
         _, after = call(base, "/api/inferdeck/v1/stats/history?limit=100", token=control)
-        for before_row in (ok, bad):
+        for before_row in (ok, bad, *cancel_rows):
             restored = request_row(after["requests"], before_row["request_id"])
             for field in ("request_id", "api_key_id", "api_key_name", "model", "resolved_model"):
                 if restored[field] != before_row[field]: raise AssertionError(f"restart changed {field}")
@@ -156,7 +196,7 @@ model_registry:
         if any(key["key"] in visible for key in (ka, kb)): raise AssertionError("raw API key leaked into history or logs")
         status, _ = call(base, "/api/inferdeck/v1/swap/status", token=control)
         if status != 200: raise AssertionError("swap status failed after restart")
-        print(json.dumps({"port":port,"request_ids":[success_id,failure_id],"key_ids":[ka["id"],kb["id"]],"swap_request_id":swap["request_id"],"restart_history":True}))
+        print(json.dumps({"port":port,"request_ids":[success_id,failure_id],"key_ids":[ka["id"],kb["id"]],"swap_request_id":swap["request_id"],"restart_history":True,"concurrent_cancel_owners":True}))
     finally:
         if proc and proc.poll() is None: proc.kill(); proc.wait(10)
         if not args.keep_artifacts:
