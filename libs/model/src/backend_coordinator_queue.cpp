@@ -371,6 +371,12 @@ bool BackendCoordinator::admission_pool_allows_locked(
     };
     const auto target_info = find_info(name);
     if (!target_info) return false;
+    if (target_info->concurrency_auto) {
+        const auto backend = instances_.find(name);
+        if (backend == instances_.end() || !backend->second || !backend->second->is_loaded()) return true;
+        const auto active = active_requests_by_model_.find(name);
+        return (active == active_requests_by_model_.end() ? 0 : active->second) < backend->second->n_slots();
+    }
     int active = 0;
     for (const auto& [model_name, count] : active_requests_by_model_) {
         if (count <= 0) continue;

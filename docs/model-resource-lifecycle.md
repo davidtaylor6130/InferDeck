@@ -47,8 +47,11 @@ capacity eviction.
 ## Admission and lifecycle
 
 Slot leases are coordinator-owned and idempotently released. An explicit
-admission pool applies its concurrency limit across every member model. Queue
-waiting, lifecycle-lock acquisition, capacity resize, eviction, drain, unload,
+admission pool applies its concurrency limit across fixed-capacity member models.
+A llama.cpp model opting into `concurrency_auto` uses its hardware-fitted sequence
+capacity instead of that pool limit; shared KV admission still checks each request's
+prompt/output budget. Leave automatic concurrency disabled when a fixed shared
+quota or a single-request exclusive profile is required. Queue waiting, lifecycle-lock acquisition, capacity resize, eviction, drain, unload,
 and load receive one steady-clock deadline and cancellation predicate.
 Rollback uses a separate bounded recovery window so expiry of the failed
 operation cannot suppress restoration. llama.cpp model loading connects the

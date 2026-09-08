@@ -69,6 +69,7 @@ public:
     virtual int vram_usage_mb() const = 0;
     virtual int n_slots() const = 0;
     virtual int n_free_slots() const = 0;
+    virtual int context_pool_capacity() const { return 0; }
     virtual int min_slots() const { return n_slots(); }
     virtual bool can_resize_slots() const { return false; }
     virtual bool can_reclaim_idle_context() const { return false; }

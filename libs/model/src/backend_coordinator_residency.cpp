@@ -92,14 +92,15 @@ std::vector<ResidencyInfo> BackendCoordinator::residency() const {
         out.push_back({name, info.runtime, info.modality,
                        to_string(info.role), to_string(info.compute),
                        to_string(info.residency), info.admission_pool,
-                       info.concurrency_limit, info.memory_required_mb,
+                       info.concurrency_auto ? backend->n_slots() : info.concurrency_limit, info.memory_required_mb,
                        info.eviction_eligible,
                        backend->n_slots(),
                        resizing_models_.contains(name) ? 0 : backend->n_free_slots(),
                        active == active_requests_by_model_.end() ? 0 : active->second,
                        backend->estimate_vram_mb(backend->n_slots()),
                        current_loaded_ && *current_loaded_ == name,
-                       resizing_models_.contains(name)});
+                       resizing_models_.contains(name),
+                       info.concurrency_auto, backend->context_pool_capacity()});
     }
     std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
     return out;

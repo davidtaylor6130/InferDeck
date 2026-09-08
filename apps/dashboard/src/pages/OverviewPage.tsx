@@ -199,11 +199,11 @@ export const OverviewPage: React.FC = () => {
                 return <div key={model.id} className="py-1">
                   <details className="group">
                     <summary className="-mx-1 flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 rounded px-1 py-2.5 text-left hover:bg-white/[0.02]">
-                      <span className="flex shrink-0 gap-1" aria-label={`${model.active_requests ?? 0} active, ${model.free_slots ?? 0} free slots`}>{Array.from({length: Math.min(model.n_slots, 32)}, (_, index) => <span key={index} className={`h-3 w-3 rounded-[3px] ${index < (model.active_requests ?? 0) ? 'bg-success-green shadow-[0_0_6px_rgba(82,183,136,0.55)]' : 'border border-dashed border-white/30'}`} />)}</span>
+                      <span className="flex w-full min-w-0 max-w-full flex-wrap gap-1 sm:w-auto" aria-label={`${model.active_requests ?? 0} active, ${model.free_slots ?? 0} free slots`}>{Array.from({length: Math.min(model.n_slots, 32)}, (_, index) => <span key={index} className={`h-3 w-3 rounded-[3px] ${index < (model.active_requests ?? 0) ? 'bg-success-green shadow-[0_0_6px_rgba(82,183,136,0.55)]' : 'border border-dashed border-white/30'}`} />)}</span>
                       <span className="min-w-0 flex-1 truncate font-mono text-sm font-semibold" title={model.id}>{model.id}</span>
                       <Badge label={model.family || model.runtime || 'Model'} tone="idle" />
                       {model.primary && <Badge label="Primary" tone="info" />}
-                      <span className="text-xs tabular-nums text-text-secondary">{model.active_requests ?? 0}/{model.n_slots} active</span>
+                      <span className="text-xs tabular-nums text-text-secondary">{model.active_requests ?? 0}/{model.n_slots} active{model.concurrency_auto ? ` | Auto | ${(model.context_pool_capacity ?? 0).toLocaleString()} shared tokens` : ''}</span>
                       <span className="text-xs text-text-muted group-open:rotate-90" aria-hidden="true">&#8250;</span>
                     </summary>
                     <p className="pb-2 text-xs text-text-muted">{formatTokenCount(model.context_size)} context / {model.free_slots ?? 'Unknown'} slots free / {formatMb(model.vram_required_mb)} estimated memory</p>

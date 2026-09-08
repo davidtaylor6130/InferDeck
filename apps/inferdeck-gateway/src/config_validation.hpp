@@ -364,6 +364,12 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "model context_size must be positive: " + name);
                 }
+                if (entry["concurrency_auto"] && entry["concurrency_auto"].as<bool>() &&
+                    (!(entry["context_pool_auto"] && entry["context_pool_auto"].as<bool>()) ||
+                     (entry["runtime"] && entry["runtime"].as<std::string>() != "llama_cpp"))) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "concurrency_auto requires the automatic llama_cpp context pool: " + name);
+                }
                 if (entry["kv_unified"]) (void)entry["kv_unified"].as<bool>();
                 if (entry["context_pool_auto"] && entry["context_pool_auto"].as<bool>() &&
                     (!(entry["kv_unified"] && entry["kv_unified"].as<bool>()) ||

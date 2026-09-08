@@ -42,6 +42,14 @@ describe('searchStore', () => {
 });
 
 describe('getModels', () => {
+  it('uses fitted capacity and shared pool metadata rather than the configured slot hint', async () => {
+    respondWith({ models: [{ id: 'automatic', n_slots: 1, inferdeck: { residency: {
+      loaded: true, slots: 12, concurrency_auto: true, context_pool_capacity: 131072,
+    } } }] });
+    const [model] = await getModels();
+    expect(model).toMatchObject({ n_slots: 12, concurrency_auto: true, context_pool_capacity: 131072 });
+  });
+
   it('normalizes loaded residency fields while preserving registry metadata', async () => {
     respondWith({
       models: [{

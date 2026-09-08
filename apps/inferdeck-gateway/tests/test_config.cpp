@@ -736,3 +736,11 @@ TEST_CASE("VRAM reserve accepts zero and rejects invalid sizes", "[config][pool]
     CHECK(load_config(path).vram_safety_margin_mb == 0);
     std::filesystem::remove(path);
 }
+
+TEST_CASE("Automatic concurrency requires a fitted llama pool", "[config][pool]") {
+    const std::string prefix = "model_registry:\n  - name: auto\n    gguf_path: model.gguf\n";
+    CHECK(validate_config_text(prefix + "    concurrency_auto: true\n    kv_unified: true\n    context_pool_auto: true\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    concurrency_auto: true\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    concurrency_auto: invalid\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    concurrency_auto: true\n    kv_unified: true\n    context_pool_auto: true\n    runtime: sherpa_onnx\n"));
+}

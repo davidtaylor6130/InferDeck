@@ -23,6 +23,7 @@ namespace inferdeck::llama_wrapper {
     int vram_safety_margin_mb,
     const model::LifecycleControl& control,
     const llama_context* reclaimable_target = nullptr,
-    const llama_context* reclaimable_draft = nullptr);
+    const llama_context* reclaimable_draft = nullptr,
+    int* automatic_sequence_capacity = nullptr);
 
 } // namespace inferdeck::llama_wrapper

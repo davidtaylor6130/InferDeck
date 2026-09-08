@@ -55,6 +55,8 @@ struct ResidencyInfo {
     int estimated_vram_mb{0};
     bool primary{false};
     bool resizing{false};
+    bool concurrency_auto{false};
+    int context_pool_capacity{0};
 };
 
 struct ModelIdentitySnapshot {

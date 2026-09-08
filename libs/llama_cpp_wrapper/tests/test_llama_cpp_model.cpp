@@ -1648,3 +1648,46 @@ TEST_CASE("JSON object requests provide an explicit object constraint", "[llama]
   REQUIRE(unconstrained);
   CHECK(unconstrained->inputs.json_schema == R"({"$comment":"Unconstrained JSON output"})");
 }
+
+TEST_CASE("Automatic sequence fitting exceeds configured slots and preserves output",
+          "[llama][auto-concurrency][.][requires_model]") {
+  const std::string path = test_model_path();
+  if (path.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+  ModelInfo info;
+  info.name = "automatic-concurrency";
+  info.gguf_path = path;
+  info.n_slots = 1;
+  info.context_size = 4096;
+  info.context_pool_auto = true;
+  info.concurrency_auto = true;
+  LlamaCppConfig config = test_runtime_config();
+  config.kv_unified = true;
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+  REQUIRE(model.n_slots() >= 4);
+  REQUIRE(model.context_pool_capacity() >= info.context_size);
+  InferenceRequest request;
+  request.messages = {ChatMessage{"user", "Reply OK."}};
+  request.max_output_tokens = 4;
+  request.sampling.temperature = 0;
+  std::vector<int> leases;
+  for (int i = 0; i < 4; ++i) {
+    const auto lease = model.acquire_slot();
+    REQUIRE(lease);
+    leases.push_back(*lease);
+  }
+  std::vector<std::future<foundation::Result<InferenceResult>>> results;
+  for (int lease : leases) results.push_back(std::async(std::launch::async, [&model, &request, lease] { return model.predict(lease, request); }));
+  for (std::size_t i = 0; i < results.size(); ++i) {
+    const auto result = results[i].get();
+    REQUIRE(result);
+    REQUIRE_FALSE(result->text.empty());
+    CHECK(result->text.starts_with("OK"));
+    REQUIRE(model.release_slot(leases[i]));
+  }
+  CHECK(model.n_free_slots() == model.n_slots());
+  REQUIRE(model.unload());
+  LlamaCppModel::shutdown_backend();
+}

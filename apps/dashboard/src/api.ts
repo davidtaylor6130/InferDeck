@@ -418,6 +418,8 @@ function normalizeModel(value: unknown): ModelInfo | null {
     context_size: asNumber(entry.context_size) ?? 0,
     vram_required_mb: asNumber(entry.vram_required_mb) ?? asNumber(resources.vram_required_mb) ?? 0,
     n_slots: loaded && actualSlots !== undefined ? actualSlots : configuredSlots,
+    concurrency_auto: asBoolean(entry.concurrency_auto) ?? asBoolean(residency.concurrency_auto),
+    context_pool_capacity: asNumber(entry.context_pool_capacity) ?? asNumber(residency.context_pool_capacity),
     has_vision: asBoolean(entry.has_vision) ?? false,
     loaded,
     primary: asBoolean(residency.primary) ?? asBoolean(entry.primary),

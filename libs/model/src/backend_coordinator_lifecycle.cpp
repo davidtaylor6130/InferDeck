@@ -121,7 +121,7 @@ foundation::Result<void> BackendCoordinator::load_with_lock_deadline(
         }
         instance = instances_.at(name).get();
     }
-    if (recovery_slots && instance->n_slots() != *recovery_slots) {
+    if (recovery_slots && !instance->info().concurrency_auto && instance->n_slots() != *recovery_slots) {
         const auto resized = instance->resize_slots(*recovery_slots, control);
         if (!resized) return resized;
     }

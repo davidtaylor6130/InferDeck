@@ -24,6 +24,8 @@ export interface ModelInfo {
   context_size: number;
   vram_required_mb: number;
   n_slots: number;
+  concurrency_auto?: boolean;
+  context_pool_capacity?: number;
   has_vision: boolean;
   loaded: boolean;
   primary?: boolean;

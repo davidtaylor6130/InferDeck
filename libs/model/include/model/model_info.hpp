@@ -103,6 +103,7 @@ struct ModelInfo {
     bool kv_unified{false};
     int context_pool_size{0};
     bool context_pool_auto{false};
+    bool concurrency_auto{false};
     std::optional<int> n_batch{};
     std::optional<int> n_ubatch{};
     std::string cache_type_k{};

@@ -91,7 +91,21 @@ Automatic unified context pooling is measured and bounded. It preserves each req
 
 Enable automatic fit on an individual model entry with `kv_unified: true`,
 `context_pool_auto: true`, and `context_pool_size: 0`. Keep `context_size` as
-that model's per-request limit and `n_slots` as its maximum concurrent requests.
+that model's per-request limit. Add `concurrency_auto: true` to derive sequence
+capacity from available hardware instead of limiting requests to `n_slots`.
+Without that option, `n_slots` remains the concurrency limit.
+
+Automatic concurrency first fits the largest number of complete request contexts,
+then uses remaining memory for additional independent sequences sharing that pool.
+Both target and MTP memory are included. The backend sequence limit and batch size
+bound the search. Admission uses the fitted capacity and each request's actual
+prompt/output reservation, rather than the model's configured concurrency limit.
+A short request can therefore run alongside more peers than full-length requests.
+The ceiling is fitted when loading; active contexts are not rebuilt to grow it.
+Dashboard model status exposes `concurrency_auto` and `context_pool_capacity`, with
+`n_slots` reporting the fitted capacity while resident. Recurrent/MTP state still
+has a per-sequence cost. This is not shared KV between different models.
+
 For a manually bounded pool, disable `context_pool_auto` and set a positive
 `context_pool_size`. Automatic mode and a fixed pool size are mutually exclusive.
 

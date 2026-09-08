@@ -2684,3 +2684,32 @@ TEST_CASE("BackendCoordinator: reclaims idle context without unloading weights",
         REQUIRE(coordinator.release_slot(a.name, *slot));
     }
 }
+
+TEST_CASE("Automatic concurrency admits to backend capacity rather than the role cap",
+          "[model][coordinator][resources][automatic]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots.store(3);
+        backend->busy_slots.assign(3, 0);
+        return backend;
+    });
+    ModelInfo info = make_info("automatic");
+    info.n_slots = 1;
+    info.concurrency_limit = 1;
+    info.concurrency_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::milliseconds(100);
+    options.prepare = [&] { return coordinator.load(info.name); };
+    std::vector<int> leases;
+    for (int i = 0; i < 3; ++i) {
+        const auto lease = coordinator.acquire_slot(info.name, options);
+        REQUIRE(lease);
+        leases.push_back(*lease);
+    }
+    CHECK(coordinator.active_request_count() == 3);
+    CHECK(coordinator.residency().front().concurrency_limit == 3);
+    for (int lease : leases) REQUIRE(coordinator.release_slot(info.name, lease));
+}

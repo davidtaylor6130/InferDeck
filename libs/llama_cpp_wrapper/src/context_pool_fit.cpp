@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "foundation/logging.hpp"
 #include "ggml-backend.h"
@@ -43,6 +44,9 @@ foundation::Result<std::size_t> checked_add(std::size_t left,
   }
   return left + right;
 }
+
+struct AvailableMemory { std::size_t free = 0; std::size_t total = 0; };
+using MemorySnapshot = std::map<ggml_backend_dev_t, AvailableMemory>;
 
 struct Requirements {
   std::size_t host = 0;
@@ -89,7 +93,8 @@ foundation::Result<bool> check_available(
     const Requirements& requirements,
     int capacity,
     int vram_safety_margin_mb,
-    const Requirements& reclaimable) {
+    const Requirements& reclaimable,
+    const MemorySnapshot& available) {
   bool fits = true;
   if (requirements.host > 0) {
     ggml_backend_dev_t cpu =
@@ -100,7 +105,8 @@ foundation::Result<bool> check_available(
     }
     std::size_t free = 0;
     std::size_t total = 0;
-    ggml_backend_dev_memory(cpu, &free, &total);
+    free = available.at(cpu).free;
+    total = available.at(cpu).total;
     if (free == 0 && total == 0) {
       return foundation::Err<bool>(foundation::ErrorCode::Internal,
                                    "host memory availability is unknown");
@@ -123,7 +129,8 @@ foundation::Result<bool> check_available(
   for (const auto& [device, required] : requirements.devices) {
     std::size_t free = 0;
     std::size_t total = 0;
-    ggml_backend_dev_memory(device, &free, &total);
+    free = available.at(device).free;
+    total = available.at(device).total;
     if (free == 0 && total == 0) {
       return foundation::Err<bool>(foundation::ErrorCode::Internal,
                                    "device memory availability is unknown");
@@ -191,7 +198,8 @@ foundation::Result<int> fit_context_pool(
     int vram_safety_margin_mb,
     const model::LifecycleControl& control,
     const llama_context* reclaimable_target,
-    const llama_context* reclaimable_draft) try {
+    const llama_context* reclaimable_draft,
+    int* automatic_sequence_capacity) try {
   if (model_path.empty() || minimum_capacity <= 0 ||
       maximum_capacity < minimum_capacity || vram_safety_margin_mb < 0) {
     return foundation::Err<int>(foundation::ErrorCode::InvalidArgument,
@@ -217,6 +225,21 @@ foundation::Result<int> fit_context_pool(
   probe_model_params.progress_callback_user_data =
       const_cast<model::LifecycleControl*>(&control);
 
+  std::vector<float> single_device_split(llama_max_devices(), 0.0f);
+  std::size_t gpu_count = 0;
+  if (probe_model_params.devices) {
+    while (probe_model_params.devices[gpu_count]) ++gpu_count;
+  } else {
+    for (std::size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+      const enum ggml_backend_dev_type type = ggml_backend_dev_type(ggml_backend_dev_get(i));
+      if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) ++gpu_count;
+    }
+  }
+  if (!probe_model_params.tensor_split && gpu_count == 1 && !single_device_split.empty()) {
+    single_device_split[0] = 1.0f;
+    probe_model_params.tensor_split = single_device_split.data();
+  }
+
   const std::string native_path = model_path.string();
   ModelPtr probe_model(
       llama_model_load_from_file(native_path.c_str(), probe_model_params),
@@ -236,20 +259,39 @@ foundation::Result<int> fit_context_pool(
       if (!added) return std::unexpected(added.error());
     }
   }
+  for (const auto& [device, bytes] : reclaimable.devices) {
+    std::size_t free = 0, total = 0;
+    ggml_backend_dev_memory(device, &free, &total);
+    const auto recoverable = checked_add(free, bytes);
+    if (!recoverable) return std::unexpected(recoverable.error());
+    if (static_cast<std::size_t>(vram_safety_margin_mb) * kMib >= std::min(total, *recoverable)) {
+      return foundation::Err<int>(foundation::ErrorCode::OutOfMemory,
+          "requested reserve cannot fit after context reclamation");
+    }
+  }
   int selected_actual_capacity = 0;
   int probe_count = 0;
-  const auto probe = [&](int capacity) -> foundation::Result<bool> {
+  const auto probe = [&](int capacity, int sequences = 0) -> foundation::Result<bool> {
     if (const auto lifecycle = check_lifecycle(control); !lifecycle) {
       return std::unexpected(lifecycle.error());
     }
     ++probe_count;
+    MemorySnapshot available;
+    for (std::size_t index = 0; index < ggml_backend_dev_count(); ++index) {
+      ggml_backend_dev_t device = ggml_backend_dev_get(index);
+      AvailableMemory memory;
+      ggml_backend_dev_memory(device, &memory.free, &memory.total);
+      available.emplace(device, memory);
+    }
     llama_context_params target_params = context_params;
     target_params.n_ctx = static_cast<std::uint32_t>(capacity);
+    if (sequences > 0) target_params.n_seq_max = static_cast<std::uint32_t>(sequences);
     ContextPtr target(llama_init_from_model(probe_model.get(), target_params),
                       llama_free);
     if (!target) {
-      return foundation::Err<bool>(foundation::ErrorCode::Internal,
-                                   "target context memory probe failed");
+      if (automatic_sequence_capacity && sequences > 1) return false;
+      return foundation::Err<bool>(reclaimable_target ? foundation::ErrorCode::ResourceBusy : foundation::ErrorCode::OutOfMemory,
+                                   "target context memory probe cannot allocate temporary state");
     }
 
     Requirements requirements;
@@ -265,8 +307,9 @@ foundation::Result<int> fit_context_pool(
       draft_params.n_ubatch = std::min<std::uint32_t>(draft_params.n_ubatch, 512);
       draft.reset(llama_init_from_model(probe_model.get(), draft_params));
       if (!draft) {
-        return foundation::Err<bool>(foundation::ErrorCode::Internal,
-                                     "draft context memory probe failed");
+        if (automatic_sequence_capacity && sequences > 1) return false;
+        return foundation::Err<bool>(reclaimable_target ? foundation::ErrorCode::ResourceBusy : foundation::ErrorCode::OutOfMemory,
+                                     "draft context memory probe cannot allocate temporary state");
       }
       if (const auto added = add_breakdown(requirements, draft.get()); !added) {
         return std::unexpected(added.error());
@@ -276,7 +319,9 @@ foundation::Result<int> fit_context_pool(
       return foundation::Err<bool>(foundation::ErrorCode::Internal,
           "context pool memory estimate is empty");
     }
-    const auto fits = check_available(requirements, capacity, vram_safety_margin_mb, reclaimable);
+    const auto fits = check_available(requirements, capacity, vram_safety_margin_mb, reclaimable, available);
+    foundation::LOG_INFO("sequence_capacity_probe", "sequences={} context={} fits={}",
+        target_params.n_seq_max, capacity, fits && *fits);
     if (fits && *fits) {
       const std::uint32_t actual = llama_n_ctx(target.get());
       if (actual > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
@@ -287,6 +332,60 @@ foundation::Result<int> fit_context_pool(
     }
     return fits;
   };
+
+  if (automatic_sequence_capacity != nullptr) {
+    const int maximum_sequences = static_cast<int>(std::min<std::size_t>(
+        llama_max_parallel_sequences(), std::min<std::size_t>(
+            std::max(1u, context_params.n_batch),
+            std::numeric_limits<int>::max() / minimum_capacity)));
+    const auto first = probe(minimum_capacity, 1);
+    if (!first) return std::unexpected(first.error());
+    if (!*first) return foundation::Err<int>(foundation::ErrorCode::OutOfMemory,
+        "one full request context does not fit");
+    int full_requests = 1;
+    int upper = std::min(2, maximum_sequences + 1);
+    while (upper <= maximum_sequences) {
+      const auto fits = probe(upper * minimum_capacity, upper);
+      if (!fits) return std::unexpected(fits.error());
+      if (!*fits) break;
+      full_requests = upper;
+      upper = std::min(maximum_sequences + 1, upper * 2);
+    }
+    while (full_requests + 1 < upper) {
+      const int candidate = full_requests + (upper - full_requests) / 2;
+      const auto fits = probe(candidate * minimum_capacity, candidate);
+      if (!fits) return std::unexpected(fits.error());
+      if (*fits) full_requests = candidate;
+      else upper = candidate;
+    }
+    const int pool = full_requests * minimum_capacity;
+    int sequences = full_requests;
+    upper = std::min(maximum_sequences + 1, sequences * 2);
+    while (upper <= maximum_sequences) {
+      const auto fits = probe(pool, upper);
+      if (!fits) return std::unexpected(fits.error());
+      if (!*fits) break;
+      sequences = upper;
+      upper = std::min(maximum_sequences + 1, upper * 2);
+    }
+    while (sequences + 1 < upper) {
+      const int candidate = sequences + (upper - sequences) / 2;
+      const auto fits = probe(pool, candidate);
+      if (!fits) return std::unexpected(fits.error());
+      if (*fits) sequences = candidate;
+      else upper = candidate;
+    }
+    selected_actual_capacity = 0;
+    const auto final_fit = probe(pool, sequences);
+    if (!final_fit) return std::unexpected(final_fit.error());
+    if (!*final_fit) return foundation::Err<int>(foundation::ErrorCode::OutOfMemory,
+        "memory availability changed during concurrency fitting");
+    *automatic_sequence_capacity = sequences;
+    foundation::LOG_INFO("automatic_concurrency_selected",
+        "sequences={} full_requests={} context={} request_limit={} probes={}",
+        sequences, full_requests, selected_actual_capacity, minimum_capacity, probe_count);
+    return selected_actual_capacity;
+  }
 
   const auto minimum_fits = probe(minimum_capacity);
   if (!minimum_fits) {

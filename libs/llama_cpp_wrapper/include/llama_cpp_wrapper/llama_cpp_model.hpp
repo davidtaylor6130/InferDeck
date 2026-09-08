@@ -83,9 +83,10 @@ public:
 
   int vram_usage_mb() const noexcept override;
   bool live_vram_accounting_complete() const override { return true; }
-  int n_slots() const noexcept override { return info_.n_slots; }
+  int n_slots() const noexcept override { const int capacity = sequence_capacity_.load(); return capacity > 0 ? capacity : info_.n_slots; }
   int n_free_slots() const noexcept override;
-  int min_slots() const noexcept override { return info_.min_slots; }
+  int context_pool_capacity() const noexcept override { return pool_capacity_.load(); }
+  int min_slots() const noexcept override { return info_.concurrency_auto ? 1 : info_.min_slots; }
   bool can_resize_slots() const noexcept override;
   bool can_reclaim_idle_context() const override;
   inferdeck::foundation::Result<bool> reclaim_idle_context(
@@ -175,11 +176,12 @@ private:
   inferdeck::model::ModelInfo info_;
   LlamaCppConfig cfg_;
   std::atomic<bool> loaded_{false};
+  std::atomic<int> sequence_capacity_{0};
+  std::atomic<int> pool_capacity_{0};
   std::atomic<int> reclaimed_context_vram_mb_{0};
   mutable std::mutex mtx_;        // guards slot state (acquire/release/status/last_prompt_tokens)
   llama_model* model_{nullptr};
   const llama_vocab* vocab_{nullptr};
-  // Shared context: n_ctx = context_size * n_slots, n_seq_max = n_slots
   llama_context* shared_ctx_{nullptr};
   llama_context* draft_ctx_{nullptr};
   common_speculative* speculative_{nullptr};
