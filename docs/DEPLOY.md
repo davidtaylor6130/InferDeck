@@ -31,6 +31,7 @@ pnpm --filter dashboard build
 Activate `build\bin\Release\inferdeck-gateway.exe` as
 `C:\InferDeck\inferdeck-gateway.exe` and
 `apps\inferdeck-gateway\static\` as `C:\InferDeck\static\`. The gateway
+The deployment unit is the executable, all runtime DLLs, the complete static directory, and the active configuration from one revision. Testing/Test-PackagedGateway.ps1 verifies an isolated packaged health and static path.
 resolves `static` relative to its executable. Never activate only one
 artifact. Remove stale hashed bundles from the staged static directory before
 the directory swap.
@@ -60,7 +61,7 @@ restarting the service.
    service and child PIDs, configuration revision, and live endpoint behavior.
 2. Back up the active executable, complete static directory,
    `config\gateway.yml`, StatsDb with WAL and SHM files, managed-model
-   manifests, and service registry values into one timestamped rollback set.
+   manifests, and service registry values into one timestamped rollback set. Do not copy a live StatsDb while a writer is active; stop the writer/service or use the SQLite backup API, and include the resulting WAL/SHM files.
 3. Validate staged configuration and open a copy of StatsDb with the new build.
 4. Stop only the verified `InferDeck` service and confirm its NSSM parent and
    gateway child exited.
@@ -77,6 +78,8 @@ live listener prove those exact artifacts are active.
 The OpenAI bearer token authenticates only `/v1`. Rotate it through the
 versioned configuration transaction, verify the new token, and prove the old
 token returns 401.
+
+The dashboard session can remember login for 30 days. Logout invalidates the session; control-token rotation requires proving the old token and old session fail.
 
 Remote administration is separately opt-in. Enable
 `control.allow_remote`, use a distinct control token with at least 32

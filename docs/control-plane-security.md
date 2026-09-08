@@ -23,6 +23,10 @@ loopback authority additionally requires a numeric loopback or `localhost`
 `Host` header and rejects `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, and `Via`.
 An unknown peer, DNS-rebinding host, or proxy-indicated request is not trusted.
 
+Dashboard remember-login sessions expire after 30 days. Logout invalidates the session, and control-token rotation invalidates prior sessions and tokens.
+
+The gateway VRAM safety reserve defaults to 1024 MB, accepts 0, and applies to GPU headroom only; host memory reserve is separate.
+
 The OpenAI bearer token does not grant control authority. An operator can opt in
 to sharing that token with `control.allow_data_plane_token: true`, but the remote
 control token must still be non-empty and the configuration must explicitly
@@ -293,3 +297,7 @@ Remote dashboard origins must be listed exactly in `control.origins`.
 32 cookie-safe ASCII characters. Keep remote access restricted to trusted LAN or
 encrypted overlay interfaces because the built-in listener does not terminate
 TLS.
+
+## Windows verification
+
+PowerShell scripts that read UTF-8 JSON or logs must specify UTF-8 explicitly to avoid locale-dependent parsing.

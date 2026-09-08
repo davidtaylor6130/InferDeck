@@ -76,7 +76,7 @@ account for its future peak. Otherwise the planner uses the more conservative
 of declared availability and observed pressure with the incomplete runtime's
 full declared footprint reserved.
 `gateway.vram_budget_mb` caps hardware detection and
-`gateway.vram_safety_margin_mb` is always reserved.
+`gateway.vram_safety_margin_mb` defaults to 1024 MB and may be set to 0. It reserves GPU headroom only; host/system memory reserve is separate.
 
 Lazy native runtimes reserve their declared peak beyond memory already retained
 by the runtime. This prevents an unloaded phase from being double-spent while
@@ -86,6 +86,8 @@ mutex. Lifecycle loads, resizes, and evictions remain serialized because
 overlapping native model initialization is unsafe.
 
 For a resident model with calibrated `vram_fixed_mb` and `vram_per_slot_mb`, the planner may reduce slots down to `min_slots`. It never guesses slot savings. Active models are not resized or evicted. If preparation fails, the coordinator preserves or restores the previous usable residency where possible and returns a typed error.
+
+Automatic unified context pooling is measured and bounded. It preserves each request context limit, shares capacity within a model, and may reclaim idle slot cache. Recreating an idle context keeps model weights and a vision projector resident but clears that slot cache. Active slots are protected.
 
 When no VRAM budget is known, the coordinator retains the conservative single-resident swap behavior.
 
@@ -187,9 +189,7 @@ clear the other's resource state.
 
 The LLM Usage range selector drives the chart, summary totals, per-model requests and tokens, weighted throughput, peaks, and cost through the same hourly, daily, or monthly buckets. The table headers are keyboard-sortable, expose `aria-sort`, start alphabetically for model names and highest-first for numeric columns, and reverse on a second activation. Lifetime data is only shown where it is labelled lifetime.
 
-SQLite uses WAL mode and schema version 2. Upgrading a disk ledger creates a
-`stats.db.backup-v<old-version>` backup and applies the migration in one
-transaction; failure rolls back without exposing a partially upgraded schema.
+SQLite uses WAL mode and schema version 4. Schema 4 adds swap identity fields. Before migration, SQLite creates a `stats.db.backup-v<old-version>` backup with `.backup` and applies the migration in one transaction. Older binaries reject newer schemas. Rollback must restore the matching executable, configuration, and database; post-backup history is lost, so preserve the newer database separately.
 Prepared insert statements remain open for the database lifetime. Dashboard
 lifetime totals are folded from the same all-time daily buckets used by cost
 views, so lifetime and date-aware cache pricing cannot diverge. Diagnostic jobs
@@ -225,16 +225,30 @@ are not retained.
 
 ## Source layout
 
+The source layout includes benchmark implementation modules and stream serialization and control YAML modules.
+
 ```text
-apps/inferdeck-gateway/       composition root plus process, static-hosting and
-                             benchmark implementation modules
-apps/dashboard/               React dashboard
-libs/model/                   contracts, registry, shared queue/coordinator
-libs/llama_cpp_wrapper/       in-process llama.cpp implementation
-libs/native_runtimes/         optional image, music-generation, TTS, and STT
-                             adapters
-libs/gateway/                 endpoint adapters plus focused content parsing,
-                             stream serialization and control YAML modules
-libs/observability/           GPU telemetry, metrics, SQLite
-libs/foundation/              Result/Error, logging, EventBus
+OpenAI clients                           React dashboard
+          │                                    │
+          └──────── HTTP + SSE ────────────────┘
+                               │
+                    apps/inferdeck-gateway
+                  validation · auth · streaming
+                               │
+               ┌───────────────┴───────────────┐
+               │ shared priority/aging queue   │
+               │ cancellation · 30s admission  │
+               └───────────────┬───────────────┘
+                               │
+                     BackendCoordinator
+          residency · slot capacity · VRAM fit · eviction
+                               │
+                         ModelRegistry
+                  runtime-keyed native factories
+                               │
+       ┌───────────────┬───────┴────────┬──────────────┐
+       │ llama.cpp     │ stable-        │ whisper.cpp  │ sherpa-onnx
+       │ text/embed    │ diffusion.cpp  │ STT          │ TTS
+       │ Vulkan        │ Vulkan         │ GPU          │ CPU/CUDA
+       └───────────────┴────────────────┴──────────────┘
 ```
