@@ -68,6 +68,7 @@ Result<void> LlamaCppModel::load(
     const inferdeck::model::LifecycleControl& control) {
   std::lock_guard lk(mtx_);
   if (loaded_.load()) return Result<void>{};
+  reclaimed_context_vram_mb_.store(0);
   if (control.is_cancelled()) {
     return Result<void>(std::unexpect,
         make_error(ErrorCode::Cancelled, "model load cancelled"));
@@ -232,7 +233,9 @@ Result<void> LlamaCppModel::load(
 
 Result<void> LlamaCppModel::init_shared_context_locked(
     const llama_model_params& model_params,
-    const inferdeck::model::LifecycleControl& control) {
+    const inferdeck::model::LifecycleControl& control,
+    std::optional<int> automatic_max_capacity,
+    std::optional<int> vram_safety_margin_mb) {
   const int n_slots = std::max(1, info_.n_slots);
   const int ctx_per_slot = std::max(512, info_.context_size);
   const int draft_margin = cfg_.mtp_enabled ? std::clamp(cfg_.mtp_draft_tokens, 1, 4) : 0;
@@ -252,6 +255,11 @@ Result<void> LlamaCppModel::init_shared_context_locked(
     return Result<void>(std::unexpect, make_error(ErrorCode::InvalidArgument, "context capacity exceeds supported range"));
   }
   int total_ctx = static_cast<int>(total_ctx_wide);
+  if (automatic_max_capacity.has_value()) {
+    total_ctx = std::max(
+        static_cast<int>(static_cast<std::int64_t>(ctx_per_slot) + draft_margin),
+        *automatic_max_capacity);
+  }
 
   llama_context_params cparams = llama_context_default_params();
   cparams.n_ctx      = static_cast<std::uint32_t>(total_ctx);
@@ -289,9 +297,11 @@ Result<void> LlamaCppModel::init_shared_context_locked(
   }
   const int minimum_pool = static_cast<int>(minimum_wide);
   if (info_.context_pool_auto) {
+    const int effective_margin =
+        vram_safety_margin_mb.value_or(cfg_.vram_safety_margin_mb);
     const Result<int> fitted = fit_context_pool(
         resolved_gguf_path_, model_params, cparams, cfg_.mtp_enabled,
-        minimum_pool, std::max(minimum_pool, total_ctx), cfg_.vram_safety_margin_mb, control);
+        minimum_pool, std::max(minimum_pool, total_ctx), effective_margin, control);
     if (!fitted) return Result<void>(std::unexpect, fitted.error());
     total_ctx = *fitted;
     cparams.n_ctx = static_cast<std::uint32_t>(total_ctx);
@@ -443,6 +453,7 @@ Result<void> LlamaCppModel::unload() {
   }
   vocab_ = nullptr;
   loaded_.store(false);
+  reclaimed_context_vram_mb_.store(0);
   log_memory_snapshot("llama_model_unload_memory_after", info_.name);
   return Result<void>{};
 }
@@ -456,11 +467,229 @@ bool LlamaCppModel::can_resize_slots() const noexcept {
          info_.n_slots > info_.min_slots;
 }
 
-int LlamaCppModel::estimate_vram_mb(int slots) const noexcept {
-  if (info_.vram_fixed_mb > 0 && info_.vram_per_slot_mb > 0) {
-    return info_.vram_fixed_mb + info_.vram_per_slot_mb * std::max(info_.min_slots, slots);
+bool LlamaCppModel::can_reclaim_idle_context() const {
+  std::lock_guard lk(mtx_);
+  if (!loaded_.load() || !info_.context_pool_auto || !cfg_.kv_unified ||
+      shared_ctx_ == nullptr ||
+      (info_.supports("chat_completions") &&
+       (!scheduler_ || !scheduler_->healthy())) ||
+      std::any_of(slots_.begin(), slots_.end(),
+                  [](const SlotState& slot) { return slot.busy; })) {
+    return false;
   }
-  return info_.vram_required_mb;
+  const std::int64_t minimum =
+      static_cast<std::int64_t>(std::max(512, info_.context_size)) +
+      (cfg_.mtp_enabled ? std::clamp(cfg_.mtp_draft_tokens, 1, 4) : 0);
+  return static_cast<std::int64_t>(llama_n_ctx(shared_ctx_)) > minimum;
+}
+
+Result<bool> LlamaCppModel::reclaim_idle_context(
+    int additional_reserve_mb,
+    const inferdeck::model::LifecycleControl& control) {
+  std::lock_guard lk(mtx_);
+  if (additional_reserve_mb < 0) {
+    return Result<bool>(std::unexpect, make_error(
+        ErrorCode::InvalidArgument,
+        "additional context reclamation reserve cannot be negative"));
+  }
+  if (control.is_cancelled()) {
+    return Result<bool>(std::unexpect, make_error(
+        ErrorCode::Cancelled, "idle context reclamation cancelled"));
+  }
+  if (control.is_expired()) {
+    return Result<bool>(std::unexpect, make_error(
+        ErrorCode::Timeout, "idle context reclamation deadline expired"));
+  }
+  if (!loaded_.load() || !info_.context_pool_auto || !cfg_.kv_unified ||
+      shared_ctx_ == nullptr || additional_reserve_mb == 0) {
+    return false;
+  }
+  if (info_.supports("chat_completions") &&
+      (!scheduler_ || !scheduler_->healthy())) {
+    return Result<bool>(std::unexpect, make_error(
+        ErrorCode::Unavailable,
+        "cannot reclaim an unhealthy model context"));
+  }
+  if (std::any_of(slots_.begin(), slots_.end(),
+                  [](const SlotState& slot) { return slot.busy; })) {
+    return Result<bool>(std::unexpect, make_error(
+        ErrorCode::Unavailable,
+        "cannot reclaim context while slots are active"));
+  }
+  if (additional_reserve_mb >
+      std::numeric_limits<int>::max() - cfg_.vram_safety_margin_mb) {
+    return Result<bool>(std::unexpect, make_error(
+        ErrorCode::InvalidArgument,
+        "context reclamation reserve exceeds supported range"));
+  }
+
+  const std::int64_t minimum_pool_wide =
+      static_cast<std::int64_t>(std::max(512, info_.context_size)) +
+      (cfg_.mtp_enabled ? std::clamp(cfg_.mtp_draft_tokens, 1, 4) : 0);
+  if (minimum_pool_wide > std::numeric_limits<int>::max()) {
+    return Result<bool>(std::unexpect, make_error(
+        ErrorCode::InvalidArgument,
+        "context pool minimum exceeds supported range"));
+  }
+  const int minimum_pool = static_cast<int>(minimum_pool_wide);
+  const std::uint32_t old_capacity_raw = llama_n_ctx(shared_ctx_);
+  if (old_capacity_raw > static_cast<std::uint32_t>(
+          std::numeric_limits<int>::max())) {
+    return Result<bool>(std::unexpect, make_error(
+        ErrorCode::InvalidArgument,
+        "current context capacity exceeds supported range"));
+  }
+  const int old_capacity = static_cast<int>(old_capacity_raw);
+  if (old_capacity <= minimum_pool) {
+    return false;
+  }
+
+  const Result<std::size_t> before_memory =
+      context_pool_device_memory_bytes(shared_ctx_, draft_ctx_);
+  if (!before_memory) {
+    return Result<bool>(std::unexpect, before_memory.error());
+  }
+  if (*before_memory == 0) {
+    return false;
+  }
+  if (control.is_cancelled()) {
+    return Result<bool>(std::unexpect, make_error(
+        ErrorCode::Cancelled, "idle context reclamation cancelled"));
+  }
+  if (control.is_expired()) {
+    return Result<bool>(std::unexpect, make_error(
+        ErrorCode::Timeout, "idle context reclamation deadline expired"));
+  }
+
+  llama_model_params model_params = llama_model_default_params();
+  model_params.load_mode = cfg_.use_mmap
+      ? (cfg_.use_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP)
+      : (cfg_.use_mlock ? LLAMA_LOAD_MODE_MLOCK : LLAMA_LOAD_MODE_NONE);
+  model_params.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
+  model_params.load_mtp = cfg_.mtp_enabled;
+
+  const auto clear_contexts = [&]() {
+    if (scheduler_) {
+      scheduler_->stop();
+      scheduler_.reset();
+    }
+    if (speculative_) {
+      common_speculative_free(speculative_);
+      speculative_ = nullptr;
+    }
+    if (draft_ctx_) {
+      llama_free(draft_ctx_);
+      draft_ctx_ = nullptr;
+    }
+    if (shared_ctx_) {
+      llama_free(shared_ctx_);
+      shared_ctx_ = nullptr;
+    }
+    for (int index = 0; index < static_cast<int>(slots_.size()); ++index) {
+      slots_[index] = SlotState{};
+      slots_[index].sequence_id = index;
+    }
+  };
+  const auto initialize = [&](int maximum_capacity, int reserve_mb)
+      -> Result<void> {
+    try {
+      return init_shared_context_locked(
+          model_params, {}, maximum_capacity, reserve_mb);
+    } catch (const std::exception& error) {
+      return Result<void>(std::unexpect, make_error(
+          ErrorCode::Internal,
+          std::string("context recreation failed: ") + error.what()));
+    } catch (...) {
+      return Result<void>(std::unexpect, make_error(
+          ErrorCode::Internal, "context recreation failed"));
+    }
+  };
+  const auto recover = [&]() -> Result<void> {
+    clear_contexts();
+    const Result<void> recovered =
+        initialize(old_capacity, cfg_.vram_safety_margin_mb);
+    if (!recovered) {
+      clear_contexts();
+      LOG_ERROR("context_pool_recovery_failed",
+                "model={} capacity={} error={}",
+                info_.name, old_capacity, recovered.error().message);
+    }
+    return recovered;
+  };
+
+  clear_contexts();
+  const int effective_reserve =
+      cfg_.vram_safety_margin_mb + additional_reserve_mb;
+  const Result<void> resized = initialize(old_capacity, effective_reserve);
+  if (!resized) {
+    LOG_WARN("context_pool_reclaim_fit_failed",
+             "model={} capacity={} additional_reserve_mb={} error={}",
+             info_.name, old_capacity, additional_reserve_mb,
+             resized.error().message);
+    const Result<void> recovered = recover();
+    if (!recovered) {
+      return Result<bool>(std::unexpect, recovered.error());
+    }
+    return false;
+  }
+
+  const int new_capacity = static_cast<int>(llama_n_ctx(shared_ctx_));
+  if (new_capacity >= old_capacity) {
+    LOG_INFO("context_pool_reclaim_no_gain",
+             "model={} capacity={} additional_reserve_mb={}",
+             info_.name, new_capacity, additional_reserve_mb);
+    return false;
+  }
+
+  const Result<std::size_t> after_memory =
+      context_pool_device_memory_bytes(shared_ctx_, draft_ctx_);
+  if (!after_memory) {
+    const Result<void> recovered = recover();
+    if (!recovered) {
+      return Result<bool>(std::unexpect, recovered.error());
+    }
+    return Result<bool>(std::unexpect, after_memory.error());
+  }
+  constexpr std::size_t mib = 1024ULL * 1024ULL;
+  const std::size_t reclaimed_bytes =
+      *before_memory > *after_memory ? *before_memory - *after_memory : 0;
+  const int reclaimed_mb = static_cast<int>(std::min<std::size_t>(
+      reclaimed_bytes / mib,
+      static_cast<std::size_t>(std::numeric_limits<int>::max())));
+  const int previous_reclaimed = reclaimed_context_vram_mb_.load();
+  reclaimed_context_vram_mb_.store(static_cast<int>(
+      std::min<std::int64_t>(
+          static_cast<std::int64_t>(previous_reclaimed) + reclaimed_mb,
+          std::numeric_limits<int>::max())));
+  LOG_INFO("context_pool_reclaimed",
+           "model={} old_capacity={} new_capacity={} reclaimed_device_mb={} additional_reserve_mb={}",
+           info_.name, old_capacity, new_capacity, reclaimed_mb,
+           additional_reserve_mb);
+  return true;
+}
+
+int LlamaCppModel::estimate_vram_mb(int slots) const noexcept {
+  const int declared_floor = std::max(0, info_.vram_required_mb);
+  int estimate = declared_floor;
+  int minimum_estimate = declared_floor;
+  if (info_.vram_fixed_mb > 0 && info_.vram_per_slot_mb > 0) {
+    const std::int64_t fixed_estimate =
+        static_cast<std::int64_t>(info_.vram_fixed_mb) +
+        static_cast<std::int64_t>(info_.vram_per_slot_mb) *
+            std::max(info_.min_slots, slots);
+    estimate = static_cast<int>(std::clamp<std::int64_t>(
+        fixed_estimate, 0, std::numeric_limits<int>::max()));
+    const std::int64_t minimum_wide =
+        static_cast<std::int64_t>(info_.vram_fixed_mb) +
+        static_cast<std::int64_t>(info_.vram_per_slot_mb) *
+            std::max(0, info_.min_slots);
+    minimum_estimate = std::max(
+        declared_floor,
+        static_cast<int>(std::clamp<std::int64_t>(
+            minimum_wide, 0, std::numeric_limits<int>::max())));
+  }
+  return std::max(
+      minimum_estimate, estimate - reclaimed_context_vram_mb_.load());
 }
 
 Result<void> LlamaCppModel::resize_slots(int slots) {

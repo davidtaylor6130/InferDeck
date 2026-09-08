@@ -1379,6 +1379,65 @@ TEST_CASE("Unified pool preserves the configured request context limit", "[llama
   REQUIRE(model.unload());
 }
 
+TEST_CASE("Idle automatic pool reclamation preserves a CPU model",
+          "[llama][pool-reclaim][.][requires_model]") {
+  const std::string path = test_model_path();
+  if (path.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+  ModelInfo info;
+  info.name = "pool-reclaim-cpu";
+  info.gguf_path = path;
+  info.n_slots = 2;
+  info.context_size = 512;
+  info.context_pool_auto = true;
+  LlamaCppConfig config = test_runtime_config();
+  config.kv_unified = true;
+  config.n_gpu_layers = 0;
+  config.kv_offload = false;
+  config.op_offload = false;
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+  CHECK(model.can_reclaim_idle_context());
+
+  InferenceRequest request;
+  request.messages = {ChatMessage{"user", "Reply with OK only. /no_think"}};
+  request.max_output_tokens = 8;
+  request.enable_reasoning = false;
+  request.sampling.temperature = 0.0f;
+  const foundation::Result<int> before_slot = model.acquire_slot();
+  REQUIRE(before_slot);
+  REQUIRE(model.predict(*before_slot, request));
+
+  CHECK_FALSE(model.can_reclaim_idle_context());
+  const foundation::Result<bool> held =
+      model.reclaim_idle_context(1024, {});
+  REQUIRE_FALSE(held);
+  CHECK(held.error().code == ErrorCode::Unavailable);
+  REQUIRE(model.release_slot(*before_slot));
+
+  LifecycleControl cancelled;
+  cancelled.cancelled = [] { return true; };
+  const foundation::Result<bool> pre_cancelled =
+      model.reclaim_idle_context(1024, cancelled);
+  REQUIRE_FALSE(pre_cancelled);
+  CHECK(pre_cancelled.error().code == ErrorCode::Cancelled);
+  CHECK(model.execution_healthy());
+
+  const foundation::Result<bool> no_device_gain =
+      model.reclaim_idle_context(1024, {});
+  REQUIRE(no_device_gain);
+  CHECK_FALSE(*no_device_gain);
+  CHECK(model.execution_healthy());
+
+  const foundation::Result<int> after_slot = model.acquire_slot();
+  REQUIRE(after_slot);
+  REQUIRE(model.predict(*after_slot, request));
+  REQUIRE(model.release_slot(*after_slot));
+  REQUIRE(model.unload());
+  LlamaCppModel::shutdown_backend();
+}
+
 TEST_CASE("Bounded unified pool serializes large requests and preserves outputs", "[llama][pool-admission][.][requires_model]") {
   const std::string path = test_model_path();
   if (path.empty()) SKIP("INFERDECK_TEST_MODEL not set");

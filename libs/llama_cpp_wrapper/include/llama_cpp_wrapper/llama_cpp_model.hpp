@@ -87,6 +87,10 @@ public:
   int n_free_slots() const noexcept override;
   int min_slots() const noexcept override { return info_.min_slots; }
   bool can_resize_slots() const noexcept override;
+  bool can_reclaim_idle_context() const override;
+  inferdeck::foundation::Result<bool> reclaim_idle_context(
+      int additional_reserve_mb,
+      const inferdeck::model::LifecycleControl& control) override;
   int estimate_vram_mb(int slots) const noexcept override;
   inferdeck::foundation::Result<void> resize_slots(int slots) override;
 
@@ -127,7 +131,11 @@ private:
     bool mtp_cache_synced{true};
   };
 
-  inferdeck::foundation::Result<void> init_shared_context_locked(const llama_model_params& model_params, const inferdeck::model::LifecycleControl& control);
+  inferdeck::foundation::Result<void> init_shared_context_locked(
+      const llama_model_params& model_params,
+      const inferdeck::model::LifecycleControl& control,
+      std::optional<int> automatic_max_capacity = std::nullopt,
+      std::optional<int> vram_safety_margin_mb = std::nullopt);
   // max_prompt_tokens > 0 enables history-aware truncation: oldest whole
   // non-system turns are dropped (preserving recency + coherence) until the
   // templated prompt fits the budget. 0 disables truncation.
@@ -166,6 +174,7 @@ private:
   inferdeck::model::ModelInfo info_;
   LlamaCppConfig cfg_;
   std::atomic<bool> loaded_{false};
+  std::atomic<int> reclaimed_context_vram_mb_{0};
   mutable std::mutex mtx_;        // guards slot state (acquire/release/status/last_prompt_tokens)
   llama_model* model_{nullptr};
   const llama_vocab* vocab_{nullptr};

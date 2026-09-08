@@ -38,6 +38,11 @@ public:
     std::atomic<bool> healthy{true};
     std::atomic<int> vram_mb{4096};
     std::atomic<int> additional_vram_mb{0};
+    std::atomic<int> reclaimable_mb{0};
+    std::atomic<bool> reclaim_throws{false};
+    std::function<void()> reclaim_gate{};
+    mutable std::atomic<int> guarded_query_count{0};
+    std::atomic<bool> reclaim_in_progress{false};
     std::atomic<bool> live_vram_accounting{true};
     std::atomic<int> max_slots{2};
     std::vector<int> busy_slots;
@@ -87,8 +92,23 @@ public:
     }
 
     bool is_loaded() const override { return loaded.load(); }
-    bool execution_healthy() const override { return healthy.load(); }
+    bool execution_healthy() const override {
+        if (reclaim_in_progress.load()) ++guarded_query_count;
+        return healthy.load();
+    }
     int vram_usage_mb() const override { return estimate_vram_mb(max_slots.load()); }
+    bool can_reclaim_idle_context() const override {
+        return reclaimable_mb.load() > 0;
+    }
+    Result<bool> reclaim_idle_context(int reserve_mb, const LifecycleControl& control) override {
+        if (control.is_cancelled()) return Err<bool>(ErrorCode::Cancelled, "cancelled");
+        record("reclaim_context", std::to_string(reserve_mb));
+        if (reclaim_gate) reclaim_gate();
+        if (reclaim_throws.load()) throw std::runtime_error("injected reclaim failure");
+        const int freed = reclaimable_mb.exchange(0);
+        vram_mb.fetch_sub(freed);
+        return freed > 0;
+    }
     int additional_vram_reserve_mb() const override {
         return additional_vram_mb.load();
     }
@@ -120,6 +140,7 @@ public:
     }
 
     int n_free_slots() const override {
+        if (reclaim_in_progress.load()) ++guarded_query_count;
         int busy = 0;
         for (int b : busy_slots) if (b) ++busy;
         return max_slots.load() - busy;
@@ -2530,4 +2551,136 @@ TEST_CASE("BackendCoordinator: admission pool limits span models",
     const auto second = coordinator.acquire_slot("helper-b", immediate);
     REQUIRE(second);
     REQUIRE(coordinator.release_slot("helper-b", *second));
+}
+
+TEST_CASE("BackendCoordinator: reclaims idle context without unloading weights",
+          "[model][coordinator][context-reclaim]") {
+    ModelRegistry reg;
+    IModelMock* resident = nullptr;
+    reg.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        if (info.name == "resident") {
+            resident = backend.get();
+            backend->reclaimable_mb.store(1000);
+        }
+        return backend;
+    });
+    auto a = make_info("resident");
+    auto b = make_info("incoming");
+    a.vram_required_mb = b.vram_required_mb = 5000;
+    reg.register_model(a);
+    reg.register_model(b);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.swap_to(a.name));
+    REQUIRE(resident);
+
+    SECTION("idle pool shrinks before any model is evicted") {
+        REQUIRE(coordinator.swap_to(b.name));
+        REQUIRE(coordinator.is_loaded(a.name));
+        CHECK(coordinator.is_loaded(b.name));
+        CHECK(resident->n_slots() == 2);
+        CHECK(coordinator.get_vram_usage() == 9000);
+        int loads = 0;
+        int unloads = 0;
+        int reclaims = 0;
+        for (const CallRecord& call : resident->calls) {
+            loads += call.method == "load";
+            unloads += call.method == "unload";
+            if (call.method == "reclaim_context") {
+                ++reclaims;
+                CHECK(call.detail == "5000");
+            }
+        }
+        CHECK(loads == 1);
+        CHECK(unloads == 0);
+        CHECK(reclaims == 1);
+    }
+    SECTION("always-resident weights allow idle context reclamation") {
+        resident->model_info.residency = ResidencyPolicy::Always;
+        resident->model_info.eviction_eligible = false;
+        REQUIRE(coordinator.swap_to(b.name));
+        REQUIRE(coordinator.is_loaded(a.name));
+        CHECK(resident->reclaimable_mb == 0);
+        CHECK(coordinator.is_ready(a.name));
+    }
+    SECTION("active work is not reclaimed or evicted") {
+        const auto slot = coordinator.acquire_slot(a.name);
+        REQUIRE(slot);
+        const auto loaded = coordinator.swap_to(b.name);
+        CHECK_FALSE(loaded);
+        CHECK(coordinator.is_loaded(a.name));
+        CHECK(resident->reclaimable_mb == 1000);
+        REQUIRE(coordinator.release_slot(a.name, *slot));
+    }
+    SECTION("rebuild barrier avoids backend locks while status and queues remain usable") {
+        std::promise<void> started;
+        std::promise<void> release;
+        const std::shared_future<void> released = release.get_future().share();
+        resident->reclaim_gate = [&] {
+            resident->reclaim_in_progress.store(true);
+            started.set_value();
+            released.wait();
+            resident->reclaim_in_progress.store(false);
+        };
+        auto loading = std::async(std::launch::async, [&] {
+            return coordinator.swap_to(b.name);
+        });
+        const bool entered = started.get_future().wait_for(std::chrono::seconds{2}) ==
+            std::future_status::ready;
+        if (!entered) {
+            release.set_value();
+            loading.wait();
+            FAIL("reclamation did not enter its barrier");
+        }
+        CHECK_FALSE(coordinator.is_ready(a.name));
+        const auto states = coordinator.residency();
+        CHECK(states.size() == 1);
+        if (!states.empty()) {
+            CHECK(states[0].resizing);
+            CHECK(states[0].free_slots == 0);
+        }
+        AcquireSlotOptions immediate;
+        immediate.block = false;
+        CHECK_FALSE(coordinator.acquire_slot(a.name, immediate));
+        AcquireSlotOptions bounded;
+        bounded.timeout = std::chrono::milliseconds{30};
+        CHECK_FALSE(coordinator.acquire_slot(a.name, bounded));
+        const int guarded_queries = resident->guarded_query_count.load();
+        release.set_value();
+        REQUIRE(loading.get());
+        CHECK(guarded_queries == 0);
+        CHECK(coordinator.is_ready(a.name));
+    }
+    SECTION("reclamation waits for the next hardware publication before eviction") {
+        coordinator.update_vram_observation(5000, 9000);
+        std::promise<void> reclaimed;
+        resident->reclaim_gate = [&] {
+            resident->vram_mb.fetch_add(1000);
+            reclaimed.set_value();
+        };
+        auto publishing = std::async(std::launch::async, [&] {
+            reclaimed.get_future().wait();
+            std::this_thread::sleep_for(std::chrono::milliseconds{750});
+            coordinator.update_vram_observation(4000, 9000);
+        });
+        const auto loaded = coordinator.swap_to(b.name);
+        publishing.get();
+        REQUIRE(loaded);
+        REQUIRE(coordinator.is_loaded(a.name));
+        CHECK(coordinator.is_loaded(b.name));
+    }
+    SECTION("backend exception clears admission barrier") {
+        resident->reclaim_throws.store(true);
+        CHECK_FALSE(coordinator.swap_to(b.name));
+        const auto states = coordinator.residency();
+        REQUIRE(states.size() == 1);
+        CHECK_FALSE(states[0].resizing);
+        AcquireSlotOptions options;
+        options.block = false;
+        const auto slot = coordinator.acquire_slot(a.name, options);
+        REQUIRE(slot);
+        REQUIRE(coordinator.release_slot(a.name, *slot));
+    }
 }

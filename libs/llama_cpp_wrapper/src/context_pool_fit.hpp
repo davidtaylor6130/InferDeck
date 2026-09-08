@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 
 #include "foundation/result.hpp"
@@ -7,6 +8,10 @@
 #include "model/ibackend.hpp"
 
 namespace inferdeck::llama_wrapper {
+
+[[nodiscard]] foundation::Result<std::size_t> context_pool_device_memory_bytes(
+    const llama_context* target_context,
+    const llama_context* draft_context);
 
 [[nodiscard]] foundation::Result<int> fit_context_pool(
     const std::filesystem::path& model_path,

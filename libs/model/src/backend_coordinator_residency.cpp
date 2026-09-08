@@ -7,6 +7,7 @@
 #include <limits>
 #include <thread>
 #include <utility>
+#include <unordered_set>
 
 namespace inferdeck::model {
 
@@ -39,7 +40,8 @@ bool BackendCoordinator::is_loaded(const std::string& name) const {
 bool BackendCoordinator::is_ready(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto backend = instances_.find(name);
-    return backend != instances_.end() && backend->second &&
+    return !resizing_models_.contains(name) &&
+        backend != instances_.end() && backend->second &&
         backend->second->is_loaded() && backend->second->execution_healthy();
 }
 
@@ -92,7 +94,8 @@ std::vector<ResidencyInfo> BackendCoordinator::residency() const {
                        to_string(info.residency), info.admission_pool,
                        info.concurrency_limit, info.memory_required_mb,
                        info.eviction_eligible,
-                       backend->n_slots(), backend->n_free_slots(),
+                       backend->n_slots(),
+                       resizing_models_.contains(name) ? 0 : backend->n_free_slots(),
                        active == active_requests_by_model_.end() ? 0 : active->second,
                        backend->estimate_vram_mb(backend->n_slots()),
                        current_loaded_ && *current_loaded_ == name,
@@ -285,6 +288,71 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
                 : name + " fits configured VRAM budget";
             return foundation::Ok();
         }
+    }
+
+    std::unordered_set<std::string> reclaim_attempts;
+    while (!control.is_cancelled() && !control.is_expired()) {
+        std::string candidate;
+        IBackend* backend = nullptr;
+        bool had_observation = false;
+        int previous_observed_mb = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (available_vram_locked() >= required) return foundation::Ok();
+            for (const auto& [loaded_name, instance] : instances_) {
+                const auto active = active_requests_by_model_.find(loaded_name);
+                if (loaded_name == name || resizing_models_.contains(loaded_name) ||
+                    reclaim_attempts.contains(loaded_name) ||
+                    !instance || !instance->is_loaded() || !instance->execution_healthy() ||
+                    (active != active_requests_by_model_.end() && active->second > 0) ||
+                    instance->estimate_vram_mb(instance->n_slots()) <= 0 ||
+                    !instance->can_reclaim_idle_context()) continue;
+                candidate = loaded_name;
+                backend = instance.get();
+                reclaim_attempts.insert(candidate);
+                resizing_models_.insert(candidate);
+                had_observation = live_vram_observation_fresh_locked();
+                previous_observed_mb = observed_vram_used_mb_;
+                break;
+            }
+        }
+        if (candidate.empty()) break;
+        priority_allowed = require_priority_session_allows(name);
+        if (!priority_allowed) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            resizing_models_.erase(candidate);
+            cv_.notify_all();
+            return priority_allowed;
+        }
+        foundation::Result<bool> reclaimed = false;
+        try {
+            reclaimed = backend->reclaim_idle_context(required, control);
+        } catch (const std::exception& error) {
+            reclaimed = foundation::Err<bool>(foundation::ErrorCode::Internal,
+                std::string("idle context reclamation failed: ") + error.what());
+        } catch (...) {
+            reclaimed = foundation::Err<bool>(foundation::ErrorCode::Internal,
+                "idle context reclamation failed");
+        }
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (reclaimed && *reclaimed) {
+                last_resource_decision_ = "reclaimed idle context from " + candidate + " for " + name;
+                invalidate_vram_observation_locked();
+                ++resource_generation_;
+                if (had_observation) {
+                    const auto deadline = std::min(control.deadline,
+                        clock::now() + live_vram_observation_ttl);
+                    cv_.wait_until(lock, deadline, [&] {
+                        return live_vram_observation_fresh_locked() &&
+                            observed_vram_used_mb_ < previous_observed_mb;
+                    });
+                }
+            }
+            resizing_models_.erase(candidate);
+        }
+        cv_.notify_all();
+        if (!reclaimed) return foundation::Err<void>(reclaimed.error().code, reclaimed.error().message);
     }
 
     while (true) {

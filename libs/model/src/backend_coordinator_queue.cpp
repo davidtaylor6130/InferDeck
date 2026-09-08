@@ -32,9 +32,9 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
     std::unique_lock<std::mutex> lock(mutex_);
     const auto deadline = clock::now() + opts.timeout;
     if (!opts.block) {
-        if (draining_models_.contains(name)) {
+        if (draining_models_.contains(name) || resizing_models_.contains(name)) {
             return foundation::Err<int>(foundation::ErrorCode::Unavailable,
-                                         "model is draining: " + name);
+                                         (draining_models_.contains(name) ? "model is draining: " : "model is resizing: ") + name);
         }
         auto it = instances_.find(name);
         if (it == instances_.end() || !it->second || !it->second->is_loaded()) {
@@ -80,7 +80,7 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             return foundation::Err<int>(foundation::ErrorCode::Timeout,
                                          "timeout waiting in request queue: " + name);
         }
-        if (draining_models_.contains(name)) {
+        if (draining_models_.contains(name) || resizing_models_.contains(name)) {
             cv_.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds{100}));
             continue;
         }
@@ -408,7 +408,8 @@ bool BackendCoordinator::request_waits_for_priority_media_locked(
 
 bool BackendCoordinator::waiter_is_actionable_locked(
     const SlotWaiter& waiter) const {
-    if (waiter.preparing ||
+    if (draining_models_.contains(waiter.model) ||
+        resizing_models_.contains(waiter.model) || waiter.preparing ||
         (waiter.retry_after_generation &&
          *waiter.retry_after_generation == resource_generation_)) {
         return false;
@@ -431,9 +432,7 @@ bool BackendCoordinator::waiter_is_actionable_locked(
         if (another_prepare) return false;
         return true;
     }
-    return backend->second->n_free_slots() > 0 &&
-        !draining_models_.contains(waiter.model) &&
-        !resizing_models_.contains(waiter.model);
+    return backend->second->n_free_slots() > 0;
 }
 
 bool BackendCoordinator::waiter_is_next_locked(std::uint64_t id, time_point now) const {
@@ -464,7 +463,8 @@ void BackendCoordinator::erase_waiter_locked(std::uint64_t id) {
 foundation::Result<int> BackendCoordinator::issue_lease_locked(
     const std::string& name, int backend_slot) {
     const auto backend = instances_.find(name);
-    if (backend == instances_.end() || !backend->second ||
+    if (draining_models_.contains(name) || resizing_models_.contains(name) ||
+        backend == instances_.end() || !backend->second ||
         !backend->second->is_loaded() || !backend->second->execution_healthy()) {
         return foundation::Err<int>(foundation::ErrorCode::Unavailable,
                                      "model is not ready: " + name);

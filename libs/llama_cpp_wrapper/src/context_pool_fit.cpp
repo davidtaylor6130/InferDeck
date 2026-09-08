@@ -50,7 +50,7 @@ struct Requirements {
 };
 
 foundation::Result<void> add_breakdown(Requirements& requirements,
-                                        llama_context* context) {
+                                        const llama_context* context) {
   const llama_memory_breakdown breakdown = llama_get_memory_breakdown(context);
   for (const auto& [buffer_type, data] : breakdown) {
     const auto combined = checked_add(data.context, data.compute);
@@ -136,6 +136,41 @@ foundation::Result<bool> check_available(
 }
 
 } // namespace
+
+foundation::Result<std::size_t> context_pool_device_memory_bytes(
+    const llama_context* target_context,
+    const llama_context* draft_context) try {
+  Requirements requirements;
+  if (target_context != nullptr) {
+    if (const auto added = add_breakdown(requirements, target_context); !added) {
+      return std::unexpected(added.error());
+    }
+  }
+  if (draft_context != nullptr) {
+    if (const auto added = add_breakdown(requirements, draft_context); !added) {
+      return std::unexpected(added.error());
+    }
+  }
+
+  std::size_t total = 0;
+  for (const auto& [device, required] : requirements.devices) {
+    (void)device;
+    const auto next = checked_add(total, required);
+    if (!next) {
+      return std::unexpected(next.error());
+    }
+    total = *next;
+  }
+  return total;
+} catch (const std::exception& error) {
+  return foundation::Err<std::size_t>(
+      foundation::ErrorCode::Internal,
+      std::string("context pool memory snapshot failed: ") + error.what());
+} catch (...) {
+  return foundation::Err<std::size_t>(
+      foundation::ErrorCode::Internal,
+      "context pool memory snapshot failed");
+}
 
 foundation::Result<int> fit_context_pool(
     const std::filesystem::path& model_path,
