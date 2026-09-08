@@ -23,6 +23,7 @@ import { useGateway } from '../gateway';
 import type { JobRecord, UsageRow } from '../types';
 import { clamp, compactModel, formatCurrency, formatTokenCount } from '../utils';
 import { DictationUsagePage } from './DictationUsagePage';
+import { SubscriptionSavingsPanel } from '../components/SubscriptionSavingsPanel';
 import { MediaGenerationUsagePage } from './MediaGenerationUsagePage';
 
 export const UsagePage: React.FC<{ section?: DashboardSection }> = ({ section = 'llm' }) => {
@@ -101,6 +102,11 @@ const LlmUsagePage: React.FC = () => {
   );
   const seriesUsage = useMemo(() => tokenUsageFromSeries(selectedModel, series), [selectedModel, series]);
   const rangeCost = series.cost.reduce((sum, value) => sum + value, 0);
+  const allTimeSeries = useMemo(
+    () => buildTokenSeries(llmJobs, ALL_MODELS, DEFAULT_COST_CONFIG, monthly, pricingByModel, defaults.defaults, defaults.fallback, 'all', daily, hourly, Boolean(status?.dailyTokenUsageAllTime)),
+    [llmJobs, monthly, daily, hourly, defaults, status?.dailyTokenUsageAllTime],
+  );
+  const equivalentApiCostCents = Math.round(allTimeSeries.cost.reduce((total, value) => total + value, 0) * 100);
 
   const periodUsage = useMemo(() => {
     const rows = modelNames.filter(model => model !== ALL_MODELS).map((model, index) => {
@@ -185,6 +191,8 @@ const LlmUsagePage: React.FC = () => {
         </p>
       </Panel>
 
+      <SubscriptionSavingsPanel apiCostsCents={equivalentApiCostCents} />
+
       <Panel>
         <SectionTitle title="Per-model usage" aside={TOKEN_RANGE_LABELS[range]} />
         <p className="mt-2 text-xs text-text-muted">
@@ -228,9 +236,9 @@ const LlmUsagePage: React.FC = () => {
                   <DetailItem label="Cost"><span className="text-success-green">{formatCurrency(row.cost)}</span></DetailItem>
                   <DetailItem label="Prompt">{formatTokenCount(row.promptTokens)}</DetailItem>
                   <DetailItem label="Output">{formatTokenCount(row.completionTokens)}</DetailItem>
-                  <DetailItem label="TPS">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : '—'}</DetailItem>
-                  <DetailItem label="Prompt processing">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : '—'}</DetailItem>
-                  <DetailItem label="Peak TPS">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : '—'}</DetailItem>
+                  <DetailItem label="TPS">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</DetailItem>
+                  <DetailItem label="Prompt processing">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</DetailItem>
+                  <DetailItem label="Peak TPS">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</DetailItem>
                 </dl>
               </article>
             ))}
@@ -257,9 +265,9 @@ const LlmUsagePage: React.FC = () => {
                       <td className="py-2 pr-4 text-text-secondary">{row.requests} <span className="text-text-muted">({row.successfulRequests} ok)</span></td>
                       <td className="py-2 pr-4 text-text-secondary">{formatTokenCount(row.promptTokens)}</td>
                       <td className="py-2 pr-4 text-text-secondary">{formatTokenCount(row.completionTokens)}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : '—'}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : '—'}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : '—'}</td>
+                      <td className="py-2 pr-4 text-text-secondary">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</td>
+                      <td className="py-2 pr-4 text-text-secondary">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</td>
+                      <td className="py-2 pr-4 text-text-secondary">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</td>
                       <td className="py-2 text-success-green">{formatCurrency(row.cost)}</td>
                     </tr>
                   );
@@ -411,7 +419,7 @@ const SortableHeader: React.FC<{
         onClick={() => onSort(sortKey)}
         className="rounded text-left hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
       >
-        {label}{selected ? (active.direction === 'asc' ? ' ↑' : ' ↓') : ''}
+        {label}{selected ? (active.direction === 'asc' ? ' Ã¢â€ â€˜' : ' Ã¢â€ â€œ') : ''}
       </button>
     </th>
   );

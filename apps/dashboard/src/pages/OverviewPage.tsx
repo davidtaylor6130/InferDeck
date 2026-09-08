@@ -17,6 +17,12 @@ import {
   type TokenRange,
 } from '../cost';
 import { mergeDailyUsage, useGateway } from '../gateway';
+import {
+  SUBSCRIPTION_SAVINGS_CHANGED_EVENT,
+  calculateSavings,
+  loadCancelledSubscriptions,
+  loadIncludeApiCosts,
+} from '../subscriptionSavings';
 import { usePolling } from '../usePolling';
 import type { JobRecord, StatusPayload, LiveRequest } from '../types';
 import {
@@ -65,6 +71,17 @@ export const OverviewPage: React.FC = () => {
   const [savedCosts, setSavedCosts] = useState<Record<string, ModelCostConfig>>({});
   const [usageRange, setUsageRange] = useState<TokenRange>('all');
   const [cancelError, setCancelError] = useState('');
+  const [savingsRevision, setSavingsRevision] = useState(0);
+
+  useEffect(() => {
+    const refresh = () => setSavingsRevision(value => value + 1);
+    window.addEventListener('storage', refresh);
+    window.addEventListener(SUBSCRIPTION_SAVINGS_CHANGED_EVENT, refresh);
+    return () => {
+      window.removeEventListener('storage', refresh);
+      window.removeEventListener(SUBSCRIPTION_SAVINGS_CHANGED_EVENT, refresh);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -113,9 +130,18 @@ export const OverviewPage: React.FC = () => {
   );
   const totalCost = lifetimeSeries.cost.reduce((sum, value) => sum + value, 0);
   const portfolio = getCostConfigForModel(ALL_MODELS, savedCosts, costDefaults.defaults, costDefaults.fallback);
-  const roiRemaining = Math.max(0, portfolio.breakEvenTarget - totalCost);
+  const savings = useMemo(() => calculateSavings(
+    loadCancelledSubscriptions(),
+    {
+      apiCostsCents: Math.max(0, Math.round(totalCost * 100)),
+      includeApiCosts: loadIncludeApiCosts(),
+      targetCents: Math.max(0, Math.round(portfolio.breakEvenTarget * 100)),
+    },
+  ), [portfolio.breakEvenTarget, savingsRevision, totalCost]);
+  const totalSaved = savings.totalCents / 100;
+  const roiRemaining = Math.max(0, portfolio.breakEvenTarget - totalSaved);
   const roiProgress = portfolio.breakEvenTarget > 0
-    ? Math.min(100, totalCost / portfolio.breakEvenTarget * 100)
+    ? Math.min(100, totalSaved / portfolio.breakEvenTarget * 100)
     : 0;
   const runtimeLabel = swap.swapping
     ? 'Switching'
@@ -286,10 +312,14 @@ export const OverviewPage: React.FC = () => {
         {portfolio.breakEvenTarget > 0 && (
           <div className="mt-4">
             <div className="mb-1 flex justify-between gap-3 text-xs text-text-muted">
-              <span>Break-even progress</span>
+              <span>Break-even progress · {formatCurrency(totalSaved)} saved</span>
               <span>{formatCurrency(roiRemaining)} remaining</span>
             </div>
             <ProgressBar percent={roiProgress} tone="good" />
+            <p className="mt-1 text-xs text-text-muted">
+              {formatCurrency(savings.subscriptionCents / 100)} from cancelled subscriptions
+              {' · '}{savings.includedApiCosts ? 'API-equivalent value included' : 'API-equivalent value excluded'}
+            </p>
           </div>
         )}
         <details className="mt-3 border-t border-border-slate pt-3">
