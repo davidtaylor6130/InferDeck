@@ -89,6 +89,24 @@ For a resident model with calibrated `vram_fixed_mb` and `vram_per_slot_mb`, the
 
 Automatic unified context pooling is measured and bounded. It preserves each request context limit, shares capacity within a model, and may reclaim idle slot cache. Recreating an idle context keeps model weights and a vision projector resident but clears that slot cache. Active slots are protected.
 
+Enable automatic fit on an individual model entry with `kv_unified: true`,
+`context_pool_auto: true`, and `context_pool_size: 0`. Keep `context_size` as
+that model's per-request limit and `n_slots` as its maximum concurrent requests.
+For a manually bounded pool, disable `context_pool_auto` and set a positive
+`context_pool_size`. Automatic mode and a fixed pool size are mutually exclusive.
+
+The pool is shared storage for independent sequences within one model. Different
+models retain separate weights and KV tensors. Physical fit accounts for target,
+draft and execution buffers; it does not promise every slot its maximum context
+simultaneously. Requests wait when their reserved prompt/output capacity cannot
+fit. Idle context reclamation can save a model reload but discards its cached
+conversation state; later requests may need prefill again.
+
+The dashboard's Settings > Configuration & recovery page exposes the VRAM
+reserve. Saving it reloads configuration. Zero disables the extra GPU reserve;
+it does not disable allocation checks or the separate host-memory budget.
+
+
 When no VRAM budget is known, the coordinator retains the conservative single-resident swap behavior.
 
 ## Runtime registration

@@ -45,7 +45,9 @@ Infinity --json`; it does not infer packages from pnpm's storage layout.
 `THIRD_PARTY_NOTICES/` contains direct license, notice, and copyright files
 found for those components and for explicitly provisioned native runtimes.
 `THIRD_PARTY_NOTICES.json` lists every inspected component and reports missing
-notice artifacts. This is a truthful partial inventory. A missing local notice
+notice artifacts. Pinned sherpa-onnx and ONNX Runtime notices are included under `licenses/`,
+with upstream URLs and SHA-256 hashes in `licenses/sources.json`. This remains
+a partial dependency inventory, not a complete transitive licensing audit. A missing local notice
 remains `NOASSERTION` in SPDX and requires separate licensing review. The
 release manifest hashes every packaged file, and `SHA256SUMS.txt` hashes the
 final archive.

@@ -86,11 +86,15 @@ with model recommendations and setup suited to the actual hardware. See the
   together. Lifecycle loads remain serialized.
   `POST /api/inferdeck/v1/swap/to/:name` loads the selected model, evicts only
   the idle capacity it needs, and streams progress to the dashboard over SSE.
+- **Automatic context pools.** Opt-in unified KV capacity fits available GPU
+  memory while preserving per-request limits and isolated conversations. Idle
+  contexts can shrink without unloading model weights. See
+  [pool configuration](docs/architecture.md#residency-and-automatic-expansion).
 - **KV-cache reuse.** Longest-common-prefix prompt matching, so multi-turn
   agent sessions reuse full-attention KV state and hybrid recurrent
   checkpoints instead of re-prefilling the whole conversation each turn.
-- **Honest modality discovery.** Text models advertise text input only until
-  the in-process multimodal projector path is implemented.
+- **Honest modality discovery.** Vision capability follows the configured
+  projector support; text-only models remain text-only.
 
 ### API
 
@@ -138,6 +142,13 @@ requires remote control to be enabled, an exact `control.origins` entry, and
 the separate control token. The browser exchanges that token for an HTTP-only,
 same-site session cookie so native SSE and administrative actions remain
 authenticated.
+
+Usage pages also track cancelled monthly subscriptions separately from
+API-equivalent usage value. Enter the first avoided billing date and an optional
+last date; savings accrue on eligible monthly billing dates without prorating
+partial months. Entries and the shared break-even target persist in this browser.
+The API-equivalent contribution can be included or excluded without changing
+recorded token usage or pricing.
 
 ### Observability & quality
 
