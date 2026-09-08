@@ -1,0 +1,76 @@
+{
+  "aliases": [
+    {
+      "name": "utility",
+      "requiredCapabilities": [
+        "chat_completions",
+        "responses"
+      ],
+      "requiredContextSize": 4096,
+      "target": "lfm2.5-1.2b-instruct"
+    },
+    {
+      "name": "everyday",
+      "requiredCapabilities": [
+        "chat_completions",
+        "responses"
+      ],
+      "requiredContextSize": 16384,
+      "target": "qwen3.5-4b"
+    },
+    {
+      "name": "compact-coder",
+      "requiredCapabilities": [
+        "chat_completions",
+        "responses"
+      ],
+      "requiredContextSize": 32768,
+      "target": "ornith-1.5-9b"
+    },
+    {
+      "name": "fast",
+      "requiredCapabilities": [
+        "chat_completions",
+        "responses"
+      ],
+      "requiredContextSize": 32768,
+      "target": "ornith-1.5-35b-a3b-fast"
+    },
+    {
+      "name": "deep",
+      "requiredCapabilities": [
+        "chat_completions",
+        "responses"
+      ],
+      "requiredContextSize": 32768,
+      "target": "qwen3.8-27b-deep"
+    },
+    {
+      "name": "ultra",
+      "requiredCapabilities": [
+        "chat_completions",
+        "responses"
+      ],
+      "requiredContextSize": 32768,
+      "target": "qwen3.8-27b-q8"
+    },
+    {
+      "name": "small-model",
+      "requiredCapabilities": [
+        "chat_completions",
+        "responses"
+      ],
+      "requiredContextSize": 4096,
+      "target": "qwen2.5-0.5b-instruct"
+    },
+    {
+      "name": "n8n-model",
+      "requiredCapabilities": [
+        "chat_completions",
+        "responses"
+      ],
+      "requiredContextSize": 100000,
+      "target": "qwen3.6-35b-a3b"
+    }
+  ]
+}
