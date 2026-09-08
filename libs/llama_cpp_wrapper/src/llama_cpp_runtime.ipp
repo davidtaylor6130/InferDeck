@@ -231,6 +231,27 @@ Result<void> LlamaCppModel::load(
   return Result<void>{};
 }
 
+llama_context_params LlamaCppModel::shared_context_params_locked(int capacity) const {
+  llama_context_params cparams = llama_context_default_params();
+  cparams.n_ctx      = static_cast<std::uint32_t>(capacity);
+  cparams.n_seq_max  = static_cast<std::uint32_t>(std::max(1, info_.n_slots));
+  cparams.kv_unified = cfg_.kv_unified;
+  cparams.n_threads  = cfg_.n_threads;
+  cparams.n_batch    = static_cast<std::uint32_t>(std::max(1, cfg_.n_batch));
+  cparams.n_ubatch   = static_cast<std::uint32_t>(std::max(1, cfg_.n_ubatch));
+  cparams.flash_attn_type = flash_attn_from_string(cfg_.flash_attn);
+  cparams.offload_kqv = cfg_.kv_offload;
+  cparams.op_offload  = cfg_.op_offload;
+  cparams.swa_full    = cfg_.swa_full;
+  cparams.embeddings  = info_.supports("embeddings");
+  cparams.type_k      = cache_type_from_string(cfg_.cache_type_k);
+  cparams.type_v      = cache_type_from_string(cfg_.cache_type_v);
+  cparams.n_rs_seq    = cfg_.mtp_enabled
+      ? static_cast<std::uint32_t>(std::max(1, cfg_.mtp_draft_tokens))
+      : 0;
+  return cparams;
+}
+
 Result<void> LlamaCppModel::init_shared_context_locked(
     const llama_model_params& model_params,
     const inferdeck::model::LifecycleControl& control,
@@ -261,23 +282,7 @@ Result<void> LlamaCppModel::init_shared_context_locked(
         *automatic_max_capacity);
   }
 
-  llama_context_params cparams = llama_context_default_params();
-  cparams.n_ctx      = static_cast<std::uint32_t>(total_ctx);
-  cparams.n_seq_max  = static_cast<std::uint32_t>(n_slots);
-  cparams.kv_unified = cfg_.kv_unified;
-  cparams.n_threads  = cfg_.n_threads;
-  cparams.n_batch    = static_cast<std::uint32_t>(std::max(1, cfg_.n_batch));
-  cparams.n_ubatch   = static_cast<std::uint32_t>(std::max(1, cfg_.n_ubatch));
-  cparams.flash_attn_type = flash_attn_from_string(cfg_.flash_attn);
-  cparams.offload_kqv = cfg_.kv_offload;
-  cparams.op_offload  = cfg_.op_offload;
-  cparams.swa_full    = cfg_.swa_full;
-  cparams.embeddings  = info_.supports("embeddings");
-  cparams.type_k      = cache_type_from_string(cfg_.cache_type_k);
-  cparams.type_v      = cache_type_from_string(cfg_.cache_type_v);
-  cparams.n_rs_seq    = cfg_.mtp_enabled
-      ? static_cast<std::uint32_t>(std::max(1, cfg_.mtp_draft_tokens))
-      : 0;
+  llama_context_params cparams = shared_context_params_locked(total_ctx);
 
   LOG_INFO("llama_shared_context_config",
            "model={} n_slots={} ctx_per_slot={} total_ctx={} n_seq_max={} kv_unified={} "
@@ -568,6 +573,22 @@ Result<bool> LlamaCppModel::reclaim_idle_context(
   model_params.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
   model_params.load_mtp = cfg_.mtp_enabled;
 
+  const int effective_reserve = cfg_.vram_safety_margin_mb + additional_reserve_mb;
+  const Result<int> preflight = fit_context_pool(
+      resolved_gguf_path_, model_params, shared_context_params_locked(old_capacity),
+      cfg_.mtp_enabled, minimum_pool, old_capacity, effective_reserve, control,
+      shared_ctx_, draft_ctx_);
+  if (!preflight) {
+    if (preflight.error().code == ErrorCode::OutOfMemory) return false;
+    return Result<bool>(std::unexpect, preflight.error());
+  }
+  if (control.is_cancelled() || control.is_expired()) {
+    return Result<bool>(std::unexpect, make_error(
+        control.is_cancelled() ? ErrorCode::Cancelled : ErrorCode::Timeout,
+        "idle context reclamation cancelled or expired before recreation"));
+  }
+  if (*preflight >= old_capacity) return false;
+
   const auto clear_contexts = [&]() {
     if (scheduler_) {
       scheduler_->stop();
@@ -590,11 +611,12 @@ Result<bool> LlamaCppModel::reclaim_idle_context(
       slots_[index].sequence_id = index;
     }
   };
-  const auto initialize = [&](int maximum_capacity, int reserve_mb)
+  const auto initialize = [&](int maximum_capacity, int reserve_mb,
+                              const inferdeck::model::LifecycleControl& operation_control)
       -> Result<void> {
     try {
       return init_shared_context_locked(
-          model_params, {}, maximum_capacity, reserve_mb);
+          model_params, operation_control, maximum_capacity, reserve_mb);
     } catch (const std::exception& error) {
       return Result<void>(std::unexpect, make_error(
           ErrorCode::Internal,
@@ -606,8 +628,11 @@ Result<bool> LlamaCppModel::reclaim_idle_context(
   };
   const auto recover = [&]() -> Result<void> {
     clear_contexts();
+    inferdeck::model::LifecycleControl recovery_control;
+    recovery_control.deadline = inferdeck::model::LifecycleControl::clock::now() +
+        std::chrono::seconds(30);
     const Result<void> recovered =
-        initialize(old_capacity, cfg_.vram_safety_margin_mb);
+        initialize(old_capacity, cfg_.vram_safety_margin_mb, recovery_control);
     if (!recovered) {
       clear_contexts();
       LOG_ERROR("context_pool_recovery_failed",
@@ -618,9 +643,7 @@ Result<bool> LlamaCppModel::reclaim_idle_context(
   };
 
   clear_contexts();
-  const int effective_reserve =
-      cfg_.vram_safety_margin_mb + additional_reserve_mb;
-  const Result<void> resized = initialize(old_capacity, effective_reserve);
+  const Result<void> resized = initialize(*preflight, effective_reserve, control);
   if (!resized) {
     LOG_WARN("context_pool_reclaim_fit_failed",
              "model={} capacity={} additional_reserve_mb={} error={}",
@@ -629,6 +652,10 @@ Result<bool> LlamaCppModel::reclaim_idle_context(
     const Result<void> recovered = recover();
     if (!recovered) {
       return Result<bool>(std::unexpect, recovered.error());
+    }
+    if (resized.error().code == ErrorCode::Cancelled ||
+        resized.error().code == ErrorCode::Timeout) {
+      return Result<bool>(std::unexpect, resized.error());
     }
     return false;
   }
@@ -729,7 +756,7 @@ int LlamaCppModel::n_free_slots() const noexcept {
 
 bool LlamaCppModel::execution_healthy() const {
   std::lock_guard lock(mtx_);
-  return loaded_.load() && (!info_.supports("chat_completions") ||
+  return loaded_.load() && shared_ctx_ != nullptr && (!info_.supports("chat_completions") ||
       (scheduler_ && scheduler_->healthy()));
 }
 
@@ -739,8 +766,8 @@ Result<int> LlamaCppModel::acquire_slot() {
     return Result<int>(std::unexpect,
         make_error(ErrorCode::Internal, "model not loaded"));
   }
-  if (info_.supports("chat_completions") &&
-      (!scheduler_ || !scheduler_->healthy())) {
+  if (shared_ctx_ == nullptr || (info_.supports("chat_completions") &&
+      (!scheduler_ || !scheduler_->healthy()))) {
     return Result<int>(std::unexpect,
         make_error(ErrorCode::Unavailable, "model execution failed; reload required"));
   }

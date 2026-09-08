@@ -427,7 +427,7 @@ TEST_CASE("SlotTask keeps checkpoint storage alive",
 }
 
 // ---------------------------------------------------------------------------
-// Recurrent-checkpoint tests — require a real model.
+// Recurrent-checkpoint tests â€” require a real model.
 // Run with: ctest -L unit -R "recurrent" --tests-regex . -V
 // Or explicitly: ./llama_cpp_model_tests "[requires_model]"
 // ---------------------------------------------------------------------------
@@ -1482,6 +1482,65 @@ TEST_CASE("Idle automatic pool reclamation preserves a CPU model",
   REQUIRE(after_slot);
   REQUIRE(model.predict(*after_slot, request));
   REQUIRE(model.release_slot(*after_slot));
+  REQUIRE(model.unload());
+  LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("No-gain GPU reclamation preserves the idle prompt cache",
+          "[llama][pool-reclaim-no-gain][.][requires_model]") {
+  const std::string path = test_model_path();
+  if (path.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  if (std::getenv("INFERDECK_TEST_CPU_ONLY")) SKIP("GPU context required");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+  ModelInfo info;
+  info.name = "pool-reclaim-cache";
+  info.gguf_path = path;
+  info.n_slots = 2;
+  info.context_size = 2048;
+  info.context_pool_auto = true;
+  LlamaCppConfig config = test_runtime_config();
+  config.kv_unified = true;
+  config.n_gpu_layers = 99;
+  config.kv_offload = true;
+  config.op_offload = true;
+  config.vram_safety_margin_mb = 0;
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+  InferenceRequest request;
+  std::string prompt;
+  for (int index = 0; index < 128; ++index) prompt += " hello";
+  prompt += " Reply OK.";
+  request.messages = {ChatMessage{"user", prompt}};
+  request.max_output_tokens = 4;
+  request.sampling.temperature = 0.0f;
+  const foundation::Result<int> first_slot = model.acquire_slot();
+  REQUIRE(first_slot);
+  const foundation::Result<InferenceResult> first = model.predict(*first_slot, request);
+  REQUIRE(first);
+  REQUIRE(model.release_slot(*first_slot));
+  int cancellation_checks = 0;
+  LifecycleControl during_preflight;
+  during_preflight.cancelled = [&] { return ++cancellation_checks >= 4; };
+  const foundation::Result<bool> cancelled_reclaim =
+      model.reclaim_idle_context(1, during_preflight);
+  REQUIRE_FALSE(cancelled_reclaim);
+  CHECK(cancelled_reclaim.error().code == ErrorCode::Cancelled);
+  const foundation::Result<bool> impossible_reclaim =
+      model.reclaim_idle_context(std::numeric_limits<int>::max(), {});
+  REQUIRE(impossible_reclaim);
+  CHECK_FALSE(*impossible_reclaim);
+  const foundation::Result<bool> reclaimed = model.reclaim_idle_context(1, {});
+  REQUIRE(reclaimed);
+  CHECK_FALSE(*reclaimed);
+  CHECK(model.execution_healthy());
+  const foundation::Result<int> second_slot = model.acquire_slot();
+  REQUIRE(second_slot);
+  const foundation::Result<InferenceResult> repeated = model.predict(*second_slot, request);
+  REQUIRE(repeated);
+  CHECK(repeated->cached_prompt_tokens >= first->prompt_tokens - 2);
+  CHECK(repeated->text == first->text);
+  REQUIRE(model.release_slot(*second_slot));
   REQUIRE(model.unload());
   LlamaCppModel::shutdown_backend();
 }

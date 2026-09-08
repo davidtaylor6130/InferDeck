@@ -118,7 +118,7 @@ public:
   static void shutdown_backend();
 
 private:
-  // Per-slot bookkeeping (no llama_context here — all slots share shared_ctx_)
+  // Per-slot bookkeeping (no llama_context here â€” all slots share shared_ctx_)
   struct SlotState {
     int sequence_id{-1};
     bool busy{false};
@@ -131,6 +131,7 @@ private:
     bool mtp_cache_synced{true};
   };
 
+  llama_context_params shared_context_params_locked(int capacity) const;
   inferdeck::foundation::Result<void> init_shared_context_locked(
       const llama_model_params& model_params,
       const inferdeck::model::LifecycleControl& control,

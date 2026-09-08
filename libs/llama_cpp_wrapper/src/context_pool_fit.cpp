@@ -88,7 +88,8 @@ foundation::Result<void> add_breakdown(Requirements& requirements,
 foundation::Result<bool> check_available(
     const Requirements& requirements,
     int capacity,
-    int vram_safety_margin_mb) {
+    int vram_safety_margin_mb,
+    const Requirements& reclaimable) {
   bool fits = true;
   if (requirements.host > 0) {
     ggml_backend_dev_t cpu =
@@ -104,6 +105,9 @@ foundation::Result<bool> check_available(
       return foundation::Err<bool>(foundation::ErrorCode::Internal,
                                    "host memory availability is unknown");
     }
+    const auto credited = checked_add(free, reclaimable.host);
+    if (!credited) return std::unexpected(credited.error());
+    free = std::min(total, *credited);
     constexpr std::size_t margin = 2ULL * kGib;
     const bool device_fits = free >= margin &&
                              requirements.host <= free - margin;
@@ -124,6 +128,11 @@ foundation::Result<bool> check_available(
       return foundation::Err<bool>(foundation::ErrorCode::Internal,
                                    "device memory availability is unknown");
     }
+    const auto existing = reclaimable.devices.find(device);
+    const std::size_t credit = existing == reclaimable.devices.end() ? 0 : existing->second;
+    const auto credited = checked_add(free, credit);
+    if (!credited) return std::unexpected(credited.error());
+    free = std::min(total, *credited);
     const bool device_fits = free >= margin && required <= free - margin;
     fits = fits && device_fits;
     foundation::LOG_INFO(
@@ -180,7 +189,9 @@ foundation::Result<int> fit_context_pool(
     int minimum_capacity,
     int maximum_capacity,
     int vram_safety_margin_mb,
-    const model::LifecycleControl& control) try {
+    const model::LifecycleControl& control,
+    const llama_context* reclaimable_target,
+    const llama_context* reclaimable_draft) try {
   if (model_path.empty() || minimum_capacity <= 0 ||
       maximum_capacity < minimum_capacity || vram_safety_margin_mb < 0) {
     return foundation::Err<int>(foundation::ErrorCode::InvalidArgument,
@@ -218,6 +229,14 @@ foundation::Result<int> fit_context_pool(
                                 "context pool metadata model load failed");
   }
 
+  Requirements reclaimable;
+  for (const llama_context* context : {reclaimable_target, reclaimable_draft}) {
+    if (context != nullptr) {
+      const auto added = add_breakdown(reclaimable, context);
+      if (!added) return std::unexpected(added.error());
+    }
+  }
+  int selected_actual_capacity = 0;
   int probe_count = 0;
   const auto probe = [&](int capacity) -> foundation::Result<bool> {
     if (const auto lifecycle = check_lifecycle(control); !lifecycle) {
@@ -257,7 +276,16 @@ foundation::Result<int> fit_context_pool(
       return foundation::Err<bool>(foundation::ErrorCode::Internal,
           "context pool memory estimate is empty");
     }
-    return check_available(requirements, capacity, vram_safety_margin_mb);
+    const auto fits = check_available(requirements, capacity, vram_safety_margin_mb, reclaimable);
+    if (fits && *fits) {
+      const std::uint32_t actual = llama_n_ctx(target.get());
+      if (actual > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+        return foundation::Err<bool>(foundation::ErrorCode::InvalidArgument,
+                                     "rounded context capacity exceeds supported range");
+      }
+      selected_actual_capacity = std::max(selected_actual_capacity, static_cast<int>(actual));
+    }
+    return fits;
   };
 
   const auto minimum_fits = probe(minimum_capacity);
@@ -301,9 +329,9 @@ foundation::Result<int> fit_context_pool(
 
   foundation::LOG_INFO(
       "context_pool_fit_selected",
-      "selected_capacity={} minimum_capacity={} maximum_capacity={} probes={}",
-      selected, minimum_capacity, maximum_capacity, probe_count);
-  return selected;
+      "selected_capacity={} requested_capacity={} minimum_capacity={} maximum_capacity={} probes={}",
+      selected_actual_capacity, selected, minimum_capacity, maximum_capacity, probe_count);
+  return selected_actual_capacity;
 } catch (const std::exception& error) {
   return foundation::Err<int>(foundation::ErrorCode::Internal,
       std::string("context pool estimation failed: ") + error.what());

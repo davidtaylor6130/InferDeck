@@ -21,6 +21,8 @@ namespace inferdeck::llama_wrapper {
     int minimum_capacity,
     int maximum_capacity,
     int vram_safety_margin_mb,
-    const model::LifecycleControl& control);
+    const model::LifecycleControl& control,
+    const llama_context* reclaimable_target = nullptr,
+    const llama_context* reclaimable_draft = nullptr);
 
 } // namespace inferdeck::llama_wrapper
