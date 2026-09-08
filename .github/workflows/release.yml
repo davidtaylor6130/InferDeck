@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Build only — skip publishing the GitHub Release'
+        description: 'Build only - skip publishing the GitHub Release'
         type: boolean
         default: true
 
@@ -146,7 +146,7 @@ jobs:
             Where-Object Name -NotIn @('fmtd.dll', 'spdlogd.dll') |
             Copy-Item -Destination dist\
 
-          # vcpkg runtime DLLs (x64-windows is a dynamic triplet) — already
+          # vcpkg runtime DLLs (x64-windows is a dynamic triplet) - already
           # included above since vcpkg copies them to bin\Release\ on Windows,
           # but copy from vcpkg_installed as a fallback in case any are missing.
           $vcpkgBin = "build\vcpkg_installed\x64-windows\bin"
@@ -186,6 +186,9 @@ jobs:
         shell: pwsh
         run: .\Testing\Test-PackagedGateway.ps1 -Gateway dist\inferdeck-gateway.exe
 
+      - name: Collect third-party notices
+        shell: pwsh
+        run: .\scripts\Collect-ThirdPartyNotices.ps1 -OutputDir dist -VcpkgInstalledDir build\vcpkg_installed -SherpaRoot $env:INFERDECK_SHERPA_ONNX_ROOT
       - name: Generate package metadata
         shell: pwsh
         run: .\scripts\New-ReleaseMetadata.ps1 -DistDir dist -OutputDir dist -VcpkgInstalledDir build\vcpkg_installed

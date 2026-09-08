@@ -37,8 +37,18 @@ track a branch, `latest`, or an unverified installer.
 The release workflow emits `DEPENDENCIES.json`, `SBOM.spdx.json`,
 `release-manifest.json`, and `SHA256SUMS.txt`. The dependency manifest records
 locked-input hashes, exact installed vcpkg versions, and submodule commits. The
-SPDX 2.3 document records the packaged dependency graph. The release manifest
-hashes every packaged file, and `SHA256SUMS.txt` hashes the final archive.
+SPDX 2.3 document records resolved vcpkg packages, submodule commits, and the
+dashboard's resolved production dependency closure. The notice collector reads
+that JavaScript closure from `pnpm --filter dashboard list --prod --depth
+Infinity --json`; it does not infer packages from pnpm's storage layout.
+
+`THIRD_PARTY_NOTICES/` contains direct license, notice, and copyright files
+found for those components and for explicitly provisioned native runtimes.
+`THIRD_PARTY_NOTICES.json` lists every inspected component and reports missing
+notice artifacts. This is a truthful partial inventory. A missing local notice
+remains `NOASSERTION` in SPDX and requires separate licensing review. The
+release manifest hashes every packaged file, and `SHA256SUMS.txt` hashes the
+final archive.
 
 Builds are expected to differ in PE timestamps and debug metadata until the
 native toolchain supports deterministic linking for the complete vendored
