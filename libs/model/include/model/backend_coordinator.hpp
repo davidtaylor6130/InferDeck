@@ -27,6 +27,9 @@ struct AcquireSlotOptions {
     std::function<bool()> cancelled{};
     std::string reservation_key{};
     std::function<foundation::Result<void>()> prepare{};
+    std::function<foundation::Result<RequestDemand>()> demand{};
+    std::function<foundation::Result<void>(
+        const RequestDemand&, const LifecycleControl&)> prepare_capacity{};
 };
 
 struct QueueInfo {
@@ -126,6 +129,12 @@ public:
     [[nodiscard]] bool priority_session_matches(
         const std::string& key, const std::string& model) const;
 
+    foundation::Result<RequestDemand> estimate_request_demand(
+        const std::string& name, const InferenceRequest& req) const;
+    foundation::Result<void> prepare_request_capacity(
+        const std::string& name, const RequestDemand& demand,
+        const LifecycleControl& control);
+
     foundation::Result<InferenceResult> predict(
         const std::string& name, int slot_id, const InferenceRequest& req,
         const std::atomic<bool>* cancel = nullptr);
@@ -182,11 +191,18 @@ private:
         bool preparing{false};
         bool prepared{false};
         std::optional<std::uint64_t> retry_after_generation{};
+        bool demand_prepared{false};
+        bool capacity_prepared{false};
+        std::optional<RequestDemand> demand;
+        int max_aggregate_context{0};
+        int max_aggregate_sequences{0};
     };
 
     struct ActiveLease {
         std::string model;
         int backend_slot{0};
+        int context_reservation{0};
+        int sequence_reservation{0};
     };
 
     bool priority_media_active_locked() const;
@@ -199,7 +215,7 @@ private:
     bool waiter_is_actionable_locked(const SlotWaiter& waiter) const;
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
-    foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot);
+    foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot, const RequestDemand* demand = nullptr);
     foundation::Result<int> backend_slot_for_lease_locked(
         const std::string& name, int lease_id) const;
     foundation::Result<void> unload_with_control(
@@ -207,7 +223,8 @@ private:
     foundation::Result<void> swap_to_with_control(
         const std::string& name, const LifecycleControl& control);
     foundation::Result<void> prepare_capacity_for(
-        const std::string& name, const LifecycleControl& control);
+        const std::string& name, const LifecycleControl& control,
+        bool force_idle_reclaim = false);
     foundation::Result<void> require_priority_session_allows(
         const std::string& name);
     int estimated_vram_locked() const;
@@ -224,6 +241,8 @@ private:
     int active_requests_{0};
     std::unordered_map<std::string, int> active_requests_by_model_;
     std::unordered_map<int, ActiveLease> active_leases_;
+    std::unordered_map<std::string, int> active_context_reservation_by_model_;
+    std::unordered_map<std::string, int> active_sequence_reservation_by_model_;
     std::int64_t next_lease_id_{1};
     std::unordered_set<std::string> draining_models_;
     std::unordered_set<std::string> resizing_models_;
@@ -246,7 +265,7 @@ private:
     };
     std::unordered_map<std::string, PrioritySession> priority_sessions_;
     std::uint64_t next_priority_session_token_{1};
-    std::recursive_mutex swap_mutex_;
+    mutable std::recursive_mutex swap_mutex_;
     std::recursive_mutex sidecar_mutex_;
     std::atomic<bool> swap_in_progress_{false};
     std::atomic<bool> swap_cancel_{false};

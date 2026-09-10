@@ -145,6 +145,7 @@ std::optional<AcquiredGenerationSlot> acquire_generation_slot(
     const httplib::Request& req, httplib::Response& resp,
     const GatewayDeps& deps, int priority,
     const std::string& requested_model, const std::string& resolved_model,
+    const model::InferenceRequest& inference_request,
     std::string reservation_key = {});
 
 struct SwapStartResult {

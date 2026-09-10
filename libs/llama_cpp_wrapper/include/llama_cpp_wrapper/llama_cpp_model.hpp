@@ -74,6 +74,12 @@ public:
 
   const inferdeck::model::ChatTemplateMeta& chat_template_meta() const noexcept override { return chat_template_meta_; }
 
+  inferdeck::foundation::Result<inferdeck::model::RequestDemand> estimate_request_demand(
+      const inferdeck::model::InferenceRequest& request) const override;
+  inferdeck::foundation::Result<void> ensure_request_capacity(
+      const inferdeck::model::RequestDemand& demand,
+      const inferdeck::model::LifecycleControl& control) override;
+
   inferdeck::foundation::Result<void> load() override;
   inferdeck::foundation::Result<void> load(
       const inferdeck::model::LifecycleControl& control) override;
@@ -142,7 +148,7 @@ private:
   // non-system turns are dropped (preserving recency + coherence) until the
   // templated prompt fits the budget. 0 disables truncation.
   inferdeck::foundation::Result<ChatTemplateResult> apply_chat_template(
-      const inferdeck::model::InferenceRequest& req, int max_prompt_tokens = 0);
+      const inferdeck::model::InferenceRequest& req, int max_prompt_tokens = 0) const;
 
   // Per-inference setup: tokenize, KV-state snapshot, sampler construction.
   struct PredictSetup {
@@ -165,6 +171,9 @@ private:
     int checkpoint_capture_pos{0};
     bool mtp_cache_synced{true};
   };
+  inferdeck::foundation::Result<PredictSetup> prepare_prompt(
+      const inferdeck::model::InferenceRequest& req,
+      int request_context_limit) const;
   inferdeck::foundation::Result<PredictSetup> prepare_inference(
       int slot_id, const inferdeck::model::InferenceRequest& req);
 
@@ -177,6 +186,7 @@ private:
   LlamaCppConfig cfg_;
   std::atomic<bool> loaded_{false};
   std::atomic<int> sequence_capacity_{0};
+  std::atomic<int> sequence_capacity_limit_{0};
   std::atomic<int> pool_capacity_{0};
   std::atomic<int> reclaimed_context_vram_mb_{0};
   mutable std::mutex mtx_;        // guards slot state (acquire/release/status/last_prompt_tokens)

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -1649,6 +1650,84 @@ TEST_CASE("JSON object requests provide an explicit object constraint", "[llama]
   CHECK(unconstrained->inputs.json_schema == R"({"$comment":"Unconstrained JSON output"})");
 }
 
+
+TEST_CASE("Automatic context demand grows safely and preserves health",
+          "[llama][auto-concurrency][demand-capacity][.][requires_model]") {
+  const std::string path = test_model_path();
+  if (path.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+
+  ModelInfo info;
+  info.name = "bounded-demand-capacity";
+  info.gguf_path = path;
+  info.n_slots = 8;
+  info.context_size = 32768;
+  info.context_pool_auto = true;
+  info.concurrency_auto = true;
+  LlamaCppConfig config = test_runtime_config();
+  config.kv_unified = true;
+  config.n_batch = 512;
+  config.n_ubatch = 512;
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+  CHECK(model.context_pool_capacity() <= 512);
+  CHECK(model.context_pool_capacity() < info.context_size);
+
+  LifecycleControl control;
+  RequestDemand demand;
+  demand.prompt_positions = 256;
+  demand.output_tokens = 512;
+  demand.required_context = 8192;
+  demand.aggregate_context = 8192;
+  demand.required_sequences = 2;
+  REQUIRE(model.ensure_request_capacity(demand, control));
+  CHECK(model.context_pool_capacity() >= demand.required_context);
+  CHECK(model.context_pool_capacity() <= demand.required_context + config.n_batch);
+  CHECK(model.context_pool_capacity() < info.context_size);
+  CHECK(model.n_slots() >= demand.required_sequences);
+  CHECK(model.can_reclaim_idle_context());
+  const int grown_capacity = model.context_pool_capacity();
+  auto sequence_only = demand;
+  sequence_only.required_sequences = 3;
+  sequence_only.aggregate_sequences = 3;
+  REQUIRE(model.ensure_request_capacity(sequence_only, control));
+  CHECK(model.context_pool_capacity() <= grown_capacity + config.n_batch);
+
+  const auto first = model.acquire_slot();
+  const auto second = model.acquire_slot();
+  REQUIRE(first);
+  REQUIRE(second);
+  CHECK(model.ensure_request_capacity(demand, control));
+
+  RequestDemand larger = demand;
+  larger.required_context = model.context_pool_capacity() + 512;
+  larger.aggregate_context = larger.required_context;
+  CHECK(model.ensure_request_capacity(larger, control).error().code ==
+        foundation::ErrorCode::ResourceBusy);
+
+  InferenceRequest request;
+  request.messages = {ChatMessage{"user", "Reply with only OK."}};
+  request.max_output_tokens = 4;
+  request.sampling.temperature = 0;
+  const auto result = model.predict(*first, request);
+  REQUIRE(result);
+  CHECK_FALSE(result->text.empty());
+
+  REQUIRE(model.release_slot(*first));
+  REQUIRE(model.release_slot(*second));
+  RequestDemand oversized = demand;
+  oversized.required_context = std::numeric_limits<int>::max();
+  oversized.aggregate_context = oversized.required_context;
+  const auto oversized_result = model.ensure_request_capacity(oversized, control);
+  REQUIRE_FALSE(oversized_result);
+  CHECK(oversized_result.error().code == foundation::ErrorCode::OutOfMemory);
+  CHECK(model.execution_healthy());
+
+  REQUIRE(model.unload());
+  LlamaCppModel::shutdown_backend();
+}
+
 TEST_CASE("Automatic sequence fitting exceeds configured slots and preserves output",
           "[llama][auto-concurrency][.][requires_model]") {
   const std::string path = test_model_path();
@@ -1666,8 +1745,18 @@ TEST_CASE("Automatic sequence fitting exceeds configured slots and preserves out
   config.kv_unified = true;
   LlamaCppModel model(info, config);
   REQUIRE(model.load());
+  CHECK(model.n_slots() == 1);
+  CHECK(model.context_pool_capacity() <= config.n_batch);
+  RequestDemand demand;
+  demand.prompt_positions = 128;
+  demand.output_tokens = 128;
+  demand.required_context = 512;
+  demand.aggregate_context = 512;
+  demand.required_sequences = 4;
+  demand.aggregate_sequences = 4;
+  REQUIRE(model.ensure_request_capacity(
+      demand, LifecycleControl{}));
   REQUIRE(model.n_slots() >= 4);
-  REQUIRE(model.context_pool_capacity() >= info.context_size);
   InferenceRequest request;
   request.messages = {ChatMessage{"user", "Reply OK."}};
   request.max_output_tokens = 4;

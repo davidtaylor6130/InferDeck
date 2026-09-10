@@ -262,7 +262,8 @@ void BackendCoordinator::select_primary_locked() {
 }
 
 foundation::Result<void> BackendCoordinator::prepare_capacity_for(
-    const std::string& name, const LifecycleControl& control) {
+    const std::string& name, const LifecycleControl& control,
+    bool force_idle_reclaim) {
     if (control.is_cancelled()) {
         return foundation::Err<void>(foundation::ErrorCode::Cancelled,
                                      "capacity preparation cancelled: " + name);
@@ -283,7 +284,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
             last_resource_decision_ = name + " already resident";
             return foundation::Ok();
         }
-        if (vram_budget_mb_ <= 0 || available_vram_locked() >= required) {
+        if (!force_idle_reclaim && (vram_budget_mb_ <= 0 || available_vram_locked() >= required)) {
             last_resource_decision_ = live_vram_observation_usable_locked()
                 ? name + " fits live GPU headroom"
                 : name + " fits configured VRAM budget";
@@ -299,7 +300,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
         int previous_observed_mb = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (available_vram_locked() >= required) return foundation::Ok();
+            if (!force_idle_reclaim && available_vram_locked() >= required) return foundation::Ok();
             for (const auto& [loaded_name, instance] : instances_) {
                 const auto active = active_requests_by_model_.find(loaded_name);
                 if (loaded_name == name || resizing_models_.contains(loaded_name) ||
@@ -353,8 +354,14 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
             resizing_models_.erase(candidate);
         }
         cv_.notify_all();
+        if (reclaimed && *reclaimed) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (available_vram_locked() >= required) return foundation::Ok();
+        }
         if (!reclaimed) return foundation::Err<void>(reclaimed.error().code, reclaimed.error().message);
     }
+
+    if (force_idle_reclaim) return foundation::Err<void>(foundation::ErrorCode::OutOfMemory, "unable to reclaim idle context for " + name);
 
     while (true) {
         if (control.is_cancelled()) {

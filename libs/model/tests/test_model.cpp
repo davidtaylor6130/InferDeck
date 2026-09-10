@@ -30,6 +30,7 @@ class IModelMock : public IModel {
 public:
     ModelInfo model_info{};
     std::atomic<bool> load_should_fail{false};
+    std::atomic<ErrorCode> load_failure_code{ErrorCode::Internal};
     std::atomic<bool> unload_should_fail{false};
     std::atomic<int> load_delay_ms{0};
     std::atomic<bool> load_started{false};
@@ -70,7 +71,7 @@ public:
         record("load");
         load_started.store(true);
         if (load_should_fail.load()) {
-            return Err<void>(ErrorCode::Internal, "mock load failure");
+            return Err<void>(load_failure_code.load(), "mock load failure");
         }
         if (load_gate) load_gate();
         int delay = load_delay_ms.load();
@@ -2712,4 +2713,328 @@ TEST_CASE("Automatic concurrency admits to backend capacity rather than the role
     CHECK(coordinator.active_request_count() == 3);
     CHECK(coordinator.residency().front().concurrency_limit == 3);
     for (int lease : leases) REQUIRE(coordinator.release_slot(info.name, lease));
+}
+
+TEST_CASE("BackendCoordinator: demand reservations include active leases")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto info = make_info("demand");
+    info.n_slots = 2;
+    info.concurrency_auto = true;
+    info.context_pool_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+
+    std::mutex values_mutex;
+    std::vector<int> aggregate_values;
+    AcquireSlotOptions options;
+    options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+    options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl&) {
+        std::lock_guard lock(values_mutex);
+        aggregate_values.push_back(demand.aggregate_context);
+        return Ok();
+    };
+    const auto first = coordinator.acquire_slot(info.name, options);
+    REQUIRE(first);
+    const auto second = coordinator.acquire_slot(info.name, options);
+    REQUIRE(second);
+    REQUIRE(coordinator.release_slot(info.name, *second));
+    REQUIRE(coordinator.release_slot(info.name, *first));
+    REQUIRE(aggregate_values.size() == 2);
+    CHECK(aggregate_values[0] == 500);
+    CHECK(aggregate_values[1] == 1000);
+}
+TEST_CASE("BackendCoordinator: busy demand waits and cancellation cleans waiter")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto info = make_info("demand-busy");
+    info.n_slots = 2;
+    info.concurrency_auto = true;
+    info.context_pool_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+
+    AcquireSlotOptions first_options;
+    first_options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+    first_options.prepare_capacity = [](const RequestDemand&, const LifecycleControl&) { return Ok(); };
+    const auto first = coordinator.acquire_slot(info.name, first_options);
+    REQUIRE(first);
+
+    std::atomic<bool> cancelled{false};
+    std::atomic<int> attempts{0};
+    std::promise<Result<int>> queued_result;
+    auto queued_future = queued_result.get_future();
+    std::thread queued_worker([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds(5);
+        options.cancelled = [&] { return cancelled.load(); };
+        options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+        options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl&) {
+            CHECK(demand.aggregate_context >= 1000);
+            CHECK(demand.aggregate_sequences >= 2);
+            ++attempts;
+            if (coordinator.active_request_count(info.name) > 0)
+                return Err<void>(ErrorCode::ResourceBusy, "active peer");
+            return Ok();
+        };
+        queued_result.set_value(coordinator.acquire_slot(info.name, options));
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(attempts.load() == 1);
+    CHECK(coordinator.queued_request_count() == 1);
+    REQUIRE(coordinator.release_slot(info.name, *first));
+    REQUIRE(queued_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto second = queued_future.get();
+    REQUIRE(second);
+    REQUIRE(coordinator.release_slot(info.name, *second));
+    queued_worker.join();
+    CHECK(attempts.load() == 2);
+    CHECK(coordinator.queued_request_count() == 0);
+    CHECK(coordinator.active_request_count(info.name) == 0);
+
+    cancelled.store(false);
+    const auto held = coordinator.acquire_slot(info.name, first_options);
+    REQUIRE(held);
+    std::promise<Result<int>> cancelled_result;
+    auto cancelled_future = cancelled_result.get_future();
+    std::thread cancelled_thread([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds(5);
+        options.cancelled = [&] { return cancelled.load(); };
+        options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+        options.prepare_capacity = [](const RequestDemand&, const LifecycleControl&) {
+            return Err<void>(ErrorCode::ResourceBusy, "active peer");
+        };
+        cancelled_result.set_value(coordinator.acquire_slot(info.name, options));
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    cancelled.store(true);
+    REQUIRE(cancelled_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto cancelled_slot = cancelled_future.get();
+    CHECK_FALSE(cancelled_slot);
+    CHECK(cancelled_slot.error().code == ErrorCode::Cancelled);
+    cancelled_thread.join();
+    REQUIRE(coordinator.release_slot(info.name, *held));
+    CHECK(coordinator.queued_request_count() == 0);
+    CHECK(coordinator.active_request_count(info.name) == 0);
+}
+TEST_CASE("BackendCoordinator: demand preflight runs with full current pool")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) { return std::make_unique<IModelMock>(info); });
+    auto info = make_info("full-pool-demand");
+    info.n_slots = 1;
+    info.concurrency_auto = true;
+    info.context_pool_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions first_options;
+    first_options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+    first_options.prepare_capacity = [](const RequestDemand&, const LifecycleControl&) { return Ok(); };
+    const auto first = coordinator.acquire_slot(info.name, first_options);
+    REQUIRE(first);
+    std::atomic<int> attempts{0};
+    std::atomic<int> max_context{0};
+    std::atomic<int> max_sequences{0};
+    std::promise<Result<int>> result_promise;
+    auto result_future = result_promise.get_future();
+    std::thread worker([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds(5);
+        options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+        options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl&) {
+            max_context.store(demand.aggregate_context);
+            max_sequences.store(demand.aggregate_sequences);
+            const int call = ++attempts;
+            if (call == 1) return Err<void>(ErrorCode::ResourceBusy, "active");
+            return Ok();
+        };
+        result_promise.set_value(coordinator.acquire_slot(info.name, options));
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(attempts.load() == 1);
+    CHECK(max_context.load() == 1000);
+    CHECK(max_sequences.load() == 2);
+    CHECK(coordinator.queued_request_count() == 1);
+    REQUIRE(coordinator.release_slot(info.name, *first));
+    REQUIRE(result_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto second = result_future.get();
+    REQUIRE(second);
+    REQUIRE(coordinator.release_slot(info.name, *second));
+    worker.join();
+    CHECK(attempts.load() == 2);
+    CHECK(coordinator.queued_request_count() == 0);
+}
+TEST_CASE("BackendCoordinator: retained demand survives paused capacity callback")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) { return std::make_unique<IModelMock>(info); });
+    auto info = make_info("paused-demand");
+    info.n_slots = 1;
+    info.concurrency_auto = true;
+    info.context_pool_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+
+    AcquireSlotOptions first_options;
+    first_options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+    first_options.prepare_capacity = [](const RequestDemand&, const LifecycleControl&) { return Ok(); };
+    const auto first = coordinator.acquire_slot(info.name, first_options);
+    REQUIRE(first);
+
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool entered = false;
+    bool resume = false;
+    std::atomic<int> calls{0};
+    std::promise<Result<int>> result_promise;
+    auto result_future = result_promise.get_future();
+    std::thread worker([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds(5);
+        options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+        options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl&) {
+            CHECK(demand.aggregate_context == 1000);
+            CHECK(demand.aggregate_sequences == 2);
+            const int call = ++calls;
+            if (call == 1) {
+                std::unique_lock lock(gate_mutex);
+                entered = true;
+                gate_cv.notify_all();
+                gate_cv.wait(lock, [&] { return resume; });
+                return Err<void>(ErrorCode::ResourceBusy, "active peer");
+            }
+            return Ok();
+        };
+        result_promise.set_value(coordinator.acquire_slot(info.name, options));
+    });
+    {
+        std::unique_lock lock(gate_mutex);
+        REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
+    }
+    CHECK(coordinator.active_request_count(info.name) == 1);
+    REQUIRE(coordinator.release_slot(info.name, *first));
+    {
+        std::lock_guard lock(gate_mutex);
+        resume = true;
+    }
+    gate_cv.notify_all();
+    REQUIRE(result_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto second = result_future.get();
+    REQUIRE(second);
+    REQUIRE(coordinator.release_slot(info.name, *second));
+    worker.join();
+    CHECK(calls.load() == 2);
+    CHECK(coordinator.active_request_count(info.name) == 0);
+}
+TEST_CASE("BackendCoordinator: native OOM reclaims idle context before one retry",
+          "[model][coordinator][context-reclaim]") {
+    ModelRegistry registry;
+    IModelMock* resident = nullptr;
+    IModelMock* incoming = nullptr;
+    bool memory_reclaimed = false;
+    int incoming_instances = 0;
+    registry.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        if (info.name == "oom-resident") {
+            resident = backend.get();
+            backend->reclaimable_mb.store(1000);
+            backend->reclaim_gate = [&] {
+                memory_reclaimed = true;
+            };
+        } else {
+            incoming = backend.get();
+            ++incoming_instances;
+            backend->load_should_fail.store(!memory_reclaimed);
+            backend->load_failure_code.store(ErrorCode::OutOfMemory);
+        }
+        return backend;
+    });
+    auto first = make_info("oom-resident");
+    auto second = make_info("oom-incoming");
+    first.vram_required_mb = second.vram_required_mb = 5000;
+    registry.register_model(first);
+    registry.register_model(second);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(20000, 0);
+    REQUIRE(coordinator.swap_to(first.name));
+    REQUIRE(resident != nullptr);
+    REQUIRE(coordinator.swap_to(second.name));
+    CHECK(coordinator.is_loaded(first.name));
+    CHECK(coordinator.is_loaded(second.name));
+    int reclaims = 0;
+    int unloads = 0;
+    int attempts = 0;
+    for (const auto& call : resident->calls) {
+        reclaims += call.method == "reclaim_context";
+        unloads += call.method == "unload";
+    }
+    for (const auto& call : incoming->calls) attempts += call.method == "load";
+    CHECK(reclaims == 1);
+    CHECK(unloads == 0);
+    CHECK(attempts == 1);
+    CHECK(incoming_instances == 2);
+}
+
+TEST_CASE("BackendCoordinator: rechecks capacity after another waiter acquires") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto info = make_info("stale-demand");
+    info.concurrency_auto = info.context_pool_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    std::promise<void> entered;
+    std::promise<void> resume;
+    auto resumed = resume.get_future().share();
+    auto started = entered.get_future();
+    std::atomic<int> calls{0};
+    std::atomic<bool> observed_peer{false};
+    AcquireSlotOptions first_options;
+    first_options.timeout = std::chrono::seconds(3);
+    first_options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+    first_options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl&) {
+        if (++calls == 1) {
+            entered.set_value();
+            resumed.wait_for(std::chrono::seconds(2));
+            return Ok();
+        }
+        if (demand.aggregate_context == 1000 && demand.aggregate_sequences == 2)
+            observed_peer.store(true);
+        if (coordinator.active_request_count() > 0)
+            return Err<void>(ErrorCode::ResourceBusy, "peer active");
+        return Ok();
+    };
+    auto first = std::async(std::launch::async, [&] {
+        return coordinator.acquire_slot(info.name, first_options);
+    });
+    REQUIRE(started.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    AcquireSlotOptions second_options;
+    second_options.timeout = std::chrono::seconds(1);
+    second_options.demand = first_options.demand;
+    second_options.prepare_capacity = [](const RequestDemand&, const LifecycleControl&) { return Ok(); };
+    const auto second = coordinator.acquire_slot(info.name, second_options);
+    resume.set_value();
+    REQUIRE(second);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!observed_peer.load() && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(observed_peer.load());
+    REQUIRE(coordinator.release_slot(info.name, *second));
+    const auto first_lease = first.get();
+    REQUIRE(first_lease);
+    REQUIRE(coordinator.release_slot(info.name, *first_lease));
 }

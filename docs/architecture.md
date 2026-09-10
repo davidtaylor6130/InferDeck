@@ -284,3 +284,8 @@ OpenAI clients                           React dashboard
        │ Vulkan        │ Vulkan         │ GPU          │ CPU/CUDA
        └───────────────┴────────────────┴──────────────┘
 ```
+
+## Request-aware context allocation
+
+Models with `concurrency_auto` start with a small batch-aligned context pool. Each resident text request is rendered and tokenized before its lease is issued. Admission records prompt positions, output budget, context demand, and sequence demand. Requests that fit the current pool continue concurrently. If aggregate demand exceeds the pool, the coordinator waits for the model to become idle and grows context geometrically and adds sequence capacity as needed within the configured context and native sequence limits. Context recreation clears KV and recurrent caches; cache transfer is not transparent. An unspecified `max_tokens` uses the remaining requested context budget.
+`slots` reports currently allocated sequence capacity and does not promise unlimited concurrency.

@@ -34,6 +34,15 @@ struct ChatTemplateMeta {
 
 using InferenceResult = inference::GenerationResult;
 
+struct RequestDemand {
+    int prompt_positions{0};
+    int output_tokens{0};
+    int required_context{0};
+    int required_sequences{1};
+    int aggregate_context{0};
+    int aggregate_sequences{0};
+};
+
 struct EmbeddingTextInput {
     std::string text;
 };
@@ -172,6 +181,16 @@ public:
 class IModel : public IBackend {
 public:
     virtual ~IModel() = default;
+
+    virtual foundation::Result<RequestDemand> estimate_request_demand(
+        const InferenceRequest&) const {
+        return foundation::Ok(RequestDemand{});
+    }
+
+    virtual foundation::Result<void> ensure_request_capacity(
+        const RequestDemand&, const LifecycleControl&) {
+        return foundation::Ok();
+    }
 
     virtual const ChatTemplateMeta& chat_template_meta() const {
         static const ChatTemplateMeta meta{};

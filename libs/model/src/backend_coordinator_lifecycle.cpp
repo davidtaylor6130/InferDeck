@@ -310,6 +310,18 @@ foundation::Result<void> BackendCoordinator::swap_to_with_control(
   if (!priority_allowed) return priority_allowed;
   auto loaded = load_with_lock_deadline(name, control.deadline, control.cancelled);
   if (loaded) return loaded;
+  if (loaded.error().code == foundation::ErrorCode::OutOfMemory &&
+      !control.is_cancelled() && !control.is_expired()) {
+    (void)unload_with_control(name, control);
+    auto reclaimed = prepare_capacity_for(name, control, true);
+    if (reclaimed) {
+      loaded = load_with_lock_deadline(name, control.deadline, control.cancelled);
+      if (loaded) return loaded;
+    } else if (reclaimed.error().code == foundation::ErrorCode::Cancelled ||
+               reclaimed.error().code == foundation::ErrorCode::Timeout) {
+      return reclaimed;
+    }
+  }
 
   const LifecycleControl recovery{
       clock::now() + std::chrono::seconds{30}, {}};

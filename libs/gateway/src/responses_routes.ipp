@@ -66,7 +66,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
     if (!stream) {
         auto acquired = acquire_generation_slot(
             req, resp, deps, parsed->priority, requested_model, model_name,
-            cache_reservation_key);
+            parsed->generation, cache_reservation_key);
         if (!acquired) return;
         auto observation = observe_request(req, resp, deps, "text", false);
         observation.live = acquired->live;
@@ -93,7 +93,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& resp,
     }
     auto acquired = acquire_generation_slot(
         req, resp, deps, parsed->priority, requested_model, model_name,
-        cache_reservation_key);
+        parsed->generation, cache_reservation_key);
     if (!acquired) return;
     auto observation = observe_request(req, resp, deps, "text", true);
     observation.live = acquired->live;

@@ -1,5 +1,47 @@
+Result<inferdeck::model::RequestDemand>
+LlamaCppModel::estimate_request_demand(
+    const InferenceRequest& req) const {
+  const int loaded_n_ctx_seq = info_.concurrency_auto
+      ? std::max(512, info_.context_size)
+      : (cfg_.kv_unified
+          ? std::min(std::max(512, info_.context_size),
+                     static_cast<int>(llama_n_ctx_seq(shared_ctx_)))
+          : static_cast<int>(llama_n_ctx_seq(shared_ctx_)));
+  const int request_context_limit = req.context_window
+      ? std::min(loaded_n_ctx_seq, *req.context_window)
+      : loaded_n_ctx_seq;
+  auto prompt_res = prepare_prompt(req, request_context_limit);
+  if (!prompt_res.has_value()) {
+    return Result<inferdeck::model::RequestDemand>(
+        std::unexpect, prompt_res.error());
+  }
+
+  int prompt_positions = prompt_res->prompt_position_count > 0
+      ? prompt_res->prompt_position_count
+      : static_cast<int>(prompt_res->prompt_tokens.size());
+  if (prompt_positions >= request_context_limit &&
+      cfg_.truncate_prompt && prompt_res->media_chunks.empty()) {
+    maybe_truncate_prompt(prompt_res->prompt_tokens, request_context_limit,
+                          req.max_output_tokens, info_.name);
+    prompt_positions = static_cast<int>(prompt_res->prompt_tokens.size());
+  }
+
+  const int context_budget = std::max(
+      1, request_context_limit - prompt_positions - 1);
+  const int output_tokens = req.max_output_tokens > 0
+      ? std::min(req.max_output_tokens, context_budget)
+      : context_budget;
+
+  inferdeck::model::RequestDemand demand;
+  demand.prompt_positions = prompt_positions;
+  demand.output_tokens = output_tokens;
+  demand.required_context = prompt_positions + output_tokens + 1;
+  demand.required_sequences = 1;
+  return Result<inferdeck::model::RequestDemand>(std::move(demand));
+}
+
 Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
-    const InferenceRequest& req, int max_prompt_tokens) {
+    const InferenceRequest& req, int max_prompt_tokens) const {
   if (!chat_templates_) {
     return Result<ChatTemplateResult>(std::unexpect, make_error(ErrorCode::Internal, "chat templates not initialized"));
   }
@@ -176,23 +218,12 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
 // Tokenizes the request, checks context limits, snapshots per-slot KV state,
 // and initialises a sampler. All of this runs on the HTTP handler thread
 // before the task is handed off to the scheduler.
-Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
-    int slot_id, const InferenceRequest& req) {
+Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_prompt(
+    const InferenceRequest& req, int request_context_limit) const {
   PredictSetup s;
-  // Compute the prompt-token budget so apply_chat_template can drop whole
-  // oldest messages (history-aware truncation, issue #38) before tokenizing.
-  // Mirrors the reserve/target maths in maybe_truncate_prompt, which remains as
-  // a hard safety net for the pathological single-oversized-message case.
-  const int loaded_n_ctx_seq = cfg_.kv_unified
-      ? std::min(std::max(512, info_.context_size), static_cast<int>(llama_n_ctx_seq(shared_ctx_)))
-      : static_cast<int>(llama_n_ctx_seq(shared_ctx_));
-  const int n_ctx_seq = req.context_window
-      ? std::min(loaded_n_ctx_seq, *req.context_window)
-      : loaded_n_ctx_seq;
+  const int n_ctx_seq = request_context_limit;
   int budget = 0;
   if (cfg_.truncate_prompt && n_ctx_seq > 0) {
-    // See maybe_truncate_prompt: clamp bounds must satisfy lo <= hi (UB
-    // otherwise) when n_ctx_seq < 1024.
     const int reserve_hi = n_ctx_seq / 4;
     const int reserve = std::clamp(req.max_output_tokens > 0 ? req.max_output_tokens : 1024,
                                    std::min(256, reserve_hi), reserve_hi);
@@ -362,20 +393,36 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
 
   // Per-slot context window = n_ctx_seq (total context / n_slots as set during load)
   s.n_ctx_seq = n_ctx_seq;
+  return Result<PredictSetup>(std::move(s));
+}
 
+Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
+    int slot_id, const InferenceRequest& req) {
+  const int loaded_n_ctx_seq = info_.concurrency_auto
+      ? std::max(512, info_.context_size)
+      : (cfg_.kv_unified
+          ? std::min(std::max(512, info_.context_size),
+                     static_cast<int>(llama_n_ctx_seq(shared_ctx_)))
+          : static_cast<int>(llama_n_ctx_seq(shared_ctx_)));
+  const int n_ctx_seq = req.context_window
+      ? std::min(loaded_n_ctx_seq, *req.context_window)
+      : loaded_n_ctx_seq;
+  auto prompt_res = prepare_prompt(req, n_ctx_seq);
+  if (!prompt_res.has_value())
+    return Result<PredictSetup>(std::unexpect, prompt_res.error());
+  PredictSetup s = std::move(*prompt_res);
   const int prompt_context = s.prompt_position_count > 0
       ? s.prompt_position_count
-      : n_tokens;
+      : static_cast<int>(s.prompt_tokens.size());
   if (prompt_context >= s.n_ctx_seq) {
-    if (!cfg_.truncate_prompt || has_media)
+    if (!cfg_.truncate_prompt || !s.media_chunks.empty())
       return Result<PredictSetup>(std::unexpect,
           make_error(ErrorCode::ContextLengthExceeded,
                      "This model's maximum context length is " + std::to_string(s.n_ctx_seq) +
                      " tokens. However, your messages resulted in " + std::to_string(prompt_context) +
                      " tokens. Please reduce the length of the messages."));
     maybe_truncate_prompt(s.prompt_tokens, s.n_ctx_seq, req.max_output_tokens, info_.name);
-    n_tokens = static_cast<int>(s.prompt_tokens.size());
-    s.prompt_position_count = n_tokens;
+    s.prompt_position_count = static_cast<int>(s.prompt_tokens.size());
   }
 
   const int ctx_budget = std::max(
@@ -386,7 +433,7 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
   // Snapshot per-slot KV state under the mutex (scheduler may touch these after submit)
   {
     std::lock_guard lk(mtx_);
-    if (!has_media && !slots_[slot_id].sequence_bound)
+    if (s.media_chunks.empty() && !slots_[slot_id].sequence_bound)
     {
       const auto reusable_prefix = [&](const SlotState& slot) -> std::size_t
       {

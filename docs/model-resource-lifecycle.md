@@ -92,3 +92,9 @@ Needle remains disabled until upstream supplies an MSVC-compatible pinned
 library with complete runtime dependencies, or source that builds within the
 pinned InferDeck toolchain. Issue #99 records artifact sizes, symbols, hashes,
 and upstream links. No Needle artifact is shipped by InferDeck Core.
+
+## Request demand and idle growth
+
+A resident llama.cpp request is rendered and tokenized before lease acquisition. Its context and sequence demand is retained while queued, while active leases retain their own reservations. Fitting requests acquire normally and can run together. Growth is performed only after active leases finish, because context recreation clears KV and recurrent caches. Context growth is geometric and bounded by the configured model context, native sequence limit, batch capacity, and actual allocation result. An unspecified `max_tokens` reserves the remaining requested context budget. For `concurrency_auto`, status `slots` reports currently allocated sequences. Idle reclamation can reduce the context pool to its initial batch-sized minimum; recreation discards retained caches.
+
+If a native model load runs out of memory after admission, managed loading can reclaim an idle context and retry once under the original deadline. This retry does not evict another model.

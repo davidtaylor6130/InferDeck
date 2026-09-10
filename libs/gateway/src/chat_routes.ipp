@@ -143,6 +143,7 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     const httplib::Request& req, httplib::Response& resp,
     const GatewayDeps& deps, int priority,
     const std::string& requested_model, const std::string& model_name,
+    const model::InferenceRequest& inference_request,
     std::string reservation_key) {
     AcquiredChatSlot acquired;
     acquired.live = std::make_shared<observability::LiveRequest>();
@@ -178,6 +179,12 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     opts.reservation_key = acquired.reservation_key;
     if (acquired.voice_session_token) opts.priority = 100;
     opts.cancelled = cancelled;
+    opts.demand = [&deps, model_name, inference_request] {
+        return deps.coordinator.estimate_request_demand(model_name, inference_request);
+    };
+    opts.prepare_capacity = [&deps, model_name](const model::RequestDemand& demand, const model::LifecycleControl& control) {
+        return deps.coordinator.prepare_request_capacity(model_name, demand, control);
+    };
     acquired.live->priority = opts.priority;
     if (deps.metrics) deps.metrics->track_request(acquired.live);
     opts.prepare = [&deps, &model_name, requested_model, deadline, cancelled, &acquired] {
@@ -310,10 +317,11 @@ std::optional<AcquiredGenerationSlot> acquire_generation_slot(
     const httplib::Request& req, httplib::Response& resp,
     const GatewayDeps& deps, int priority,
     const std::string& requested_model, const std::string& resolved_model,
+    const model::InferenceRequest& inference_request,
     std::string reservation_key) {
     auto acquired = acquire_chat_slot(req, resp, deps, priority,
                                       requested_model, resolved_model,
-                                      std::move(reservation_key));
+                                      inference_request, std::move(reservation_key));
     if (!acquired) return std::nullopt;
     return AcquiredGenerationSlot{
         acquired->slot_id,
@@ -590,7 +598,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     }
     auto acquired = acquire_generation_slot(
         req, resp, deps, priority, requested_model, model_name,
-        std::move(prompt_cache_key));
+        *inference_request, std::move(prompt_cache_key));
     if (!acquired) return;
     const int slot_id = acquired->slot_id;
     const auto& reservation_key = acquired->reservation_key;

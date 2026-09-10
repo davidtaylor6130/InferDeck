@@ -1,4 +1,5 @@
 #include "model/backend_coordinator.hpp"
+#include "foundation/logging.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -9,6 +10,62 @@
 #include <utility>
 
 namespace inferdeck::model {
+foundation::Result<RequestDemand> BackendCoordinator::estimate_request_demand(
+    const std::string& name, const InferenceRequest& req) const {
+    std::unique_lock<std::recursive_mutex> lifecycle_lock(swap_mutex_);
+    const IModel* model = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second || !it->second->is_loaded())
+            return foundation::Err<RequestDemand>(foundation::ErrorCode::NotFound,
+                                                  "model not loaded: " + name);
+        model = dynamic_cast<const IModel*>(it->second.get());
+        if (!model) return foundation::Err<RequestDemand>(foundation::ErrorCode::InvalidArgument,
+                                                           "backend is not a generation model: " + name);
+    }
+    return model->estimate_request_demand(req);
+}
+
+foundation::Result<void> BackendCoordinator::prepare_request_capacity(
+    const std::string& name, const RequestDemand& demand,
+    const LifecycleControl& control) {
+    std::unique_lock<std::recursive_mutex> lifecycle_lock(swap_mutex_);
+    IModel* model = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second || !it->second->is_loaded())
+            return foundation::Err<void>(foundation::ErrorCode::NotFound,
+                                         "model not loaded: " + name);
+        if (resizing_models_.contains(name))
+            return foundation::Err<void>(foundation::ErrorCode::ResourceBusy,
+                                         "request capacity is already being prepared: " + name);
+        model = dynamic_cast<IModel*>(it->second.get());
+        if (!model) return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                  "backend is not a generation model: " + name);
+        resizing_models_.insert(name);
+    }
+    foundation::Result<void> result;
+    try {
+        result = model->ensure_request_capacity(demand, control);
+    } catch (const std::exception& error) {
+        result = foundation::Err<void>(foundation::ErrorCode::Internal,
+            std::string("request capacity preparation threw: ") + error.what());
+    } catch (...) {
+        result = foundation::Err<void>(foundation::ErrorCode::Internal,
+            "request capacity preparation threw");
+    }
+    foundation::LOG_INFO("request_capacity_prepared", "model={} context={} sequences={} success={}",
+             name, demand.aggregate_context, demand.aggregate_sequences, result.has_value());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        resizing_models_.erase(name);
+        if (result) ++resource_generation_;
+    }
+    cv_.notify_all();
+    return result;
+}
 foundation::Result<InferenceResult> BackendCoordinator::predict(
     const std::string& name, int lease_id, const InferenceRequest& req,
     const std::atomic<bool>* cancel) {
