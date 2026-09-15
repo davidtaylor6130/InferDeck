@@ -5,6 +5,7 @@
 #include "native_runtimes/png.hpp"
 
 #include <stable-diffusion.h>
+#include <native_runtimes/diffusion_runtime_lock.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -35,7 +36,7 @@ model::ModelInfo image_info(model::ModelInfo info) {
     return info;
 }
 
-std::mutex generation_mutex;
+std::mutex& generation_mutex = diffusion_runtime_mutex();
 
 struct ProgressState {
     sd_ctx_t* context{};

@@ -28,6 +28,11 @@ enum class StrictOpenAIRoute : std::size_t {
     AudioTranscriptions,
 };
 
+enum class InferDeckRoute : std::size_t {
+    VideoGenerations,
+    MediaVideoGenerations,
+};
+
 enum class OpenAIDerivativeRoute : std::size_t {
     ChatCompletions,
     Responses,
@@ -63,6 +68,13 @@ inline constexpr std::array<RouteManifestEntry, 4> kOpenAIDerivativeRoutes{{
      R"(^/compat/openai-derivative/v1/images/generations$)"},
 }};
 
+inline constexpr std::array<RouteManifestEntry, 2> kInferDeckRoutes{{
+    {"POST", "/api/inferdeck/v1/video/generations",
+     R"(^/api/inferdeck/v1/video/generations$)"},
+    {"POST", "/api/inferdeck/v1/media/video/generations",
+     R"(^/api/inferdeck/v1/media/video/generations$)"},
+}};
+
 constexpr const RouteManifestEntry& strict_openai_route(
     StrictOpenAIRoute route) {
     return kStrictOpenAIRoutes[static_cast<std::size_t>(route)];
@@ -71,6 +83,10 @@ constexpr const RouteManifestEntry& strict_openai_route(
 constexpr const RouteManifestEntry& openai_derivative_route(
     OpenAIDerivativeRoute route) {
     return kOpenAIDerivativeRoutes[static_cast<std::size_t>(route)];
+}
+
+constexpr const RouteManifestEntry& inferdeck_route(InferDeckRoute route) {
+    return kInferDeckRoutes[static_cast<std::size_t>(route)];
 }
 
 constexpr bool is_strict_openai_route(std::string_view method,

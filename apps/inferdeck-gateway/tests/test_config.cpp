@@ -311,14 +311,17 @@ TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
     CHECK(*qwen->completion_price_per_million == 3.20);
     CHECK(qwen->gguf_path ==
           "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/"
-          "Qwen3.8-27B-Q4_K_M.gguf");
+          "Qwen3.8-27B-UD-IQ4_XS.gguf");
     CHECK(qwen->mmproj_path ==
           "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/"
           "mmproj-F16.gguf");
     CHECK(qwen->n_slots == 4);
-    CHECK(qwen->min_slots == 4);
+    CHECK(qwen->min_slots == 1);
     CHECK(qwen->context_size == 100000);
     CHECK(qwen->vram_required_mb == 30000);
+    CHECK(qwen->kv_unified);
+    CHECK(qwen->context_pool_auto);
+    CHECK(qwen->concurrency_auto);
     REQUIRE(qwen->n_batch);
     REQUIRE(qwen->n_ubatch);
     CHECK(*qwen->n_batch == 2048);
@@ -743,4 +746,41 @@ TEST_CASE("Automatic concurrency requires a fitted llama pool", "[config][pool]"
     CHECK_FALSE(validate_config_text(prefix + "    concurrency_auto: true\n"));
     CHECK_FALSE(validate_config_text(prefix + "    concurrency_auto: invalid\n"));
     CHECK_FALSE(validate_config_text(prefix + "    concurrency_auto: true\n    kv_unified: true\n    context_pool_auto: true\n    runtime: sherpa_onnx\n"));
+}
+TEST_CASE("LTX video runtime contract accepts native artifacts",
+          "[config][video-generation]") {
+    const auto valid = validate_config_text(R"(
+model_registry:
+  - name: ltx-video
+    runtime: ltx_video_cpp
+    modality: video
+    artifacts:
+      diffusion_model: C:/models/ltx-video.gguf
+      llm: C:/models/text-encoder.gguf
+      embeddings_connectors: C:/models/connectors.safetensors
+      vae: C:/models/vae.safetensors
+    n_slots: 1
+)");
+    REQUIRE(valid);
+
+    const auto invalid = validate_config_text(R"(
+model_registry:
+  - name: ltx-video
+    runtime: ltx_video_cpp
+    modality: video
+    capabilities: [image_generation]
+    artifacts:
+      diffusion_model: C:/models/ltx-video.gguf
+)");
+    REQUIRE_FALSE(invalid);
+}
+
+TEST_CASE("Published LTX profile loads through gateway configuration", "[config][video-generation]") {
+    const std::filesystem::path path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "mcp" / "ltx-2.3-profile.example.yml";
+    const inferdeck::gateway::GatewayConfig config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    CHECK(config.models.front().runtime == "ltx_video_cpp");
+    CHECK(config.models.front().modality == "video");
+    CHECK(config.models.front().n_slots == 1);
 }

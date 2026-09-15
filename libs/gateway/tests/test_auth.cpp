@@ -136,6 +136,10 @@ TEST_CASE("RouteAuthorizer: remote control requires its own credential",
                                "Bearer openai-token", "192.168.1.20",
                                "192.168.1.10:11434", false) ==
           AuthorizationStatus::AuthenticationRequired);
+    CHECK(authorizer.authorize(
+              classify_route("POST", "/api/inferdeck/v1/media/video/generations"),
+              "Bearer openai-token", "192.168.1.20", "192.168.1.10:11434", false) ==
+          AuthorizationStatus::AuthenticationRequired);
     CHECK(authorizer.authorize(RoutePrincipal::ControlWrite,
                                "Bearer control-token", "192.168.1.20",
                                "192.168.1.10:11434", false) ==
@@ -186,6 +190,12 @@ TEST_CASE("Route classification separates data and control principals",
               "POST", "/api/inferdeck/v1/audio/generations") ==
           RoutePrincipal::OpenAIDataPlane);
     CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/video/generations") ==
+          RoutePrincipal::OpenAIDataPlane);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/media/video/generations") ==
+          RoutePrincipal::ControlWrite);
+    CHECK(classify_route(
               "POST", "/api/inferdeck/v1/media/images/generations") ==
           RoutePrincipal::ControlWrite);
     CHECK(classify_route(
@@ -223,6 +233,7 @@ TEST_CASE("Every mutating administrative route requires the control principal",
         {"POST", "/api/inferdeck/v1/swap/cancel"},
         {"POST", "/api/inferdeck/v1/media/images/generations"},
         {"POST", "/api/inferdeck/v1/media/audio/generations"},
+        {"POST", "/api/inferdeck/v1/media/video/generations"},
         {"POST", "/api/inferdeck/v1/media/jobs/1/cancel"},
         {"POST", "/api/inferdeck/v1/optimize/profile"},
         {"POST", "/api/inferdeck/v1/optimize/benchmark"},
@@ -290,6 +301,9 @@ TEST_CASE("Request policies enforce endpoint body and media constraints",
           RequestValidationStatus::Allowed);
     CHECK(validate_request(request, request_policy("GET", "/v1/models")) ==
           RequestValidationStatus::BodyNotAllowed);
+    CHECK(validate_request(request, request_policy(
+              "POST", "/api/inferdeck/v1/video/generations")) ==
+          RequestValidationStatus::Allowed);
 
     request.headers.clear();
     request.headers.emplace("Content-Type", "text/plain");

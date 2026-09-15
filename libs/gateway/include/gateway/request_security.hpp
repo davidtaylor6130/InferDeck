@@ -51,6 +51,9 @@ inline RequestPolicy request_policy(std::string_view method,
     if (path == "/v1/audio/transcriptions") {
         return {audio_body_limit, ContentPolicy::Multipart, false};
     }
+    if (path == "/api/inferdeck/v1/video/generations") {
+        return {json_body_limit, ContentPolicy::Json, false};
+    }
     if (path.starts_with("/api/")) {
         return {control_body_limit, ContentPolicy::Json, control_write};
     }

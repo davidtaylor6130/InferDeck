@@ -182,12 +182,15 @@ model_registry:
     prompt_price_per_million: 0.45
     cached_prompt_price_per_million: 0.05
     completion_price_per_million: 3.20
-    gguf_path: "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"
+    gguf_path: "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-IQ4_XS.gguf"
     mmproj_path: "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/mmproj-F16.gguf"
     n_slots: 4
-    min_slots: 4
+    min_slots: 1
     vram_required_mb: 30000
     context_size: 100000
+    kv_unified: true
+    context_pool_auto: true
+    concurrency_auto: true
     n_batch: 2048
     n_ubatch: 2048
     cache_type_k: "q4_0"
@@ -207,52 +210,6 @@ model_registry:
     has_vision: true
     sampling:
       temperature: 1.0
-      top_p: 0.95
-      top_k: 20
-      min_p: 0.0
-      repeat_penalty: 1.0
-
-  - name: "qwen3.6-27b"
-    family: "qwen3.6"
-    prompt_price_per_million: 0.289
-    cached_prompt_price_per_million: 0.289
-    completion_price_per_million: 2.40
-    gguf_path: "E:/InferDeck/models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
-    mmproj_path: "C:/Inferdeck/models/unsloth/Qwen3.6-27B-GGUF/mmproj-BF16.gguf"
-    n_slots: 4
-    min_slots: 4
-    vram_required_mb: 29791
-    context_size: 100000
-    n_batch: 2048
-    n_ubatch: 2048
-    cache_type_k: "q4_0"
-    cache_type_v: "q4_0"
-    speculative:
-      type: "mtp"
-      draft_tokens: 2
-      p_min: 0.0
-      max_active_requests: 1
-    optimization:
-      status: "measured"
-      measured_at: "2026-07-26"
-      quality_passes: 3
-      quality_total: 3
-      single_tokens_per_second: 50.16
-      parallel_tokens_per_second: 51.24
-      schedule:
-        enabled: false
-        window_start: "03:00"
-        window_end: "04:00"
-    has_vision: false
-    # Corrected Qwen3.6 chat template: avoids the "No user query found in messages."
-    # crash during multi-step tool calling (e.g. OpenCode). See config/templates/.
-    chat_template_path: "C:/Inferdeck/config/templates/qwen3.6-fixed.jinja"
-    # Per-model sampler overrides inherit the global `gateway.sampling` block
-    # above and override only the keys listed here (issue #42).
-    # Qwen3 thinking/reasoning sweet spot (Qwen team): temp 0.6, top_p 0.95,
-    # top_k 20, min_p 0, no repetition penalty / no DRY.
-    sampling:
-      temperature: 0.6
       top_p: 0.95
       top_k: 20
       min_p: 0.0
@@ -316,45 +273,6 @@ model_registry:
       min_p: 0.0
       repeat_penalty: 1.0
 
-  - name: "qwen3-coder-30b-a3b"
-    family: "qwen3.6"
-    prompt_price_per_million: 0.07
-    cached_prompt_price_per_million: 0.07
-    completion_price_per_million: 0.28
-    gguf_path: "C:/Inferdeck/models/DevQuasar/Qwen.Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen.Qwen3-Coder-30B-A3B-Instruct.Q4_K_M.gguf"
-    mmproj_path: ""
-    n_slots: 1
-    vram_required_mb: 20000
-    context_size: 262144
-    has_vision: false
-    # Qwen3-Coder recommended sampling (Qwen team): temp 0.7, top_p 0.8,
-    # top_k 20, repetition_penalty 1.05.
-    sampling:
-      temperature: 0.7
-      top_p: 0.8
-      top_k: 20
-      min_p: 0.0
-      repeat_penalty: 1.05
-
-  - name: "qwen3-coder-next"
-    family: "qwen3-next"
-    prompt_price_per_million: 0.12
-    cached_prompt_price_per_million: 0.07
-    completion_price_per_million: 0.80
-    gguf_path: "C:/Inferdeck/models/unsloth/Qwen3-Coder-Next-GGUF/Qwen3-Coder-Next-UD-Q2_K_XL.gguf"
-    mmproj_path: null
-    n_slots: 1
-    vram_required_mb: 29000
-    context_size: 262144
-    has_vision: false
-    # Qwen3-Coder recommended sampling (Qwen team).
-    sampling:
-      temperature: 0.7
-      top_p: 0.8
-      top_k: 20
-      min_p: 0.0
-      repeat_penalty: 1.05
-
   - name: "qwen2.5-0.5b-instruct"
     family: "qwen2.5"
     prompt_price_per_million: 0.10
@@ -383,65 +301,3 @@ model_registry:
       top_k: 20
       min_p: 0.0
       repeat_penalty: 1.05
-
-  - name: "gemma-4-26b-a4b"
-    family: "gemma4"
-    prompt_price_per_million: 0.07
-    cached_prompt_price_per_million: 0.07
-    completion_price_per_million: 0.34
-    gguf_path: "C:/Inferdeck/models/unsloth/gemma-4-26B-A4B-it-GGUF/gemma-4-26B-A4B-it-UD-IQ3_XXS.gguf"
-    mmproj_path: "C:/Inferdeck/models/unsloth/gemma-4-26B-A4B-it-GGUF/mmproj-F32.gguf"
-    n_slots: 4
-    vram_required_mb: 13000
-    context_size: 100000
-    has_vision: false
-    # Gemma recommended sampling (Google): temp 1.0, top_k 64, top_p 0.95,
-    # min_p 0.
-    sampling:
-      temperature: 1.0
-      top_p: 0.95
-      top_k: 64
-      min_p: 0.0
-      repeat_penalty: 1.0
-
-  - name: "gemma-4-31b"
-    family: "gemma4"
-    prompt_price_per_million: 0.10
-    cached_prompt_price_per_million: 0.10
-    completion_price_per_million: 0.34
-    gguf_path: "C:/Inferdeck/models/unsloth/gemma-4-31B-it-GGUF/gemma-4-31B-it-UD-Q4_K_XL.gguf"
-    mmproj_path: "C:/Inferdeck/models/unsloth/gemma-4-31B-it-GGUF/mmproj-BF16.gguf"
-    n_slots: 1
-    vram_required_mb: 29000
-    context_size: 262144
-    has_vision: false
-    sampling:
-      temperature: 1.0
-      top_p: 0.95
-      top_k: 64
-      min_p: 0.0
-      repeat_penalty: 1.0
-
-  - name: "gpt-oss-20b"
-    family: "gpt-oss"
-    prompt_price_per_million: 0.03
-    cached_prompt_price_per_million: 0.03
-    completion_price_per_million: 0.13
-    gguf_path: "C:/Inferdeck/models/lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf"
-    mmproj_path: null
-    n_slots: 8
-    vram_required_mb: 13000
-    context_size: 32768
-    has_vision: false
-    # Corrected gpt-oss harmony template: replaces the "Message has tool role, but there
-    # was no previous assistant message with a tool call!" raise_exception with a graceful
-    # fallback, so multi-step tool calling (OpenCode) no longer 400s. See config/templates/.
-    chat_template_path: "C:/Inferdeck/config/templates/gpt-oss-20b-fixed.jinja"
-    # gpt-oss recommended sampling (OpenAI): temp 1.0, top_p 1.0, top_k disabled,
-    # min_p 0. Repetition controls off.
-    sampling:
-      temperature: 1.0
-      top_p: 1.0
-      top_k: 0
-      min_p: 0.0
-      repeat_penalty: 1.0

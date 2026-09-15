@@ -66,6 +66,7 @@ describe('dashboard section data boundaries', () => {
     expect(usageForSection([usage('stable-diffusion-xl')], models, 'image')).toHaveLength(1);
     expect(usageForSection([usage('flux-dev')], models, 'image')).toHaveLength(1);
     expect(usageForSection([usage('ace-step-v1.5')], models, 'music')).toHaveLength(1);
+    expect(usageForSection([usage('ltx-2.3')], models, 'video')).toHaveLength(1);
     expect(usageForSection([usage('musicgen-small')], models, 'music')).toHaveLength(1);
     expect(usageForSection([usage('stable-diffusion-xl')], models, 'llm')).toHaveLength(0);
     expect(usageForSection([usage('ace-step-v1.5')], models, 'llm')).toHaveLength(0);

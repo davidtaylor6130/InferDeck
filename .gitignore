@@ -79,6 +79,9 @@ __pycache__/
 # Config
 config/gateway.local.yaml
 
+# MCP package manager lock redundancy (project uses npm)
+mcp/pnpm-lock.yaml
+
 # OS installer
 *.dmg
 *.exe

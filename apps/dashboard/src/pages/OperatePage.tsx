@@ -30,6 +30,7 @@ const SETTINGS_DESCRIPTION: Record<DashboardSection, string> = {
   dictation: 'Control backend speech services and tune their runtime profiles. Recording and playback stay in clients such as Open WebUI.',
   image: 'Control image generation runtimes, residency, and model profiles used by the Image API and dashboard generator.',
   music: 'Control music generation runtimes, residency, and model profiles used by the audio generation API and dashboard generator.',
+  video: 'Control video generation runtimes, residency, and model profiles used by the video API and dashboard generator.',
 };
 
 export function stageProfileOptimization(

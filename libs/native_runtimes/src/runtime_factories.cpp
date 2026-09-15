@@ -10,6 +10,9 @@ std::unique_ptr<model::IBackend> make_stable_diffusion_backend(const model::Mode
 #ifdef INFERDECK_HAS_ACESTEP_CPP
 std::unique_ptr<model::IBackend> make_ace_step_backend(const model::ModelInfo& info);
 #endif
+#ifdef INFERDECK_HAS_LTX_VIDEO_CPP
+std::unique_ptr<model::IBackend> make_ltx_video_backend(const model::ModelInfo& info);
+#endif
 #ifdef INFERDECK_HAS_WHISPER_CPP
 std::unique_ptr<model::IBackend> make_whisper_backend(const model::ModelInfo& info);
 #endif
@@ -38,6 +41,9 @@ void register_factories(model::ModelRegistry& registry) {
 #ifdef INFERDECK_HAS_ACESTEP_CPP
     registry.register_factory("ace_step_cpp", make_ace_step_backend);
 #endif
+#ifdef INFERDECK_HAS_LTX_VIDEO_CPP
+    registry.register_factory("ltx_video_cpp", make_ltx_video_backend);
+#endif
 #ifdef INFERDECK_HAS_WHISPER_CPP
     registry.register_factory("whisper_cpp", make_whisper_backend);
 #endif
@@ -56,6 +62,9 @@ std::vector<std::string> available_runtimes() {
 #endif
 #ifdef INFERDECK_HAS_ACESTEP_CPP
     result.push_back("ace_step_cpp");
+#endif
+#ifdef INFERDECK_HAS_LTX_VIDEO_CPP
+    result.push_back("ltx_video_cpp");
 #endif
 #ifdef INFERDECK_HAS_WHISPER_CPP
     result.push_back("whisper_cpp");

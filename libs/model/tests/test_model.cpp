@@ -255,6 +255,28 @@ public:
     }
 };
 
+class VideoBackendMock : public IBackendMock, public IVideoBackend {
+public:
+    explicit VideoBackendMock(ModelInfo info) : IBackendMock(std::move(info)) {}
+
+    int last_slot{-1};
+    VideoGenerationRequest last_request{};
+
+    Result<VideoGenerationResult> generate_video(
+        int slot_id, const VideoGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) override {
+        last_slot = slot_id;
+        last_request = request;
+        if (progress) progress(100);
+        VideoGenerationResult result;
+        result.video_bytes.push_back(std::byte{0x01});
+        result.content_type = "video/x-msvideo";
+        result.output_video_seconds = static_cast<double>(request.frames) /
+            static_cast<double>(request.fps);
+        return Ok(std::move(result));
+    }
+};
+
 IModelMock* as_mock(IModel* m) { return static_cast<IModelMock*>(m); }
 
 ModelInfo make_info(const std::string& name, const std::string& family = "qwen3.6") {
@@ -1694,6 +1716,117 @@ TEST_CASE("BackendCoordinator: capacity-blocked request stays queued until activ
     REQUIRE(coordinator.release_slot("qwen", *result).has_value());
 }
 
+TEST_CASE("BackendCoordinator: blocked high priority residency waiter prevents lower priority slot admission",
+          "[model][coordinator][queue][residency][priority]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        if (info.name == "qwen3.8-27b") {
+            backend->max_slots.store(4);
+            backend->busy_slots.assign(4, 0);
+        } else {
+            backend->max_slots.store(1);
+            backend->busy_slots.assign(1, 0);
+        }
+        return backend;
+    });
+
+    auto active = make_info("qwen3.8-27b");
+    active.vram_fixed_mb = 2000;
+    active.vram_per_slot_mb = 1500;
+    active.vram_required_mb = 8000;
+    active.n_slots = 4;
+    active.min_slots = 1;
+    active.concurrency_limit = 4;
+    active.admission_pool = "qwen3.8-27b";
+    auto urgent = make_info("qwen3.5-4b");
+    urgent.vram_required_mb = 4000;
+    urgent.n_slots = 1;
+    urgent.min_slots = 1;
+    urgent.concurrency_limit = 1;
+    urgent.admission_pool = "qwen3.5-4b";
+    auto sidecar = make_info("whisper-cpu");
+    sidecar.role = ModelRole::Media;
+    sidecar.compute = ModelCompute::Cpu;
+    sidecar.vram_required_mb = 0;
+    sidecar.n_slots = 1;
+    sidecar.min_slots = 1;
+    sidecar.admission_pool = "whisper-cpu";
+    sidecar.resource_metadata_explicit = true;
+    reg.register_model(active);
+    reg.register_model(urgent);
+    reg.register_model(sidecar);
+
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.swap_to(active.name));
+    REQUIRE(coordinator.load(sidecar.name));
+    const auto active_lease = coordinator.acquire_slot(active.name);
+    REQUIRE(active_lease);
+
+    Result<int> urgent_result = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread urgent_waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        options.priority = 100;
+        options.prepare = [&] { return coordinator.swap_to(urgent.name); };
+        urgent_result = coordinator.acquire_slot(urgent.name, options);
+    });
+    for (int attempt = 0; attempt < 500 &&
+         coordinator.last_resource_decision().find("waiting for active residency") ==
+             std::string::npos;
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    REQUIRE(coordinator.last_resource_decision().find("waiting for active residency") !=
+            std::string::npos);
+    coordinator.update_vram_observation(8000, 9000);
+
+    std::atomic<bool> lower_acquired{false};
+    Result<int> lower_result = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread lower_waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        options.priority = 0;
+        lower_result = coordinator.acquire_slot(active.name, options);
+        lower_acquired.store(lower_result.has_value());
+    });
+    for (int attempt = 0; attempt < 100 && coordinator.queued_request_count() < 2; ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    REQUIRE(coordinator.queued_request_count() == 2);
+    CHECK(coordinator.queue().front().model == urgent.name);
+    std::atomic<bool> sidecar_acquired{false};
+    Result<int> sidecar_result = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread sidecar_waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        sidecar_result = coordinator.acquire_slot(sidecar.name, options);
+        sidecar_acquired.store(sidecar_result.has_value());
+    });
+    for (int attempt = 0; attempt < 100 && !sidecar_acquired.load(); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    sidecar_waiter.join();
+    REQUIRE(sidecar_result.has_value());
+    REQUIRE(coordinator.release_slot(sidecar.name, *sidecar_result));
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    CHECK_FALSE(lower_acquired.load());
+
+    if (lower_acquired.load()) {
+        REQUIRE(coordinator.release_slot(active.name, *lower_result));
+    }
+    REQUIRE(coordinator.release_slot(active.name, *active_lease));
+    urgent_waiter.join();
+    REQUIRE(urgent_result.has_value());
+    REQUIRE(coordinator.is_loaded(urgent.name));
+    REQUIRE(coordinator.get_backend(active.name)->n_slots() == 2);
+    REQUIRE(coordinator.release_slot(urgent.name, *urgent_result));
+
+    lower_waiter.join();
+    REQUIRE(lower_result.has_value());
+    REQUIRE(coordinator.release_slot(active.name, *lower_result));
+}
+
 TEST_CASE("BackendCoordinator: VRAM pressure preserves zero-VRAM voice residency",
           "[model][coordinator][residency][voice]") {
     ModelRegistry reg;
@@ -3037,4 +3170,47 @@ TEST_CASE("BackendCoordinator: rechecks capacity after another waiter acquires")
     const auto first_lease = first.get();
     REQUIRE(first_lease);
     REQUIRE(coordinator.release_slot(info.name, *first_lease));
+}
+
+TEST_CASE("BackendCoordinator dispatches video generation through its lease",
+          "[model][coordinator][video]") {
+    ModelRegistry registry;
+    VideoBackendMock* backend = nullptr;
+    registry.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto created = std::make_unique<VideoBackendMock>(info);
+        backend = created.get();
+        return created;
+    });
+
+    auto info = make_info("video");
+    info.modality = "video";
+    info.capabilities = {"video_generation"};
+    info.role = ModelRole::Media;
+    info.n_slots = 1;
+    info.min_slots = 1;
+    registry.register_model(info);
+
+    const auto registered = registry.get_info(info.name);
+    CHECK(registered.role == ModelRole::Media);
+    CHECK(registered.supports("video_generation"));
+
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    const auto lease = coordinator.acquire_slot(info.name);
+    REQUIRE(lease);
+
+    VideoGenerationRequest request;
+    request.prompt = "a cat walking";
+    request.frames = 33;
+    request.fps = 24;
+    const auto result = coordinator.generate_video(
+        info.name, *lease, request, [](int percent) { return percent == 100; });
+    REQUIRE(result);
+    REQUIRE(backend != nullptr);
+    CHECK(backend->last_slot == 0);
+    CHECK(backend->last_request.prompt == request.prompt);
+    CHECK(result->video_bytes.size() == 1);
+    CHECK(result->content_type == "video/x-msvideo");
+    CHECK(result->output_video_seconds == 33.0 / 24.0);
+    REQUIRE(coordinator.release_slot(info.name, *lease));
 }

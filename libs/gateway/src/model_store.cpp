@@ -117,11 +117,22 @@ std::string artifact_key(const std::string& name) {
     return safe_name(std::filesystem::path(name).stem().string());
 }
 
+std::string ltx_artifact_key(const std::string& name) {
+    auto lower_name = std::filesystem::path(name).filename().string();
+    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower_name == "ltx-2.3-22b-dev-ud-q4_k_m.gguf") return "diffusion_model";
+    if (lower_name == "ltx-2.3-22b-dev_embeddings_connectors.safetensors") return "embeddings_connectors";
+    if (lower_name == "ltx-2.3-22b-dev_video_vae.safetensors") return "vae";
+    if (lower_name == "ltx-2.3-22b-dev_audio_vae.safetensors") return "audio_vae";
+    if (lower_name == "gemma-3-12b-it-qat-ud-q4_k_xl.gguf") return "llm";
+    return {};
+}
 bool compatible_extension(const std::string& filename, const std::string& runtime) {
     std::string extension = std::filesystem::path(filename).extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (runtime == "llama_cpp") return extension == ".gguf";
+    if (runtime == "ltx_video_cpp") return extension == ".gguf" || extension == ".safetensors";
     if (runtime == "stable_diffusion_cpp") return extension == ".safetensors" || extension == ".gguf" ||
                                                      extension == ".ckpt" || extension == ".pth" || extension == ".pt";
     if (runtime == "ace_step_cpp") return extension == ".gguf";
@@ -137,6 +148,7 @@ std::vector<std::string> capabilities_for(const std::string& runtime,
                                            const std::string& modality) {
     if (modality == "embedding") return {"embeddings"};
     if (runtime == "stable_diffusion_cpp") return {"image_generation"};
+    if (runtime == "ltx_video_cpp") return {"video_generation"};
     if (runtime == "ace_step_cpp") return {"audio_generation"};
     if (runtime == "whisper_cpp") return {"audio_transcription"};
     if (runtime == "sherpa_onnx") {
@@ -156,6 +168,7 @@ std::string infer_runtime(const std::string& filename, const std::string& pipeli
     const std::string name = lower(filename);
     const std::string tag = lower(pipeline);
     const std::string searchable = lower(filename + " " + pipeline + " " + context);
+    if (searchable.find("ltx-2.3") != std::string::npos || searchable.find("ltx2.3") != std::string::npos) return "ltx_video_cpp";
     if (searchable.find("ace-step") != std::string::npos ||
         searchable.find("acestep") != std::string::npos) {
         return "ace_step_cpp";
@@ -168,6 +181,7 @@ std::string infer_runtime(const std::string& filename, const std::string& pipeli
 }
 
 std::string infer_modality(const std::string& runtime, const std::string& pipeline) {
+    if (runtime == "ltx_video_cpp") return "video";
     if (runtime == "stable_diffusion_cpp") return "image";
     if (runtime == "ace_step_cpp") return "audio_generation";
     if (runtime == "whisper_cpp") return "audio_transcription";
@@ -322,11 +336,18 @@ std::optional<CatalogueCompatibility> catalogue_compatibility(
         } else if (runtime == "whisper_cpp" &&
                    is_primary_whisper_artifact(name)) {
             ++standalone_count;
+        } else if (runtime == "ltx_video_cpp" && valid_artifact_path(name) && compatible_extension(name, runtime)) {
+            bundle_keys.insert(ltx_artifact_key(name));
         } else if ((runtime == "sherpa_onnx" || runtime == "ace_step_cpp") &&
                    valid_artifact_path(name) &&
                    compatible_extension(name, runtime)) {
             bundle_keys.insert(artifact_key(name));
         }
+    }
+    if (runtime == "ltx_video_cpp") {
+        const bool complete = bundle_keys.contains("diffusion_model") && bundle_keys.contains("embeddings_connectors") && bundle_keys.contains("vae") && bundle_keys.contains("audio_vae") && bundle_keys.contains("llm");
+        if (!complete) return std::nullopt;
+        return CatalogueCompatibility{bundle_keys.size(), "bundle"};
     }
     if (runtime == "ace_step_cpp") {
         if (bundle_keys.contains("text_encoder") &&

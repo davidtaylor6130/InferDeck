@@ -13,7 +13,7 @@ import type { MonthlyUsageRow, UsageRow } from '../types';
 import { compactModel, formatDuration, timeAgo } from '../utils';
 import { MediaJobsPanel } from './MediaJobsPanel';
 
-type MediaSection = Extract<DashboardSection, 'image' | 'music'>;
+type MediaSection = Extract<DashboardSection, 'image' | 'music' | 'video'>;
 type MediaUsageRow = Pick<
   UsageRow | MonthlyUsageRow,
   'model' | 'requests' | 'successfulRequests' | 'generationDurationMs' |
@@ -123,7 +123,7 @@ export const MediaGenerationUsagePage: React.FC<{ section: MediaSection }> = ({
         .reduce((sum, row) => sum + row.requests, 0)),
     };
   }, [buckets]);
-  const modalities = section === 'image' ? ['image'] : ['audio_generation'];
+  const modalities = section === 'image' ? ['image'] : section === 'music' ? ['audio_generation'] : ['video_generation'];
 
   return (
     <div className="space-y-4">
@@ -135,7 +135,7 @@ export const MediaGenerationUsagePage: React.FC<{ section: MediaSection }> = ({
           <Stat label="Failed" value={failed.toLocaleString()} tone={failed ? 'critical' : 'idle'} />
           {section === 'image'
             ? <Stat label="Images generated" value={totals.outputImageCount.toLocaleString()} />
-            : <Stat label="Audio generated" value={formatAudio(totals.outputAudioSeconds)} />}
+            : section === 'music' ? <Stat label="Audio generated" value={formatAudio(totals.outputAudioSeconds)} /> : <Stat label="Videos generated" value={totals.successful.toLocaleString()} />}
           <Stat label="Processing time" value={formatDuration(totals.durationMs)} />
           <Stat label="Average request" value={formatDuration(averageMs)} />
         </div>
@@ -171,8 +171,8 @@ export const MediaGenerationUsagePage: React.FC<{ section: MediaSection }> = ({
                   <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
                     <DetailItem label="Requests">{row.requests.toLocaleString()}</DetailItem>
                     <DetailItem label="Success">{row.requests ? `${(row.successful / row.requests * 100).toFixed(1)}%` : 'N/A'}</DetailItem>
-                    <DetailItem label={section === 'image' ? 'Images generated' : 'Audio generated'}>
-                      {section === 'image' ? row.outputImageCount.toLocaleString() : formatAudio(row.outputAudioSeconds)}
+                    <DetailItem label={section === 'image' ? 'Images generated' : section === 'music' ? 'Audio generated' : 'Videos generated'}>
+                      {section === 'image' ? row.outputImageCount.toLocaleString() : section === 'music' ? formatAudio(row.outputAudioSeconds) : row.successful.toLocaleString()}
                     </DetailItem>
                     <DetailItem label="Processing time">{formatDuration(row.durationMs)}</DetailItem>
                   </dl>
@@ -186,7 +186,7 @@ export const MediaGenerationUsagePage: React.FC<{ section: MediaSection }> = ({
                     <th className="py-2 pr-4 font-medium">Model</th>
                     <th className="py-2 pr-4 font-medium">Requests</th>
                     <th className="py-2 pr-4 font-medium">Success</th>
-                    <th className="py-2 pr-4 font-medium">{section === 'image' ? 'Images' : 'Audio'}</th>
+                    <th className="py-2 pr-4 font-medium">{section === 'image' ? 'Images' : section === 'music' ? 'Audio' : 'Videos'}</th>
                     <th className="py-2 pr-4 font-medium">Processing time</th>
                     <th className="py-2 font-medium">Last used</th>
                   </tr>
@@ -202,7 +202,7 @@ export const MediaGenerationUsagePage: React.FC<{ section: MediaSection }> = ({
                           {row.requests ? `${(row.successful / row.requests * 100).toFixed(1)}%` : 'N/A'}
                         </td>
                         <td className="py-2.5 pr-4 text-text-secondary">
-                          {section === 'image' ? row.outputImageCount.toLocaleString() : formatAudio(row.outputAudioSeconds)}
+                          {section === 'image' ? row.outputImageCount.toLocaleString() : section === 'music' ? formatAudio(row.outputAudioSeconds) : row.successful.toLocaleString()}
                         </td>
                         <td className="py-2.5 pr-4 text-text-secondary">{formatDuration(row.durationMs)}</td>
                         <td className="py-2.5 text-text-secondary">

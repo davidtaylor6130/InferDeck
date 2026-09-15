@@ -5,10 +5,10 @@ Result<nlohmann::json> ModelStore::search(const std::string& query,
                                           bool include_gated) {
     const std::unordered_set<std::string> runtimes = {
         "", "llama_cpp", "stable_diffusion_cpp", "ace_step_cpp",
-        "whisper_cpp", "sherpa_onnx"};
+        "whisper_cpp", "sherpa_onnx", "ltx_video_cpp"};
     const std::unordered_set<std::string> modalities = {
         "", "text", "embedding", "image", "audio_generation",
-        "audio_transcription", "audio_speech"};
+        "audio_transcription", "audio_speech", "video"};
     const std::unordered_map<std::string, std::string> sort_fields = {
         {"trending", "trendingScore"}, {"downloads", "downloads"},
         {"likes", "likes"}, {"recent", "lastModified"}};
@@ -32,6 +32,8 @@ Result<nlohmann::json> ModelStore::search(const std::string& query,
         effective_query = "ACE-Step";
     } else if (effective_query.empty() && runtime == "whisper_cpp") {
         effective_query = "whisper ggml";
+    } else if (effective_query.empty() && runtime == "ltx_video_cpp") {
+        effective_query = "LTX-2.3";
     } else if (effective_query.empty() && runtime == "sherpa_onnx") {
         effective_query = modality == "audio_speech"
             ? "sherpa onnx text to speech"
@@ -246,6 +248,36 @@ Result<nlohmann::json> ModelStore::inspect(const std::string& repo) {
             {"estimatedVramMb", 0}
         });
     }
+    std::uint64_t ltx_bundle_size = 0;
+    std::size_t ltx_bundle_count = 0;
+    std::unordered_set<std::string> ltx_keys;
+    bool ltx_verified = true;
+    for (const auto& file : files) {
+        if (file.value("runtime", "") != "ltx_video_cpp") continue;
+        const auto name = file.value("name", "");
+        const auto key = ltx_artifact_key(name);
+        if (key.empty() || !valid_artifact_path(name)) continue;
+        ++ltx_bundle_count;
+        ltx_bundle_size += file.value("size", std::uint64_t{0});
+        ltx_keys.insert(key);
+        ltx_verified = ltx_verified && file.value("compatible", false);
+    }
+    const bool ltx_complete = ltx_keys.contains("diffusion_model") &&
+        ltx_keys.contains("embeddings_connectors") && ltx_keys.contains("vae") &&
+        ltx_keys.contains("audio_vae") && ltx_keys.contains("llm");
+    if (ltx_bundle_count > 0) {
+        files.push_back({
+            {"repo", repo}, {"revision", revision},
+            {"name", "__inferdeck_ltx_bundle__"}, {"size", ltx_bundle_size},
+            {"sha256", ""}, {"runtime", "ltx_video_cpp"}, {"modality", "video"},
+            {"capabilities", capabilities_for("ltx_video_cpp", "video")},
+            {"format", "bundle"}, {"quantization", "multi-file"},
+            {"compatible", ltx_verified && ltx_complete && ltx_bundle_count == 5},
+            {"artifactCount", ltx_bundle_count},
+            {"estimatedRamMb", static_cast<std::uint64_t>((ltx_bundle_size + 1024 * 1024 - 1) / (1024 * 1024))},
+            {"estimatedVramMb", 0}
+        });
+    }
     const auto ace_text_encoder =
         preferred_ace_artifact(files, "text_encoder");
     const auto ace_vae = preferred_ace_artifact(files, "vae");
@@ -324,12 +356,13 @@ Result<StoreFile> ModelStore::resolve_file(const std::string& repo,
 Result<std::vector<StoreFile>> ModelStore::resolve_bundle(
     const std::string& repo, const std::string& runtime,
     const std::string& modality, const std::string& bundle_name) {
-    if (runtime != "sherpa_onnx" && runtime != "ace_step_cpp") {
+    if (runtime != "sherpa_onnx" && runtime != "ace_step_cpp" && runtime != "ltx_video_cpp") {
         return Err<std::vector<StoreFile>>(ErrorCode::InvalidArgument,
                                            "runtime does not use bundle installation");
     }
     auto details = inspect(repo);
     if (!details) return Err<std::vector<StoreFile>>(details.error().code, details.error().message);
+    if (runtime == "ltx_video_cpp" && bundle_name != "__inferdeck_ltx_bundle__") return Err<std::vector<StoreFile>>(ErrorCode::InvalidArgument, "invalid LTX bundle selection");
     const auto selected_ace_dit = runtime == "ace_step_cpp"
         ? ace_step_bundle_dit(bundle_name)
         : std::optional<std::string>{};
@@ -359,7 +392,7 @@ Result<std::vector<StoreFile>> ModelStore::resolve_bundle(
     std::unordered_set<std::string> keys;
     for (const auto& file : details->at("files")) {
         const std::string name = file.value("name", "");
-        if (name == sherpa_bundle_name || is_ace_step_bundle(name) ||
+        if (name == sherpa_bundle_name || name == "__inferdeck_ltx_bundle__" || is_ace_step_bundle(name) ||
             file.value("runtime", "") != runtime ||
             file.value("modality", "") != modality || !file.value("compatible", false) ||
             !valid_artifact_path(name)) {
@@ -370,6 +403,7 @@ Result<std::vector<StoreFile>> ModelStore::resolve_bundle(
             name != *ace_vae) {
             continue;
         }
+        if (runtime == "ltx_video_cpp" && ltx_artifact_key(name).empty()) continue;
         StoreFile artifact;
         artifact.repo = repo;
         artifact.revision = file.value("revision", details->value("revision", "main"));
@@ -380,7 +414,7 @@ Result<std::vector<StoreFile>> ModelStore::resolve_bundle(
         artifact.modality = modality;
         artifact.capabilities = file.value("capabilities", capabilities_for(runtime, modality));
         if (artifact.size == 0 || artifact.sha256.size() != 64) continue;
-        keys.insert(artifact_key(name));
+        keys.insert(runtime == "ltx_video_cpp" ? ltx_artifact_key(name) : artifact_key(name));
         const auto extension = lower(std::filesystem::path(name).extension().string());
         if (modality == "audio_speech" &&
             (extension == ".onnx" || extension == ".ort")) {
@@ -393,6 +427,11 @@ Result<std::vector<StoreFile>> ModelStore::resolve_bundle(
             return keys.contains(key);
         });
     };
+    if (runtime == "ltx_video_cpp") {
+        const bool complete_ltx = contains_all({"diffusion_model", "embeddings_connectors", "vae", "audio_vae", "llm"});
+        if (!complete_ltx || artifacts.size() != 5) return Err<std::vector<StoreFile>>(ErrorCode::InvalidArgument, "repository does not expose a complete verified LTX bundle");
+        return Ok(std::move(artifacts));
+    }
     const bool supertonic = keys.contains("duration_predictor") ||
         keys.contains("vector_estimator");
     const bool complete = runtime == "ace_step_cpp"

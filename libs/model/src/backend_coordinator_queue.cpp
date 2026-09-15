@@ -65,6 +65,7 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
     waiters_.push_back({waiter_id, name, std::clamp(opts.priority, -100, 100),
                         clock::now(), deadline, opts.cancelled,
                         opts.reservation_key, false, false,
+                        std::nullopt, false, false, false,
                         std::nullopt});
     while (true) {
         const auto now = clock::now();
@@ -124,6 +125,7 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             }
             waiter->retry_after_generation.reset();
             waiter->preparing = true;
+            waiter->resource_blocked = true;
             const auto aggregate_context = static_cast<std::int64_t>(
                 active_context_reservation_by_model_[name]) + waiter->demand->required_context;
             const auto aggregate_sequences = static_cast<std::int64_t>(
@@ -156,15 +158,21 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             if (waiter != waiters_.end()) waiter->preparing = false;
             if (!prepared) {
                 if (prepared.error().code == foundation::ErrorCode::ResourceBusy) {
-                    if (waiter != waiters_.end() && resource_generation_ == generation_before)
-                        waiter->retry_after_generation = generation_before;
+                    if (waiter != waiters_.end()) {
+                        waiter->resource_blocked = true;
+                        if (resource_generation_ == generation_before)
+                            waiter->retry_after_generation = generation_before;
+                    }
                     continue;
                 }
                 erase_waiter_locked(waiter_id);
                 cv_.notify_all();
                 return foundation::Err<int>(prepared.error().code, prepared.error().message);
             }
-            if (waiter != waiters_.end()) waiter->capacity_prepared = true;
+            if (waiter != waiters_.end()) {
+                waiter->capacity_prepared = true;
+                waiter->resource_blocked = false;
+            }
             continue;
         }
         if (!resident || !it->second->execution_healthy()) {
@@ -180,6 +188,7 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
                 if (load_waiter != waiters_.end() && !load_waiter->preparing) {
                     load_waiter->retry_after_generation.reset();
                     load_waiter->preparing = true;
+                    load_waiter->resource_blocked = true;
                     load_waiter->prepared = false;
                     const auto generation_before = resource_generation_;
                     lock.unlock();
@@ -190,9 +199,10 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
                     if (load_waiter != waiters_.end()) load_waiter->preparing = false;
                     if (!prepared) {
                         if (prepared.error().code == foundation::ErrorCode::ResourceBusy) {
-                            if (load_waiter != waiters_.end() &&
-                                resource_generation_ == generation_before) {
-                                load_waiter->retry_after_generation = generation_before;
+                            if (load_waiter != waiters_.end()) {
+                                load_waiter->resource_blocked = true;
+                                if (resource_generation_ == generation_before)
+                                    load_waiter->retry_after_generation = generation_before;
                             }
                             continue;
                         }
@@ -200,7 +210,10 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
                         cv_.notify_all();
                         return foundation::Err<int>(prepared.error().code, prepared.error().message);
                     }
-                    if (load_waiter != waiters_.end()) load_waiter->prepared = true;
+                    if (load_waiter != waiters_.end()) {
+                        load_waiter->prepared = true;
+                        load_waiter->resource_blocked = false;
+                    }
                     continue;
                 }
             }
@@ -306,16 +319,47 @@ std::vector<QueueInfo> BackendCoordinator::queue() const {
     std::vector<const SlotWaiter*> ordered;
     ordered.reserve(waiters_.size());
     for (const auto& waiter : waiters_) ordered.push_back(&waiter);
-    std::sort(ordered.begin(), ordered.end(), [this, now](const auto* a, const auto* b) {
-        const bool actionable_a = waiter_is_actionable_locked(*a);
-        const bool actionable_b = waiter_is_actionable_locked(*b);
-        if (actionable_a != actionable_b) return actionable_a;
-        if (actionable_a && a->prepared != b->prepared) return a->prepared;
-        const auto age_a = std::chrono::duration_cast<std::chrono::seconds>(now - a->enqueued).count();
-        const auto age_b = std::chrono::duration_cast<std::chrono::seconds>(now - b->enqueued).count();
-        const auto score_a = a->priority + age_a;
-        const auto score_b = b->priority + age_b;
-        return score_a == score_b ? a->id < b->id : score_a > score_b;
+    struct QueueOrderKey {
+        int category{0};
+        bool actionable{false};
+        bool barrier{false};
+        bool independent{false};
+        bool prepared{false};
+        std::int64_t score{0};
+        std::uint64_t id{0};
+    };
+    std::unordered_map<std::uint64_t, QueueOrderKey> order_keys;
+    order_keys.reserve(waiters_.size());
+    std::int64_t highest_barrier_score = std::numeric_limits<std::int64_t>::min();
+    for (const auto& waiter : waiters_) {
+        const auto age = std::chrono::duration_cast<std::chrono::seconds>(
+            now - waiter.enqueued).count();
+        QueueOrderKey key;
+        key.actionable = waiter_is_actionable_locked(waiter);
+        key.barrier = waiter_is_resource_barrier_locked(waiter);
+        key.independent = model_is_independent_sidecar_locked(waiter.model);
+        key.prepared = key.actionable && waiter.prepared;
+        key.score = static_cast<std::int64_t>(waiter.priority) + age;
+        key.id = waiter.id;
+        if (key.barrier) highest_barrier_score = std::max(highest_barrier_score, key.score);
+        order_keys.emplace(waiter.id, key);
+    }
+    for (auto& [_, key] : order_keys) {
+        if (!key.independent && !key.barrier &&
+            highest_barrier_score != std::numeric_limits<std::int64_t>::min() &&
+            key.score < highest_barrier_score) {
+            key.actionable = false;
+            key.prepared = false;
+        }
+        key.category = key.actionable ? 0 : (key.barrier ? 1 : 2);
+    }
+    std::sort(ordered.begin(), ordered.end(), [&order_keys](const auto* a, const auto* b) {
+        const auto& key_a = order_keys.at(a->id);
+        const auto& key_b = order_keys.at(b->id);
+        if (key_a.category != key_b.category) return key_a.category < key_b.category;
+        if (key_a.prepared != key_b.prepared) return key_a.prepared > key_b.prepared;
+        if (key_a.score != key_b.score) return key_a.score > key_b.score;
+        return key_a.id < key_b.id;
     });
     std::vector<QueueInfo> out;
     out.reserve(ordered.size());
@@ -544,20 +588,45 @@ bool BackendCoordinator::waiter_is_actionable_locked(
     return backend->second->n_free_slots() > 0 || waiter.demand_prepared;
 }
 
+bool BackendCoordinator::waiter_is_resource_barrier_locked(const SlotWaiter& waiter) const {
+    return waiter.resource_blocked && !model_is_independent_sidecar_locked(waiter.model);
+}
+
 bool BackendCoordinator::waiter_is_next_locked(std::uint64_t id, time_point now) const {
+    const auto score_for = [now](const SlotWaiter& waiter) {
+        const auto age = std::chrono::duration_cast<std::chrono::seconds>(
+            now - waiter.enqueued).count();
+        return static_cast<std::int64_t>(waiter.priority) + age;
+    };
     const bool has_prepared = std::any_of(
         waiters_.begin(), waiters_.end(), [this](const SlotWaiter& waiter) {
             return waiter.prepared && waiter_is_actionable_locked(waiter);
         });
+    const SlotWaiter* resource_barrier = nullptr;
+    std::int64_t resource_barrier_score = std::numeric_limits<std::int64_t>::min();
+    for (const auto& waiter : waiters_) {
+        if (!waiter_is_resource_barrier_locked(waiter)) {
+            continue;
+        }
+        const auto score = score_for(waiter);
+        if (!resource_barrier || score > resource_barrier_score ||
+            (score == resource_barrier_score && waiter.id < resource_barrier->id)) {
+            resource_barrier = &waiter;
+            resource_barrier_score = score;
+        }
+    }
     const SlotWaiter* selected = nullptr;
     std::int64_t selected_score = 0;
     for (const auto& waiter : waiters_) {
         if (!waiter_is_actionable_locked(waiter)) continue;
         if (has_prepared && !waiter.prepared &&
             !model_is_independent_sidecar_locked(waiter.model)) continue;
-        const auto age = std::chrono::duration_cast<std::chrono::seconds>(now - waiter.enqueued).count();
-        const auto score = static_cast<std::int64_t>(waiter.priority) + age;
-        if (!selected || score > selected_score || (score == selected_score && waiter.id < selected->id)) {
+        const auto score = score_for(waiter);
+        if (resource_barrier && waiter.id != resource_barrier->id &&
+            !model_is_independent_sidecar_locked(waiter.model) &&
+            score < resource_barrier_score) continue;
+        if (!selected || score > selected_score ||
+            (score == selected_score && waiter.id < selected->id)) {
             selected = &waiter;
             selected_score = score;
         }

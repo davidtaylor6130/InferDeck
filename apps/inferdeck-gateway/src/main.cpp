@@ -576,6 +576,13 @@ int run_gateway(const fs::path& config_path) {
                                                            httplib::Response& resp) {
         handle_audio_transcriptions(req, resp, deps);
     }));
+    server.Post(std::string(inferdeck_route(InferDeckRoute::VideoGenerations).pattern), wrap([&](const httplib::Request& req, httplib::Response& resp) { handle_video_generations(req, resp, deps); }));
+    server.Post(std::string(inferdeck_route(
+                    InferDeckRoute::MediaVideoGenerations).pattern),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
+        handle_video_generations(req, resp, deps);
+    }));
     server.Post(control_api_pattern("/audio/generations"),
                 wrap([&](const httplib::Request& req,
                          httplib::Response& resp) {

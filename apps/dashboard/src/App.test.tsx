@@ -28,6 +28,11 @@ describe('dashboard boundary', () => {
       { id: 'music/models', label: 'Model Store', section: 'music' },
       { id: 'music/usage', label: 'Usage', section: 'music' },
       { id: 'music/diagnostics', label: 'Health & alerts', section: 'music' },
+      { id: 'video/generate', label: 'Generate', section: 'video' },
+      { id: 'video/settings', label: 'Model Settings', section: 'video' },
+      { id: 'video/models', label: 'Model Store', section: 'video' },
+      { id: 'video/usage', label: 'Usage', section: 'video' },
+      { id: 'video/diagnostics', label: 'Health & alerts', section: 'video' },
       { id: 'post-training', label: 'Post Training', preview: true },
     ]);
     expect(DASHBOARD_PAGES.filter(page => page.section === 'llm')).toHaveLength(4);
@@ -48,7 +53,7 @@ describe('dashboard boundary', () => {
     for (const section of ['LLM', 'Dictation', 'Image', 'Music']) {
       expect(html).toContain('aria-label="Hide ' + section + ' navigation"');
     }
-    expect(html.match(/aria-expanded="true"/g)).toHaveLength(4);
+    expect(html.match(/aria-expanded="true"/g)).toHaveLength(5);
     expect(html).toContain('href="#settings"');
     expect(html).toContain('API Settings');
   });

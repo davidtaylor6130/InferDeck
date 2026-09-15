@@ -1728,6 +1728,53 @@ TEST_CASE("Automatic context demand grows safely and preserves health",
   LlamaCppModel::shutdown_backend();
 }
 
+TEST_CASE("Automatic capacity keeps a single request to one slot under a 100k limit",
+          "[llama][auto-concurrency][capacity-budget][.][requires_model]") {
+  const std::string path = test_model_path();
+  if (path.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
+  LlamaCppModel::init_backend();
+
+  ModelInfo info;
+  info.name = "automatic-100k-capacity";
+  info.gguf_path = path;
+  info.n_slots = 4;
+  info.min_slots = 1;
+  info.context_size = 100000;
+  info.context_pool_auto = true;
+  info.concurrency_auto = true;
+  LlamaCppConfig config = test_runtime_config();
+  config.kv_unified = true;
+  config.n_batch = 512;
+  config.n_ubatch = 512;
+  LlamaCppModel model(info, config);
+  REQUIRE(model.load());
+  CHECK(model.n_slots() == 1);
+  CHECK(model.context_pool_capacity() <= config.n_batch);
+
+  RequestDemand demand;
+  demand.prompt_positions = 256;
+  demand.output_tokens = 384;
+  demand.required_context = 8192;
+  demand.aggregate_context = 8192;
+  demand.required_sequences = 1;
+  demand.aggregate_sequences = 1;
+  REQUIRE(model.ensure_request_capacity(demand, LifecycleControl{}));
+  CHECK(model.n_slots() == 1);
+  CHECK(model.context_pool_capacity() >= demand.required_context);
+  CHECK(model.context_pool_capacity() < info.context_size);
+
+  auto concurrent = demand;
+  concurrent.required_sequences = 2;
+  concurrent.aggregate_sequences = 2;
+  concurrent.aggregate_context = 16384;
+  REQUIRE(model.ensure_request_capacity(concurrent, LifecycleControl{}));
+  CHECK(model.n_slots() >= concurrent.required_sequences);
+  CHECK(model.context_pool_capacity() >= concurrent.aggregate_context);
+
+  REQUIRE(model.unload());
+  LlamaCppModel::shutdown_backend();
+}
 TEST_CASE("Automatic sequence fitting exceeds configured slots and preserves output",
           "[llama][auto-concurrency][.][requires_model]") {
   const std::string path = test_model_path();

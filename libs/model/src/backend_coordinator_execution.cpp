@@ -205,6 +205,36 @@ foundation::Result<AudioGenerationResult> BackendCoordinator::generate_audio(
     return backend->generate_audio(backend_slot, request, progress);
 }
 
+foundation::Result<VideoGenerationResult> BackendCoordinator::generate_video(
+    const std::string& name, int lease_id,
+    const VideoGenerationRequest& request,
+    const std::function<bool(int)>& progress) {
+    IVideoBackend* backend = nullptr;
+    int backend_slot = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second) {
+            return foundation::Err<VideoGenerationResult>(
+                foundation::ErrorCode::NotFound,
+                "model not loaded: " + name);
+        }
+        backend = dynamic_cast<IVideoBackend*>(it->second.get());
+        if (!backend || !it->second->info().supports("video_generation")) {
+            return foundation::Err<VideoGenerationResult>(
+                foundation::ErrorCode::InvalidArgument,
+                "backend does not support video generation: " + name);
+        }
+        auto slot = backend_slot_for_lease_locked(name, lease_id);
+        if (!slot) {
+            return foundation::Err<VideoGenerationResult>(
+                slot.error().code, slot.error().message);
+        }
+        backend_slot = *slot;
+    }
+    return backend->generate_video(backend_slot, request, progress);
+}
+
 foundation::Result<AudioResult> BackendCoordinator::synthesize(
     const std::string& name, int lease_id, const SpeechRequest& request,
     const std::function<bool(const std::byte*, std::size_t)>& stream) {

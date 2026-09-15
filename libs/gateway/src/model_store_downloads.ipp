@@ -8,10 +8,12 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
         return Err<std::uint64_t>(ErrorCode::InvalidArgument, "invalid model name");
     }
     std::vector<StoreFile> artifacts;
-    if (runtime == "sherpa_onnx" || runtime == "ace_step_cpp") {
+    if (runtime == "sherpa_onnx" || runtime == "ace_step_cpp" || runtime == "ltx_video_cpp") {
         const bool valid_bundle = runtime == "sherpa_onnx"
             ? filename == sherpa_bundle_name
-            : ace_step_bundle_dit(filename).has_value();
+            : runtime == "ltx_video_cpp"
+                ? filename == "__inferdeck_ltx_bundle__"
+                : ace_step_bundle_dit(filename).has_value();
         if (!valid_bundle) {
             return Err<std::uint64_t>(ErrorCode::InvalidArgument,
                                       "multi-artifact runtime models must be installed as a complete bundle");
@@ -495,13 +497,15 @@ void ModelStore::run_bundle(
     info.runtime = job.file.runtime;
     info.modality = job.file.modality;
     info.capabilities = job.file.capabilities;
-    info.vram_required_mb = job.file.runtime == "ace_step_cpp"
+    info.vram_required_mb = (job.file.runtime == "ace_step_cpp" || job.file.runtime == "ltx_video_cpp")
         ? static_cast<int>((job.file.size + 1024 * 1024 - 1) /
                            (1024 * 1024))
         : 0;
     nlohmann::json artifact_manifest = nlohmann::json::object();
     for (const auto& artifact : job.artifacts) {
-        auto key = artifact_key(artifact.name);
+        const std::string base_key = job.file.runtime == "ltx_video_cpp"
+            ? ltx_artifact_key(artifact.name) : artifact_key(artifact.name);
+        std::string key = base_key;
         const auto extension = lower(std::filesystem::path(artifact.name).extension().string());
         if (job.file.modality == "audio_speech" && !info.artifacts.contains("model") &&
             (extension == ".onnx" || extension == ".ort") &&
@@ -510,7 +514,7 @@ void ModelStore::run_bundle(
             key = "model";
         }
         for (std::size_t suffix = 2; info.artifacts.contains(key); ++suffix) {
-            key = artifact_key(artifact.name) + "_" + std::to_string(suffix);
+            key = base_key + "_" + std::to_string(suffix);
         }
         const auto path = destination / std::filesystem::path(artifact.name).lexically_normal();
         info.artifacts[key] = path.string();

@@ -329,10 +329,32 @@ export interface MediaJob {
 }
 
 export interface MediaJobOutput {
-  content_type: 'image/png' | 'audio/wav';
+  content_type: 'image/png' | 'audio/wav' | 'video/avi' | 'video/x-msvideo' | 'video/mp4';
   filename: string;
   bytes: number;
   url: string;
+}
+
+export interface VideoGenerationInput {
+  model: string;
+  prompt: string;
+  negative_prompt: string;
+  width: number;
+  height: number;
+  frames: number;
+  fps: number;
+  steps: number;
+  seed: number;
+  /** Public UI spelling; converted to the gateway snake_case field. */
+  guidanceScale?: number;
+  /** Backward-compatible wire spelling accepted from existing callers. */
+  guidance_scale?: number;
+}
+
+export interface VideoGenerationResult {
+  video: Blob;
+  filename: string;
+  jobId: number | null;
 }
 
 export interface ImageGenerationInput {
@@ -818,6 +840,43 @@ export async function generateMusic(
   };
 }
 
+export async function generateVideo(
+  input: VideoGenerationInput,
+  signal?: AbortSignal,
+): Promise<VideoGenerationResult> {
+  const path = `${CONTROL_API_BASE}/media/video/generations`;
+  const payload = {
+    model: input.model,
+    prompt: input.prompt,
+    negative_prompt: input.negative_prompt,
+    width: input.width,
+    height: input.height,
+    frames: input.frames,
+    fps: input.fps,
+    steps: input.steps,
+    seed: input.seed,
+    guidance_scale: input.guidance_scale ?? input.guidanceScale,
+  };
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    signal: mediaSignal(signal),
+    headers: { Accept: 'video/mp4, video/x-msvideo, video/avi, application/octet-stream, application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { error?: { message?: string } };
+    throw new Error(payload.error?.message || `${path} responded ${response.status}`);
+  }
+  const video = await response.blob();
+  if (video.size === 0 || (video.type && video.type !== 'video/mp4' && video.type !== 'video/x-msvideo' && video.type !== 'video/avi' && video.type !== 'application/octet-stream')) {
+    throw new Error('InferDeck returned an invalid video generation response');
+  }
+  return {
+    video,
+    filename: response.headers.get('Content-Disposition')?.match(/filename="?([^";]+)"?/)?.[1] ?? 'inferdeck-video.mp4',
+    jobId: responseInteger(response.headers.get('X-InferDeck-Job-Id')),
+  };
+}
 export function mediaOutputUrl(output: MediaJobOutput): string {
   return `${API_BASE}${output.url}`;
 }

@@ -525,7 +525,7 @@ export const ModelStoreHubPanel: React.FC<{ section: DashboardSection }> = ({ se
                 <div className="mt-3 divide-y divide-white/10 border-y border-white/10">
                   {reviewFiles.map(file => {
                     const bundleRuntime =
-                      file.runtime === 'sherpa_onnx' || file.runtime === 'ace_step_cpp';
+                      file.runtime === 'sherpa_onnx' || file.runtime === 'ace_step_cpp' || file.runtime === 'ltx_video_cpp';
                     const requiresBundle = bundleRuntime && file.artifactCount === undefined;
                     const isBundle = bundleRuntime && (file.artifactCount ?? 0) > 1;
                     const active = selectedFile?.name === file.name;

@@ -139,7 +139,7 @@ export const SystemPage: React.FC<{ section?: DashboardSection }> = ({ section =
         </Panel>
       </section>
 
-      {(section === 'image' || section === 'music') && (
+      {(section === 'image' || section === 'music' || section === 'video') && (
         <Panel>
           <SectionTitle title={`${label} runtimes`} aside={`${scopedModels.length} configured`} />
           {scopedModels.length === 0 ? (
@@ -168,6 +168,15 @@ export const SystemPage: React.FC<{ section?: DashboardSection }> = ({ section =
           title="Image generation health"
           emptyTitle="No image generation jobs"
           emptyDetail="Completed, running, and failed image jobs appear here."
+          showEmpty
+        />
+      )}
+      {section === 'video' && (
+        <MediaJobsPanel
+          modalities={['video_generation']}
+          title="Video generation health"
+          emptyTitle="No video generation jobs"
+          emptyDetail="Completed, running, and failed video jobs appear here."
           showEmpty
         />
       )}

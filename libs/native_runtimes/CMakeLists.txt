@@ -13,7 +13,7 @@ endif()
 
 if(WIN32)
     target_sources(native_runtimes PRIVATE src/windows_sapi_backend.cpp)
-    target_link_libraries(native_runtimes PRIVATE sapi ole32 windowscodecs)
+    target_link_libraries(native_runtimes PRIVATE sapi ole32 windowscodecs mfplat mfreadwrite mfuuid)
     target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_WINDOWS_SAPI=1)
 endif()
 
@@ -33,9 +33,25 @@ if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
                      "${CMAKE_BINARY_DIR}/native/stable-diffusion" EXCLUDE_FROM_ALL)
     target_include_directories(stable-diffusion BEFORE PRIVATE
         "${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp")
-    target_sources(native_runtimes PRIVATE src/stable_diffusion_backend.cpp)
+    add_library(inferdeck-video-encoding STATIC
+        "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common/media_io.cpp"
+        "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common/log.cpp")
+    target_include_directories(inferdeck-video-encoding PUBLIC
+        "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common"
+        "${INFERDECK_STABLE_DIFFUSION_ROOT}/include"
+        PRIVATE "${INFERDECK_STABLE_DIFFUSION_ROOT}/thirdparty")
+    target_compile_features(inferdeck-video-encoding PUBLIC cxx_std_17)
+    target_sources(native_runtimes PRIVATE
+        src/stable_diffusion_backend.cpp
+        src/ltx_video_backend.cpp
+        src/ltx_video_encoder.cpp)
+    target_link_libraries(native_runtimes PRIVATE inferdeck-video-encoding)
+    if(MSVC)
+        set_property(SOURCE src/ltx_video_backend.cpp APPEND PROPERTY COMPILE_OPTIONS /EHsc-)
+        target_compile_options(inferdeck-video-encoding PRIVATE /utf-8 /FS)
+    endif()
     target_link_libraries(native_runtimes PRIVATE stable-diffusion)
-    target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_STABLE_DIFFUSION_CPP=1)
+    target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_STABLE_DIFFUSION_CPP=1 INFERDECK_HAS_LTX_VIDEO_CPP=1)
     if(MSVC)
         target_compile_options(stable-diffusion PRIVATE /bigobj)
     endif()
@@ -160,6 +176,29 @@ if(INFERDECK_BUILD_TESTS)
         target_sources(native_runtime_tests PRIVATE tests/test_ace_step.cpp)
     endif()
     if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/include/stable-diffusion.h")
+        add_executable(video_encoding_tests tests/test_video_encoding.cpp)
+        target_link_libraries(video_encoding_tests PRIVATE inferdeck-video-encoding Catch2::Catch2WithMain)
+        target_compile_features(video_encoding_tests PRIVATE cxx_std_23)
+        add_test(NAME video_encoding_tests COMMAND video_encoding_tests)
+        set_tests_properties(video_encoding_tests PROPERTIES LABELS "unit")
+        add_executable(ltx_video_encoder_tests tests/test_ltx_video_encoder.cpp src/ltx_video_encoder.cpp)
+        target_include_directories(ltx_video_encoder_tests PRIVATE include)
+        target_link_libraries(ltx_video_encoder_tests PRIVATE inferdeck-video-encoding foundation Catch2::Catch2WithMain)
+        if(WIN32)
+            target_link_libraries(ltx_video_encoder_tests PRIVATE mfplat mfreadwrite mfuuid)
+        endif()
+        target_compile_features(ltx_video_encoder_tests PRIVATE cxx_std_23)
+        add_test(NAME ltx_video_encoder_tests COMMAND ltx_video_encoder_tests)
+        set_tests_properties(ltx_video_encoder_tests PROPERTIES LABELS "unit")
+        add_executable(ltx_video_cleanup_tests tests/test_ltx_video_cleanup.cpp src/ltx_video_backend.cpp)
+        target_include_directories(ltx_video_cleanup_tests PRIVATE include "${INFERDECK_STABLE_DIFFUSION_ROOT}/include")
+        target_link_libraries(ltx_video_cleanup_tests PRIVATE model foundation Catch2::Catch2WithMain)
+        target_compile_features(ltx_video_cleanup_tests PRIVATE cxx_std_23)
+        if(MSVC)
+            target_compile_options(ltx_video_cleanup_tests PRIVATE /EHsc-)
+        endif()
+        add_test(NAME ltx_video_cleanup_tests COMMAND ltx_video_cleanup_tests)
+        set_tests_properties(ltx_video_cleanup_tests PROPERTIES LABELS "unit")
         add_executable(stable_diffusion_cleanup_tests
             tests/test_stable_diffusion_cleanup.cpp
             src/stable_diffusion_backend.cpp)

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ApiError, authenticateDashboard, isAuthenticationError, logoutDashboard, cancelProfileBenchmark, createApiKey,
-  generateImages, generateMusic, getApiKeys, getApiSettings, getModels, getMediaJobs, getStoreActivity,
+  generateImages, generateMusic, generateVideo, getApiKeys, getApiSettings, getModels, getMediaJobs, getStoreActivity,
   getProfileBenchmark, optimizeProfile, saveApiSettings, searchStore,
   startProfileBenchmark,
   updateApiKey,
@@ -253,6 +253,20 @@ describe('API access settings', () => {
 });
 
 describe('dashboard media generation', () => {
+  it('accepts the backend AVI MIME type for video generation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Disposition': 'attachment; filename="clip.avi"' }),
+      blob: async () => new Blob(['RIFF'], { type: 'video/x-msvideo' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await generateVideo({ model: 'ltx-2.3', prompt: 'a fox', negative_prompt: '', width: 512, height: 320, frames: 33, fps: 24, steps: 20, seed: -1, guidanceScale: 6 });
+    expect(result.video.type).toBe('video/x-msvideo');
+    expect(result.filename).toBe('clip.avi');
+    expect(fetchMock).toHaveBeenCalledWith('/api/inferdeck/v1/media/video/generations', expect.objectContaining({ method: 'POST', headers: expect.objectContaining({ Accept: expect.stringContaining('video/x-msvideo') }) }));
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ model: 'ltx-2.3', prompt: 'a fox', negative_prompt: '', width: 512, height: 320, frames: 33, fps: 24, steps: 20, seed: -1, guidance_scale: 6 });
+  });
   it('uses control-session routes and returns image and music job metadata', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({

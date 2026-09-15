@@ -17,6 +17,7 @@ export const storeScope: Record<DashboardSection, {
   dictation: { runtime: 'whisper_cpp', modality: 'audio_transcription', runtimeLabel: 'whisper.cpp' },
   image: { runtime: 'stable_diffusion_cpp', modality: 'image', runtimeLabel: 'Stable Diffusion / stable-diffusion.cpp' },
   music: { runtime: 'ace_step_cpp', modality: 'audio_generation', runtimeLabel: 'ACE-Step C++' },
+  video: { runtime: 'ltx_video_cpp', modality: 'video', runtimeLabel: 'LTX video' },
 };
 
 export const storeSearchPlaceholder: Record<DashboardSection, string> = {
@@ -24,6 +25,7 @@ export const storeSearchPlaceholder: Record<DashboardSection, string> = {
   dictation: 'Search speech models',
   image: 'Search image generation models',
   music: 'Search music generation models',
+  video: 'Search video generation models',
 };
 
 export function serverModelType(entry: InstalledStoreModel): string {

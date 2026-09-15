@@ -66,7 +66,8 @@ void normalize_model_resources(ModelInfo& info) {
         if (info.supports("audio_speech") ||
             info.supports("audio_transcription") ||
             info.supports("audio_generation") ||
-            info.supports("image_generation")) {
+            info.supports("image_generation") ||
+            info.supports("video_generation")) {
             info.role = ModelRole::Media;
         } else if (info.supports("embeddings")) {
             info.role = ModelRole::Embedding;
@@ -99,6 +100,9 @@ void normalize_model_resources(ModelInfo& info) {
         } else if (info.modality == "image" &&
                    !info.supports("image_generation")) {
             info.capabilities = {"image_generation"};
+        } else if (info.modality == "video" &&
+                   !info.supports("video_generation")) {
+            info.capabilities = {"video_generation"};
         } else if (info.modality == "embedding" &&
                    !info.supports("embeddings")) {
             info.capabilities = {"embeddings"};

@@ -245,7 +245,7 @@ foundation::Result<void> store_job_outputs(
             return fail("generated media output is empty");
         }
         const std::string stem =
-            job->modality == "image" ? "image-" : "music-";
+            job->modality == "image" ? "image-" : job->modality == "video_generation" ? "video-" : "music-";
         const std::string filename = stem + std::to_string(job->id) +
             "-" + std::to_string(index + 1) + input.extension;
         MediaOutputRecord output{
@@ -496,8 +496,8 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
                                             const GatewayDeps& deps,
                                             const std::string& model_name,
                                             const std::shared_ptr<MediaJob>& job) {
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::seconds{30};
+    constexpr auto video_load_timeout = std::chrono::minutes{5};
+    const auto deadline = std::chrono::steady_clock::now() + video_load_timeout;
     const std::function<bool()> cancelled = [&req, job] {
         return req.is_connection_closed() || job->cancelled->load();
     };
@@ -507,6 +507,7 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
         deps.public_data_plane_access &&
             classify_route(req.method, req.path) ==
                 RoutePrincipal::OpenAIDataPlane);
+    options.timeout = video_load_timeout;
     options.cancelled = cancelled;
     options.prepare = [&deps, model_name, deadline, cancelled] {
         auto loaded = ensure_model_loaded(
@@ -834,7 +835,7 @@ foundation::Result<void> configure_media_history(
                     if (filename.empty() ||
                         relative.filename().string() != filename ||
                         (content_type != "image/png" &&
-                         content_type != "audio/wav")) {
+                         content_type != "audio/wav" && content_type != "video/x-msvideo" && content_type != "video/avi" && content_type != "video/mp4")) {
                         changed = true;
                         continue;
                     }
@@ -966,6 +967,310 @@ foundation::Result<void> cancel_media_job(std::uint64_t id) {
     return foundation::Ok();
 }
 
+void handle_video_generations(const httplib::Request& req,
+                              httplib::Response& resp,
+                              const GatewayDeps& deps) {
+    RequestObservation observation = observe_request(
+        req, resp, deps, "video_generation", false);
+    observation.protocol_profile = "inferdeck";
+    if (!require_json_media_type(req, resp)) return;
+
+    const nlohmann::json body =
+        nlohmann::json::parse(req.body, nullptr, false);
+    if (body.is_discarded() || !body.is_object()) {
+        write_error(resp, 400, "invalid_video_generation",
+                    "request body must be a JSON object");
+        return;
+    }
+
+    static constexpr std::array<std::string_view, 10> supported_fields{
+        "model", "prompt", "negative_prompt", "width", "height",
+        "frames", "fps", "steps", "seed", "guidance_scale",
+    };
+    for (const auto& field : body.items()) {
+        if (std::find(supported_fields.begin(), supported_fields.end(),
+                      field.key()) == supported_fields.end()) {
+            write_error(resp, 400, "unsupported_parameter",
+                        "unsupported video generation parameter: " +
+                            field.key(), field.key());
+            return;
+        }
+    }
+
+    const auto require_string = [&body, &resp](std::string_view name,
+                                                bool required) {
+        if (!body.contains(name) || body[name].is_null()) {
+            if (required) {
+                write_error(resp, 400, "invalid_video_generation",
+                            std::string(name) + " must be a string",
+                            std::string(name));
+                return false;
+            }
+            return true;
+        }
+        if (!body[name].is_string()) {
+            write_error(resp, 400, "invalid_video_generation",
+                        std::string(name) + " must be a string",
+                        std::string(name));
+            return false;
+        }
+        return true;
+    };
+    if (!require_string("prompt", true) ||
+        !require_string("model", false) ||
+        !require_string("negative_prompt", false)) {
+        return;
+    }
+
+    const auto require_integer = [&body, &resp](std::string_view name) {
+        if (body.contains(name) && !body[name].is_null() &&
+            !body[name].is_number_integer() && !body[name].is_number_unsigned()) {
+            write_error(resp, 400, "invalid_video_generation",
+                        std::string(name) + " must be an integer",
+                        std::string(name));
+            return false;
+        }
+        return true;
+    };
+    const auto require_number = [&body, &resp](std::string_view name) {
+        if (body.contains(name) && !body[name].is_null() &&
+            !body[name].is_number()) {
+            write_error(resp, 400, "invalid_video_generation",
+                        std::string(name) + " must be a number",
+                        std::string(name));
+            return false;
+        }
+        return true;
+    };
+    if (!require_integer("width") || !require_integer("height") ||
+        !require_integer("frames") || !require_integer("fps") ||
+        !require_integer("steps") || !require_integer("seed") ||
+        !require_number("guidance_scale")) {
+        return;
+    }
+    const auto integer_in_range = [&body, &resp](
+                                      std::string_view name,
+                                      std::int64_t minimum,
+                                      std::int64_t maximum) {
+        if (!body.contains(name) || body[name].is_null()) return true;
+        if (body[name].is_number_unsigned()) {
+            const auto value = body[name].get<std::uint64_t>();
+            if (value > static_cast<std::uint64_t>(maximum)) {
+                write_error(resp, 400, "invalid_video_generation",
+                            std::string(name) + " is out of range",
+                            std::string(name));
+                return false;
+            }
+            return true;
+        }
+        const auto value = body[name].get<std::int64_t>();
+        if (value < minimum || value > maximum) {
+            write_error(resp, 400, "invalid_video_generation",
+                        std::string(name) + " is out of range",
+                        std::string(name));
+            return false;
+        }
+        return true;
+    };
+    const auto number_in_range = [&body, &resp](
+                                     std::string_view name,
+                                     float minimum,
+                                     float maximum) {
+        if (!body.contains(name) || body[name].is_null()) return true;
+        const double value = body[name].get<double>();
+        if (!std::isfinite(value) || value < minimum || value > maximum) {
+            write_error(resp, 400, "invalid_video_generation",
+                        std::string(name) + " is out of range",
+                        std::string(name));
+            return false;
+        }
+        return true;
+    };
+    if (!integer_in_range("width", 32, 1280) ||
+        !integer_in_range("height", 32, 720) ||
+        !integer_in_range("frames", 9, 121) ||
+        !integer_in_range("fps", 1, 60) ||
+        !integer_in_range("steps", 1, 50) ||
+        !integer_in_range(
+            "seed", -1,
+            static_cast<std::int64_t>(
+                std::numeric_limits<std::uint32_t>::max())) ||
+        !number_in_range("guidance_scale", 0.0f, 20.0f)) {
+        return;
+    }
+
+    model::VideoGenerationRequest request;
+    std::string model_name;
+    try {
+        model_name = body.contains("model") && !body["model"].is_null()
+            ? body["model"].get<std::string>() : deps.default_model;
+        request.prompt = body["prompt"].get<std::string>();
+        request.negative_prompt = body.value("negative_prompt", "");
+        request.width = body.value("width", 512);
+        request.height = body.value("height", 320);
+        request.frames = body.value("frames", 33);
+        request.fps = body.value("fps", 24);
+        request.steps = body.value("steps", 20);
+        request.seed = body.value("seed", std::int64_t{-1});
+        request.guidance_scale = body.value("guidance_scale", 6.0f);
+    } catch (const std::exception&) {
+        write_error(resp, 400, "invalid_video_generation",
+                    "video generation parameters are out of range");
+        return;
+    }
+
+    constexpr int min_dimension = 64;
+    constexpr int max_width = 1280;
+    constexpr int max_height = 720;
+    constexpr int max_frames = 121;
+    constexpr int max_fps = 60;
+    constexpr int max_steps = 50;
+    if (model_name.empty() || model_name.size() > 256 ||
+        request.prompt.empty() || request.prompt.size() > 32000 ||
+        request.negative_prompt.size() > 32768 ||
+        request.width < min_dimension || request.width > max_width ||
+        request.height < min_dimension || request.height > max_height ||
+        request.width % 32 != 0 || request.height % 32 != 0 ||
+        static_cast<std::uint64_t>(request.width) *
+                static_cast<std::uint64_t>(request.height) >
+            1280ULL * 720ULL ||
+        request.frames < 9 || request.frames > max_frames ||
+        (request.frames - 1) % 8 != 0 ||
+        request.fps < 1 || request.fps > max_fps ||
+        request.steps < 1 || request.steps > max_steps ||
+        request.seed < -1 ||
+        request.seed > static_cast<std::int64_t>(
+            std::numeric_limits<std::uint32_t>::max()) ||
+        !std::isfinite(request.guidance_scale) ||
+        request.guidance_scale < 0.0f || request.guidance_scale > 20.0f) {
+        write_error(resp, 400, "invalid_video_generation",
+                    "model, prompt, resolution, frames, fps, steps, seed, or guidance_scale is invalid");
+        return;
+    }
+
+    const auto resolved_model = resolve_model_name(deps, model_name);
+    if (!resolved_model) {
+        write_error(resp, 404, "model_not_found",
+                    resolved_model.error().message);
+        return;
+    }
+    const auto info = deps.coordinator.registry().get_info_result(
+        resolved_model->resolved);
+    if (!info || !info->supports("video_generation")) {
+        write_error(resp, 400, "unsupported_video_model",
+                    "model does not support video generation", "model");
+        return;
+    }
+
+    const auto job = begin_job(
+        model_name, "video_generation", request.prompt,
+        nlohmann::json{
+            {"width", request.width},
+            {"height", request.height},
+            {"frames", request.frames},
+            {"fps", request.fps},
+            {"steps", request.steps},
+            {"seed", request.seed},
+            {"guidance_scale", request.guidance_scale},
+        });
+    resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
+
+    const std::string& runtime_model = resolved_model->resolved;
+    const auto slot = acquire_media_slot(req, deps, runtime_model, job);
+    if (!slot) {
+        const int status = status_for(slot.error().code);
+        const int internal_status = internal_status_for(slot.error().code);
+        write_error(resp, status, "video_generation_admission_failed",
+                    slot.error().message);
+        record_media(deps, model_name, 0.0f, internal_status, -1,
+                     0.0, 0, observation);
+        finish_job(job, internal_status == 499 ? "cancelled" : "failed",
+                   slot.error().message);
+        return;
+    }
+
+    SlotGuard guard{&deps.coordinator, runtime_model, *slot};
+    const auto result = deps.coordinator.generate_video(
+        runtime_model, *slot, request,
+        [&req, &deps, &model_name, job](int progress) {
+            if (update_job(job, progress) && deps.events) {
+                deps.events->publish(
+                    "progress",
+                    nlohmann::json{
+                        {"id", job->id},
+                        {"model", model_name},
+                        {"modality", "video_generation"},
+                        {"progress", progress},
+                    }.dump());
+            }
+            return !req.is_connection_closed() &&
+                !job->cancelled->load();
+        });
+    if (!result) {
+        const bool cancelled = job->cancelled->load() ||
+            result.error().code == foundation::ErrorCode::Cancelled;
+        const int status = cancelled ? 408 : status_for(result.error().code);
+        const int internal_status = cancelled ? 499 : status;
+        write_error(resp, status, "video_generation_failed",
+                    result.error().message);
+        record_media(deps, model_name, 0.0f, internal_status, *slot,
+                     0.0, utf8_character_count(request.prompt), observation);
+        finish_job(job, cancelled ? "cancelled" : "failed",
+                   result.error().message);
+        return;
+    }
+
+    if (req.is_connection_closed() || job->cancelled->load()) {
+        write_error(resp, 408, "video_generation_failed",
+                    "video generation was cancelled");
+        record_media(deps, model_name, 0.0f, 499, *slot,
+                     0.0, utf8_character_count(request.prompt), observation);
+        finish_job(job, "cancelled", "video generation was cancelled");
+        return;
+    }
+    if (result->video_bytes.size() > 25ULL * 1024ULL * 1024ULL) {
+        write_error(resp, 413, "video_generation_failed",
+                    "generated video exceeds the 25 MiB limit");
+        record_media(deps, model_name, result->duration_ms, 413, *slot,
+                     0.0, utf8_character_count(request.prompt), observation);
+        finish_job(job, "failed", "generated video exceeds the 25 MiB limit");
+        return;
+    }
+    if (result->video_bytes.empty() ||
+        (result->content_type != "video/x-msvideo" && result->content_type != "video/avi" && result->content_type != "video/mp4")) {
+        constexpr std::string_view message =
+            "video backend returned an unsupported or empty video container";
+        write_error(resp, 500, "video_generation_failed",
+                    std::string(message));
+        record_media(deps, model_name, result->duration_ms, 500, *slot,
+                     0.0, utf8_character_count(request.prompt), observation);
+        finish_job(job, "failed", std::string(message));
+        return;
+    }
+
+    const bool is_mp4 = result->content_type == "video/mp4";
+    const std::vector<PendingMediaOutput> history_outputs{
+        PendingMediaOutput{
+            result->content_type, is_mp4 ? ".mp4" : ".avi", &result->video_bytes},
+    };
+    const auto stored = store_job_outputs(job, history_outputs);
+    if (!stored) {
+        foundation::LOG_WARN(
+            "media_output_store_failed", "job_id={} error={}",
+            job->id, stored.error().message);
+    }
+    resp.set_header("X-InferDeck-Video-Duration-Seconds",
+                    std::to_string(result->output_video_seconds));
+    resp.set_content(
+        std::string(
+            reinterpret_cast<const char*>(result->video_bytes.data()),
+            result->video_bytes.size()),
+        result->content_type);
+    resp.status = 200;
+    record_media(deps, model_name, result->duration_ms, 200, *slot,
+                 0.0, utf8_character_count(request.prompt), observation);
+    finish_job(job, "completed");
+}
 #include "image_routes.ipp"
 
 #include "audio_generation_routes.ipp"

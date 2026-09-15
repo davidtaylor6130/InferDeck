@@ -1,11 +1,12 @@
 import type { ModelInfo, MonthlyUsageRow, UsageRow } from './types';
 
-export const DASHBOARD_SECTIONS = ['llm', 'dictation', 'image', 'music'] as const;
+export const DASHBOARD_SECTIONS = ['llm', 'dictation', 'image', 'music', 'video'] as const;
 export type DashboardSection = typeof DASHBOARD_SECTIONS[number];
 
 const DICTATION_MODALITIES = new Set(['audio_transcription', 'audio_speech']);
 const DICTATION_MODEL_NAME = /(?:^|[-_.])(sapi|whisper|parakeet|supertonic|speech|tts|stt|asr)(?:$|[-_.])/i;
 const IMAGE_MODEL_NAME = /(?:^|[-_.])(stable[-_.]?diffusion|sdxl|flux|z[-_.]?image|imagegen)(?:$|[-_.])/i;
+const VIDEO_MODEL_NAME = /(?:^|[-_.])(ltx(?:[-_.]?video|[-_.]?[-0-9.]+)|video[-_.]?generation)(?:$|[-_.])/i;
 const MUSIC_MODEL_NAME = /(?:^|[-_.])(ace[-_.]?step|musicgen|audiocraft|audio[-_.]?generation)(?:$|[-_.])/i;
 
 export function isDictationModel(model: Pick<ModelInfo, 'modality'> | undefined): boolean {
@@ -23,6 +24,7 @@ export function sectionForModality(modality?: string): DashboardSection {
   if (DICTATION_MODALITIES.has(modality ?? '')) return 'dictation';
   if (modality === 'image') return 'image';
   if (modality === 'audio_generation') return 'music';
+  if (modality === 'video' || modality === 'video_generation') return 'video';
   return 'llm';
 }
 
@@ -53,6 +55,7 @@ export function modelNameLooksLikeSection(model: string): DashboardSection {
   if (DICTATION_MODEL_NAME.test(model)) return 'dictation';
   if (IMAGE_MODEL_NAME.test(model)) return 'image';
   if (MUSIC_MODEL_NAME.test(model)) return 'music';
+  if (VIDEO_MODEL_NAME.test(model)) return 'video';
   return 'llm';
 }
 
@@ -78,6 +81,7 @@ export function modalityLabel(modality?: string): string {
   if (modality === 'embedding') return 'Embeddings';
   if (modality === 'image') return 'Image';
   if (modality === 'audio_generation') return 'Music generation';
+  if (modality === 'video' || modality === 'video_generation') return 'Video generation';
   return 'Language model';
 }
 
@@ -85,5 +89,6 @@ export function sectionLabel(section: DashboardSection): string {
   if (section === 'dictation') return 'Dictation';
   if (section === 'image') return 'Image';
   if (section === 'music') return 'Music';
+  if (section === 'video') return 'Video';
   return 'LLM';
 }

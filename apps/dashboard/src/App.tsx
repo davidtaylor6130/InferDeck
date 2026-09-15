@@ -15,6 +15,7 @@ import { SystemPage } from './pages/SystemPage';
 import { FutureWorkspacePage } from './pages/FutureWorkspacePage';
 import { ImagePage } from './pages/ImagePage';
 import { MusicPage } from './pages/MusicPage';
+import { VideoPage } from './pages/VideoPage';
 import { ApiSettingsPage } from './pages/ApiSettingsPage';
 import {
   loadCollapsedSidebarSections,
@@ -47,6 +48,11 @@ export type PageId =
   | 'music/models'
   | 'music/usage'
   | 'music/diagnostics'
+  | 'video/generate'
+  | 'video/settings'
+  | 'video/models'
+  | 'video/usage'
+  | 'video/diagnostics'
   | 'post-training';
 
 interface DashboardPage {
@@ -78,6 +84,11 @@ export const DASHBOARD_PAGES: ReadonlyArray<DashboardPage> = [
   { id: 'music/models', label: 'Model Store', section: 'music' },
   { id: 'music/usage', label: 'Usage', section: 'music' },
   { id: 'music/diagnostics', label: 'Health & alerts', section: 'music' },
+  { id: 'video/generate', label: 'Generate', section: 'video' },
+  { id: 'video/settings', label: 'Model Settings', section: 'video' },
+  { id: 'video/models', label: 'Model Store', section: 'video' },
+  { id: 'video/usage', label: 'Usage', section: 'video' },
+  { id: 'video/diagnostics', label: 'Health & alerts', section: 'video' },
   { id: 'post-training', label: 'Post Training', preview: true },
 ];
 
@@ -86,6 +97,7 @@ const SECTION_SETTINGS_HELP: Record<DashboardSection, string> = {
   dictation: 'Speech runtimes, costs, and model configuration',
   image: 'Image runtimes, model loading, and active profiles',
   music: 'Music runtimes, model loading, and active profiles',
+  video: 'Video runtimes, model loading, and active profiles',
 };
 
 const LEGACY_ROUTES: Record<string, PageId> = {
@@ -236,6 +248,11 @@ const Shell: React.FC = () => {
             {page === 'music/models' && <ModelsPage section="music" />}
             {page === 'music/usage' && <UsagePage section="music" />}
             {page === 'music/diagnostics' && <SystemPage section="music" />}
+            {page === 'video/generate' && <VideoPage />}
+            {page === 'video/settings' && <OperatePage section="video" />}
+            {page === 'video/models' && <ModelsPage section="video" />}
+            {page === 'video/usage' && <UsagePage section="video" />}
+            {page === 'video/diagnostics' && <SystemPage section="video" />}
             {page === 'post-training' && <FutureWorkspacePage area="post-training" />}
           </div>
         </main>

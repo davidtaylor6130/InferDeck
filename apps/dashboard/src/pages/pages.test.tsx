@@ -13,6 +13,7 @@ import { parseDashboardLogLine, SystemPage } from './SystemPage';
 import { FutureWorkspacePage } from './FutureWorkspacePage';
 import { ImagePage } from './ImagePage';
 import { MusicPage } from './MusicPage';
+import { VIDEO_JOB_MODALITIES } from './VideoPage';
 import type { StatsEvent, StatusPayload } from '../types';
 
 const stats: StatsEvent = {
@@ -108,6 +109,11 @@ const value: GatewayValue = {
 
 const renderWith = (node: React.ReactElement) =>
   renderToStaticMarkup(<GatewayContext.Provider value={value}>{node}</GatewayContext.Provider>);
+
+  it('uses the gateway video_generation modality for video history', () => {
+    expect(VIDEO_JOB_MODALITIES).toContain('video_generation');
+    expect(VIDEO_JOB_MODALITIES).not.toContain('video');
+  });
 
 describe('pages', () => {
   it('preserves complete cost history when live request polling refreshes', () => {

@@ -96,6 +96,25 @@ struct AudioGenerationResult {
     double output_audio_seconds{0.0};
 };
 
+struct VideoGenerationRequest {
+    std::string prompt;
+    std::string negative_prompt;
+    int width{512};
+    int height{320};
+    int frames{33};
+    int fps{24};
+    int steps{20};
+    std::int64_t seed{-1};
+    float guidance_scale{6.0f};
+};
+
+struct VideoGenerationResult {
+    std::vector<std::byte> video_bytes;
+    std::string content_type{"video/x-msvideo"};
+    float duration_ms{0.0f};
+    double output_video_seconds{0.0};
+};
+
 struct SpeechRequest {
     std::string input;
     std::string voice;
@@ -149,6 +168,14 @@ public:
     virtual ~IAudioGenerationBackend() = default;
     virtual foundation::Result<AudioGenerationResult> generate_audio(
         int slot_id, const AudioGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) = 0;
+};
+
+class IVideoBackend {
+public:
+    virtual ~IVideoBackend() = default;
+    virtual foundation::Result<VideoGenerationResult> generate_video(
+        int slot_id, const VideoGenerationRequest& request,
         const std::function<bool(int)>& progress = {}) = 0;
 };
 

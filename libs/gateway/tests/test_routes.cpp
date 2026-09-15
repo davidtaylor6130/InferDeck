@@ -320,7 +320,7 @@ TEST_CASE("OpenAI adapter matches the canonical golden fixture",
 namespace {
 
 class IModelMock : public IModel, public IEmbeddingBackend, public IImageBackend,
-                   public IAudioGenerationBackend, public ISpeechBackend,
+                   public IAudioGenerationBackend, public IVideoBackend, public ISpeechBackend,
                    public ITranscriptionBackend {
 public:
     ModelInfo model_info{};
@@ -335,6 +335,9 @@ public:
     std::atomic<int> nonstream_started{0};
     std::atomic<bool> nonstream_saw_cancel{false};
     std::atomic<bool> block_media_until_cancel{false};
+    std::atomic<bool> video_should_fail{false};
+    std::atomic<bool> video_output_too_large{false};
+    std::atomic<bool> video_output_mp4{false};
     std::atomic<bool> split_utf8{false};
     std::atomic<bool> context_error{false};
     std::atomic<int> last_max_tokens{0};
@@ -680,6 +683,39 @@ public:
         return Ok(std::move(result));
     }
 
+    Result<VideoGenerationResult> generate_video(
+        int, const VideoGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) override {
+        if (video_should_fail.load()) {
+            return inferdeck::foundation::Err<VideoGenerationResult>(
+                ErrorCode::Internal, "mock video failure");
+        }
+        if (block_media_until_cancel.load()) {
+            while (!progress || progress(25)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            }
+            return inferdeck::foundation::Err<VideoGenerationResult>(
+                ErrorCode::Cancelled, "cancelled");
+        }
+        if (progress && !progress(50)) {
+            return inferdeck::foundation::Err<VideoGenerationResult>(
+                ErrorCode::Cancelled, "cancelled");
+        }
+        VideoGenerationResult result;
+        result.video_bytes = {
+            std::byte{0x52}, std::byte{0x49}, std::byte{0x46},
+            std::byte{0x46}, std::byte{0x41}, std::byte{0x56},
+            std::byte{0x49}, std::byte{0x20},
+        };
+        if (video_output_too_large.load()) {
+            result.video_bytes.resize(25u * 1024u * 1024u + 1u);
+        }
+        result.content_type = request.prompt == "mp4" ? "video/mp4" : "video/x-msvideo";
+        result.duration_ms = 22.0f;
+        result.output_video_seconds =
+            static_cast<double>(request.frames) / request.fps;
+        return Ok(std::move(result));
+    }
     Result<void> validate_speech_request(
         const SpeechRequest& request) override {
         if (request.voice == "not-a-voice" || request.voice == "999") {
@@ -799,7 +835,7 @@ struct TestServer {
         registry.set_factory([](const ModelInfo& info) {
             return std::make_unique<IModelMock>(info);
         });
-        for (const std::string runtime : {"stable_diffusion_cpp", "ace_step_cpp", "sherpa_onnx", "whisper_cpp"}) {
+        for (const std::string runtime : {"stable_diffusion_cpp", "ltx_video_cpp", "ace_step_cpp", "sherpa_onnx", "whisper_cpp"}) {
             registry.register_factory(runtime, [](const ModelInfo& info) {
                 return std::make_unique<IModelMock>(info);
             });
@@ -843,6 +879,11 @@ struct TestServer {
                     [this](const httplib::Request& req,
                            httplib::Response& resp) {
                         handle_audio_generations(req, resp, make_deps());
+                    });
+        server.Post("/api/inferdeck/v1/video/generations",
+                    [this](const httplib::Request& req,
+                           httplib::Response& resp) {
+                        handle_video_generations(req, resp, make_deps());
                     });
     }
 
@@ -1008,6 +1049,18 @@ TEST_CASE("Route manifest matches the pinned strict OpenAI snapshot",
         CHECK(fixture["derivative_routes"][index]["path"].get<std::string>() ==
               std::string(kOpenAIDerivativeRoutes[index].path));
     }
+
+    REQUIRE(kInferDeckRoutes.size() == 2);
+    CHECK(inferdeck_route(InferDeckRoute::VideoGenerations).method == "POST");
+    CHECK(inferdeck_route(InferDeckRoute::VideoGenerations).path ==
+          "/api/inferdeck/v1/video/generations");
+    CHECK(is_strict_openai_route("POST",
+          "/api/inferdeck/v1/video/generations") == false);
+    CHECK(inferdeck_route(InferDeckRoute::MediaVideoGenerations).method == "POST");
+    CHECK(inferdeck_route(InferDeckRoute::MediaVideoGenerations).path ==
+          "/api/inferdeck/v1/media/video/generations");
+    CHECK(is_strict_openai_route("POST",
+          "/api/inferdeck/v1/media/video/generations") == false);
 
     const auto main_path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "apps/inferdeck-gateway/src/main.cpp";
@@ -2800,6 +2853,224 @@ TEST_CASE("Image jobs can be cancelled through the shared tracker", "[routes][im
     const auto rows = ts.stats_db.recent_requests(1);
     REQUIRE(rows.size() == 1);
     CHECK(rows[0].status_code == 499);
+    ts.stop();
+}
+
+TEST_CASE("InferDeck video generation returns AVI and restores its saved output",
+          "[routes][video-generation][media-history]") {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("inferdeck-video-history-" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup {
+        std::filesystem::path root;
+        ~Cleanup() {
+            (void)configure_media_history({});
+            std::error_code ignored;
+            std::filesystem::remove_all(root, ignored);
+        }
+    } cleanup{root};
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    REQUIRE(configure_media_history(root));
+
+    TestServer ts;
+    ModelInfo info = make_info("ltx-video");
+    info.runtime = "ltx_video_cpp";
+    info.modality = "video";
+    info.capabilities = {"video_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto response = client.Post(
+        "/api/inferdeck/v1/video/generations",
+        nlohmann::json{
+            {"model", info.name},
+            {"prompt", "a lighthouse in rain"},
+            {"negative_prompt", "text"},
+            {"width", 512},
+            {"height", 320},
+            {"frames", 33},
+            {"fps", 24},
+            {"steps", 20},
+            {"seed", -1},
+            {"guidance_scale", 6.0},
+        }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(response->get_header_value("Content-Type") == "video/x-msvideo");
+    CHECK(response->body.substr(0, 4) == "RIFF");
+    CHECK_FALSE(response->get_header_value("X-InferDeck-Job-Id").empty());
+    CHECK(response->get_header_value("X-InferDeck-Video-Duration-Seconds") ==
+          "1.375000");
+    const auto mp4_response = client.Post("/api/inferdeck/v1/video/generations", nlohmann::json{{"model", info.name}, {"prompt", "mp4"}, {"negative_prompt", "text"}, {"width", 512}, {"height", 320}, {"frames", 33}, {"fps", 24}, {"steps", 20}, {"seed", -1}, {"guidance_scale", 6.0}}.dump(), "application/json");
+    REQUIRE(mp4_response);
+    CHECK(mp4_response->status == 200);
+    CHECK(mp4_response->get_header_value("Content-Type") == "video/mp4");
+    CHECK(mp4_response->body == response->body);
+    ts.stop();
+
+    const auto jobs = media_jobs();
+    REQUIRE(jobs.size() == 2);
+    const std::uint64_t id = jobs[1]["id"];
+    CHECK(jobs[1]["modality"] == "video_generation");
+    CHECK(jobs[1]["parameters"]["width"] == 512);
+    CHECK(jobs[1]["parameters"]["height"] == 320);
+    CHECK(jobs[1]["parameters"]["frames"] == 33);
+    CHECK(jobs[1]["parameters"]["fps"] == 24);
+    CHECK(jobs[1]["parameters"]["steps"] == 20);
+    CHECK(jobs[1]["state"] == "completed");
+    REQUIRE(jobs[1]["outputs"].size() == 1);
+    CHECK(jobs[1]["outputs"][0]["content_type"] == "video/x-msvideo");
+    CHECK(std::string(jobs[1]["outputs"][0]["filename"]).ends_with(".avi"));
+
+    auto output = media_job_output(id, 0);
+    REQUIRE(output);
+    CHECK(output->content_type == "video/x-msvideo");
+    CHECK(output->body == response->body);
+
+    REQUIRE(configure_media_history(root));
+    output = media_job_output(id, 0);
+    REQUIRE(output);
+    CHECK(output->content_type == "video/x-msvideo");
+    CHECK(output->body == response->body);
+    const std::uint64_t mp4_id = jobs[0]["id"];
+    REQUIRE(jobs[0]["outputs"].size() == 1);
+    CHECK(jobs[0]["outputs"][0]["content_type"] == "video/mp4");
+    CHECK(std::string(jobs[0]["outputs"][0]["filename"]).ends_with(".mp4"));
+    auto mp4_output = media_job_output(mp4_id, 0);
+    REQUIRE(mp4_output);
+    CHECK(mp4_output->content_type == "video/mp4");
+    CHECK(mp4_output->body == mp4_response->body);
+    REQUIRE(configure_media_history(root));
+    mp4_output = media_job_output(mp4_id, 0);
+    REQUIRE(mp4_output);
+    CHECK(mp4_output->content_type == "video/mp4");
+    CHECK(mp4_output->body == mp4_response->body);
+}
+
+TEST_CASE("Video validation and backend failures happen before or after admission",
+          "[routes][video-generation][validation]") {
+    (void)configure_media_history({});
+    TestServer ts;
+    ModelInfo info = make_info("video-validation");
+    info.runtime = "ltx_video_cpp";
+    info.modality = "video";
+    info.capabilities = {"video_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.start());
+
+    const auto initial_jobs = media_jobs().size();
+    httplib::Client client("127.0.0.1", ts.port);
+    const std::vector<nlohmann::json> invalid{
+        {{"model", info.name}, {"prompt", "bad"}, {"width", 513}},
+        {{"model", info.name}, {"prompt", "bad"}, {"frames", 122}},
+        {{"model", info.name}, {"prompt", "bad"}, {"steps", 51}},
+        {{"model", info.name}, {"prompt", "bad"}, {"future", true}},
+        {{"model", info.name}, {"prompt", "bad"}, {"width", std::numeric_limits<std::uint64_t>::max()}},
+        {{"model", info.name}, {"prompt", "bad"}, {"seed", std::numeric_limits<std::uint64_t>::max()}},
+    };
+    for (const auto& body : invalid) {
+        const auto response = client.Post(
+            "/api/inferdeck/v1/video/generations", body.dump(),
+            "application/json");
+        REQUIRE(response);
+        CHECK(response->status == 400);
+    }
+    CHECK_FALSE(ts.coordinator.is_loaded(info.name));
+    const auto unknown = client.Post(
+        "/api/inferdeck/v1/video/generations",
+        nlohmann::json{{"model", "missing-video"}, {"prompt", "unknown"}}.dump(),
+        "application/json");
+    REQUIRE(unknown);
+    CHECK(unknown->status == 404);
+    CHECK(media_jobs().size() == initial_jobs);
+    CHECK(ts.swap_tracker.snapshot().target.empty());
+
+    REQUIRE(ts.coordinator.load(info.name));
+    const auto* backend = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend(info.name));
+    REQUIRE(backend);
+    const_cast<IModelMock*>(backend)->video_should_fail.store(true);
+    const auto failed = client.Post(
+        "/api/inferdeck/v1/video/generations",
+        nlohmann::json{{"model", info.name}, {"prompt", "backend error"}}.dump(),
+        "application/json");
+    REQUIRE(failed);
+    CHECK(failed->status == 500);
+    CHECK(nlohmann::json::parse(failed->body)["error"]["code"] ==
+          "video_generation_failed");
+    const auto jobs = media_jobs();
+    REQUIRE(jobs.size() == initial_jobs + 1);
+    CHECK(jobs[0]["state"] == "failed");
+    CHECK(jobs[0]["outputs"].empty());
+
+    const_cast<IModelMock*>(backend)->video_should_fail.store(false);
+    const_cast<IModelMock*>(backend)->video_output_too_large.store(true);
+    const auto capped = client.Post(
+        "/api/inferdeck/v1/video/generations",
+        nlohmann::json{{"model", info.name}, {"prompt", "too large"}}.dump(),
+        "application/json");
+    REQUIRE(capped);
+    CHECK(capped->status == 413);
+    CHECK(capped->body.find("25 MiB") != std::string::npos);
+    const auto capped_jobs = media_jobs();
+    REQUIRE(capped_jobs.size() == initial_jobs + 2);
+    CHECK(capped_jobs[0]["state"] == "failed");
+    CHECK(capped_jobs[0]["outputs"].empty());
+    ts.stop();
+}
+
+TEST_CASE("Video generation jobs can be cancelled through the shared tracker",
+          "[routes][video-generation][cancel]") {
+    TestServer ts;
+    ModelInfo info = make_info("cancel-video");
+    info.runtime = "ltx_video_cpp";
+    info.modality = "video";
+    info.capabilities = {"video_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    const IModelMock* backend = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend(info.name));
+    REQUIRE(backend);
+    const_cast<IModelMock*>(backend)->block_media_until_cancel.store(true);
+    REQUIRE(ts.start());
+
+    std::atomic<int> status{0};
+    std::thread request_thread([&] {
+        httplib::Client client("127.0.0.1", ts.port);
+        const httplib::Result response = client.Post(
+            "/api/inferdeck/v1/video/generations",
+            nlohmann::json{{"model", info.name}, {"prompt", "cancel me"}}.dump(),
+            "application/json");
+        status.store(response ? response->status : -1);
+    });
+
+    std::uint64_t job_id = 0;
+    for (int attempt = 0; attempt < 100 && job_id == 0; ++attempt) {
+        for (const auto& job : media_jobs()) {
+            if (job["model"] == info.name &&
+                job["modality"] == "video_generation" &&
+                job["state"] == "running") {
+                job_id = job["id"];
+            }
+        }
+        if (job_id == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+    }
+    REQUIRE(job_id > 0);
+    REQUIRE(cancel_media_job(job_id));
+    request_thread.join();
+    CHECK(status.load() == 408);
+    const std::vector<observability::RequestRow> rows =
+        ts.stats_db.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].status_code == 499);
+    CHECK(rows[0].modality == "video_generation");
+    CHECK(ts.coordinator.active_request_count() == 0);
     ts.stop();
 }
 

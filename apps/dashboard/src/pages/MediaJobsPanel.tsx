@@ -25,6 +25,7 @@ interface MediaJobsPanelProps {
   emptyDetail?: string;
   showEmpty?: boolean;
   refreshToken?: number;
+  onJobsChange?: (jobs: MediaJob[]) => void;
 }
 
 function statusTone(state: string): 'good' | 'critical' | 'warn' | 'info' {
@@ -41,6 +42,11 @@ function parameterSummary(job: MediaJob): string {
     return [size, typeof count === 'number' ? `${count} image${count === 1 ? '' : 's'}` : '']
       .filter(Boolean)
       .join(' / ');
+  }
+  if (job.modality === 'video_generation') {
+    const frames = job.parameters?.frames;
+    const fps = job.parameters?.fps;
+    return [typeof frames === 'number' ? `${frames} frames` : '', typeof fps === 'number' ? `${fps} fps` : ''].filter(Boolean).join(' / ');
   }
   if (job.modality === 'audio_generation') {
     const duration = job.parameters?.duration_seconds;
@@ -65,6 +71,7 @@ export const MediaJobsPanel: React.FC<MediaJobsPanelProps> = ({
   emptyDetail = 'Speech requests appear here while the gateway is processing them.',
   showEmpty = false,
   refreshToken = 0,
+  onJobsChange,
 }) => {
   const [jobs, setJobs] = useState<MediaJob[]>([]);
   const [loadError, setLoadError] = useState('');
@@ -72,8 +79,9 @@ export const MediaJobsPanel: React.FC<MediaJobsPanelProps> = ({
 
   const receiveJobs = useCallback((result: MediaJob[]) => {
     setJobs(result);
+    onJobsChange?.(result);
     setLoadError('');
-  }, []);
+  }, [onJobsChange]);
   const failed = useCallback((error: unknown) => {
     setLoadError(error instanceof Error ? error.message : 'Media history is unavailable');
   }, []);
@@ -159,6 +167,12 @@ export const MediaJobsPanel: React.FC<MediaJobsPanelProps> = ({
                               className="max-h-[36rem] w-full bg-black object-contain"
                             />
                           </a>
+                        ) : output.content_type === 'video/avi' ? (
+                          <p className="border-l-2 border-white/15 pl-3 text-xs text-text-muted">
+                            AVI output is download-only. Download the AVI to watch it.
+                          </p>
+                        ) : output.content_type === 'video/mp4' ? (
+                          <video controls preload="metadata" src={mediaOutputUrl(output)} className="max-h-[36rem] w-full bg-black">Video playback is not supported by this browser.</video>
                         ) : (
                           <audio
                             controls

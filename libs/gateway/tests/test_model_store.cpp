@@ -81,6 +81,33 @@ public:
     std::string last_url;
 };
 
+class LtxCatalogueTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string&) override {
+        last_url = url;
+if (url.find("/api/models/") != std::string::npos) {
+            const auto sha = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+            nlohmann::json files = nlohmann::json::array();
+            for (const auto& name : {"ltx-2.3-22b-dev-UD-Q4_K_M.gguf", "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors", "vae/ltx-2.3-22b-dev_video_vae.safetensors", "vae/ltx-2.3-22b-dev_audio_vae.safetensors", "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf"}) files.push_back({{"rfilename", name}, {"lfs", {{"size", 4}, {"sha256", sha}}}});
+            return foundation::Ok(nlohmann::json{{"sha", "revision"}, {"pipeline_tag", "text-to-video"}, {"siblings", files}});
+        }
+        const bool incomplete = url.find("incomplete") != std::string::npos;
+        nlohmann::json siblings = {
+            {{"rfilename", "ltx-2.3-22b-dev-UD-Q4_K_M.gguf"}},
+            {{"rfilename", "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors"}},
+            {{"rfilename", "vae/ltx-2.3-22b-dev_video_vae.safetensors"}},
+            {{"rfilename", "vae/ltx-2.3-22b-dev_audio_vae.safetensors"}},
+            {{"rfilename", "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf"}}
+        };
+        if (incomplete) siblings.erase(siblings.begin() + 1, siblings.end());
+        return foundation::Ok(nlohmann::json::array({
+            {{"id", incomplete ? "owner/LTX-2.3-incomplete" : "owner/LTX-2.3"},
+             {"pipeline_tag", "text-to-video"}, {"tags", nlohmann::json::array({"ltx-2.3"})}, {"siblings", siblings}}
+        }));
+    }
+    std::string last_url;
+};
 class CatalogueTransport final : public FakeTransport {
 public:
     foundation::Result<nlohmann::json> get_json(
@@ -1546,6 +1573,68 @@ TEST_CASE("Model store archives and permanently deletes managed artifacts",
         CHECK_FALSE(std::filesystem::exists(deleted_source));
         CHECK_FALSE(registry.has("deleted-model"));
         CHECK_FALSE(store.installed().contains("deleted-model"));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store discovers complete LTX video bundles only",
+          "[model-store][catalogue][ltx]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto transport = std::make_unique<LtxCatalogueTransport>();
+    auto* recording = transport.get();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        const auto result = store.search("", "ltx_video_cpp", "video", 10,
+                                         "downloads", false);
+        REQUIRE(result);
+        REQUIRE(result->size() == 1);
+        CHECK((*result)[0]["runtime"] == "ltx_video_cpp");
+        CHECK((*result)[0]["modality"] == "video");
+        CHECK((*result)[0]["format"] == "bundle");
+        CHECK((*result)[0]["compatibleArtifacts"] == 5);
+        CHECK(recording->last_url.find("search=LTX-2.3") != std::string::npos);
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store rejects incomplete LTX video bundles",
+          "[model-store][catalogue][ltx]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<LtxCatalogueTransport>());
+        const auto result = store.search("incomplete", "ltx_video_cpp", "video",
+                                         10, "downloads", false);
+        REQUIRE(result);
+        CHECK(result->empty());
+    }
+    std::filesystem::remove_all(root);
+}
+TEST_CASE("Model store installs complete LTX bundle artifacts",
+          "[model-store][ltx][install]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<LtxCatalogueTransport>());
+        const auto installed = store.install("owner/LTX-2.3", "__inferdeck_ltx_bundle__",
+                                             "ltx_video_cpp", "video", "ltx-test");
+        REQUIRE(installed);
+        const auto job = wait_for_terminal(store, *installed);
+        REQUIRE(job);
+        REQUIRE(job->state == "installed");
+        const auto resolved = registry.resolve("ltx-test");
+        REQUIRE(resolved);
+        CHECK(job->artifacts.size() == 5);
+        CHECK(job->artifacts[0].name == "ltx-2.3-22b-dev-UD-Q4_K_M.gguf");
+        CHECK(job->artifacts[4].name == "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf");
+        CHECK_FALSE(store.install("owner/LTX-2.3", "ltx-2.3-22b-dev-UD-Q4_K_M.gguf",
+                                  "ltx_video_cpp", "video", "ltx-standalone"));
     }
     std::filesystem::remove_all(root);
 }

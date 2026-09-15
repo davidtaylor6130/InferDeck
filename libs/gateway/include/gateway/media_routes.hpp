@@ -22,6 +22,9 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
 void handle_audio_generations(const httplib::Request& req,
                               httplib::Response& resp,
                               const GatewayDeps& deps);
+void handle_video_generations(const httplib::Request& req,
+                              httplib::Response& resp,
+                              const GatewayDeps& deps);
 void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
                          const GatewayDeps& deps);
 void handle_audio_transcriptions(const httplib::Request& req, httplib::Response& resp,

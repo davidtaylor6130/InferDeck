@@ -28,7 +28,7 @@ import { MediaGenerationUsagePage } from './MediaGenerationUsagePage';
 
 export const UsagePage: React.FC<{ section?: DashboardSection }> = ({ section = 'llm' }) => {
   if (section === 'dictation') return <DictationUsagePage />;
-  if (section === 'image' || section === 'music') {
+  if (section === 'image' || section === 'music' || section === 'video') {
     return <MediaGenerationUsagePage section={section} />;
   }
   return <LlmUsagePage />;

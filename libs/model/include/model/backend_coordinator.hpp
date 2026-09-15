@@ -154,6 +154,10 @@ public:
         const std::string& name, int slot_id,
         const AudioGenerationRequest& request,
         const std::function<bool(int)>& progress = {});
+    foundation::Result<VideoGenerationResult> generate_video(
+        const std::string& name, int slot_id,
+        const VideoGenerationRequest& request,
+        const std::function<bool(int)>& progress = {});
     foundation::Result<void> validate_speech_request(
         const std::string& name, const SpeechRequest& request);
     foundation::Result<AudioResult> synthesize(
@@ -191,6 +195,7 @@ private:
         bool preparing{false};
         bool prepared{false};
         std::optional<std::uint64_t> retry_after_generation{};
+        bool resource_blocked{false};
         bool demand_prepared{false};
         bool capacity_prepared{false};
         std::optional<RequestDemand> demand;
@@ -213,6 +218,7 @@ private:
     bool request_waits_for_priority_media_locked(
         const std::string& name, const std::string& reservation_key) const;
     bool waiter_is_actionable_locked(const SlotWaiter& waiter) const;
+    bool waiter_is_resource_barrier_locked(const SlotWaiter& waiter) const;
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
     foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot, const RequestDemand* demand = nullptr);
