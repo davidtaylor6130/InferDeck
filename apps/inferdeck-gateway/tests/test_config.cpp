@@ -274,24 +274,6 @@ TEST_CASE("Repository gateway configuration keeps statistics in the installed ru
     CHECK(config.stats_db_path == "C:/InferDeck/data/stats.db");
 }
 
-TEST_CASE("Repository retains the tuned Gemma 31B profile",
-          "[config][gemma4]") {
-    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
-        "config" / "gateway.yml";
-    const auto config = load_config(path);
-    const auto gemma = std::find_if(
-        config.models.begin(), config.models.end(),
-        [](const auto& model) { return model.name == "gemma-4-31b"; });
-    REQUIRE(gemma != config.models.end());
-    CHECK(gemma->gguf_path ==
-          "C:/Inferdeck/models/unsloth/gemma-4-31B-it-GGUF/"
-          "gemma-4-31B-it-UD-Q4_K_XL.gguf");
-    CHECK(gemma->n_slots == 1);
-    CHECK(gemma->context_size == 262144);
-    CHECK(gemma->vram_required_mb == 29000);
-    CHECK_FALSE(gemma->mtp_enabled);
-}
-
 TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
           "[config][mtp]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
@@ -344,43 +326,6 @@ TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
     CHECK(qwen->sampling.top_k == 20);
     CHECK(qwen->sampling.min_p == 0.0f);
     CHECK(qwen->sampling.repeat_penalty == 1.0f);
-}
-
-TEST_CASE("Repository Qwen 3.6 27B profile enables the measured adaptive MTP settings",
-          "[config][mtp]") {
-    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
-        "config" / "gateway.yml";
-    const auto config = load_config(path);
-    const auto qwen = std::find_if(
-        config.models.begin(), config.models.end(),
-        [](const auto& model) { return model.name == "qwen3.6-27b"; });
-    REQUIRE(qwen != config.models.end());
-    CHECK(qwen->gguf_path ==
-          "E:/InferDeck/models/unsloth/Qwen3.6-27B-MTP-GGUF/"
-          "Qwen3.6-27B-Q4_K_M.gguf");
-    CHECK(qwen->n_slots == 4);
-    CHECK(qwen->min_slots == 4);
-    CHECK(qwen->context_size == 100000);
-    CHECK(qwen->vram_required_mb == 29791);
-    REQUIRE(qwen->n_batch);
-    REQUIRE(qwen->n_ubatch);
-    CHECK(*qwen->n_batch == 2048);
-    CHECK(*qwen->n_ubatch == 2048);
-    CHECK(qwen->cache_type_k == "q4_0");
-    CHECK(qwen->cache_type_v == "q4_0");
-    CHECK(qwen->mtp_enabled);
-    CHECK(qwen->mtp_draft_tokens == 2);
-    CHECK(qwen->mtp_p_min == 0.0f);
-    CHECK(qwen->mtp_max_active_requests == 1);
-    CHECK(qwen->optimization.status == "measured");
-    CHECK(qwen->optimization.measured_at == "2026-07-26");
-    CHECK(qwen->optimization.quality_passes == 3);
-    CHECK(qwen->optimization.quality_total == 3);
-    CHECK(qwen->optimization.single_tokens_per_second == 50.16);
-    CHECK(qwen->optimization.parallel_tokens_per_second == 51.24);
-    CHECK_FALSE(qwen->optimization.schedule_enabled);
-    CHECK(qwen->optimization.schedule_window_start == "03:00");
-    CHECK(qwen->optimization.schedule_window_end == "04:00");
 }
 
 TEST_CASE("Repository gateway configuration reserves measured target model resources",

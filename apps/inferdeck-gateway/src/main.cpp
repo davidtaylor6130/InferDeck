@@ -93,8 +93,7 @@ int run_gateway(const fs::path& config_path) {
     g_default_model_loading.store(false);
     const auto config_selection = load_config_with_active(config_path);
     auto cfg = config_selection.config;
-    const auto running_config_revision =
-        config_revision(read_text_file(config_selection.loaded_path.string()));
+    const auto running_config_revision = config_revision(read_text_file(config_selection.loaded_path.string()));
     foundation::LogConfig lc;
     lc.level = parse_log_level(cfg.log_level);
     if (!cfg.log_file.empty()) lc.log_file = cfg.log_file;
@@ -194,11 +193,9 @@ int run_gateway(const fs::path& config_path) {
 
     foundation::EventBus events;
     SwapTracker swap_tracker;
-    GatewayDeps deps{coordinator, "15", cfg.auto_swap,
-                     cfg.default_model,
-                     cfg.voice_session_grace_ms,
-                     &metrics, &stats_db, &events, &swap_tracker,
-                     &maintenance_resource};
+    GatewayDeps deps{coordinator, "15", cfg.auto_swap, cfg.default_model,
+                     cfg.voice_session_grace_ms, &metrics, &stats_db,
+                     &events, &swap_tracker, &maintenance_resource};
     deps.api_keys = api_keys;
     deps.background_idle_after_seconds =
         cfg.background_idle_after_seconds;
@@ -793,8 +790,7 @@ int main(int argc, char** argv) {
     SymInitialize(GetCurrentProcess(), NULL, TRUE);
     AddVectoredExceptionHandler(0, CrashHandler);
 #endif
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
+    std::signal(SIGINT, signal_handler); std::signal(SIGTERM, signal_handler);
 
     while (true) {
         const int result = run_gateway(config_path);
