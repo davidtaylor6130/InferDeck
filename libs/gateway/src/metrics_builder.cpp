@@ -50,6 +50,9 @@ json MetricsBuilder::build_history(const observability::StatsDb& db, int limit) 
       {"timestamp_unix_ms", r.timestamp_unix_ms},
       {"model", r.model},
       {"resolved_model", r.resolved_model},
+      {"request_id", r.request_id},
+      {"api_key_id", r.api_key_id},
+      {"api_key_name", r.api_key_name},
       {"prompt_tokens", r.prompt_tokens},
       {"cached_prompt_tokens", r.cached_prompt_tokens},
       {"completion_tokens", r.completion_tokens},
@@ -70,7 +73,11 @@ json MetricsBuilder::build_history(const observability::StatsDb& db, int limit) 
       {"to_model", s.to_model},
       {"duration_ms", s.duration_ms},
       {"success", s.success},
-      {"error", s.error}
+      {"error", s.error},
+      {"requested_model", s.requested_model},
+      {"request_id", s.request_id},
+      {"api_key_id", s.api_key_id},
+      {"api_key_name", s.api_key_name}
     });
   }
   json usage = json::array();

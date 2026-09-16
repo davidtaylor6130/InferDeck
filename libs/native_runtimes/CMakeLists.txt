@@ -7,13 +7,16 @@ target_include_directories(native_runtimes PUBLIC include)
 target_link_libraries(native_runtimes PUBLIC model foundation)
 target_compile_features(native_runtimes PUBLIC cxx_std_23)
 
+if(MSVC)
+    set_property(SOURCE src/stable_diffusion_backend.cpp APPEND PROPERTY COMPILE_OPTIONS /EHsc-)
+endif()
+
 if(WIN32)
     target_sources(native_runtimes PRIVATE src/windows_sapi_backend.cpp)
-    target_link_libraries(native_runtimes PRIVATE sapi ole32)
+    target_link_libraries(native_runtimes PRIVATE sapi ole32 windowscodecs mfplat mfreadwrite mfuuid)
     target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_WINDOWS_SAPI=1)
 endif()
 
-set(INFERDECK_STABLE_DIFFUSION_ROOT "" CACHE PATH "stable-diffusion.cpp source tree")
 set(INFERDECK_WHISPER_ROOT "${CMAKE_SOURCE_DIR}/runtime/whisper.cpp-src" CACHE PATH "whisper.cpp source tree")
 option(INFERDECK_REQUIRE_WHISPER_CPP "Fail configuration when whisper.cpp is unavailable" OFF)
 set(INFERDECK_SHERPA_ONNX_ROOT "" CACHE PATH "sherpa-onnx install prefix")
@@ -22,13 +25,95 @@ set(INFERDECK_SHERPA_ONNX_RUNTIME_DIR "${INFERDECK_SHERPA_ONNX_ROOT}/lib" CACHE 
 
 if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
     set(SD_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SD_WEBP OFF CACHE BOOL "" FORCE)
+    set(SD_WEBM OFF CACHE BOOL "" FORCE)
     set(SD_VULKAN ON CACHE BOOL "" FORCE)
     set(SD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     add_subdirectory("${INFERDECK_STABLE_DIFFUSION_ROOT}"
                      "${CMAKE_BINARY_DIR}/native/stable-diffusion" EXCLUDE_FROM_ALL)
-    target_sources(native_runtimes PRIVATE src/stable_diffusion_backend.cpp)
+    target_include_directories(stable-diffusion BEFORE PRIVATE
+        "${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp")
+    add_library(inferdeck-video-encoding STATIC
+        "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common/media_io.cpp"
+        "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common/log.cpp")
+    target_include_directories(inferdeck-video-encoding PUBLIC
+        "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common"
+        "${INFERDECK_STABLE_DIFFUSION_ROOT}/include"
+        PRIVATE "${INFERDECK_STABLE_DIFFUSION_ROOT}/thirdparty")
+    target_compile_features(inferdeck-video-encoding PUBLIC cxx_std_17)
+    target_sources(native_runtimes PRIVATE
+        src/stable_diffusion_backend.cpp
+        src/ltx_video_backend.cpp
+        src/ltx_video_encoder.cpp)
+    target_link_libraries(native_runtimes PRIVATE inferdeck-video-encoding)
+    if(MSVC)
+        set_property(SOURCE src/ltx_video_backend.cpp APPEND PROPERTY COMPILE_OPTIONS /EHsc-)
+        target_compile_options(inferdeck-video-encoding PRIVATE /utf-8 /FS)
+    endif()
     target_link_libraries(native_runtimes PRIVATE stable-diffusion)
-    target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_STABLE_DIFFUSION_CPP=1)
+    target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_STABLE_DIFFUSION_CPP=1 INFERDECK_HAS_LTX_VIDEO_CPP=1)
+    if(MSVC)
+        target_compile_options(stable-diffusion PRIVATE /bigobj)
+    endif()
+endif()
+
+if(EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
+    find_package(Threads REQUIRED)
+
+    add_library(inferdeck-acestep-yyjson STATIC
+        "${INFERDECK_ACESTEP_ROOT}/vendor/yyjson/yyjson.c")
+    target_include_directories(inferdeck-acestep-yyjson PUBLIC
+        "${INFERDECK_ACESTEP_ROOT}/vendor/yyjson")
+
+    add_library(inferdeck-acestep-core STATIC
+        "${INFERDECK_ACESTEP_ROOT}/src/request.cpp"
+        "${INFERDECK_ACESTEP_ROOT}/src/model-store.cpp"
+        "${INFERDECK_ACESTEP_ROOT}/src/pipeline-lm.cpp"
+        "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp"
+        "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth-ops.cpp"
+        "${INFERDECK_ACESTEP_ROOT}/src/pipeline-understand.cpp")
+    target_include_directories(inferdeck-acestep-core PRIVATE
+        "${INFERDECK_ACESTEP_ROOT}"
+        "${INFERDECK_ACESTEP_ROOT}/src"
+        "${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/ggml/include")
+    target_link_libraries(inferdeck-acestep-core PRIVATE
+        inferdeck-acestep-yyjson
+        ggml
+        Threads::Threads)
+    foreach(INFERDECK_ACESTEP_GGML_BACKEND IN ITEMS
+            ggml-base ggml-cpu ggml-vulkan)
+        if(TARGET ${INFERDECK_ACESTEP_GGML_BACKEND})
+            target_link_libraries(inferdeck-acestep-core PRIVATE
+                ${INFERDECK_ACESTEP_GGML_BACKEND})
+        endif()
+    endforeach()
+    target_compile_features(inferdeck-acestep-core PUBLIC cxx_std_17)
+
+    if(MSVC)
+        target_compile_definitions(inferdeck-acestep-core PRIVATE
+            _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(inferdeck-acestep-yyjson PRIVATE /W0 /utf-8 /FS)
+        target_compile_options(inferdeck-acestep-core PRIVATE
+            /W4 /wd4100 /wd4505 /utf-8 /FS)
+    else()
+        target_compile_options(inferdeck-acestep-yyjson PRIVATE -w)
+        target_compile_options(inferdeck-acestep-core PRIVATE
+            -Wall -Wextra -Wshadow -Wconversion
+            -Wno-unused-parameter -Wno-unused-function -Wno-sign-conversion)
+    endif()
+
+    target_sources(native_runtimes PRIVATE src/ace_step_backend.cpp)
+    target_include_directories(native_runtimes PRIVATE
+        "${INFERDECK_ACESTEP_ROOT}"
+        "${INFERDECK_ACESTEP_ROOT}/src"
+        "${INFERDECK_ACESTEP_ROOT}/vendor/yyjson")
+    target_link_libraries(native_runtimes PRIVATE inferdeck-acestep-core)
+    target_compile_definitions(native_runtimes PUBLIC
+        INFERDECK_HAS_ACESTEP_CPP=1)
+    if(MSVC)
+        set_source_files_properties(src/ace_step_backend.cpp PROPERTIES
+            COMPILE_OPTIONS "/wd4505;/wd4996")
+    endif()
 endif()
 
 if(EXISTS "${INFERDECK_WHISPER_ROOT}/CMakeLists.txt")
@@ -86,6 +171,43 @@ if(INFERDECK_BUILD_TESTS)
                         "$<TARGET_FILE_DIR:native_runtime_tests>"
                 COMMENT "Copying sherpa-onnx runtime libraries for native tests")
         endif()
+    endif()
+    if(EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
+        target_sources(native_runtime_tests PRIVATE tests/test_ace_step.cpp)
+    endif()
+    if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/include/stable-diffusion.h")
+        add_executable(video_encoding_tests tests/test_video_encoding.cpp)
+        target_link_libraries(video_encoding_tests PRIVATE inferdeck-video-encoding Catch2::Catch2WithMain)
+        target_compile_features(video_encoding_tests PRIVATE cxx_std_23)
+        add_test(NAME video_encoding_tests COMMAND video_encoding_tests)
+        set_tests_properties(video_encoding_tests PROPERTIES LABELS "unit")
+        add_executable(ltx_video_encoder_tests tests/test_ltx_video_encoder.cpp src/ltx_video_encoder.cpp)
+        target_include_directories(ltx_video_encoder_tests PRIVATE include)
+        target_link_libraries(ltx_video_encoder_tests PRIVATE inferdeck-video-encoding foundation Catch2::Catch2WithMain)
+        if(WIN32)
+            target_link_libraries(ltx_video_encoder_tests PRIVATE mfplat mfreadwrite mfuuid)
+        endif()
+        target_compile_features(ltx_video_encoder_tests PRIVATE cxx_std_23)
+        add_test(NAME ltx_video_encoder_tests COMMAND ltx_video_encoder_tests)
+        set_tests_properties(ltx_video_encoder_tests PROPERTIES LABELS "unit")
+        add_executable(ltx_video_cleanup_tests tests/test_ltx_video_cleanup.cpp src/ltx_video_backend.cpp)
+        target_include_directories(ltx_video_cleanup_tests PRIVATE include "${INFERDECK_STABLE_DIFFUSION_ROOT}/include")
+        target_link_libraries(ltx_video_cleanup_tests PRIVATE model foundation Catch2::Catch2WithMain)
+        target_compile_features(ltx_video_cleanup_tests PRIVATE cxx_std_23)
+        if(MSVC)
+            target_compile_options(ltx_video_cleanup_tests PRIVATE /EHsc-)
+        endif()
+        add_test(NAME ltx_video_cleanup_tests COMMAND ltx_video_cleanup_tests)
+        set_tests_properties(ltx_video_cleanup_tests PROPERTIES LABELS "unit")
+        add_executable(stable_diffusion_cleanup_tests
+            tests/test_stable_diffusion_cleanup.cpp
+            src/stable_diffusion_backend.cpp)
+        target_include_directories(stable_diffusion_cleanup_tests PRIVATE
+            include "${INFERDECK_STABLE_DIFFUSION_ROOT}/include")
+        target_link_libraries(stable_diffusion_cleanup_tests PRIVATE model foundation Catch2::Catch2WithMain)
+        target_compile_features(stable_diffusion_cleanup_tests PRIVATE cxx_std_23)
+        add_test(NAME stable_diffusion_cleanup_tests COMMAND stable_diffusion_cleanup_tests)
+        set_tests_properties(stable_diffusion_cleanup_tests PROPERTIES LABELS "unit")
     endif()
     target_link_libraries(native_runtime_tests PRIVATE native_runtimes Catch2::Catch2WithMain)
     add_test(NAME native_runtime_tests COMMAND native_runtime_tests)

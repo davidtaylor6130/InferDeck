@@ -105,6 +105,31 @@ function Test-NativeBuildDefinition([string]$Text) {
     }
 }
 
+function Test-ImageBuildDefinition(
+    [string]$RootCmake,
+    [string]$NativeCmake,
+    [string]$Submodules,
+    [string]$CiWorkflow,
+    [string]$ReleaseWorkflow
+) {
+    $valid =
+        $RootCmake -match [regex]::Escape('libs/third_party/stable-diffusion.cpp') -and
+        $RootCmake -match [regex]::Escape('INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP') -and
+        $RootCmake -match [regex]::Escape('add_compile_definitions(GGML_MAX_NAME=128)') -and
+        $NativeCmake -match [regex]::Escape('set(SD_WEBP OFF CACHE BOOL "" FORCE)') -and
+        $NativeCmake -match [regex]::Escape('set(SD_WEBM OFF CACHE BOOL "" FORCE)') -and
+        $NativeCmake -match [regex]::Escape('target_include_directories(stable-diffusion BEFORE PRIVATE') -and
+        $NativeCmake -match [regex]::Escape('${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp') -and
+        $NativeCmake -match [regex]::Escape('target_compile_options(stable-diffusion PRIVATE /bigobj)') -and
+        $Submodules -match [regex]::Escape('path = libs/third_party/stable-diffusion.cpp') -and
+        $Submodules -match [regex]::Escape('url = https://github.com/leejet/stable-diffusion.cpp.git') -and
+        $CiWorkflow -match [regex]::Escape('-DINFERDECK_REQUIRE_STABLE_DIFFUSION_CPP=ON') -and
+        $ReleaseWorkflow -match [regex]::Escape('-DINFERDECK_REQUIRE_STABLE_DIFFUSION_CPP=ON')
+    if (!$valid) {
+        Add-Failure 'native image runtime dependency is not mandatory and ABI-safe in CI and releases'
+    }
+}
+
 $scanRoots = @(
     'apps/inferdeck-gateway/src',
     'libs/foundation/include', 'libs/foundation/src',
@@ -145,8 +170,16 @@ if ($routeTests -notmatch 'Chat stream serializers preserve exact OpenAI event o
 Test-SseTerminator "data: [DONE]`n`n"
 Test-ReleaseDefinition (Get-Content -LiteralPath (
     Join-Path $repoRoot '.github/workflows/release.yml') -Raw)
-Test-NativeBuildDefinition (Get-Content -LiteralPath (
-    Join-Path $repoRoot 'CMakeLists.txt') -Raw)
+$rootCmake = Get-Content -LiteralPath (Join-Path $repoRoot 'CMakeLists.txt') -Raw
+$releaseWorkflow = Get-Content -LiteralPath (
+    Join-Path $repoRoot '.github/workflows/release.yml') -Raw
+Test-NativeBuildDefinition $rootCmake
+Test-ImageBuildDefinition `
+    $rootCmake `
+    (Get-Content -LiteralPath (Join-Path $repoRoot 'libs/native_runtimes/CMakeLists.txt') -Raw) `
+    (Get-Content -LiteralPath (Join-Path $repoRoot '.gitmodules') -Raw) `
+    (Get-Content -LiteralPath (Join-Path $repoRoot '.github/workflows/ci.yml') -Raw) `
+    $releaseWorkflow
 Test-CoreOwnership $repoRoot
 
 if ($SelfTest) {
@@ -163,10 +196,11 @@ Where-Object Name -NotIn @('fmtd.dll', 'spdlogd.dll')
 "@
     Test-ReleaseDefinition 'Copy-Item build\bin\Release\*.dll dist\'
     Test-NativeBuildDefinition 'add_subdirectory(libs/third_party/llama.cpp)'
-    if ($failures.Count -ne $before + 9) {
-        throw "Architecture policy self-test expected nine violations; observed $($failures.Count - $before)"
+    Test-ImageBuildDefinition '' '' '' '' ''
+    if ($failures.Count -ne $before + 10) {
+        throw "Architecture policy self-test expected ten violations; observed $($failures.Count - $before)"
     }
-    $failures.RemoveRange($before, 9)
+    $failures.RemoveRange($before, 10)
 }
 
 if ($failures.Count -gt 0) {

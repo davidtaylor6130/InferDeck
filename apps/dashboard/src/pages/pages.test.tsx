@@ -3,14 +3,17 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { parseDocument } from 'yaml';
 import { GatewayContext, type GatewayValue } from '../gateway';
-import { OverviewPage } from './OverviewPage';
+import { OverviewPage, overviewStatus } from './OverviewPage';
 import { ModelsPage } from './ModelsPage';
-import { defaultStoreModelName } from './ModelStorePanel';
+import { defaultStoreModelName } from './ModelStoreHubPanel';
 import { OperatePage, stageProfileOptimization } from './OperatePage';
 import type { ProfileOptimizationCandidate } from '../api';
 import { UsagePage } from './UsagePage';
 import { parseDashboardLogLine, SystemPage } from './SystemPage';
 import { FutureWorkspacePage } from './FutureWorkspacePage';
+import { ImagePage } from './ImagePage';
+import { MusicPage } from './MusicPage';
+import { VIDEO_JOB_MODALITIES } from './VideoPage';
 import type { StatsEvent, StatusPayload } from '../types';
 
 const stats: StatsEvent = {
@@ -50,10 +53,24 @@ const status: StatusPayload = {
       peakTokensPerSecond: 0, avgTokensPerSecond: 0, lastTimestampUnixMs: Date.now(),
       inputAudioSeconds: 3_600, inputCharacters: 0,
     },
+    {
+      model: 'stable-diffusion-v1-5-fp16', requests: 2, successfulRequests: 2,
+      promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      peakTokensPerSecond: 0, avgTokensPerSecond: 0, lastTimestampUnixMs: Date.now(),
+      generationDurationMs: 9_000, outputImageCount: 3,
+    },
+    {
+      model: 'ace-step-v1.5-turbo-q4', requests: 1, successfulRequests: 1,
+      promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      peakTokensPerSecond: 0, avgTokensPerSecond: 0, lastTimestampUnixMs: Date.now(),
+      generationDurationMs: 6_000, outputAudioSeconds: 10,
+    },
   ],
   monthlyTokenUsage: [
     { bucket: '2026-06', model: 'qwen3.6-35b-a3b', promptTokens: 384_220, completionTokens: 120_000, totalTokens: 504_220, requests: 12, successfulRequests: 11 },
     { bucket: '2026-06', model: 'parakeet-tdt-0.6b-v3', promptTokens: 0, completionTokens: 0, totalTokens: 0, requests: 7, successfulRequests: 7, inputAudioSeconds: 3_600, inputCharacters: 0 },
+    { bucket: '2026-06', model: 'stable-diffusion-v1-5-fp16', promptTokens: 0, completionTokens: 0, totalTokens: 0, requests: 2, successfulRequests: 2, generationDurationMs: 9_000, outputImageCount: 3 },
+    { bucket: '2026-06', model: 'ace-step-v1.5-turbo-q4', promptTokens: 0, completionTokens: 0, totalTokens: 0, requests: 1, successfulRequests: 1, generationDurationMs: 6_000, outputAudioSeconds: 10 },
   ],
   models: [],
   current: 'qwen3.6-35b-a3b',
@@ -79,6 +96,8 @@ const value: GatewayValue = {
     },
     { id: 'parakeet-tdt-0.6b-v3', family: 'parakeet', runtime: 'sherpa_onnx', runtime_available: true, modality: 'audio_transcription', context_size: 0, vram_required_mb: 0, n_slots: 1, has_vision: false, loaded: true },
     { id: 'supertonic-3', family: 'supertonic', runtime: 'sherpa_onnx', runtime_available: true, modality: 'audio_speech', context_size: 0, vram_required_mb: 0, n_slots: 1, has_vision: false, loaded: false },
+    { id: 'stable-diffusion-v1-5-fp16', family: 'stable-diffusion-1.5', runtime: 'stable_diffusion_cpp', runtime_available: true, modality: 'image', capabilities: ['image_generation'], context_size: 0, vram_required_mb: 4096, n_slots: 1, has_vision: false, loaded: false },
+    { id: 'ace-step-v1.5-turbo-q4', family: 'ace-step-1.5', runtime: 'ace_step_cpp', runtime_available: true, modality: 'audio_generation', capabilities: ['audio_generation'], context_size: 0, vram_required_mb: 8192, n_slots: 1, has_vision: false, loaded: false },
   ],
   swap: status.swap,
   activity: [],
@@ -91,17 +110,42 @@ const value: GatewayValue = {
 const renderWith = (node: React.ReactElement) =>
   renderToStaticMarkup(<GatewayContext.Provider value={value}>{node}</GatewayContext.Provider>);
 
+  it('uses the gateway video_generation modality for video history', () => {
+    expect(VIDEO_JOB_MODALITIES).toContain('video_generation');
+    expect(VIDEO_JOB_MODALITIES).not.toContain('video');
+  });
+
 describe('pages', () => {
+  it('preserves complete cost history when live request polling refreshes', () => {
+    const complete = { ...status, dailyTokenUsageAllTime: true, dailyTokenUsage: [
+      { ...status.monthlyTokenUsage[0], bucket: '2026-06-01' },
+      { ...status.monthlyTokenUsage[0], bucket: '2026-09-08' },
+    ] };
+    const recent = { ...status, dailyTokenUsageAllTime: false,
+      dailyTokenUsage: [complete.dailyTokenUsage[1]], queue: { ...status.queue, running: 4 } };
+    const merged = overviewStatus(complete, recent)!;
+    expect(merged.dailyTokenUsageAllTime).toBe(true);
+    expect(merged.dailyTokenUsage).toEqual(complete.dailyTokenUsage);
+    expect(merged.queue.running).toBe(4);
+    const renderStatus = (payload: StatusPayload) => renderToStaticMarkup(
+      <GatewayContext.Provider value={{ ...value, status: payload }}><OverviewPage /></GatewayContext.Provider>);
+    const apiValue = (html: string) => html.split('API-equivalent value')[1]?.split('</div>')[0];
+    expect(apiValue(renderStatus(merged))).toBe(apiValue(renderStatus(complete)));
+    expect(overviewStatus(null, recent)).toBe(recent);
+    expect(overviewStatus(complete, null)).toBe(complete);
+  });
+
   it('Home leads with the current runtime, then combined health, usage, and activity', () => {
     const html = renderWith(<OverviewPage />);
     expect(html).toContain('Runtime now');
-    expect(html).toContain('Current model');
+    expect(html).toContain('Resident models');
     expect(html).toContain('qwen3.6-35b-a3b');
     expect(html).toContain('Processing');
     expect(html).toContain('GPU utilization');
     expect(html).toContain('42%');
     expect(html).toContain('Lifetime tokens');
-    expect(html).toContain('p95 latency');
+    expect(html).toContain('Waiting');
+    expect(html).toContain('Recent activity');
     expect(html).toContain('Combined usage');
     expect(html).toContain('All services');
     expect(html).toContain('Recent activity');
@@ -110,15 +154,39 @@ describe('pages', () => {
     expect(html).not.toContain('Open Dictation');
   });
 
-  it('LLM and dictation Model Settings pages stay administration-only', () => {
+  it('shows authenticated owners and measured per-slot progress without exposing secrets', () => {
+    const progress = { id: 'request-1', model: 'qwen3.6-35b-a3b', requestedModel: 'Fast', apiKeyId: 'key-id', apiKeyName: 'n8n workflows', endpoint: '/v1/chat/completions', priority: 3, slotId: 0, startedUnixMs: 1, elapsedMs: 2500, phase: 'prefill' as const, promptTokens: 1000, processedTokens: 500, cachedTokens: 100, completionTokens: 0, promptTokensPerSecond: 200, tokensPerSecond: null };
+    const fixture = { ...value, status: { ...status, queue: { ...status.queue, liveRequests: [progress, { ...progress, id: 'queued-2', slotId: -1, phase: 'waiting' as const, apiKeyName: 'UAM' }] } } };
+    const html = renderToStaticMarkup(<GatewayContext.Provider value={fixture}><OverviewPage /></GatewayContext.Provider>);
+    expect(html).toContain('n8n workflows');
+    expect(html).toContain('UAM');
+    expect(html).toContain('PP tok/s');
+    expect(html).toContain('>200</td>');
+    expect(html).toContain('N/A');
+    expect(html).toContain('Slot ');
+    expect(html).toContain('Fast');
+    expect(html).not.toContain('API owner: not recorded');
+  });
+
+  it('every active division has section-scoped Model Settings', () => {
     const llm = renderWith(<OperatePage section="llm" />);
     const dictation = renderWith(<OperatePage section="dictation" />);
+    const image = renderWith(<OperatePage section="image" />);
+    const music = renderWith(<OperatePage section="music" />);
     expect(llm).toContain('LLM Model Settings');
     expect(llm).toContain('qwen3.6-35b-a3b');
     expect(dictation).toContain('Dictation Model Settings');
     expect(dictation).toContain('parakeet-tdt-0.6b-v3');
     expect(dictation).toContain('Recording and playback stay in clients');
     expect(dictation).not.toContain('microphone');
+    expect(image).toContain('Image Model Settings');
+    expect(image).toContain('stable-diffusion-v1-5-fp16');
+    expect(image).not.toContain('ace-step-v1.5-turbo-q4');
+    expect(image).toContain('Image generation jobs');
+    expect(music).toContain('Music Model Settings');
+    expect(music).toContain('ace-step-v1.5-turbo-q4');
+    expect(music).not.toContain('stable-diffusion-v1-5-fp16');
+    expect(music).toContain('Music generation jobs');
     expect(llm).toContain('Model settings for qwen3.6-35b-a3b');
     expect(llm).toContain('Auto-optimize');
     expect(llm).not.toContain('Auto-optimize with benchmark');
@@ -175,15 +243,31 @@ describe('pages', () => {
   it('Model Store pages are section-specific catalogues rather than runtime controls', () => {
     const llm = renderWith(<ModelsPage section="llm" />);
     const dictation = renderWith(<ModelsPage section="dictation" />);
+    const image = renderWith(<ModelsPage section="image" />);
+    const music = renderWith(<ModelsPage section="music" />);
     expect(llm).toContain('LLM Model Store');
-    expect(llm).toContain('1. Find a model');
-    expect(llm).toContain('2. Review and install');
-    expect(llm).toContain('Advanced filters');
-    expect(llm).toContain('Hide low-adoption results');
-    expect(llm).toContain('Models on this server');
+    expect(llm).toContain('Discover');
+    expect(llm).toContain('Downloads');
+    expect(llm).toContain('Installed');
+    expect(llm).toContain('Trending compatible models');
+    expect(llm).toContain('Compatibility');
+    expect(llm).toContain('Local runtime only');
+    expect(llm).toContain('Include gated');
+    expect(llm).toContain('Choose a verified variant');
+    expect(llm).not.toContain('1. Find a model');
+    expect(llm).not.toContain('Start with');
+    expect(llm).not.toContain('aria-label="AI type"');
     expect(dictation).toContain('Dictation Model Store');
     expect(dictation).toContain('Speech to text');
     expect(dictation).toContain('Text to speech');
+    expect(image).toContain('Image Model Store');
+    expect(image).toContain('Stable Diffusion');
+    expect(image).toContain('stable-diffusion.cpp');
+    expect(image).toContain('Search image generation models');
+    expect(music).toContain('Music Model Store');
+    expect(music).toContain('ACE-Step');
+    expect(music).toContain('ACE-Step C++');
+    expect(music).toContain('Search music generation models');
     expect(llm).not.toContain('Stable API aliases');
     expect(llm).not.toContain('Load history');
     expect(dictation).not.toContain('Load history');
@@ -194,20 +278,45 @@ describe('pages', () => {
       repo: 'bartowski/Qwen3.5-27B-GGUF',
       name: 'Qwen3.5-27B-Q4_K_M.gguf',
     })).toBe('Qwen3.5-27B-GGUF-Qwen3.5-27B-Q4_K_M');
+    expect(defaultStoreModelName({
+      repo: 'Serveurperso/ACE-Step-1.5-GGUF',
+      name: '__inferdeck_ace_step_bundle__:acestep-v15-turbo-Q4_K_M.gguf',
+      variant: 'acestep-v15-turbo-Q4_K_M.gguf',
+    })).toBe('ACE-Step-1.5-GGUF-acestep-v15-turbo-Q4_K_M');
   });
 
-  it('keeps planned workspaces explicit and non-interactive', () => {
-    for (const area of ['image', 'music', 'post-training'] as const) {
-      const html = renderWith(<FutureWorkspacePage area={area} />);
-      expect(html).toContain('Planned workflow');
-      expect(html).toContain('No controls are active here yet');
-      expect(html).not.toContain('<button');
-    }
+  it('renders functional image and music generation workspaces with history', () => {
+    const image = renderWith(<ImagePage />);
+    const music = renderWith(<MusicPage />);
+
+    expect(image).toContain('Generate image');
+    expect(image).toContain('Describe the image to generate');
+    expect(image).toContain('stable-diffusion-v1-5-fp16');
+    expect(image).toContain('Image history');
+    expect(image).toContain('No image attempts yet');
+    expect(image).not.toContain('Planned workflow');
+
+    expect(music).toContain('Generate music');
+    expect(music).toContain('Describe the sound, mood, instruments, and tempo');
+    expect(music).toContain('ace-step-v1.5-turbo-q4');
+    expect(music).toContain('Advanced generation settings');
+    expect(music).toContain('Music history');
+    expect(music).toContain('No music attempts yet');
+    expect(music).not.toContain('Planned workflow');
   });
 
-  it('Usage pages expose correctly scoped LLM and dictation economics', () => {
+  it('keeps unfinished post-training dashboard work explicit and non-interactive', () => {
+    const html = renderWith(<FutureWorkspacePage area="post-training" />);
+    expect(html).toContain('Planned workflow');
+    expect(html).toContain('No controls are active here yet');
+    expect(html).not.toContain('<button');
+  });
+
+  it('Usage pages expose section-correct metrics and persisted media output', () => {
     const llm = renderWith(<UsagePage section="llm" />);
     const dictation = renderWith(<UsagePage section="dictation" />);
+    const image = renderWith(<UsagePage section="image" />);
+    const music = renderWith(<UsagePage section="music" />);
     expect(llm).toContain('LLM usage');
     expect(llm).toContain('Estimated API cost');
     expect(llm).toContain('server-side prices configured for each model in Model Settings');
@@ -224,11 +333,44 @@ describe('pages', () => {
     expect(dictation).toContain('OpenAI whisper-1');
     expect(dictation).not.toContain('ROI remaining');
     expect(dictation).not.toContain('Portfolio break-even USD');
+    expect(image).toContain('Image usage');
+    expect(image).toContain('Images generated');
+    expect(image).toContain('persisted SQL ledger');
+    expect(image).toContain('stable-diffusion-v1-5-fp16');
+    expect(image).not.toContain('ace-step-v1.5-turbo-q4');
+    expect(image).toContain('Image history');
+    expect(music).toContain('Music usage');
+    expect(music).toContain('Audio generated');
+    expect(music).toContain('persisted SQL ledger');
+    expect(music).toContain('ace-step-v1.5-turbo-q4');
+    expect(music).not.toContain('stable-diffusion-v1-5-fp16');
+    expect(music).toContain('Music history');
+  });
+
+  it('gives dense runtime and usage data phone-native views without dropping controls or metrics', () => {
+    const settings = renderWith(<OperatePage section="llm" />);
+    const llm = renderWith(<UsagePage section="llm" />);
+    const dictation = renderWith(<UsagePage section="dictation" />);
+    const image = renderWith(<UsagePage section="image" />);
+    const music = renderWith(<UsagePage section="music" />);
+
+    expect(settings).toContain('aria-label="Runtime model cards"');
+    expect(settings).toContain('aria-label="Unload qwen3.6-35b-a3b"');
+    expect(settings).toContain('aria-label="Model settings for qwen3.6-35b-a3b"');
+    expect(llm).toContain('aria-label="Sort mobile LLM usage"');
+    expect(llm).toContain('aria-label="Per-model LLM usage cards"');
+    expect(llm).toContain('<dt class="text-xs text-text-muted">Prompt processing</dt>');
+    expect(dictation).toContain('aria-label="Per-model dictation usage cards"');
+    expect(dictation).toContain('<dt class="text-xs text-text-muted">Billable work</dt>');
+    expect(image).toContain('aria-label="Per-model image usage cards"');
+    expect(music).toContain('aria-label="Per-model music usage cards"');
   });
 
   it('Health and alerts pages expose section-specific runtime health before raw logs', () => {
     const llm = renderWith(<SystemPage section="llm" />);
     const dictation = renderWith(<SystemPage section="dictation" />);
+    const image = renderWith(<SystemPage section="image" />);
+    const music = renderWith(<SystemPage section="music" />);
     expect(llm).toContain('LLM accelerator');
     expect(llm).toContain('GPU utilization');
     expect(llm).toContain('Warnings &amp; errors');
@@ -242,6 +384,16 @@ describe('pages', () => {
     expect(dictation).toContain('Warnings &amp; errors');
     expect(dictation).toContain('Full gateway log');
     expect(dictation).toContain('collapsed for safety');
+    expect(image).toContain('Image accelerator');
+    expect(image).toContain('Image runtimes');
+    expect(image).toContain('stable-diffusion-v1-5-fp16');
+    expect(image).toContain('Image generation health');
+    expect(image).not.toContain('ace-step-v1.5-turbo-q4');
+    expect(music).toContain('Music accelerator');
+    expect(music).toContain('Music runtimes');
+    expect(music).toContain('ace-step-v1.5-turbo-q4');
+    expect(music).toContain('Music generation health');
+    expect(music).not.toContain('stable-diffusion-v1-5-fp16');
   });
 
   it('classifies structured and legacy gateway alerts without guessing from presentation', () => {

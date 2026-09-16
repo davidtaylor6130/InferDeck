@@ -1,6 +1,9 @@
-﻿#include <atomic>
+#include <semaphore>
+#include <atomic>
 #include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cctype>
 #include <csignal>
 #include <cstdint>
@@ -12,8 +15,10 @@
 #include <future>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -33,6 +38,7 @@
 #include "foundation/json_utils.hpp"
 #include "foundation/logging.hpp"
 #include "foundation/path_utils.hpp"
+#include "gateway/api_key_store.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
 #include "gateway/deadline_server.hpp"
@@ -76,6 +82,7 @@ constexpr int runtime_reload_result = 75;
 #include "process_runtime.ipp"
 #include "dashboard_static.ipp"
 #include "profile_benchmark_runtime.ipp"
+#include "media_control_routes.ipp"
 int run_gateway(const fs::path& config_path) {
     using namespace inferdeck;
     using namespace inferdeck::foundation;
@@ -86,8 +93,7 @@ int run_gateway(const fs::path& config_path) {
     g_default_model_loading.store(false);
     const auto config_selection = load_config_with_active(config_path);
     auto cfg = config_selection.config;
-    const auto running_config_revision =
-        config_revision(read_text_file(config_selection.loaded_path.string()));
+    const auto running_config_revision = config_revision(read_text_file(config_selection.loaded_path.string()));
     foundation::LogConfig lc;
     lc.level = parse_log_level(cfg.log_level);
     if (!cfg.log_file.empty()) lc.log_file = cfg.log_file;
@@ -139,12 +145,33 @@ int run_gateway(const fs::path& config_path) {
     if (cfg.vram_budget_mb > 0) {
         coordinator.set_vram_budget(cfg.vram_budget_mb, cfg.vram_safety_margin_mb);
     }
+    std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     ModelStore model_store(cfg.model_store_root, cfg.model_store_archive_root,
-                           cfg.model_store_hf_token, coordinator);
+                           cfg.model_store_hf_token, coordinator, {}, {},
+                           &maintenance_resource);
 
     observability::Metrics metrics;
     observability::GpuTelemetry gpu;
     observability::StatsDb stats_db(cfg.stats_db_path);
+    fs::path media_history_parent =
+        fs::path(cfg.stats_db_path).parent_path();
+    if (media_history_parent.empty()) {
+        media_history_parent = "data";
+    }
+    const auto media_history = configure_media_history(
+        media_history_parent / "generated-media");
+    if (!media_history) {
+        LOG_WARN(
+            "media_history_unavailable", "path={} error={}",
+            (media_history_parent / "generated-media").string(),
+            media_history.error().message);
+    }
+    auto api_keys = std::make_shared<ApiKeyStore>(cfg.api_keys_db_path);
+    if (api_keys->healthy()) {
+        LOG_INFO("api_key_store_opened", "db={}", api_keys->path());
+    } else {
+        LOG_ERROR("api_key_store_unavailable", "db={}", api_keys->path());
+    }
     if (stats_db.healthy()) {
         const auto totals = stats_db.lifetime_totals();
         metrics.restore_lifetime(totals.requests, totals.swaps,
@@ -166,12 +193,13 @@ int run_gateway(const fs::path& config_path) {
 
     foundation::EventBus events;
     SwapTracker swap_tracker;
-    std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
-    GatewayDeps deps{coordinator, "15", cfg.auto_swap,
-                     cfg.default_model,
-                     cfg.voice_session_grace_ms,
-                     &metrics, &stats_db, &events, &swap_tracker,
-                     &maintenance_resource};
+    GatewayDeps deps{coordinator, "15", cfg.auto_swap, cfg.default_model,
+                     cfg.voice_session_grace_ms, &metrics, &stats_db,
+                     &events, &swap_tracker, &maintenance_resource};
+    deps.api_keys = api_keys;
+    deps.background_idle_after_seconds =
+        cfg.background_idle_after_seconds;
+    deps.public_data_plane_access = !cfg.auth_required;
     auto derivative_deps = deps;
     derivative_deps.compatibility_profile =
         CompatibilityProfile::OpenAIDerivative;
@@ -183,10 +211,11 @@ int run_gateway(const fs::path& config_path) {
             const model::ModelInfo& info,
             const optimize::ProfileCandidate& candidate,
             const std::vector<ProfileBenchmarkPrompt>& prompts,
+            const std::vector<int>& concurrency_levels,
             const std::atomic<bool>& cancel,
             const ProfileBenchmarkProgress& progress) {
             return run_profile_benchmark_trial(
-                cfg, gpu, info, candidate, prompts, cancel, progress);
+                cfg, gpu, info, candidate, prompts, concurrency_levels, cancel, progress);
         }};
     ProfileBenchmarkScheduler profile_benchmark_scheduler{
         profile_benchmark, coordinator, gpu};
@@ -203,6 +232,12 @@ int run_gateway(const fs::path& config_path) {
             if (cfg.vram_budget_mb <= 0 && g.vram_total_mb > 0.0) {
                 coordinator.set_vram_budget(static_cast<int>(g.vram_total_mb),
                                             cfg.vram_safety_margin_mb);
+            }
+            if (g.available && g.vram_total_mb > 0.0 &&
+                g.vram_mb >= 0.0) {
+                coordinator.update_vram_observation(
+                    static_cast<int>(std::ceil(g.vram_mb)),
+                    static_cast<int>(g.vram_total_mb));
             }
             if (events.subscriber_count() > 0) {
                 const auto swap = swap_tracker.snapshot();
@@ -244,7 +279,7 @@ int run_gateway(const fs::path& config_path) {
     route_auth.control_allow_remote = cfg.control_allow_remote;
     route_auth.control_allow_data_plane_token = cfg.control_allow_data_plane_token;
     route_auth.control_token = cfg.control_token;
-    RouteAuthorizer authorizer(std::move(route_auth));
+    RouteAuthorizer authorizer(std::move(route_auth), api_keys);
     AuthMiddleware control_session({true, cfg.control_token});
     CorsMiddleware data_cors(cfg.cors_origins);
     CorsMiddleware control_cors(cfg.control_origins);
@@ -453,6 +488,11 @@ int run_gateway(const fs::path& config_path) {
                         "dashboard token is required");
             return;
         }
+        if (body.contains("remember") && !body["remember"].is_boolean()) {
+            write_error(resp, 400, "invalid_request",
+                        "remember must be a boolean");
+            return;
+        }
         const auto token = body["token"].get<std::string>();
         if (!control_session.check("Bearer " + token)) {
             resp.set_header("WWW-Authenticate", "Bearer");
@@ -460,9 +500,19 @@ int run_gateway(const fs::path& config_path) {
                         "valid dashboard token required");
             return;
         }
+        std::string cookie = "inferdeck_control=" + token +
+            "; Path=/api/inferdeck/v1; HttpOnly; SameSite=Strict";
+        if (body.value("remember", false)) cookie += "; Max-Age=2592000";
+        resp.set_header("Set-Cookie", cookie);
+        resp.set_header("Cache-Control", "no-store");
+        resp.set_content(R"({"ok":true})", "application/json");
+    }));
+    server.Delete(dashboard_session_path,
+                  wrap([&](const httplib::Request&,
+                           httplib::Response& resp) {
         resp.set_header("Set-Cookie",
-                        "inferdeck_control=" + token +
-                        "; Path=/api/inferdeck/v1; HttpOnly; SameSite=Strict");
+                        "inferdeck_control=; Path=/api/inferdeck/v1; HttpOnly; SameSite=Strict; Max-Age=0");
+        resp.set_header("Cache-Control", "no-store");
         resp.set_content(R"({"ok":true})", "application/json");
     }));
 
@@ -523,6 +573,19 @@ int run_gateway(const fs::path& config_path) {
                                                            httplib::Response& resp) {
         handle_audio_transcriptions(req, resp, deps);
     }));
+    server.Post(std::string(inferdeck_route(InferDeckRoute::VideoGenerations).pattern), wrap([&](const httplib::Request& req, httplib::Response& resp) { handle_video_generations(req, resp, deps); }));
+    server.Post(std::string(inferdeck_route(
+                    InferDeckRoute::MediaVideoGenerations).pattern),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
+        handle_video_generations(req, resp, deps);
+    }));
+    server.Post(control_api_pattern("/audio/generations"),
+                wrap([&](const httplib::Request& req,
+                         httplib::Response& resp) {
+        handle_audio_generations(req, resp, deps);
+    }));
+    register_media_control_routes(server, wrap, deps);
     if (cfg.openai_derivative_compatibility_enabled) {
         server.Post(std::string(openai_derivative_route(
                         OpenAIDerivativeRoute::ChatCompletions).pattern),
@@ -549,22 +612,6 @@ int run_gateway(const fs::path& config_path) {
             handle_image_generations(req, resp, derivative_deps);
         }));
     }
-    server.Get(control_api_pattern("/media/jobs"),
-               wrap([&](const httplib::Request&,
-                        httplib::Response& resp) {
-        write_json(resp, 200, {{"jobs", media_jobs()}});
-    }));
-    server.Post(control_api_pattern("/media/jobs/([0-9]+)/cancel"),
-                wrap([&](const httplib::Request& req,
-                         httplib::Response& resp) {
-        auto result = cancel_media_job(static_cast<std::uint64_t>(std::stoull(req.matches[1].str())));
-        if (!result) {
-            write_error(resp, result.error().code == foundation::ErrorCode::NotFound ? 404 : 409,
-                        "media_cancel_failed", result.error().message);
-            return;
-        }
-        write_json(resp, 200, {{"ok", true}});
-    }));
     server.Get(control_api_pattern("/metrics"),
                wrap([&](const httplib::Request&,
                         httplib::Response& resp) {
@@ -743,8 +790,7 @@ int main(int argc, char** argv) {
     SymInitialize(GetCurrentProcess(), NULL, TRUE);
     AddVectoredExceptionHandler(0, CrashHandler);
 #endif
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
+    std::signal(SIGINT, signal_handler); std::signal(SIGTERM, signal_handler);
 
     while (true) {
         const int result = run_gateway(config_path);

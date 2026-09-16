@@ -196,8 +196,7 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         static_cast<double>(decoded->sample_rate);
     auto result = deps.coordinator.transcribe(runtime_model, *slot, *decoded,
         [&req, &deps, &model_name, job](int progress) {
-            update_job(job, progress);
-            if (deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "audio_transcription"}, {"progress", progress}}.dump());
+            if (update_job(job, progress) && deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "audio_transcription"}, {"progress", progress}}.dump());
             return !req.is_connection_closed() && !job->cancelled->load();
         });
     if (!result) {

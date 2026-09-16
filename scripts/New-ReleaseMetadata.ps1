@@ -1,21 +1,19 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$DistDir,
-    [Parameter(Mandatory = $true)]
-    [string]$OutputDir,
+    [Parameter(Mandatory = $true)] [string]$DistDir,
+    [Parameter(Mandatory = $true)] [string]$OutputDir,
     [string]$VcpkgInstalledDir,
-    [string]$Archive
+    [string]$Archive,
+    [string]$RepoRoot
 )
-
 $ErrorActionPreference = 'Stop'
-$repoRoot = Split-Path -Parent $PSScriptRoot
+if (!$RepoRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
+$repoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 $resolvedDist = (Resolve-Path -LiteralPath $DistDir).Path
 $resolvedOutput = [System.IO.Path]::GetFullPath($OutputDir)
 New-Item -ItemType Directory -Path $resolvedOutput -Force | Out-Null
-
 $version = (Get-Content -LiteralPath (Join-Path $repoRoot 'VERSION') -Raw).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'VERSION is not semantic' }
-$commit = (& git -C $repoRoot rev-parse HEAD).Trim()
+$commit = (& git -C $repoRoot rev-parse HEAD | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'Unable to resolve release commit' }
 $vcpkg = Get-Content -LiteralPath (Join-Path $repoRoot 'vcpkg.json') -Raw | ConvertFrom-Json
 $resolvedPackages = @()
@@ -29,7 +27,7 @@ if ($VcpkgInstalledDir) {
         if ($packageMatch.Success -and $versionMatch.Success) {
             [ordered]@{ name = $packageMatch.Groups[1].Value; version = $versionMatch.Groups[1].Value }
         }
-    } | Where-Object { $_ } | Sort-Object name)
+    } | Where-Object { $_ } | Sort-Object name, version -Unique)
 }
 $submoduleLines = @(& git -C $repoRoot submodule status)
 if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve submodule revisions' }
@@ -39,9 +37,18 @@ $submodules = @($submoduleLines | ForEach-Object {
 })
 $inputs = @('VERSION', 'vcpkg.json', 'pnpm-lock.yaml', '.gitmodules') | ForEach-Object {
     $path = Join-Path $repoRoot $_
-    [ordered]@{
-        path = $_
-        sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    [ordered]@{ path = $_; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
+}
+$noticeComponents = @()
+$missingNotices = @()
+$noticeManifest = Join-Path $resolvedDist 'THIRD_PARTY_NOTICES.json'
+if (Test-Path -LiteralPath $noticeManifest) {
+    $noticeDocument = Get-Content -LiteralPath $noticeManifest -Raw | ConvertFrom-Json
+    if ($noticeDocument.components) {
+        $noticeComponents = @($noticeDocument.components)
+        $missingNotices = @($noticeDocument.missing_notices)
+    } else {
+        $noticeComponents = @($noticeDocument)
     }
 }
 $dependencies = [ordered]@{
@@ -52,55 +59,54 @@ $dependencies = [ordered]@{
     vcpkg_dependencies = @($vcpkg.dependencies)
     resolved_vcpkg_packages = $resolvedPackages
     submodules = $submodules
+    notice_components = @($noticeComponents | ForEach-Object {
+        [ordered]@{ name = [string]$_.component; version = [string]$_.version; source = [string]$_.source }
+    })
+    missing_notices = $missingNotices
     locked_inputs = @($inputs)
 }
 $dependencies | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $resolvedOutput 'DEPENDENCIES.json') -Encoding utf8
 
-$packages = @(
-    [ordered]@{
-        SPDXID = 'SPDXRef-Package-InferDeck'
-        name = 'InferDeck'
-        versionInfo = $version
-        downloadLocation = 'NOASSERTION'
-        filesAnalyzed = $false
-        licenseConcluded = 'NOASSERTION'
-        licenseDeclared = 'MIT'
-        supplier = 'Organization: InferDeck'
-    }
-)
+$packages = [System.Collections.Generic.List[object]]::new()
+$packageKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $index = 0
-foreach ($dependency in $vcpkg.dependencies) {
-    $name = if ($dependency -is [string]) { $dependency } else { $dependency.name }
-    $resolvedPackage = $resolvedPackages | Where-Object name -eq $name | Select-Object -First 1
-    $resolvedVersion = if ($resolvedPackage) { $resolvedPackage.version } else { "vcpkg-baseline-$($vcpkg.'builtin-baseline')" }
-    $index++
-    $packages += [ordered]@{
-        SPDXID = "SPDXRef-Package-vcpkg-$index"
-        name = $name
-        versionInfo = $resolvedVersion
+function Add-SpdxPackage([string]$Name, [string]$ComponentVersion, [string]$Kind, [string]$License) {
+    if (!$Name) { return }
+    if (!$ComponentVersion) { $ComponentVersion = 'unknown' }
+    if (!$packageKeys.Add("$Name|$ComponentVersion")) { return }
+    $script:index++
+    $packages.Add([ordered]@{
+        SPDXID = "SPDXRef-Package-$($Kind -replace '[^A-Za-z0-9.-]', '-')-$($script:index)"
+        name = $Name
+        versionInfo = $ComponentVersion
         downloadLocation = 'NOASSERTION'
         filesAnalyzed = $false
         licenseConcluded = 'NOASSERTION'
-        licenseDeclared = 'NOASSERTION'
+        licenseDeclared = $License
         supplier = 'NOASSERTION'
+    })
+}
+Add-SpdxPackage 'InferDeck' $version 'product' 'MIT'
+if ($resolvedPackages.Count -gt 0) {
+    foreach ($dependency in $resolvedPackages) {
+        Add-SpdxPackage ([string]$dependency.name) ([string]$dependency.version) 'vcpkg' 'NOASSERTION'
+    }
+} else {
+    foreach ($dependency in $vcpkg.dependencies) {
+        $name = if ($dependency -is [string]) { $dependency } else { $dependency.name }
+        Add-SpdxPackage ([string]$name) 'unknown' 'vcpkg' 'NOASSERTION'
     }
 }
 foreach ($submodule in $submodules) {
-    $index++
-    $packages += [ordered]@{
-        SPDXID = "SPDXRef-Package-submodule-$index"
-        name = $submodule.path
-        versionInfo = $submodule.commit
-        downloadLocation = 'NOASSERTION'
-        filesAnalyzed = $false
-        licenseConcluded = 'NOASSERTION'
-        licenseDeclared = 'NOASSERTION'
-        supplier = 'NOASSERTION'
-    }
+    Add-SpdxPackage ([System.IO.Path]::GetFileName([string]$submodule.path)) ([string]$submodule.commit) 'submodule' 'NOASSERTION'
+}
+foreach ($notice in $noticeComponents) {
+    if ([string]$notice.component -eq 'InferDeck') { continue }
+    Add-SpdxPackage ([string]$notice.component) ([string]$notice.version) 'notice' 'NOASSERTION'
 }
 $relationships = @($packages | Select-Object -Skip 1 | ForEach-Object {
     [ordered]@{
-        spdxElementId = 'SPDXRef-Package-InferDeck'
+        spdxElementId = 'SPDXRef-Package-product-1'
         relationshipType = 'DEPENDS_ON'
         relatedSpdxElement = $_.SPDXID
     }
@@ -115,12 +121,11 @@ $sbom = [ordered]@{
         created = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         creators = @('Tool: InferDeck-New-ReleaseMetadata.ps1')
     }
-    packages = $packages
+    packages = @($packages)
     relationships = $relationships
 }
 $sbom | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $resolvedOutput 'SBOM.spdx.json') -Encoding utf8
-
-$artifactRows = @(Get-ChildItem -LiteralPath $resolvedDist -File -Recurse | Sort-Object FullName | ForEach-Object {
+$artifactRows = @(Get-ChildItem -LiteralPath $resolvedDist -File -Recurse | Where-Object Name -NotIn @('release-manifest.json', 'SHA256SUMS.txt') | Sort-Object FullName | ForEach-Object {
     [ordered]@{
         path = $_.FullName.Substring($resolvedDist.Length).TrimStart('\', '/').Replace('\', '/')
         bytes = $_.Length

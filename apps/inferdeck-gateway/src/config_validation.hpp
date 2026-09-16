@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <string>
 #include <unordered_map>
@@ -79,6 +80,11 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
             (!root["auth"]["token"] || root["auth"]["token"].as<std::string>().empty())) {
             return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                          "auth.token is required when authentication is enabled");
+        }
+        if (root["auth"] && root["auth"]["api_keys_db"] &&
+            root["auth"]["api_keys_db"].as<std::string>().empty()) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "auth.api_keys_db cannot be empty");
         }
         if (root["control"]) {
             const auto& control = root["control"];
@@ -176,6 +182,13 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                  gateway["voice_session_grace_ms"].as<int>() > 120000)) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                              "gateway.voice_session_grace_ms must be between 1000 and 120000");
+            }
+            if (gateway["background_idle_after_seconds"] &&
+                (gateway["background_idle_after_seconds"].as<int>() < 60 ||
+                 gateway["background_idle_after_seconds"].as<int>() > 86400)) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "gateway.background_idle_after_seconds must be between 60 and 86400");
             }
             if (gateway["n_batch"] && gateway["n_ubatch"] &&
                 gateway["n_ubatch"].as<int>() > gateway["n_batch"].as<int>()) {
@@ -350,6 +363,36 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 if (entry["context_size"] && entry["context_size"].as<int>() < 1) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "model context_size must be positive: " + name);
+                }
+                if (entry["concurrency_auto"] && entry["concurrency_auto"].as<bool>() &&
+                    (!(entry["context_pool_auto"] && entry["context_pool_auto"].as<bool>()) ||
+                     (entry["runtime"] && entry["runtime"].as<std::string>() != "llama_cpp"))) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "concurrency_auto requires the automatic llama_cpp context pool: " + name);
+                }
+                if (entry["kv_unified"]) (void)entry["kv_unified"].as<bool>();
+                if (entry["context_pool_auto"] && entry["context_pool_auto"].as<bool>() &&
+                    (!(entry["kv_unified"] && entry["kv_unified"].as<bool>()) ||
+                     (entry["context_pool_size"] && entry["context_pool_size"].as<int>() != 0))) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "context_pool_auto requires unified KV and no fixed pool size: " + name);
+                }
+                if (entry["context_pool_size"]) {
+                    const int pool_size = entry["context_pool_size"].as<int>();
+                    const int context_size = entry["context_size"]
+                        ? entry["context_size"].as<int>() : 65536;
+                    const bool unified = entry["kv_unified"] && entry["kv_unified"].as<bool>();
+                    const YAML::Node speculative = entry["speculative"];
+                    const bool mtp = speculative && speculative.IsMap() && speculative["type"] &&
+                        speculative["type"].as<std::string>() == "mtp";
+                    const int draft_margin = mtp
+                        ? (speculative["draft_tokens"] ? speculative["draft_tokens"].as<int>() : 2) : 0;
+                    if (pool_size < 0 || (pool_size > 0 &&
+                        (!unified || static_cast<std::int64_t>(pool_size) <
+                            static_cast<std::int64_t>(std::max(512, context_size)) + draft_margin))) {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                            "context_pool_size requires unified KV and capacity for one full request plus MTP draft tokens: " + name);
+                    }
                 }
                 const int model_batch = entry["n_batch"]
                     ? entry["n_batch"].as<int>()
@@ -592,6 +635,8 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     else if (modality == "image") target_capabilities.insert("image_generation");
                     else if (modality == "audio_speech") target_capabilities.insert("audio_speech");
                     else if (modality == "audio_transcription") target_capabilities.insert("audio_transcription");
+                    else if (modality == "audio_generation") target_capabilities.insert("audio_generation");
+                    else if (modality == "video") target_capabilities.insert("video_generation");
                     else target_capabilities = {"chat_completions", "responses"};
                 }
                 if (alias["required_capabilities"]) {

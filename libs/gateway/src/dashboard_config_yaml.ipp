@@ -165,3 +165,31 @@ foundation::Result<std::string> render_aliases(
             foundation::ErrorCode::ParseError, error.what());
     }
 }
+
+foundation::Result<std::string> render_public_data_plane_access(
+    const std::string& text, bool allow_public_traffic) {
+    try {
+        const auto root = YAML::Load(text);
+        YAML::Node auth = root["auth"]
+            ? YAML::Clone(root["auth"])
+            : YAML::Node(YAML::NodeType::Map);
+        if (!auth.IsMap()) {
+            return foundation::Err<std::string>(
+                foundation::ErrorCode::ParseError,
+                "auth must be a mapping");
+        }
+        auth["required"] = !allow_public_traffic;
+        YAML::Emitter emitter;
+        emitter << auth;
+        if (!emitter.good()) {
+            return foundation::Err<std::string>(
+                foundation::ErrorCode::ParseError,
+                emitter.GetLastError());
+        }
+        return foundation::Ok(replace_top_level_yaml_section(
+            text, "auth", emitter.c_str()));
+    } catch (const std::exception& error) {
+        return foundation::Err<std::string>(
+            foundation::ErrorCode::ParseError, error.what());
+    }
+}

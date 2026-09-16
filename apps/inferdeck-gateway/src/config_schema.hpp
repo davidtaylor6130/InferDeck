@@ -60,7 +60,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
     };
     if (!(result = check("server", {"host", "port"}))) return result;
     if (!(result = check("logging", {"level", "file"}))) return result;
-    if (!(result = check("auth", {"required", "token"}))) return result;
+    if (!(result = check("auth", {"required", "token", "api_keys_db"}))) return result;
     if (!(result = check("control", {
             "allow_remote", "allow_data_plane_token", "token", "origins"}))) return result;
     if (!(result = check("cors", {"origins"}))) return result;
@@ -73,7 +73,8 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
             "n_gpu_layers", "flash_attn", "kv_offload", "op_offload",
             "cache_type_k", "cache_type_v", "swa_full", "truncate_prompt",
             "vram_budget_mb", "vram_safety_margin_mb", "max_queue_size",
-            "voice_session_grace_ms", "sampling"}))) return result;
+            "voice_session_grace_ms", "background_idle_after_seconds",
+            "sampling"}))) return result;
     if (!(result = check("compatibility", {
             "openai_derivative"}))) return result;
     const auto compatibility = root["compatibility"];
@@ -111,7 +112,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
                     "min_slots", "role", "compute", "residency",
                     "admission_pool", "concurrency_limit", "memory_required_mb",
                     "eviction_eligible", "vram_required_mb", "vram_fixed_mb",
-                    "vram_per_slot_mb", "context_size", "n_batch", "n_ubatch",
+                    "vram_per_slot_mb", "context_size", "kv_unified", "context_pool_size", "context_pool_auto", "concurrency_auto", "n_batch", "n_ubatch",
                     "cache_type_k", "cache_type_v", "n_gpu_layers",
                     "speculative", "has_vision", "reasoning_format",
                     "chat_template_path", "reasoning",

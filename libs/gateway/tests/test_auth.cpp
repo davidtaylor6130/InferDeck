@@ -136,6 +136,10 @@ TEST_CASE("RouteAuthorizer: remote control requires its own credential",
                                "Bearer openai-token", "192.168.1.20",
                                "192.168.1.10:11434", false) ==
           AuthorizationStatus::AuthenticationRequired);
+    CHECK(authorizer.authorize(
+              classify_route("POST", "/api/inferdeck/v1/media/video/generations"),
+              "Bearer openai-token", "192.168.1.20", "192.168.1.10:11434", false) ==
+          AuthorizationStatus::AuthenticationRequired);
     CHECK(authorizer.authorize(RoutePrincipal::ControlWrite,
                                "Bearer control-token", "192.168.1.20",
                                "192.168.1.10:11434", false) ==
@@ -162,12 +166,44 @@ TEST_CASE("Route classification separates data and control principals",
           RoutePrincipal::OpenAIDataPlane);
     CHECK(classify_route("POST", "/v1/chat/completions") ==
           RoutePrincipal::OpenAIDataPlane);
+    CHECK(classify_route(
+              "GET", "/api/inferdeck/v1/background/availability") ==
+          RoutePrincipal::ManagedClient);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/background/lease") ==
+          RoutePrincipal::ManagedClient);
+    CHECK(classify_route(
+              "PATCH",
+              "/api/inferdeck/v1/background/lease/0123456789abcdef0123456789abcdef") ==
+          RoutePrincipal::ManagedClient);
+    CHECK(classify_route(
+              "DELETE",
+              "/api/inferdeck/v1/background/lease/0123456789abcdef0123456789abcdef") ==
+          RoutePrincipal::ManagedClient);
     CHECK(classify_route("GET", "/api/inferdeck/v1/health") ==
           RoutePrincipal::ControlRead);
     CHECK(classify_route("GET", "/api/inferdeck/v1/swap/status") ==
           RoutePrincipal::ControlRead);
     CHECK(classify_route("POST", "/api/inferdeck/v1/swap/cancel") ==
           RoutePrincipal::ControlWrite);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/audio/generations") ==
+          RoutePrincipal::OpenAIDataPlane);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/video/generations") ==
+          RoutePrincipal::OpenAIDataPlane);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/media/video/generations") ==
+          RoutePrincipal::ControlWrite);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/media/images/generations") ==
+          RoutePrincipal::ControlWrite);
+    CHECK(classify_route(
+              "POST", "/api/inferdeck/v1/media/audio/generations") ==
+          RoutePrincipal::ControlWrite);
+    CHECK(classify_route(
+              "GET", "/api/inferdeck/v1/media/jobs/1/outputs/0") ==
+          RoutePrincipal::ControlRead);
     CHECK(classify_route("GET", "/api/inferdeck/v1/status") ==
           RoutePrincipal::DashboardSession);
     CHECK(classify_route("GET", "/api/inferdeck/v1/usage/daily") ==
@@ -175,6 +211,10 @@ TEST_CASE("Route classification separates data and control principals",
     CHECK(classify_route("GET", "/api/inferdeck/v1/config") ==
           RoutePrincipal::ControlRead);
     CHECK(classify_route("PUT", "/api/inferdeck/v1/config") ==
+          RoutePrincipal::ControlWrite);
+    CHECK(classify_route("GET", "/api/inferdeck/v1/api-settings") ==
+          RoutePrincipal::ControlRead);
+    CHECK(classify_route("PUT", "/api/inferdeck/v1/api-settings") ==
           RoutePrincipal::ControlWrite);
 }
 
@@ -191,6 +231,9 @@ TEST_CASE("Every mutating administrative route requires the control principal",
     const std::pair<std::string_view, std::string_view> routes[] = {
         {"POST", "/api/inferdeck/v1/swap/to/model"},
         {"POST", "/api/inferdeck/v1/swap/cancel"},
+        {"POST", "/api/inferdeck/v1/media/images/generations"},
+        {"POST", "/api/inferdeck/v1/media/audio/generations"},
+        {"POST", "/api/inferdeck/v1/media/video/generations"},
         {"POST", "/api/inferdeck/v1/media/jobs/1/cancel"},
         {"POST", "/api/inferdeck/v1/optimize/profile"},
         {"POST", "/api/inferdeck/v1/optimize/benchmark"},
@@ -201,10 +244,12 @@ TEST_CASE("Every mutating administrative route requires the control principal",
         {"POST", "/api/inferdeck/v1/model-store/remove"},
         {"POST", "/api/inferdeck/v1/model-store/archive"},
         {"POST", "/api/inferdeck/v1/model-store/unregister"},
+        {"POST", "/api/inferdeck/v1/post-training/quantizations"},
         {"PUT", "/api/inferdeck/v1/model-aliases/stable-chat"},
         {"DELETE", "/api/inferdeck/v1/model-aliases/stable-chat"},
         {"PUT", "/api/inferdeck/v1/config"},
         {"PUT", "/api/inferdeck/v1/config/active"},
+        {"PUT", "/api/inferdeck/v1/api-settings"},
         {"DELETE", "/api/inferdeck/v1/config/active"},
         {"POST", "/api/inferdeck/v1/models/load"},
         {"POST", "/api/inferdeck/v1/models/unload"},
@@ -256,6 +301,9 @@ TEST_CASE("Request policies enforce endpoint body and media constraints",
           RequestValidationStatus::Allowed);
     CHECK(validate_request(request, request_policy("GET", "/v1/models")) ==
           RequestValidationStatus::BodyNotAllowed);
+    CHECK(validate_request(request, request_policy(
+              "POST", "/api/inferdeck/v1/video/generations")) ==
+          RequestValidationStatus::Allowed);
 
     request.headers.clear();
     request.headers.emplace("Content-Type", "text/plain");

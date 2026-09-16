@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "common.h"
+#include "inference/domain.hpp"
 #include "sampling.h"
 
 using llama_token = int32_t;
@@ -92,6 +94,21 @@ constexpr float generation_tokens_per_second(
         : 0.0f;
 }
 
+constexpr std::int64_t bounded_pool_reservation(
+    int prompt_positions, int max_tokens, int draft_margin) noexcept {
+    return static_cast<std::int64_t>(std::max(0, prompt_positions)) +
+           static_cast<std::int64_t>(std::max(0, max_tokens)) +
+           static_cast<std::int64_t>(std::max(0, draft_margin));
+}
+
+constexpr bool bounded_pool_can_admit(
+    std::int64_t reserved_positions,
+    std::int64_t candidate_positions,
+    std::int64_t capacity) noexcept {
+    return reserved_positions >= 0 && candidate_positions >= 0 &&
+           capacity > 0 && reserved_positions <= capacity - candidate_positions;
+}
+
 }
 
 // One in-flight inference request managed by the scheduler.
@@ -99,6 +116,7 @@ constexpr float generation_tokens_per_second(
 // then drains out_queue until a TokenEvent with is_done=true arrives.
 // The object MUST remain alive until after the done event is consumed.
 struct SlotTask {
+    std::shared_ptr<inference::RequestProgress> progress;
     // ---- Input (filled by caller before submit) ----
     int slot_id{-1};                          // also the llama sequence ID (0..n_slots-1)
     std::vector<llama_token> prompt_tokens;
@@ -113,7 +131,7 @@ struct SlotTask {
     std::vector<int> last_prompt_tokens;      // previous call's tokens (KV reuse hint)
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_draft_checkpoint;
-    std::shared_ptr<const std::vector<uint8_t>> recurrent_mtp_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_replay_checkpoint;
     int checkpoint_pos{0};
     int checkpoint_capture_pos{0};
     common_sampler* sampler{nullptr};         // scheduler takes ownership; freed on completion
@@ -141,6 +159,8 @@ struct SlotTask {
     int n_drafted{0};
     int n_draft_accepted{0};
     bool mtp_eligible{false};
+    bool admitted{false};
+    std::int64_t reserved_positions{0};
     std::chrono::steady_clock::time_point started_at{};
     bool generation_started{false};
     std::chrono::steady_clock::time_point generation_started_at{};
@@ -149,7 +169,7 @@ struct SlotTask {
     int out_cached_prompt_tokens{0};
     std::shared_ptr<const std::vector<uint8_t>> out_recurrent_checkpoint;
     std::shared_ptr<const std::vector<uint8_t>> out_recurrent_draft_checkpoint;
-    std::shared_ptr<const std::vector<uint8_t>> out_recurrent_mtp_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> out_recurrent_replay_checkpoint;
     int out_checkpoint_pos{0};
     bool out_mtp_cache_synced{true};
     float out_prompt_duration_ms{0.0f};
@@ -161,6 +181,10 @@ struct SlotTask {
     std::condition_variable out_cv;
     std::queue<TokenEvent> out_queue;
 };
+
+namespace detail {
+int prepare_batch_order(std::vector<SlotTask*>& tasks, int capacity, std::size_t turn);
+}
 
 // Central continuous-batching scheduler for one loaded model.
 // Owns the inference loop: collects tokens from all active SlotTasks each iteration,
@@ -180,7 +204,8 @@ public:
         const llama_vocab* vocab,
         int n_batch,
         int mtp_max_active_requests,
-        common_context_seq_rm_type draft_seq_rm_type);
+        common_context_seq_rm_type draft_seq_rm_type,
+        bool bounded_pool = false);
     ~ContinuousBatchScheduler();
 
     ContinuousBatchScheduler(const ContinuousBatchScheduler&) = delete;
@@ -194,10 +219,20 @@ public:
     void stop();
 
     llama_context* ctx() const noexcept { return ctx_; }
+    bool healthy() const noexcept { return !failed_.load() && !stop_.load(); }
 
 private:
     void run_loop();
     void init_task(SlotTask* task);
+    void admit_bounded_pool_tasks(
+        const std::vector<SlotTask*>& tasks,
+        std::vector<SlotTask*>& runnable,
+        std::vector<std::pair<SlotTask*, std::string>>& rejected);
+    bool reclaim_bounded_pool_capacity(
+        const std::vector<SlotTask*>& tasks,
+        const SlotTask* candidate,
+        std::int64_t reserved,
+        std::int64_t required);
     void push_event(SlotTask* task, TokenEvent ev);
     bool should_cancel(const SlotTask* task) const noexcept;
     void fail_all(std::string error);
@@ -211,11 +246,16 @@ private:
     int n_batch_;
     int mtp_max_active_requests_;
     common_context_seq_rm_type draft_seq_rm_type_;
+    bool bounded_pool_;
+    int context_capacity_;
+    int draft_context_capacity_;
+    int draft_margin_;
 
     std::mutex sub_mtx_;
     std::condition_variable sub_cv_;
     std::vector<SlotTask*> active_;
     std::string terminal_error_;
+    std::atomic<bool> failed_{false};
     std::atomic<bool> stop_{false};
     std::thread thread_;
 };

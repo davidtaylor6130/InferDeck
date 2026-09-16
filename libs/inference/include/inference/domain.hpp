@@ -1,6 +1,8 @@
 #pragma once
 
 #include <chrono>
+#include <atomic>
+#include <memory>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -167,7 +169,20 @@ struct Sampling {
     std::int64_t seed{-1};
 };
 
+struct RequestProgress {
+    std::atomic<int> phase{0};
+    std::atomic<int> slot{-1};
+    std::atomic<int> prompt_tokens{0};
+    std::atomic<int> processed_tokens{0};
+    std::atomic<int> cached_tokens{0};
+    std::atomic<int> output_tokens{0};
+    std::atomic<double> prompt_ms{0};
+    std::atomic<double> generation_ms{0};
+};
+
 struct GenerationRequest {
+    std::shared_ptr<RequestProgress> progress;
+
     std::string prompt;
     std::vector<Message> messages;
     std::vector<FunctionTool> tools;

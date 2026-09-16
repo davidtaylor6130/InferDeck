@@ -1,4 +1,7 @@
 #include "gateway/dashboard_routes.hpp"
+
+#include "gateway/api_key_routes.hpp"
+#include "gateway/background_lease_routes.hpp"
 #include "gateway/config_repository.hpp"
 #include "gateway/config_secrets.hpp"
 
@@ -190,7 +193,7 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"compute", model::to_string(info.compute)},
             {"residency_policy", model::to_string(info.residency)},
             {"admission_pool", info.admission_pool},
-            {"concurrency_limit", info.concurrency_limit},
+            {"concurrency_limit", resident == residency.end() ? info.concurrency_limit : resident->second.concurrency_limit},
             {"memory_required_mb", info.memory_required_mb},
             {"eviction_eligible", info.eviction_eligible},
             {"capabilities", info.capabilities},
@@ -203,6 +206,8 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"loaded", resident != residency.end()},
             {"primary", resident != residency.end() && resident->second.primary},
             {"context_size", info.context_size},
+            {"concurrency_auto", info.concurrency_auto},
+            {"context_pool_capacity", resident == residency.end() ? 0 : resident->second.context_pool_capacity},
             {"vram_required_mb", info.vram_required_mb},
             {"n_slots", resident == residency.end() ? info.n_slots : resident->second.slots},
             {"free_slots", resident == residency.end() ? 0 : resident->second.free_slots},
@@ -241,13 +246,15 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"compute", model::to_string(info->compute)},
             {"residency_policy", model::to_string(info->residency)},
             {"admission_pool", info->admission_pool},
-            {"concurrency_limit", info->concurrency_limit},
+            {"concurrency_limit", resident == residency.end() ? info->concurrency_limit : resident->second.concurrency_limit},
             {"memory_required_mb", info->memory_required_mb},
             {"eviction_eligible", info->eviction_eligible},
             {"capabilities", info->capabilities},
             {"loaded", resident != residency.end()},
             {"primary", resident != residency.end() && resident->second.primary},
             {"context_size", info->context_size},
+            {"concurrency_auto", info->concurrency_auto},
+            {"context_pool_capacity", resident == residency.end() ? 0 : resident->second.context_pool_capacity},
             {"vram_required_mb", info->vram_required_mb},
             {"n_slots", resident == residency.end() ? info->n_slots : resident->second.slots},
             {"free_slots", resident == residency.end() ? 0 : resident->second.free_slots},
@@ -275,6 +282,8 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"loaded", true},
             {"primary", resident.primary},
             {"context_size", info.context_size},
+            {"concurrency_auto", info.concurrency_auto},
+            {"context_pool_capacity", resident.context_pool_capacity},
             {"vram_required_mb", resident.estimated_vram_mb},
         });
     }
@@ -307,6 +316,8 @@ nlohmann::json build_dashboard_jobs(const observability::StatsDb& stats_db,
             {"model", row.model},
             {"resolvedModel", row.resolved_model},
             {"principalClass", row.principal_class},
+            {"apiKeyId", row.api_key_id},
+            {"apiKeyName", row.api_key_name},
             {"endpoint", row.endpoint},
             {"protocolProfile", row.protocol_profile},
             {"modality", row.modality},
@@ -467,7 +478,10 @@ nlohmann::json usage_bucket_json(
             {"peakTokensPerSecond", row.peak_tokens_per_second},
             {"peakPromptTokensPerSecond", row.peak_prompt_tokens_per_second},
             {"inputAudioSeconds", row.input_audio_seconds},
-            {"inputCharacters", row.input_characters}
+            {"inputCharacters", row.input_characters},
+            {"outputAudioSeconds", row.output_audio_seconds},
+            {"inputImageCount", row.input_image_count},
+            {"outputImageCount", row.output_image_count}
         });
     }
     return out;
@@ -483,70 +497,51 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
     for (auto it = system.begin(); it != system.end(); ++it) hardware[it.key()] = it.value();
 
     nlohmann::json usage = nlohmann::json::array();
-    std::unordered_map<std::string, observability::UsageBucketRow> canonical_usage;
-    for (const auto& bucket : stats_db.daily_usage(0)) {
-        auto& total = canonical_usage[bucket.model];
-        total.model = bucket.model;
-        total.prompt_tokens += bucket.prompt_tokens;
-        total.cached_prompt_tokens += bucket.cached_prompt_tokens;
-        total.completion_tokens += bucket.completion_tokens;
-        total.total_tokens += bucket.total_tokens;
-        total.requests += bucket.requests;
-        total.successful_requests += bucket.successful_requests;
-        total.measured_completion_tokens += bucket.measured_completion_tokens;
-        total.measured_prompt_tokens += bucket.measured_prompt_tokens;
-        total.generation_duration_ms += bucket.generation_duration_ms;
-        total.prompt_duration_ms += bucket.prompt_duration_ms;
-        total.peak_tokens_per_second = std::max(
-            total.peak_tokens_per_second, bucket.peak_tokens_per_second);
-        total.peak_prompt_tokens_per_second = std::max(
-            total.peak_prompt_tokens_per_second,
-            bucket.peak_prompt_tokens_per_second);
-        total.input_audio_seconds += bucket.input_audio_seconds;
-        total.input_characters += bucket.input_characters;
-    }
+    const std::shared_ptr<const observability::DashboardStatsSnapshot> snapshot = stats_db.dashboard_snapshot();
     std::int64_t prompt_tokens = 0;
     std::int64_t completion_tokens = 0;
     std::int64_t requests = 0;
-    for (const auto& row : stats_db.model_usage()) {
-        const auto& canonical = canonical_usage.at(row.model);
-        prompt_tokens += canonical.prompt_tokens;
-        completion_tokens += canonical.completion_tokens;
-        requests += canonical.requests;
-        const double avg_tps = canonical.generation_duration_ms > 0.0
-            ? static_cast<double>(canonical.measured_completion_tokens) / (canonical.generation_duration_ms / 1000.0)
+    for (const auto& row : snapshot->models) {
+        prompt_tokens += row.prompt_tokens;
+        completion_tokens += row.completion_tokens;
+        requests += row.requests;
+        const double avg_tps = row.total_generation_duration_ms > 0.0
+            ? static_cast<double>(row.measured_completion_tokens) / (row.total_generation_duration_ms / 1000.0)
             : 0.0;
-        const double avg_prompt_tps = canonical.prompt_duration_ms > 0.0
-            ? static_cast<double>(canonical.measured_prompt_tokens) /
-                (canonical.prompt_duration_ms / 1000.0)
+        const double avg_prompt_tps = row.total_prompt_duration_ms > 0.0
+            ? static_cast<double>(row.measured_prompt_tokens) /
+                (row.total_prompt_duration_ms / 1000.0)
             : 0.0;
         usage.push_back({
             {"model", row.model},
-            {"requests", canonical.requests},
-            {"successfulRequests", canonical.successful_requests},
-            {"promptTokens", canonical.prompt_tokens},
-            {"cachedPromptTokens", canonical.cached_prompt_tokens},
-            {"completionTokens", canonical.completion_tokens},
-            {"measuredCompletionTokens", canonical.measured_completion_tokens},
-            {"measuredPromptTokens", canonical.measured_prompt_tokens},
-            {"totalTokens", canonical.total_tokens},
-            {"peakTokensPerSecond", canonical.peak_tokens_per_second},
+            {"requests", row.requests},
+            {"successfulRequests", row.successful_requests},
+            {"promptTokens", row.prompt_tokens},
+            {"cachedPromptTokens", row.cached_prompt_tokens},
+            {"completionTokens", row.completion_tokens},
+            {"measuredCompletionTokens", row.measured_completion_tokens},
+            {"measuredPromptTokens", row.measured_prompt_tokens},
+            {"totalTokens", row.prompt_tokens + row.completion_tokens},
+            {"peakTokensPerSecond", row.peak_tokens_per_second},
             {"avgTokensPerSecond", avg_tps},
-            {"peakPromptTokensPerSecond", canonical.peak_prompt_tokens_per_second},
+            {"peakPromptTokensPerSecond", row.peak_prompt_tokens_per_second},
             {"avgPromptTokensPerSecond", avg_prompt_tps},
+            {"generationDurationMs", row.total_generation_duration_ms},
             {"lastTimestampUnixMs", row.last_timestamp_unix_ms},
-            {"inputAudioSeconds", canonical.input_audio_seconds},
-            {"inputCharacters", canonical.input_characters}
+            {"inputAudioSeconds", row.input_audio_seconds},
+            {"inputCharacters", row.input_characters},
+            {"outputAudioSeconds", row.output_audio_seconds},
+            {"inputImageCount", row.input_image_count},
+            {"outputImageCount", row.output_image_count}
         });
     }
 
-    const auto monthly_rows = stats_db.monthly_usage();
-    auto monthly = usage_bucket_json(monthly_rows);
-    auto daily = usage_bucket_json(stats_db.daily_usage(31));
-    auto hourly = usage_bucket_json(stats_db.hourly_usage(24));
+    auto monthly = usage_bucket_json(snapshot->monthly);
+    auto daily = usage_bucket_json(snapshot->daily);
+    auto hourly = usage_bucket_json(snapshot->hourly);
 
     std::vector<double> latencies;
-    for (const auto& row : stats_db.recent_requests(500)) {
+    for (const auto& row : snapshot->recent) {
         if (row.status_code >= 200 && row.status_code < 300 && row.duration_ms > 0.0) {
             latencies.push_back(row.duration_ms);
         }
@@ -562,6 +557,28 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
         if (gpu_lock_owner.empty() || item.primary) gpu_lock_owner = item.name;
     }
     auto model_json = build_dashboard_models(coordinator);
+    nlohmann::json live_requests = nlohmann::json::array();
+    for (const auto& request : metrics.live_requests()) {
+        const auto& progress = *request->progress;
+        const int phase = progress.phase.load();
+        const int processed = progress.processed_tokens.load();
+        const int cached = progress.cached_tokens.load();
+        const double prompt_ms = progress.prompt_ms.load();
+        const double generation_ms = progress.generation_ms.load();
+        live_requests.push_back({
+            {"id", request->request_id}, {"model", request->model},
+            {"requestedModel", request->requested_model}, {"apiKeyId", request->api_key_id},
+            {"apiKeyName", request->api_key_name}, {"endpoint", request->endpoint},
+            {"priority", request->priority}, {"slotId", progress.slot.load()},
+            {"startedUnixMs", request->started_unix_ms},
+            {"elapsedMs", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - request->started).count()},
+            {"phase", phase == 0 ? "waiting" : phase == 1 ? "loading" : phase == 2 ? "prefill" : "generating"},
+            {"promptTokens", progress.prompt_tokens.load()}, {"processedTokens", processed},
+            {"cachedTokens", cached}, {"completionTokens", progress.output_tokens.load()},
+            {"promptTokensPerSecond", prompt_ms > 0 ? nlohmann::json(std::max(0, processed - cached) * 1000.0 / prompt_ms) : nlohmann::json(nullptr)},
+            {"tokensPerSecond", generation_ms > 0 ? nlohmann::json(progress.output_tokens.load() * 1000.0 / generation_ms) : nlohmann::json(nullptr)},
+        });
+    }
     nlohmann::json queued_requests = nlohmann::json::array();
     for (const auto& item : coordinator.queue()) {
         queued_requests.push_back({
@@ -579,6 +596,7 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
             {"running", coordinator.active_request_count()},
             {"queued", coordinator.queued_request_count()},
             {"requests", queued_requests},
+            {"liveRequests", live_requests},
             {"gpuLocked", gpu_locked},
             {"lockOwner", gpu_lock_owner},
             {"vramBudgetMb", coordinator.vram_budget_mb()},
@@ -623,7 +641,11 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
 
 void register_dashboard_routes(httplib::Server& server, const DashboardDeps& deps,
                                const RouteWrapper& wrap) {
+#include "dashboard_api_key_routes.ipp"
+#include "dashboard_api_settings_routes.ipp"
+#include "dashboard_background_lease_routes.ipp"
 #include "dashboard_optimize_routes.ipp"
+#include "dashboard_post_training_routes.ipp"
 
 #include "dashboard_model_store_routes.ipp"
 #include "dashboard_alias_routes.ipp"

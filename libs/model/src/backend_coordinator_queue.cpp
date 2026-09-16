@@ -32,14 +32,18 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
     std::unique_lock<std::mutex> lock(mutex_);
     const auto deadline = clock::now() + opts.timeout;
     if (!opts.block) {
-        if (draining_models_.contains(name)) {
+        if (draining_models_.contains(name) || resizing_models_.contains(name)) {
             return foundation::Err<int>(foundation::ErrorCode::Unavailable,
-                                         "model is draining: " + name);
+                                         (draining_models_.contains(name) ? "model is draining: " : "model is resizing: ") + name);
         }
         auto it = instances_.find(name);
         if (it == instances_.end() || !it->second || !it->second->is_loaded()) {
             return foundation::Err<int>(foundation::ErrorCode::NotFound,
                                          "model not loaded: " + name);
+        }
+        if (!it->second->execution_healthy()) {
+            return foundation::Err<int>(foundation::ErrorCode::Unavailable,
+                                         "model requires recovery: " + name);
         }
         if (!waiters_.empty() || resizing_models_.contains(name) ||
             request_waits_for_priority_media_locked(name, opts.reservation_key) ||
@@ -61,6 +65,7 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
     waiters_.push_back({waiter_id, name, std::clamp(opts.priority, -100, 100),
                         clock::now(), deadline, opts.cancelled,
                         opts.reservation_key, false, false,
+                        std::nullopt, false, false, false,
                         std::nullopt});
     while (true) {
         const auto now = clock::now();
@@ -76,37 +81,128 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             return foundation::Err<int>(foundation::ErrorCode::Timeout,
                                          "timeout waiting in request queue: " + name);
         }
-        if (draining_models_.contains(name)) {
+        if (draining_models_.contains(name) || resizing_models_.contains(name)) {
             cv_.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds{100}));
             continue;
         }
         auto it = instances_.find(name);
-        if (it == instances_.end() || !it->second || !it->second->is_loaded()) {
+        const bool resident = it != instances_.end() && it->second &&
+            it->second->is_loaded();
+        auto waiter = std::find_if(waiters_.begin(), waiters_.end(),
+            [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
+        if (waiter != waiters_.end() && resident && opts.demand &&
+            !waiter->demand_prepared &&
+            (waiter_is_next_locked(waiter_id, now) ||
+             (!waiters_.empty() && waiter->id == waiters_.front().id))) {
+            waiter->preparing = true;
+            lock.unlock();
+            auto demand = opts.demand();
+            lock.lock();
+            waiter = std::find_if(waiters_.begin(), waiters_.end(),
+                [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
+            if (waiter != waiters_.end()) waiter->preparing = false;
+            if (!demand) {
+                erase_waiter_locked(waiter_id);
+                cv_.notify_all();
+                return foundation::Err<int>(demand.error().code, demand.error().message);
+            }
+            if (waiter != waiters_.end()) {
+                waiter->demand = *demand;
+                waiter->demand_prepared = true;
+            }
+            continue;
+        }
+        waiter = std::find_if(waiters_.begin(), waiters_.end(),
+            [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
+        if (waiter != waiters_.end() && resident && opts.prepare_capacity &&
+            waiter->demand_prepared && !waiter->capacity_prepared &&
+            waiter_is_next_locked(waiter_id, now)) {
+            if (waiter->retry_after_generation &&
+                *waiter->retry_after_generation == resource_generation_) {
+                cv_.wait_until(lock, std::min(
+                    deadline, now + std::chrono::milliseconds{100}));
+                continue;
+            }
+            waiter->retry_after_generation.reset();
+            waiter->preparing = true;
+            waiter->resource_blocked = true;
+            const auto aggregate_context = static_cast<std::int64_t>(
+                active_context_reservation_by_model_[name]) + waiter->demand->required_context;
+            const auto aggregate_sequences = static_cast<std::int64_t>(
+                active_sequence_reservation_by_model_[name]) + waiter->demand->required_sequences;
+            if (aggregate_context > std::numeric_limits<int>::max() ||
+                aggregate_sequences > std::numeric_limits<int>::max()) {
+                erase_waiter_locked(waiter_id);
+                cv_.notify_all();
+                return foundation::Err<int>(foundation::ErrorCode::InvalidArgument,
+                    "request demand exceeds supported capacity");
+            }
+            const bool automatic_pool = it->second->info().concurrency_auto &&
+                it->second->info().context_pool_auto;
+            waiter->max_aggregate_context = automatic_pool
+                ? std::max(waiter->max_aggregate_context, static_cast<int>(aggregate_context))
+                : static_cast<int>(aggregate_context);
+            waiter->demand->aggregate_context = waiter->max_aggregate_context;
+            waiter->max_aggregate_sequences = automatic_pool
+                ? std::max(waiter->max_aggregate_sequences, static_cast<int>(aggregate_sequences))
+                : static_cast<int>(aggregate_sequences);
+            waiter->demand->aggregate_sequences = waiter->max_aggregate_sequences;
+            const auto demand = *waiter->demand;
+            const auto generation_before = resource_generation_;
+            const LifecycleControl control{deadline, opts.cancelled};
+            lock.unlock();
+            auto prepared = opts.prepare_capacity(demand, control);
+            lock.lock();
+            waiter = std::find_if(waiters_.begin(), waiters_.end(),
+                [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
+            if (waiter != waiters_.end()) waiter->preparing = false;
+            if (!prepared) {
+                if (prepared.error().code == foundation::ErrorCode::ResourceBusy) {
+                    if (waiter != waiters_.end()) {
+                        waiter->resource_blocked = true;
+                        if (resource_generation_ == generation_before)
+                            waiter->retry_after_generation = generation_before;
+                    }
+                    continue;
+                }
+                erase_waiter_locked(waiter_id);
+                cv_.notify_all();
+                return foundation::Err<int>(prepared.error().code, prepared.error().message);
+            }
+            if (waiter != waiters_.end()) {
+                waiter->capacity_prepared = true;
+                waiter->resource_blocked = false;
+            }
+            continue;
+        }
+        if (!resident || !it->second->execution_healthy()) {
             if (opts.prepare && waiter_is_next_locked(waiter_id, now)) {
-                auto waiter = std::find_if(waiters_.begin(), waiters_.end(),
+                auto load_waiter = std::find_if(waiters_.begin(), waiters_.end(),
                     [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
-                if (waiter != waiters_.end() && waiter->retry_after_generation &&
-                    *waiter->retry_after_generation == resource_generation_) {
+                if (load_waiter != waiters_.end() && load_waiter->retry_after_generation &&
+                    *load_waiter->retry_after_generation == resource_generation_) {
                     cv_.wait_until(lock, std::min(
                         deadline, now + std::chrono::milliseconds{100}));
                     continue;
                 }
-                if (waiter != waiters_.end() && !waiter->preparing) {
-                    waiter->retry_after_generation.reset();
-                    waiter->preparing = true;
-                    waiter->prepared = false;
+                if (load_waiter != waiters_.end() && !load_waiter->preparing) {
+                    load_waiter->retry_after_generation.reset();
+                    load_waiter->preparing = true;
+                    load_waiter->resource_blocked = true;
+                    load_waiter->prepared = false;
                     const auto generation_before = resource_generation_;
                     lock.unlock();
                     auto prepared = opts.prepare();
                     lock.lock();
-                    waiter = std::find_if(waiters_.begin(), waiters_.end(),
+                    load_waiter = std::find_if(waiters_.begin(), waiters_.end(),
                         [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
-                    if (waiter != waiters_.end()) waiter->preparing = false;
+                    if (load_waiter != waiters_.end()) load_waiter->preparing = false;
                     if (!prepared) {
                         if (prepared.error().code == foundation::ErrorCode::ResourceBusy) {
-                            if (waiter != waiters_.end() &&
-                                resource_generation_ == generation_before) {
-                                waiter->retry_after_generation = generation_before;
+                            if (load_waiter != waiters_.end()) {
+                                load_waiter->resource_blocked = true;
+                                if (resource_generation_ == generation_before)
+                                    load_waiter->retry_after_generation = generation_before;
                             }
                             continue;
                         }
@@ -114,7 +210,10 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
                         cv_.notify_all();
                         return foundation::Err<int>(prepared.error().code, prepared.error().message);
                     }
-                    if (waiter != waiters_.end()) waiter->prepared = true;
+                    if (load_waiter != waiters_.end()) {
+                        load_waiter->prepared = true;
+                        load_waiter->resource_blocked = false;
+                    }
                     continue;
                 }
             }
@@ -124,15 +223,34 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             }
             erase_waiter_locked(waiter_id);
             cv_.notify_all();
-            return foundation::Err<int>(foundation::ErrorCode::NotFound,
-                                         "model not loaded: " + name);
+            return foundation::Err<int>(
+                resident ? foundation::ErrorCode::Unavailable
+                         : foundation::ErrorCode::NotFound,
+                (resident ? "model requires recovery: " : "model not loaded: ") + name);
         }
-        if (!resizing_models_.contains(name) && waiter_is_next_locked(waiter_id, now)) {
+        if (waiter != waiters_.end() && waiter->capacity_prepared &&
+            waiter->demand && opts.prepare_capacity) {
+            const std::int64_t current_context = static_cast<std::int64_t>(
+                active_context_reservation_by_model_[name]) + waiter->demand->required_context;
+            const std::int64_t current_sequences = static_cast<std::int64_t>(
+                active_sequence_reservation_by_model_[name]) + waiter->demand->required_sequences;
+            if (current_context > waiter->demand->aggregate_context ||
+                current_sequences > waiter->demand->aggregate_sequences) {
+                waiter->capacity_prepared = false;
+                continue;
+            }
+        }
+        if (!resizing_models_.contains(name) && admission_pool_allows_locked(name) && waiter_is_next_locked(waiter_id, now)) {
             auto slot = it->second->acquire_slot();
             if (slot) {
-                auto lease = issue_lease_locked(name, *slot);
+                const auto waiter_demand = waiter != waiters_.end() && waiter->demand_prepared ? &*waiter->demand : nullptr;
+                auto lease = issue_lease_locked(name, *slot, waiter_demand);
                 if (!lease) {
                     (void)it->second->release_slot(*slot);
+                    if (lease.error().code == foundation::ErrorCode::ResourceBusy) {
+                        cv_.wait_until(lock, std::min(deadline, now + std::chrono::milliseconds{100}));
+                        continue;
+                    }
                     erase_waiter_locked(waiter_id);
                     cv_.notify_all();
                     return lease;
@@ -167,8 +285,14 @@ foundation::Result<void> BackendCoordinator::release_slot(
         }
         auto r = it->second->release_slot(lease->second.backend_slot);
         if (!r) return r;
+        const int context_reservation = lease->second.context_reservation;
+        const int sequence_reservation = lease->second.sequence_reservation;
         active_leases_.erase(lease);
         if (active_requests_ > 0) --active_requests_;
+        auto& model_context = active_context_reservation_by_model_[name];
+        model_context = std::max(0, model_context - context_reservation);
+        auto& model_sequences = active_sequence_reservation_by_model_[name];
+        model_sequences = std::max(0, model_sequences - sequence_reservation);
         auto active = active_requests_by_model_.find(name);
         if (active != active_requests_by_model_.end() && active->second > 0) --active->second;
         if (it->second->estimate_vram_mb(it->second->n_slots()) > 0) {
@@ -195,16 +319,47 @@ std::vector<QueueInfo> BackendCoordinator::queue() const {
     std::vector<const SlotWaiter*> ordered;
     ordered.reserve(waiters_.size());
     for (const auto& waiter : waiters_) ordered.push_back(&waiter);
-    std::sort(ordered.begin(), ordered.end(), [this, now](const auto* a, const auto* b) {
-        const bool actionable_a = waiter_is_actionable_locked(*a);
-        const bool actionable_b = waiter_is_actionable_locked(*b);
-        if (actionable_a != actionable_b) return actionable_a;
-        if (actionable_a && a->prepared != b->prepared) return a->prepared;
-        const auto age_a = std::chrono::duration_cast<std::chrono::seconds>(now - a->enqueued).count();
-        const auto age_b = std::chrono::duration_cast<std::chrono::seconds>(now - b->enqueued).count();
-        const auto score_a = a->priority + age_a;
-        const auto score_b = b->priority + age_b;
-        return score_a == score_b ? a->id < b->id : score_a > score_b;
+    struct QueueOrderKey {
+        int category{0};
+        bool actionable{false};
+        bool barrier{false};
+        bool independent{false};
+        bool prepared{false};
+        std::int64_t score{0};
+        std::uint64_t id{0};
+    };
+    std::unordered_map<std::uint64_t, QueueOrderKey> order_keys;
+    order_keys.reserve(waiters_.size());
+    std::int64_t highest_barrier_score = std::numeric_limits<std::int64_t>::min();
+    for (const auto& waiter : waiters_) {
+        const auto age = std::chrono::duration_cast<std::chrono::seconds>(
+            now - waiter.enqueued).count();
+        QueueOrderKey key;
+        key.actionable = waiter_is_actionable_locked(waiter);
+        key.barrier = waiter_is_resource_barrier_locked(waiter);
+        key.independent = model_is_independent_sidecar_locked(waiter.model);
+        key.prepared = key.actionable && waiter.prepared;
+        key.score = static_cast<std::int64_t>(waiter.priority) + age;
+        key.id = waiter.id;
+        if (key.barrier) highest_barrier_score = std::max(highest_barrier_score, key.score);
+        order_keys.emplace(waiter.id, key);
+    }
+    for (auto& [_, key] : order_keys) {
+        if (!key.independent && !key.barrier &&
+            highest_barrier_score != std::numeric_limits<std::int64_t>::min() &&
+            key.score < highest_barrier_score) {
+            key.actionable = false;
+            key.prepared = false;
+        }
+        key.category = key.actionable ? 0 : (key.barrier ? 1 : 2);
+    }
+    std::sort(ordered.begin(), ordered.end(), [&order_keys](const auto* a, const auto* b) {
+        const auto& key_a = order_keys.at(a->id);
+        const auto& key_b = order_keys.at(b->id);
+        if (key_a.category != key_b.category) return key_a.category < key_b.category;
+        if (key_a.prepared != key_b.prepared) return key_a.prepared > key_b.prepared;
+        if (key_a.score != key_b.score) return key_a.score > key_b.score;
+        return key_a.id < key_b.id;
     });
     std::vector<QueueInfo> out;
     out.reserve(ordered.size());
@@ -363,6 +518,12 @@ bool BackendCoordinator::admission_pool_allows_locked(
     };
     const auto target_info = find_info(name);
     if (!target_info) return false;
+    if (target_info->concurrency_auto) {
+        const auto backend = instances_.find(name);
+        if (backend == instances_.end() || !backend->second || !backend->second->is_loaded()) return true;
+        const auto active = active_requests_by_model_.find(name);
+        return (active == active_requests_by_model_.end() ? 0 : active->second) < backend->second->n_slots();
+    }
     int active = 0;
     for (const auto& [model_name, count] : active_requests_by_model_) {
         if (count <= 0) continue;
@@ -400,17 +561,18 @@ bool BackendCoordinator::request_waits_for_priority_media_locked(
 
 bool BackendCoordinator::waiter_is_actionable_locked(
     const SlotWaiter& waiter) const {
-    if (waiter.preparing ||
+    if (draining_models_.contains(waiter.model) ||
+        resizing_models_.contains(waiter.model) || waiter.preparing ||
         (waiter.retry_after_generation &&
          *waiter.retry_after_generation == resource_generation_)) {
         return false;
     }
     if (request_waits_for_priority_media_locked(
             waiter.model, waiter.reservation_key)) return false;
-    if (!admission_pool_allows_locked(waiter.model)) return false;
+    if (!admission_pool_allows_locked(waiter.model) && !waiter.demand_prepared) return false;
     const auto backend = instances_.find(waiter.model);
     if (backend == instances_.end() || !backend->second ||
-        !backend->second->is_loaded()) {
+        !backend->second->is_loaded() || !backend->second->execution_healthy()) {
         if (model_is_independent_sidecar_locked(waiter.model)) return true;
         const bool another_prepare = std::any_of(
             waiters_.begin(), waiters_.end(), [this, &waiter](const SlotWaiter& other) {
@@ -423,25 +585,48 @@ bool BackendCoordinator::waiter_is_actionable_locked(
         if (another_prepare) return false;
         return true;
     }
-    return backend->second->n_free_slots() > 0 &&
-        !draining_models_.contains(waiter.model) &&
-        !resizing_models_.contains(waiter.model);
+    return backend->second->n_free_slots() > 0 || waiter.demand_prepared;
+}
+
+bool BackendCoordinator::waiter_is_resource_barrier_locked(const SlotWaiter& waiter) const {
+    return waiter.resource_blocked && !model_is_independent_sidecar_locked(waiter.model);
 }
 
 bool BackendCoordinator::waiter_is_next_locked(std::uint64_t id, time_point now) const {
+    const auto score_for = [now](const SlotWaiter& waiter) {
+        const auto age = std::chrono::duration_cast<std::chrono::seconds>(
+            now - waiter.enqueued).count();
+        return static_cast<std::int64_t>(waiter.priority) + age;
+    };
     const bool has_prepared = std::any_of(
         waiters_.begin(), waiters_.end(), [this](const SlotWaiter& waiter) {
             return waiter.prepared && waiter_is_actionable_locked(waiter);
         });
+    const SlotWaiter* resource_barrier = nullptr;
+    std::int64_t resource_barrier_score = std::numeric_limits<std::int64_t>::min();
+    for (const auto& waiter : waiters_) {
+        if (!waiter_is_resource_barrier_locked(waiter)) {
+            continue;
+        }
+        const auto score = score_for(waiter);
+        if (!resource_barrier || score > resource_barrier_score ||
+            (score == resource_barrier_score && waiter.id < resource_barrier->id)) {
+            resource_barrier = &waiter;
+            resource_barrier_score = score;
+        }
+    }
     const SlotWaiter* selected = nullptr;
     std::int64_t selected_score = 0;
     for (const auto& waiter : waiters_) {
         if (!waiter_is_actionable_locked(waiter)) continue;
         if (has_prepared && !waiter.prepared &&
             !model_is_independent_sidecar_locked(waiter.model)) continue;
-        const auto age = std::chrono::duration_cast<std::chrono::seconds>(now - waiter.enqueued).count();
-        const auto score = static_cast<std::int64_t>(waiter.priority) + age;
-        if (!selected || score > selected_score || (score == selected_score && waiter.id < selected->id)) {
+        const auto score = score_for(waiter);
+        if (resource_barrier && waiter.id != resource_barrier->id &&
+            !model_is_independent_sidecar_locked(waiter.model) &&
+            score < resource_barrier_score) continue;
+        if (!selected || score > selected_score ||
+            (score == selected_score && waiter.id < selected->id)) {
             selected = &waiter;
             selected_score = score;
         }
@@ -454,7 +639,14 @@ void BackendCoordinator::erase_waiter_locked(std::uint64_t id) {
 }
 
 foundation::Result<int> BackendCoordinator::issue_lease_locked(
-    const std::string& name, int backend_slot) {
+    const std::string& name, int backend_slot, const RequestDemand* demand) {
+    const auto backend = instances_.find(name);
+    if (draining_models_.contains(name) || resizing_models_.contains(name) ||
+        backend == instances_.end() || !backend->second ||
+        !backend->second->is_loaded() || !backend->second->execution_healthy()) {
+        return foundation::Err<int>(foundation::ErrorCode::Unavailable,
+                                     "model is not ready: " + name);
+    }
     if (!admission_pool_allows_locked(name)) {
         return foundation::Err<int>(
             foundation::ErrorCode::ResourceBusy,
@@ -465,7 +657,11 @@ foundation::Result<int> BackendCoordinator::issue_lease_locked(
                                      "slot lease id space exhausted");
     }
     const auto lease_id = static_cast<int>(next_lease_id_++);
-    active_leases_.emplace(lease_id, ActiveLease{name, backend_slot});
+    const int reservation = demand ? std::max(0, demand->required_context) : 0;
+    const int sequence_reservation = demand ? std::max(0, demand->required_sequences) : 0;
+    active_leases_.emplace(lease_id, ActiveLease{name, backend_slot, reservation, sequence_reservation});
+    active_context_reservation_by_model_[name] += reservation;
+    active_sequence_reservation_by_model_[name] += sequence_reservation;
     ++active_requests_;
     ++active_requests_by_model_[name];
     return foundation::Ok(lease_id);

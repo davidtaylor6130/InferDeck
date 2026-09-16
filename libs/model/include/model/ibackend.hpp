@@ -65,15 +65,26 @@ public:
         return unload();
     }
     virtual bool is_loaded() const = 0;
+    virtual bool execution_healthy() const { return true; }
     virtual int vram_usage_mb() const = 0;
     virtual int n_slots() const = 0;
     virtual int n_free_slots() const = 0;
+    virtual int context_pool_capacity() const { return 0; }
     virtual int min_slots() const { return n_slots(); }
     virtual bool can_resize_slots() const { return false; }
+    virtual bool can_reclaim_idle_context() const { return false; }
+    virtual foundation::Result<bool> reclaim_idle_context(
+        int additional_reserve_mb, const LifecycleControl& control) {
+        (void)additional_reserve_mb;
+        (void)control;
+        return false;
+    }
     virtual int estimate_vram_mb(int slots) const {
         (void)slots;
         return vram_usage_mb();
     }
+    virtual int additional_vram_reserve_mb() const { return 0; }
+    virtual bool live_vram_accounting_complete() const { return false; }
     virtual foundation::Result<void> resize_slots(int slots) {
         (void)slots;
         return foundation::Err<void>(foundation::ErrorCode::Unavailable,

@@ -3,9 +3,11 @@
 #include <optional>
 #include <charconv>
 #include <cctype>
+#include <memory>
 #include <string>
 #include <string_view>
 
+#include "gateway/api_key_store.hpp"
 #include "gateway/route_manifest.hpp"
 
 namespace inferdeck::gateway {
@@ -18,6 +20,7 @@ struct AuthConfig {
 enum class RoutePrincipal {
     PublicStatus,
     OpenAIDataPlane,
+    ManagedClient,
     DashboardSession,
     ControlRead,
     ControlWrite,
@@ -63,10 +66,13 @@ private:
 
 class RouteAuthorizer {
 public:
-    explicit RouteAuthorizer(RouteAuthConfig cfg)
+    explicit RouteAuthorizer(
+        RouteAuthConfig cfg,
+        std::shared_ptr<ApiKeyStore> api_keys = {})
         : cfg_(std::move(cfg)),
           data_plane_(cfg_.data_plane),
-          control_({true, cfg_.control_token}) {}
+          control_({true, cfg_.control_token}),
+          api_keys_(std::move(api_keys)) {}
 
     [[nodiscard]] AuthorizationStatus authorize(
         RoutePrincipal principal,
@@ -78,7 +84,15 @@ public:
             return AuthorizationStatus::Granted;
         }
         if (principal == RoutePrincipal::OpenAIDataPlane) {
+            if (api_keys_ && api_keys_->authenticate_bearer(auth_header)) {
+                return AuthorizationStatus::Granted;
+            }
             return data_plane_.check(auth_header)
+                ? AuthorizationStatus::Granted
+                : AuthorizationStatus::AuthenticationRequired;
+        }
+        if (principal == RoutePrincipal::ManagedClient) {
+            return api_keys_ && api_keys_->authenticate_bearer(auth_header)
                 ? AuthorizationStatus::Granted
                 : AuthorizationStatus::AuthenticationRequired;
         }
@@ -163,6 +177,7 @@ private:
     RouteAuthConfig cfg_;
     AuthMiddleware data_plane_;
     AuthMiddleware control_;
+    std::shared_ptr<ApiKeyStore> api_keys_;
 };
 
 inline RoutePrincipal classify_route(std::string_view method,
@@ -175,6 +190,15 @@ inline RoutePrincipal classify_route(std::string_view method,
     }
     if (path.starts_with("/compat/openai-derivative/v1/")) {
         return RoutePrincipal::OpenAIDataPlane;
+    }
+    if (path == "/api/inferdeck/v1/audio/generations" ||
+        path == "/api/inferdeck/v1/video/generations") {
+        return RoutePrincipal::OpenAIDataPlane;
+    }
+    if (path == "/api/inferdeck/v1/background/availability" ||
+        path == "/api/inferdeck/v1/background/lease" ||
+        path.starts_with("/api/inferdeck/v1/background/lease/")) {
+        return RoutePrincipal::ManagedClient;
     }
     if (path == "/api/inferdeck/v1/status" ||
         path == "/api/inferdeck/v1/pricing" ||

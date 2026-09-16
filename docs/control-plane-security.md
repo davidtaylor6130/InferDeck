@@ -12,7 +12,8 @@ InferDeck assigns one principal to every API request before its handler runs.
 | Principal | Default authority | Authentication |
 |---|---|---|
 | Public status | reserved for a future minimal liveness route | none |
-| OpenAI data plane | OpenAI inference and model discovery | independently configured `auth` bearer token |
+| OpenAI data plane | OpenAI inference and model discovery | configured `auth` bearer token or a managed API key |
+| Managed client | background availability and lease coordination | managed API key only |
 | Dashboard session | live status, pricing, and event stream | direct loopback only |
 | Control read | configuration, logs, jobs, metrics, model-store state | loopback, or remote control principal |
 | Control write | every operation that changes runtime, files, configuration, aliases, or jobs | loopback, or remote control principal |
@@ -22,14 +23,20 @@ loopback authority additionally requires a numeric loopback or `localhost`
 `Host` header and rejects `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, and `Via`.
 An unknown peer, DNS-rebinding host, or proxy-indicated request is not trusted.
 
+Dashboard remember-login sessions expire after 30 days. Logout invalidates the session, and control-token rotation invalidates prior sessions and tokens.
+
+The gateway VRAM safety reserve defaults to 1024 MB, accepts 0, and applies to GPU headroom only; host memory reserve is separate.
+
 The OpenAI bearer token does not grant control authority. An operator can opt in
 to sharing that token with `control.allow_data_plane_token: true`, but the remote
 control token must still be non-empty and the configuration must explicitly
 acknowledge the shared principal.
 
-Legacy alternate API-key promotion has been removed and cannot authenticate either
-plane. The optional OpenAI-derivative profile uses a separate `/compat/*` path and
-the same data-plane bearer authentication; it is disabled by default.
+Managed `idk_` keys authenticate the OpenAI data plane and the background lease
+API. The legacy OpenAI token cannot call the lease API. Managed keys never
+satisfy dashboard or control authorization, even when remote control is
+enabled. The optional OpenAI-derivative profile uses a separate `/compat/*` path
+and the same data-plane bearer authentication; it is disabled by default.
 
 ## Route inventory
 
@@ -44,6 +51,14 @@ The paths below are the canonical Phase 4 routes.
 - `POST /v1/images/generations`
 - `POST /v1/audio/speech`
 - `POST /v1/audio/transcriptions`
+- `POST /api/inferdeck/v1/audio/generations`
+
+### Managed client
+
+- `GET /api/inferdeck/v1/background/availability`
+- `POST /api/inferdeck/v1/background/lease`
+- `PATCH /api/inferdeck/v1/background/lease/:id`
+- `DELETE /api/inferdeck/v1/background/lease/:id`
 
 ### Dashboard session
 
@@ -58,6 +73,7 @@ The paths below are the canonical Phase 4 routes.
 - `GET /api/inferdeck/v1/metrics`
 - `GET /api/inferdeck/v1/stats/history`
 - `GET /api/inferdeck/v1/media/jobs`
+- `GET /api/inferdeck/v1/media/jobs/:id/outputs/:index`
 - `GET /api/inferdeck/v1/models`
 - `GET /api/inferdeck/v1/usage/daily`
 - `GET /api/inferdeck/v1/optimize/benchmark`
@@ -69,11 +85,16 @@ The paths below are the canonical Phase 4 routes.
 - `GET /api/inferdeck/v1/config`
 - `GET /api/inferdeck/v1/jobs`
 - `GET /api/inferdeck/v1/logs`
+- `GET /api/inferdeck/v1/api-keys`
+- `GET /api/inferdeck/v1/post-training/capabilities`
+- `GET /api/inferdeck/v1/post-training/quantizations`
 
 ### Control write
 
 - `POST /api/inferdeck/v1/swap/to/:name`
 - `POST /api/inferdeck/v1/swap/cancel`
+- `POST /api/inferdeck/v1/media/images/generations`
+- `POST /api/inferdeck/v1/media/audio/generations`
 - `POST /api/inferdeck/v1/media/jobs/:id/cancel`
 - `POST /api/inferdeck/v1/optimize/profile`
 - `POST /api/inferdeck/v1/optimize/benchmark`
@@ -91,17 +112,35 @@ The paths below are the canonical Phase 4 routes.
 - `DELETE /api/inferdeck/v1/config/active`
 - `POST /api/inferdeck/v1/models/load`
 - `POST /api/inferdeck/v1/models/unload`
+- `POST /api/inferdeck/v1/api-keys`
+- `PATCH /api/inferdeck/v1/api-keys/:id`
+- `DELETE /api/inferdeck/v1/api-keys/:id`
+- `POST /api/inferdeck/v1/post-training/quantizations`
 
 All future `/api` mutations default to the control-write principal through the
 central classifier, even before they are added to this human-readable inventory.
 The route matrix test lists every current mutating operation so omissions fail
 review visibly.
 
+Quantisation is a filesystem-writing control operation.
+The request cannot provide a path. It selects an existing managed source and a safe model name;
+the server derives both staging and final paths under the model-store root.
+The existing output parent is reparse-resolved back into that root before a
+directory is created. Existing destinations are never replaced, and data-plane
+or managed-client keys do not gain access to the route.
+
+An accepted quantisation job owns the CPU maintenance resource until it reaches
+`installed` or `failed`. With no existing lease, managed-key background
+availability reports `maintenance`, a suggested report-back time, and
+`Retry-After`; new lease acquisition returns 409. This keeps the advisory
+background-work gate aligned with server-owned maintenance state.
+
 ## Configuration contract
 
-`auth` configures only the OpenAI data plane. `cors.origins` is likewise a
-data-plane allowlist and may remain wildcard for explicitly public local-model
-clients.
+`auth` configures only the OpenAI data plane. `auth.token` is the legacy shared
+credential. `auth.api_keys_db` stores hashes and metadata for managed client
+keys. `cors.origins` is likewise a data-plane allowlist and may remain wildcard
+for explicitly public local-model clients.
 
 `control` configures administrative access:
 
@@ -130,8 +169,10 @@ Control and model-store tokens are masked as `__INFERDECK_SECRET__` by the
 configuration API and restored server-side during an update. A parsed-YAML
 fallback covers flow mappings, quoted keys, block scalars, and duplicate secret
 keys when the comment-preserving fast path cannot prove complete redaction.
-Credential checks use the constant-time bearer comparison shared by both
-principals.
+Configured-token checks use constant-time bearer comparison. Managed keys use
+Windows CNG for random generation and SHA-256, then compare the stored digest in
+constant time. The create response is marked `Cache-Control: no-store`; list
+responses never contain plaintext credentials.
 
 Remote dashboard access uses the same separate control credential. The browser
 exchanges it at `POST /api/inferdeck/v1/dashboard/session` for an HTTP-only,
@@ -156,7 +197,7 @@ loopback authority.
 
 Control CORS returns only an exact configured HTTP(S) origin. Empty, wildcard,
 `null`, credential-bearing, and path-bearing origins are invalid in every mode,
-and legacy alternate API-key headers are no longer advertised. Ambient loopback authority is treated as
+and alternate API-key headers are not accepted. Ambient loopback authority is treated as
 a CSRF credential: every control mutation rejects an unallowlisted `Origin` or
 `Sec-Fetch-Site: cross-site`, and even empty mutations require
 `Content-Type: application/json`. Cross-origin mutation attempts therefore fail
@@ -171,6 +212,7 @@ Request policy is enforced before handlers:
 |---|---:|---|
 | `GET`, `HEAD`, `OPTIONS` | none | none |
 | control-plane mutation | 2 MiB | `application/json` when a body is present |
+| managed-client lease mutation | 2 MiB | `application/json` when a body is present |
 | OpenAI transcription | 26 MiB total, with a 25 MiB file | `multipart/form-data` |
 | other OpenAI data-plane mutation | 16 MiB | `application/json` |
 | server hard ceiling | 26 MiB | endpoint rule still applies |
@@ -255,3 +297,7 @@ Remote dashboard origins must be listed exactly in `control.origins`.
 32 cookie-safe ASCII characters. Keep remote access restricted to trusted LAN or
 encrypted overlay interfaces because the built-in listener does not terminate
 TLS.
+
+## Windows verification
+
+PowerShell scripts that read UTF-8 JSON or logs must specify UTF-8 explicitly to avoid locale-dependent parsing.

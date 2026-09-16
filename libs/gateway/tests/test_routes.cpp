@@ -18,6 +18,7 @@
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -319,7 +320,8 @@ TEST_CASE("OpenAI adapter matches the canonical golden fixture",
 namespace {
 
 class IModelMock : public IModel, public IEmbeddingBackend, public IImageBackend,
-                   public ISpeechBackend, public ITranscriptionBackend {
+                   public IAudioGenerationBackend, public IVideoBackend, public ISpeechBackend,
+                   public ITranscriptionBackend {
 public:
     ModelInfo model_info{};
     std::atomic<bool> loaded{false};
@@ -329,7 +331,13 @@ public:
     std::atomic<bool> load_started{false};
     std::atomic<bool> load_should_fail{false};
     std::atomic<bool> block_until_cancel{false};
+    std::atomic<bool> block_nonstream_until_cancel{false};
+    std::atomic<int> nonstream_started{0};
+    std::atomic<bool> nonstream_saw_cancel{false};
     std::atomic<bool> block_media_until_cancel{false};
+    std::atomic<bool> video_should_fail{false};
+    std::atomic<bool> video_output_too_large{false};
+    std::atomic<bool> video_output_mp4{false};
     std::atomic<bool> split_utf8{false};
     std::atomic<bool> context_error{false};
     std::atomic<int> last_max_tokens{0};
@@ -441,6 +449,30 @@ public:
         r.prompt_tokens = 3;
         r.completion_tokens = 4;
         return Ok(std::move(r));
+    }
+
+    Result<InferenceResult> predict_cancellable(
+        int slot, const InferenceRequest& request,
+        const std::atomic<bool>* cancel) override {
+        if (block_nonstream_until_cancel.load() && request.max_output_tokens == 123) {
+            nonstream_started.fetch_add(1);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (cancel && cancel->load()) {
+                    nonstream_saw_cancel.store(true);
+                    InferenceResult partial;
+                    partial.prompt_tokens = 20;
+                    partial.cached_prompt_tokens = 10;
+                    partial.completion_tokens = 2;
+                    partial.prompt_duration_ms = 40;
+                    partial.generation_duration_ms = 10;
+                    partial.duration_ms = 50;
+                    return Ok(std::move(partial));
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+        }
+        return predict(slot, request);
     }
 
     Result<InferenceResult> predict_stream(
@@ -626,6 +658,64 @@ public:
         return Ok(std::move(result));
     }
 
+    Result<AudioGenerationResult> generate_audio(
+        int, const AudioGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) override {
+        if (block_media_until_cancel.load()) {
+            while (!progress || progress(25)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            }
+            return inferdeck::foundation::Err<AudioGenerationResult>(
+                ErrorCode::Cancelled, "cancelled");
+        }
+        if (progress && !progress(50)) {
+            return inferdeck::foundation::Err<AudioGenerationResult>(
+                ErrorCode::Cancelled, "cancelled");
+        }
+        AudioGenerationResult result;
+        result.wav_bytes = {
+            std::byte{0x52}, std::byte{0x49},
+            std::byte{0x46}, std::byte{0x46},
+        };
+        result.seed = request.seed < 0 ? 42 : request.seed;
+        result.duration_ms = 18.0f;
+        result.output_audio_seconds = request.duration_seconds;
+        return Ok(std::move(result));
+    }
+
+    Result<VideoGenerationResult> generate_video(
+        int, const VideoGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) override {
+        if (video_should_fail.load()) {
+            return inferdeck::foundation::Err<VideoGenerationResult>(
+                ErrorCode::Internal, "mock video failure");
+        }
+        if (block_media_until_cancel.load()) {
+            while (!progress || progress(25)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            }
+            return inferdeck::foundation::Err<VideoGenerationResult>(
+                ErrorCode::Cancelled, "cancelled");
+        }
+        if (progress && !progress(50)) {
+            return inferdeck::foundation::Err<VideoGenerationResult>(
+                ErrorCode::Cancelled, "cancelled");
+        }
+        VideoGenerationResult result;
+        result.video_bytes = {
+            std::byte{0x52}, std::byte{0x49}, std::byte{0x46},
+            std::byte{0x46}, std::byte{0x41}, std::byte{0x56},
+            std::byte{0x49}, std::byte{0x20},
+        };
+        if (video_output_too_large.load()) {
+            result.video_bytes.resize(25u * 1024u * 1024u + 1u);
+        }
+        result.content_type = request.prompt == "mp4" ? "video/mp4" : "video/x-msvideo";
+        result.duration_ms = 22.0f;
+        result.output_video_seconds =
+            static_cast<double>(request.frames) / request.fps;
+        return Ok(std::move(result));
+    }
     Result<void> validate_speech_request(
         const SpeechRequest& request) override {
         if (request.voice == "not-a-voice" || request.voice == "999") {
@@ -745,7 +835,7 @@ struct TestServer {
         registry.set_factory([](const ModelInfo& info) {
             return std::make_unique<IModelMock>(info);
         });
-        for (const std::string runtime : {"stable_diffusion_cpp", "sherpa_onnx", "whisper_cpp"}) {
+        for (const std::string runtime : {"stable_diffusion_cpp", "ltx_video_cpp", "ace_step_cpp", "sherpa_onnx", "whisper_cpp"}) {
             registry.register_factory(runtime, [](const ModelInfo& info) {
                 return std::make_unique<IModelMock>(info);
             });
@@ -784,6 +874,16 @@ struct TestServer {
         server.Post("/v1/audio/transcriptions",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_audio_transcriptions(req, resp, make_deps());
+                    });
+        server.Post("/api/inferdeck/v1/audio/generations",
+                    [this](const httplib::Request& req,
+                           httplib::Response& resp) {
+                        handle_audio_generations(req, resp, make_deps());
+                    });
+        server.Post("/api/inferdeck/v1/video/generations",
+                    [this](const httplib::Request& req,
+                           httplib::Response& resp) {
+                        handle_video_generations(req, resp, make_deps());
                     });
     }
 
@@ -826,6 +926,97 @@ bool wait_for_count(const std::atomic<int>& count, int minimum) {
 
 } // namespace
 
+TEST_CASE("Disconnected generation requests are recorded as cancellations",
+          "[routes][cancel][disconnect]") {
+    for (const bool responses : {false, true}) {
+        for (const bool after_admission : {false, true}) {
+            INFO("responses=" << responses << " after_admission=" << after_admission);
+            TestServer server;
+            server.registry.register_model(make_info("disconnect-model"));
+            REQUIRE(server.coordinator.load("disconnect-model"));
+            const IModelMock* backend = dynamic_cast<const IModelMock*>(
+                server.coordinator.get_backend("disconnect-model"));
+            REQUIRE(backend);
+            httplib::Request request;
+            request.set_header("Content-Type", "application/json");
+            request.is_connection_closed = [backend, after_admission] {
+                return !after_admission || backend->last_max_tokens.load() != 0;
+            };
+            request.body = responses
+                ? R"({"model":"disconnect-model","input":"test","max_output_tokens":16})"
+                : R"({"model":"disconnect-model","messages":[{"role":"user","content":"test"}],"max_completion_tokens":16})";
+            httplib::Response response;
+            if (responses) handle_responses(request, response, server.make_deps());
+            else handle_chat_completions(request, response, server.make_deps());
+            CHECK(response.status == 499);
+            CHECK(server.coordinator.active_request_count() == 0);
+            CHECK(backend->n_free_slots() == backend->n_slots());
+            const auto history = server.stats_db.recent_requests(1);
+            REQUIRE(history.size() == 1);
+            CHECK(history.front().status_code == 499);
+        }
+    }
+}
+
+TEST_CASE("Non-stream disconnect cancels execution and preserves peer capacity",
+          "[routes][cancel][disconnect]") {
+    for (const bool responses : {false, true}) {
+        INFO("responses=" << responses);
+        TestServer server;
+        server.registry.register_model(make_info("cancel-running"));
+        REQUIRE(server.coordinator.load("cancel-running"));
+        IModelMock* backend = const_cast<IModelMock*>(dynamic_cast<const IModelMock*>(
+            server.coordinator.get_backend("cancel-running")));
+        REQUIRE(backend);
+        backend->block_nonstream_until_cancel.store(true);
+        auto deps = server.make_deps();
+        deps.api_keys = std::make_shared<ApiKeyStore>(":memory:");
+        const auto key = deps.api_keys->create("CLI owner", 5);
+        REQUIRE(key);
+        std::atomic<bool> disconnected{false};
+        httplib::Request request;
+        request.set_header("Content-Type", "application/json");
+        request.set_header("Authorization", "Bearer " + key->key);
+        request.is_connection_closed = [&] { return disconnected.load(); };
+        request.body = responses
+            ? R"({"model":"cancel-running","input":"test","max_output_tokens":123})"
+            : R"({"model":"cancel-running","messages":[{"role":"user","content":"test"}],"max_completion_tokens":123})";
+        httplib::Response response;
+        std::jthread worker([&] {
+            if (responses) handle_responses(request, response, deps);
+            else handle_chat_completions(request, response, deps);
+        });
+        const bool started = wait_for_count(backend->nonstream_started, 1);
+        const auto live = server.metrics.live_requests();
+        const bool live_owner = live.size() == 1 && live[0]->api_key_name == "CLI owner" && live[0]->api_key_id == key->record.id;
+        disconnected.store(true);
+        worker.join();
+        REQUIRE(started);
+        CHECK(live_owner);
+        CHECK(server.metrics.live_requests().empty());
+        CHECK(backend->nonstream_saw_cancel.load());
+        CHECK(response.status == 499);
+        CHECK(server.coordinator.active_request_count() == 0);
+        const auto history = server.stats_db.recent_requests(1);
+        REQUIRE(history.size() == 1);
+        CHECK(history.front().status_code == 499);
+        CHECK(history.front().api_key_name == "CLI owner");
+        CHECK(history.front().api_key_id == key->record.id);
+        CHECK(history.front().api_key_name != key->key);
+        CHECK(history.front().completion_tokens == 2);
+        CHECK(history.front().prompt_duration_ms == 40);
+        const auto first = server.coordinator.acquire_slot("cancel-running");
+        const auto peer = server.coordinator.acquire_slot("cancel-running");
+        REQUIRE(first);
+        REQUIRE(peer);
+        const auto result = server.coordinator.predict("cancel-running", *peer, {});
+        REQUIRE(result);
+        CHECK(result->text == "Hello from model");
+        CHECK(server.coordinator.release_slot("cancel-running", *first));
+        CHECK(server.coordinator.release_slot("cancel-running", *peer));
+    }
+}
+
 TEST_CASE("Route manifest matches the pinned strict OpenAI snapshot",
           "[routes][manifest]") {
     const auto fixture_path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
@@ -858,6 +1049,18 @@ TEST_CASE("Route manifest matches the pinned strict OpenAI snapshot",
         CHECK(fixture["derivative_routes"][index]["path"].get<std::string>() ==
               std::string(kOpenAIDerivativeRoutes[index].path));
     }
+
+    REQUIRE(kInferDeckRoutes.size() == 2);
+    CHECK(inferdeck_route(InferDeckRoute::VideoGenerations).method == "POST");
+    CHECK(inferdeck_route(InferDeckRoute::VideoGenerations).path ==
+          "/api/inferdeck/v1/video/generations");
+    CHECK(is_strict_openai_route("POST",
+          "/api/inferdeck/v1/video/generations") == false);
+    CHECK(inferdeck_route(InferDeckRoute::MediaVideoGenerations).method == "POST");
+    CHECK(inferdeck_route(InferDeckRoute::MediaVideoGenerations).path ==
+          "/api/inferdeck/v1/media/video/generations");
+    CHECK(is_strict_openai_route("POST",
+          "/api/inferdeck/v1/media/video/generations") == false);
 
     const auto main_path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "apps/inferdeck-gateway/src/main.cpp";
@@ -2326,8 +2529,135 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     CHECK(rows[0].protocol_profile == "strict_openai");
     CHECK(rows[0].modality == "image_generation");
     CHECK(rows[0].output_image_count == 2);
+    CHECK(rows[0].generation_duration_ms == Catch::Approx(12.0));
     CHECK_FALSE(rows[0].request_id.empty());
     ts.stop();
+}
+
+TEST_CASE("Media history persists generated outputs and useful attempt details",
+          "[routes][media-history]") {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() /
+        ("inferdeck-media-history-" +
+         std::to_string(
+             std::chrono::steady_clock::now()
+                 .time_since_epoch()
+                 .count()));
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    REQUIRE(configure_media_history(root));
+
+    TestServer ts;
+    auto info = make_info("history-image-model");
+    info.runtime = "stable_diffusion_cpp";
+    info.modality = "image";
+    info.capabilities = {"image_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto response = client.Post(
+        "/v1/images/generations",
+        nlohmann::json{
+            {"model", info.name},
+            {"prompt", "a persistent lighthouse"},
+            {"size", "512x512"},
+            {"n", 2},
+        }.dump(),
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    ts.stop();
+
+    nlohmann::json jobs = media_jobs();
+    REQUIRE(jobs.size() == 1);
+    const std::uint64_t id = jobs[0]["id"];
+    CHECK(jobs[0]["model"] == info.name);
+    CHECK(jobs[0]["prompt"] == "a persistent lighthouse");
+    CHECK(jobs[0]["parameters"]["size"] == "512x512");
+    CHECK(jobs[0]["parameters"]["count"] == 2);
+    CHECK(jobs[0]["state"] == "completed");
+    CHECK(jobs[0]["progress"] == 100);
+    CHECK(jobs[0]["created_at_unix_ms"].get<std::int64_t>() > 0);
+    CHECK(jobs[0]["finished_at_unix_ms"].get<std::int64_t>() >=
+          jobs[0]["created_at_unix_ms"].get<std::int64_t>());
+    REQUIRE(jobs[0]["outputs"].size() == 2);
+    CHECK(jobs[0]["outputs"][0]["content_type"] == "image/png");
+    CHECK(jobs[0]["outputs"][0]["url"] ==
+          "/api/inferdeck/v1/media/jobs/" + std::to_string(id) +
+              "/outputs/0");
+
+    auto output = media_job_output(id, 0);
+    REQUIRE(output);
+    CHECK(output->content_type == "image/png");
+    CHECK_FALSE(output->body.empty());
+
+    REQUIRE(configure_media_history(root));
+    jobs = media_jobs();
+    REQUIRE(jobs.size() == 1);
+    CHECK(jobs[0]["id"] == id);
+    output = media_job_output(id, 0);
+    REQUIRE(output);
+    CHECK_FALSE(output->body.empty());
+
+    REQUIRE(configure_media_history({}));
+    std::filesystem::remove_all(root, ignored);
+}
+
+TEST_CASE("Concurrent media history writes retain all terminal job states",
+          "[routes][media-history]") {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("inferdeck-media-concurrent-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct HistoryReset {
+        std::filesystem::path root;
+        ~HistoryReset() {
+            (void)configure_media_history({});
+            std::error_code ignored;
+            std::filesystem::remove_all(root, ignored);
+        }
+    } cleanup{root};
+    REQUIRE(configure_media_history(root));
+    TestServer ts;
+    auto info = make_info("concurrent-history-image");
+    info.runtime = "stable_diffusion_cpp";
+    info.modality = "image";
+    info.capabilities = {"image_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+    constexpr std::size_t request_count = 8;
+    std::array<int, request_count> statuses{};
+    std::vector<std::jthread> clients;
+    for (std::size_t index = 0; index < request_count; ++index) {
+        clients.emplace_back([&ts, &info, &statuses, index] {
+            httplib::Client client("127.0.0.1", ts.port);
+            client.set_read_timeout(10, 0);
+            const auto response = client.Post("/v1/images/generations",
+                nlohmann::json{{"model", info.name},
+                               {"prompt", "history " + std::to_string(index)},
+                               {"size", "512x512"}}.dump(), "application/json");
+            statuses[index] = response ? response->status : 0;
+        });
+    }
+    clients.clear();
+    ts.stop();
+    for (const int status : statuses) CHECK(status == 200);
+    const auto current = media_jobs();
+    REQUIRE(current.size() == request_count);
+    std::ifstream input(root / "history.json");
+    const auto persisted = nlohmann::json::parse(input);
+    REQUIRE(persisted["jobs"].size() == request_count);
+    for (const auto& job : persisted["jobs"]) {
+        CHECK(job["state"] == "completed");
+        CHECK(job["progress"] == 100);
+        CHECK(job["outputs"].size() == 1);
+    }
+    REQUIRE(configure_media_history(root));
+    const auto restored = media_jobs();
+    REQUIRE(restored.size() == current.size());
+    CHECK(restored == current);
 }
 
 TEST_CASE("Strict Images separates unknown fields from model capabilities",
@@ -2441,6 +2771,54 @@ TEST_CASE("Strict Images separates unknown fields from model capabilities",
     CHECK(ts.coordinator.active_request_count() == 0);
 }
 
+TEST_CASE("Image capability rejection precedes model loading on both API surfaces",
+          "[routes][images][image-capability-preflight]")
+{
+    for (const std::string path : {"/v1/images/generations",
+                                  "/api/inferdeck/v1/media/images/generations"})
+    {
+        INFO(path);
+        TestServer server;
+        std::atomic<int> creations{0};
+        server.registry.set_factory([&](const ModelInfo& info)
+        {
+            ++creations;
+            return std::make_unique<IModelMock>(info);
+        });
+        server.registry.register_model(make_info("resident-peer"));
+        server.registry.register_model(make_info("unloaded-text"));
+        REQUIRE(server.coordinator.load("resident-peer"));
+        const IBackend* peer = server.coordinator.get_backend("resident-peer");
+        const nlohmann::json initial_jobs = media_jobs();
+        GatewayDeps deps = server.make_deps();
+        deps.auto_swap = true;
+        httplib::Request request;
+        request.method = "POST";
+        request.path = path;
+        request.set_header("Content-Type", "application/json");
+        request.is_connection_closed = [] { return false; };
+        request.body = nlohmann::json{
+            {"model", "unloaded-text"}, {"prompt", "a lighthouse"},
+            {"size", "512x512"}}.dump();
+        httplib::Response response;
+        handle_image_generations(request, response, deps);
+
+        CHECK(response.status == 400);
+        CHECK(nlohmann::json::parse(response.body)["error"]["code"] ==
+              "unsupported_image_model");
+        CHECK(creations.load() == 1);
+        CHECK_FALSE(server.coordinator.is_loaded("unloaded-text"));
+        CHECK(server.coordinator.is_ready("resident-peer"));
+        CHECK(server.coordinator.get_backend("resident-peer") == peer);
+        CHECK(server.coordinator.get_loaded_model() == "resident-peer");
+        CHECK(server.swap_tracker.snapshot().target.empty());
+        CHECK(server.coordinator.active_request_count() == 0);
+        CHECK(server.coordinator.queued_request_count() == 0);
+        CHECK(media_jobs() == initial_jobs);
+        CHECK(server.stats_db.recent_requests(1).empty());
+    }
+}
+
 TEST_CASE("Image jobs can be cancelled through the shared tracker", "[routes][images][cancel]") {
     TestServer ts;
     auto info = make_info("cancel-image");
@@ -2475,6 +2853,390 @@ TEST_CASE("Image jobs can be cancelled through the shared tracker", "[routes][im
     const auto rows = ts.stats_db.recent_requests(1);
     REQUIRE(rows.size() == 1);
     CHECK(rows[0].status_code == 499);
+    ts.stop();
+}
+
+TEST_CASE("InferDeck video generation returns AVI and restores its saved output",
+          "[routes][video-generation][media-history]") {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("inferdeck-video-history-" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup {
+        std::filesystem::path root;
+        ~Cleanup() {
+            (void)configure_media_history({});
+            std::error_code ignored;
+            std::filesystem::remove_all(root, ignored);
+        }
+    } cleanup{root};
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    REQUIRE(configure_media_history(root));
+
+    TestServer ts;
+    ModelInfo info = make_info("ltx-video");
+    info.runtime = "ltx_video_cpp";
+    info.modality = "video";
+    info.capabilities = {"video_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto response = client.Post(
+        "/api/inferdeck/v1/video/generations",
+        nlohmann::json{
+            {"model", info.name},
+            {"prompt", "a lighthouse in rain"},
+            {"negative_prompt", "text"},
+            {"width", 512},
+            {"height", 320},
+            {"frames", 33},
+            {"fps", 24},
+            {"steps", 20},
+            {"seed", -1},
+            {"guidance_scale", 6.0},
+        }.dump(), "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(response->get_header_value("Content-Type") == "video/x-msvideo");
+    CHECK(response->body.substr(0, 4) == "RIFF");
+    CHECK_FALSE(response->get_header_value("X-InferDeck-Job-Id").empty());
+    CHECK(response->get_header_value("X-InferDeck-Video-Duration-Seconds") ==
+          "1.375000");
+    const auto mp4_response = client.Post("/api/inferdeck/v1/video/generations", nlohmann::json{{"model", info.name}, {"prompt", "mp4"}, {"negative_prompt", "text"}, {"width", 512}, {"height", 320}, {"frames", 33}, {"fps", 24}, {"steps", 20}, {"seed", -1}, {"guidance_scale", 6.0}}.dump(), "application/json");
+    REQUIRE(mp4_response);
+    CHECK(mp4_response->status == 200);
+    CHECK(mp4_response->get_header_value("Content-Type") == "video/mp4");
+    CHECK(mp4_response->body == response->body);
+    ts.stop();
+
+    const auto jobs = media_jobs();
+    REQUIRE(jobs.size() == 2);
+    const std::uint64_t id = jobs[1]["id"];
+    CHECK(jobs[1]["modality"] == "video_generation");
+    CHECK(jobs[1]["parameters"]["width"] == 512);
+    CHECK(jobs[1]["parameters"]["height"] == 320);
+    CHECK(jobs[1]["parameters"]["frames"] == 33);
+    CHECK(jobs[1]["parameters"]["fps"] == 24);
+    CHECK(jobs[1]["parameters"]["steps"] == 20);
+    CHECK(jobs[1]["state"] == "completed");
+    REQUIRE(jobs[1]["outputs"].size() == 1);
+    CHECK(jobs[1]["outputs"][0]["content_type"] == "video/x-msvideo");
+    CHECK(std::string(jobs[1]["outputs"][0]["filename"]).ends_with(".avi"));
+
+    auto output = media_job_output(id, 0);
+    REQUIRE(output);
+    CHECK(output->content_type == "video/x-msvideo");
+    CHECK(output->body == response->body);
+
+    REQUIRE(configure_media_history(root));
+    output = media_job_output(id, 0);
+    REQUIRE(output);
+    CHECK(output->content_type == "video/x-msvideo");
+    CHECK(output->body == response->body);
+    const std::uint64_t mp4_id = jobs[0]["id"];
+    REQUIRE(jobs[0]["outputs"].size() == 1);
+    CHECK(jobs[0]["outputs"][0]["content_type"] == "video/mp4");
+    CHECK(std::string(jobs[0]["outputs"][0]["filename"]).ends_with(".mp4"));
+    auto mp4_output = media_job_output(mp4_id, 0);
+    REQUIRE(mp4_output);
+    CHECK(mp4_output->content_type == "video/mp4");
+    CHECK(mp4_output->body == mp4_response->body);
+    REQUIRE(configure_media_history(root));
+    mp4_output = media_job_output(mp4_id, 0);
+    REQUIRE(mp4_output);
+    CHECK(mp4_output->content_type == "video/mp4");
+    CHECK(mp4_output->body == mp4_response->body);
+}
+
+TEST_CASE("Video validation and backend failures happen before or after admission",
+          "[routes][video-generation][validation]") {
+    (void)configure_media_history({});
+    TestServer ts;
+    ModelInfo info = make_info("video-validation");
+    info.runtime = "ltx_video_cpp";
+    info.modality = "video";
+    info.capabilities = {"video_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.start());
+
+    const auto initial_jobs = media_jobs().size();
+    httplib::Client client("127.0.0.1", ts.port);
+    const std::vector<nlohmann::json> invalid{
+        {{"model", info.name}, {"prompt", "bad"}, {"width", 513}},
+        {{"model", info.name}, {"prompt", "bad"}, {"frames", 122}},
+        {{"model", info.name}, {"prompt", "bad"}, {"steps", 51}},
+        {{"model", info.name}, {"prompt", "bad"}, {"future", true}},
+        {{"model", info.name}, {"prompt", "bad"}, {"width", std::numeric_limits<std::uint64_t>::max()}},
+        {{"model", info.name}, {"prompt", "bad"}, {"seed", std::numeric_limits<std::uint64_t>::max()}},
+    };
+    for (const auto& body : invalid) {
+        const auto response = client.Post(
+            "/api/inferdeck/v1/video/generations", body.dump(),
+            "application/json");
+        REQUIRE(response);
+        CHECK(response->status == 400);
+    }
+    CHECK_FALSE(ts.coordinator.is_loaded(info.name));
+    const auto unknown = client.Post(
+        "/api/inferdeck/v1/video/generations",
+        nlohmann::json{{"model", "missing-video"}, {"prompt", "unknown"}}.dump(),
+        "application/json");
+    REQUIRE(unknown);
+    CHECK(unknown->status == 404);
+    CHECK(media_jobs().size() == initial_jobs);
+    CHECK(ts.swap_tracker.snapshot().target.empty());
+
+    REQUIRE(ts.coordinator.load(info.name));
+    const auto* backend = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend(info.name));
+    REQUIRE(backend);
+    const_cast<IModelMock*>(backend)->video_should_fail.store(true);
+    const auto failed = client.Post(
+        "/api/inferdeck/v1/video/generations",
+        nlohmann::json{{"model", info.name}, {"prompt", "backend error"}}.dump(),
+        "application/json");
+    REQUIRE(failed);
+    CHECK(failed->status == 500);
+    CHECK(nlohmann::json::parse(failed->body)["error"]["code"] ==
+          "video_generation_failed");
+    const auto jobs = media_jobs();
+    REQUIRE(jobs.size() == initial_jobs + 1);
+    CHECK(jobs[0]["state"] == "failed");
+    CHECK(jobs[0]["outputs"].empty());
+
+    const_cast<IModelMock*>(backend)->video_should_fail.store(false);
+    const_cast<IModelMock*>(backend)->video_output_too_large.store(true);
+    const auto capped = client.Post(
+        "/api/inferdeck/v1/video/generations",
+        nlohmann::json{{"model", info.name}, {"prompt", "too large"}}.dump(),
+        "application/json");
+    REQUIRE(capped);
+    CHECK(capped->status == 413);
+    CHECK(capped->body.find("25 MiB") != std::string::npos);
+    const auto capped_jobs = media_jobs();
+    REQUIRE(capped_jobs.size() == initial_jobs + 2);
+    CHECK(capped_jobs[0]["state"] == "failed");
+    CHECK(capped_jobs[0]["outputs"].empty());
+    ts.stop();
+}
+
+TEST_CASE("Video generation jobs can be cancelled through the shared tracker",
+          "[routes][video-generation][cancel]") {
+    TestServer ts;
+    ModelInfo info = make_info("cancel-video");
+    info.runtime = "ltx_video_cpp";
+    info.modality = "video";
+    info.capabilities = {"video_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    const IModelMock* backend = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend(info.name));
+    REQUIRE(backend);
+    const_cast<IModelMock*>(backend)->block_media_until_cancel.store(true);
+    REQUIRE(ts.start());
+
+    std::atomic<int> status{0};
+    std::thread request_thread([&] {
+        httplib::Client client("127.0.0.1", ts.port);
+        const httplib::Result response = client.Post(
+            "/api/inferdeck/v1/video/generations",
+            nlohmann::json{{"model", info.name}, {"prompt", "cancel me"}}.dump(),
+            "application/json");
+        status.store(response ? response->status : -1);
+    });
+
+    std::uint64_t job_id = 0;
+    for (int attempt = 0; attempt < 100 && job_id == 0; ++attempt) {
+        for (const auto& job : media_jobs()) {
+            if (job["model"] == info.name &&
+                job["modality"] == "video_generation" &&
+                job["state"] == "running") {
+                job_id = job["id"];
+            }
+        }
+        if (job_id == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+    }
+    REQUIRE(job_id > 0);
+    REQUIRE(cancel_media_job(job_id));
+    request_thread.join();
+    CHECK(status.load() == 408);
+    const std::vector<observability::RequestRow> rows =
+        ts.stats_db.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].status_code == 499);
+    CHECK(rows[0].modality == "video_generation");
+    CHECK(ts.coordinator.active_request_count() == 0);
+    ts.stop();
+}
+
+TEST_CASE("InferDeck audio generation returns a WAV with job metadata",
+          "[routes][audio-generation]") {
+    TestServer ts;
+    ModelInfo info = make_info("music-model");
+    info.runtime = "ace_step_cpp";
+    info.modality = "audio_generation";
+    info.capabilities = {"audio_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const httplib::Result response = client.Post(
+        "/api/inferdeck/v1/audio/generations",
+        nlohmann::json{
+            {"model", info.name},
+            {"prompt", "ambient pulse"},
+            {"duration", 12},
+            {"seed", 99},
+            {"steps", 8},
+        }.dump(),
+        "application/json");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK(response->get_header_value("Content-Type") == "audio/wav");
+    REQUIRE(response->body.size() == 4);
+    CHECK(response->body == "RIFF");
+    CHECK(response->get_header_value("X-InferDeck-Seed") == "99");
+    CHECK_FALSE(
+        response->get_header_value("X-InferDeck-Job-Id").empty());
+
+    const std::vector<observability::RequestRow> rows =
+        ts.stats_db.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].endpoint ==
+          "/api/inferdeck/v1/audio/generations");
+    CHECK(rows[0].protocol_profile == "inferdeck");
+    CHECK(rows[0].modality == "audio_generation");
+    CHECK(rows[0].input_characters == 13);
+    CHECK(rows[0].output_audio_seconds == Catch::Approx(12.0));
+    CHECK(rows[0].generation_duration_ms == Catch::Approx(18.0));
+    CHECK(rows[0].status_code == 200);
+
+    const nlohmann::json jobs = media_jobs();
+    bool found = false;
+    for (const auto& job : jobs) {
+        if (job["model"] == info.name &&
+            job["modality"] == "audio_generation") {
+            found = true;
+            CHECK(job["state"] == "completed");
+            CHECK(job["progress"] == 100);
+        }
+    }
+    CHECK(found);
+    ts.stop();
+}
+
+TEST_CASE("Invalid audio generation requests do not load models or create jobs",
+          "[routes][audio-generation][validation]") {
+    TestServer ts;
+    ModelInfo audio = make_info("validation-music");
+    audio.runtime = "ace_step_cpp";
+    audio.modality = "audio_generation";
+    audio.capabilities = {"audio_generation"};
+    ts.registry.register_model(audio);
+    ModelInfo text = make_info("validation-text");
+    ts.registry.register_model(text);
+    REQUIRE(ts.start());
+
+    httplib::Client client("127.0.0.1", ts.port);
+    const std::size_t initial_jobs = media_jobs().size();
+    const std::vector<nlohmann::json> invalid{
+        nlohmann::json::array(),
+        {{"prompt", "missing model"}},
+        {{"model", audio.name}, {"prompt", 42}},
+        {{"model", audio.name}, {"prompt", "short"}, {"duration", 9}},
+        {{"model", audio.name}, {"prompt", "long"}, {"duration", 601}},
+        {{"model", audio.name}, {"prompt", "seed"}, {"seed", 4294967296ULL}},
+        {{"model", audio.name}, {"prompt", "steps"}, {"steps", 101}},
+        {{"model", audio.name}, {"prompt", "field"}, {"future", true}},
+    };
+    for (const nlohmann::json& body : invalid) {
+        const httplib::Result response = client.Post(
+            "/api/inferdeck/v1/audio/generations", body.dump(),
+            "application/json");
+        REQUIRE(response);
+        INFO(body.dump());
+        CHECK(response->status == 400);
+    }
+    const httplib::Result unsupported = client.Post(
+        "/api/inferdeck/v1/audio/generations",
+        nlohmann::json{
+            {"model", text.name},
+            {"prompt", "wrong capability"},
+            {"duration", 30},
+        }.dump(),
+        "application/json");
+    REQUIRE(unsupported);
+    CHECK(unsupported->status == 400);
+    CHECK(nlohmann::json::parse(unsupported->body)["error"]["code"] ==
+          "unsupported_audio_model");
+
+    CHECK_FALSE(ts.coordinator.is_loaded(audio.name));
+    CHECK_FALSE(ts.coordinator.is_loaded(text.name));
+    CHECK(ts.coordinator.active_request_count() == 0);
+    CHECK(ts.coordinator.queued_request_count() == 0);
+    CHECK(media_jobs().size() == initial_jobs);
+    CHECK(ts.stats_db.recent_requests(1).empty());
+    ts.stop();
+}
+
+TEST_CASE("Audio generation jobs can be cancelled through the shared tracker",
+          "[routes][audio-generation][cancel]") {
+    TestServer ts;
+    ModelInfo info = make_info("cancel-music");
+    info.runtime = "ace_step_cpp";
+    info.modality = "audio_generation";
+    info.capabilities = {"audio_generation"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    const IModelMock* backend = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend(info.name));
+    REQUIRE(backend);
+    const_cast<IModelMock*>(backend)->block_media_until_cancel.store(true);
+    REQUIRE(ts.start());
+
+    std::atomic<int> status{0};
+    std::thread request_thread([&] {
+        httplib::Client client("127.0.0.1", ts.port);
+        const httplib::Result response = client.Post(
+            "/api/inferdeck/v1/audio/generations",
+            nlohmann::json{
+                {"model", info.name},
+                {"prompt", "cancel me"},
+                {"duration", 30},
+            }.dump(),
+            "application/json");
+        status.store(response ? response->status : -1);
+    });
+
+    std::uint64_t job_id = 0;
+    for (int attempt = 0; attempt < 100 && job_id == 0; ++attempt) {
+        for (const auto& job : media_jobs()) {
+            if (job["model"] == info.name &&
+                job["modality"] == "audio_generation" &&
+                job["state"] == "running") {
+                job_id = job["id"];
+            }
+        }
+        if (job_id == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        }
+    }
+    REQUIRE(job_id > 0);
+    REQUIRE(cancel_media_job(job_id));
+    request_thread.join();
+    CHECK(status.load() == 408);
+    const std::vector<observability::RequestRow> rows =
+        ts.stats_db.recent_requests(1);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].status_code == 499);
+    CHECK(rows[0].modality == "audio_generation");
+    CHECK(ts.coordinator.active_request_count() == 0);
     ts.stop();
 }
 
@@ -2800,12 +3562,14 @@ TEST_CASE("Routes: Open WebUI voice reservation spans STT through TTS",
     REQUIRE(ts.start());
 
     httplib::Client client("127.0.0.1", ts.port);
-    client.set_default_headers({
+    const httplib::Headers voice_headers{
         {"Authorization", "Bearer voice-principal"},
         {"X-InferDeck-Voice-Session", "voice-session-0001"},
-    });
-    const std::string session_key =
-        std::string{"voice-principal"} + '\x1f' + "voice-session-0001";
+    };
+    client.set_default_headers(voice_headers);
+    httplib::Request identity_request;
+    identity_request.headers = voice_headers;
+    const std::string session_key = request_client_key(identity_request);
     const auto transcription = client.Post(
         "/v1/audio/transcriptions", httplib::UploadFormDataItems{
             {"file", test_wav(), "test.wav", "audio/wav"},
@@ -3635,6 +4399,88 @@ TEST_CASE("ensure_model_loaded: cold voice sidecar bypasses an active GPU swap",
     CHECK(coordinator.is_loaded("qwen"));
 }
 
+TEST_CASE("auto swap preserves request attribution in event and history", "[routes][swap][observability]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    registry.register_model(make_info("target"));
+    auto alias = ModelAlias{"target-alias", "target"};
+    REQUIRE(registry.set_alias(alias));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    observability::Metrics metrics;
+    observability::StatsDb stats(":memory:");
+    foundation::EventBus events;
+    auto subscription = events.subscribe();
+    GatewayDeps deps{coordinator, "10"};
+    deps.swap_tracker = &tracker;
+    deps.metrics = &metrics;
+    deps.stats_db = &stats;
+    deps.events = &events;
+
+    const SwapAttribution attribution{"target-alias", "req-auto-swap", "key-id", "CLI owner"};
+    REQUIRE(start_swap_async(deps, "target-alias", false, attribution).status == 202);
+    tracker.join();
+
+    const auto swaps = stats.recent_swaps(10);
+    REQUIRE(swaps.size() == 1);
+    CHECK(swaps[0].to_model == "target");
+    CHECK(swaps[0].requested_model == "target-alias");
+    CHECK(swaps[0].request_id == "req-auto-swap");
+    CHECK(swaps[0].api_key_id == "key-id");
+    CHECK(swaps[0].api_key_name == "CLI owner");
+
+    auto swapping = subscription->wait_for(std::chrono::milliseconds{100});
+    auto ready = subscription->wait_for(std::chrono::milliseconds{100});
+    REQUIRE(swapping);
+    REQUIRE(ready);
+    const auto ready_payload = nlohmann::json::parse(ready->data);
+    CHECK(ready_payload["state"] == "ready");
+    CHECK(ready_payload["requestedModel"] == "target-alias");
+    CHECK(ready_payload["requestId"] == "req-auto-swap");
+    CHECK(ready_payload["apiKeyId"] == "key-id");
+    CHECK(ready_payload["apiKeyName"] == "CLI owner");
+}
+TEST_CASE("failed auto swap preserves request attribution", "[routes][swap][observability]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->load_should_fail.store(true);
+        return backend;
+    });
+    registry.register_model(make_info("failed-target"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    observability::StatsDb stats(":memory:");
+    foundation::EventBus events;
+    auto subscription = events.subscribe();
+    GatewayDeps deps{coordinator, "10"};
+    deps.swap_tracker = &tracker;
+    deps.stats_db = &stats;
+    deps.events = &events;
+
+    const SwapAttribution attribution{"failed-alias", "req-failed-swap", "key-fail", "Failed owner"};
+    REQUIRE(start_swap_async(deps, "failed-target", false, attribution).status == 202);
+    tracker.join();
+
+    const auto swaps = stats.recent_swaps(10);
+    REQUIRE(swaps.size() == 1);
+    CHECK_FALSE(swaps[0].success);
+    CHECK(swaps[0].requested_model == "failed-alias");
+    CHECK(swaps[0].request_id == "req-failed-swap");
+    CHECK(swaps[0].api_key_id == "key-fail");
+    CHECK(swaps[0].api_key_name == "Failed owner");
+
+    auto swapping = subscription->wait_for(std::chrono::milliseconds{100});
+    auto failed = subscription->wait_for(std::chrono::milliseconds{100});
+    REQUIRE(swapping);
+    REQUIRE(failed);
+    const auto failed_payload = nlohmann::json::parse(failed->data);
+    CHECK(failed_payload["state"] == "failed");
+    CHECK(failed_payload["requestId"] == "req-failed-swap");
+    CHECK(failed_payload["apiKeyId"] == "key-fail");
+}
 TEST_CASE("SwapTracker owns the worker and joins it at destruction",
           "[routes][swap]") {
     ModelRegistry registry;

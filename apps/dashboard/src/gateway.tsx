@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import * as api from './api';
+import { useDashboardAccess } from './components/DashboardAccess';
 import type {
   ActivityItem,
   ConnectionState,
@@ -148,6 +149,8 @@ function isRequestEvent(value: unknown): value is RequestEvent {
 }
 
 export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const access = useDashboardAccess();
+  const requireSignIn = access?.requireSignIn;
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [stats, setStats] = useState<StatsEvent | null>(null);
@@ -159,19 +162,24 @@ export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const sourceRef = useRef<EventSource | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshRef = useRef(0);
+  const refreshAbort = useRef<AbortController | null>(null);
   const dailyUsageRef = useRef<MonthlyUsageRow[] | null>(null);
 
   const refresh = useCallback(async () => {
     const request = ++refreshRef.current;
+    refreshAbort.current?.abort();
+    const controller = new AbortController();
+    refreshAbort.current = controller;
     const [statusResult, modelsResult, dailyResult] = await Promise.allSettled([
-      api.getStatus(),
-      api.getModels(),
-      dailyUsageRef.current === null ? api.getDailyUsage() : Promise.resolve(null),
+      api.getStatus(controller.signal),
+      api.getModels(controller.signal),
+      dailyUsageRef.current === null ? api.getDailyUsage(controller.signal) : Promise.resolve(null),
     ]);
-    if (request !== refreshRef.current) return;
+    if (request !== refreshRef.current || controller.signal.aborted) return;
     if (dailyResult.status === 'fulfilled' && dailyResult.value) {
       dailyUsageRef.current = dailyResult.value.dailyTokenUsage;
     }
+    if (statusResult.status === 'rejected' && api.isAuthenticationError(statusResult.reason)) requireSignIn?.();
     if (statusResult.status === 'fulfilled') {
       const next = statusResult.value;
       if (dailyUsageRef.current !== null) {
@@ -191,7 +199,7 @@ export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ child
       setLastUpdatedAt(Date.now());
     }
     if (modelsResult.status === 'fulfilled') setModels(modelsResult.value);
-  }, []);
+  }, [requireSignIn]);
 
   useEffect(() => {
     let disposed = false;
@@ -259,6 +267,8 @@ export const GatewayProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     return () => {
       disposed = true;
+      ++refreshRef.current;
+      refreshAbort.current?.abort();
       clearInterval(fallback);
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       sourceRef.current?.close();

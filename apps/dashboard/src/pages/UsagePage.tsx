@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getJobs, getPricing } from '../api';
 import { UsageRangeTabs } from '../components/UsageCharts';
-import { Panel, SectionTitle, Stat, linePath, pickTickIndices } from '../components/ui';
+import { Button, DetailItem, Panel, SectionTitle, Stat, linePath, pickTickIndices } from '../components/ui';
 import {
   ALL_MODELS,
   DEFAULT_COST_CONFIG,
@@ -23,10 +23,16 @@ import { useGateway } from '../gateway';
 import type { JobRecord, UsageRow } from '../types';
 import { clamp, compactModel, formatCurrency, formatTokenCount } from '../utils';
 import { DictationUsagePage } from './DictationUsagePage';
+import { SubscriptionSavingsPanel } from '../components/SubscriptionSavingsPanel';
+import { MediaGenerationUsagePage } from './MediaGenerationUsagePage';
 
-export const UsagePage: React.FC<{ section?: DashboardSection }> = ({ section = 'llm' }) => (
-  section === 'dictation' ? <DictationUsagePage /> : <LlmUsagePage />
-);
+export const UsagePage: React.FC<{ section?: DashboardSection }> = ({ section = 'llm' }) => {
+  if (section === 'dictation') return <DictationUsagePage />;
+  if (section === 'image' || section === 'music' || section === 'video') {
+    return <MediaGenerationUsagePage section={section} />;
+  }
+  return <LlmUsagePage />;
+};
 
 type UsageSortKey = 'model' | 'requests' | 'promptTokens' | 'completionTokens' | 'avgTokensPerSecond' | 'avgPromptTokensPerSecond' | 'peakTokensPerSecond' | 'cost';
 const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
@@ -96,6 +102,11 @@ const LlmUsagePage: React.FC = () => {
   );
   const seriesUsage = useMemo(() => tokenUsageFromSeries(selectedModel, series), [selectedModel, series]);
   const rangeCost = series.cost.reduce((sum, value) => sum + value, 0);
+  const allTimeSeries = useMemo(
+    () => buildTokenSeries(llmJobs, ALL_MODELS, DEFAULT_COST_CONFIG, monthly, pricingByModel, defaults.defaults, defaults.fallback, 'all', daily, hourly, Boolean(status?.dailyTokenUsageAllTime)),
+    [llmJobs, monthly, daily, hourly, defaults, status?.dailyTokenUsageAllTime],
+  );
+  const equivalentApiCostCents = Math.round(allTimeSeries.cost.reduce((total, value) => total + value, 0) * 100);
 
   const periodUsage = useMemo(() => {
     const rows = modelNames.filter(model => model !== ALL_MODELS).map((model, index) => {
@@ -180,6 +191,8 @@ const LlmUsagePage: React.FC = () => {
         </p>
       </Panel>
 
+      <SubscriptionSavingsPanel apiCostsCents={equivalentApiCostCents} />
+
       <Panel>
         <SectionTitle title="Per-model usage" aside={TOKEN_RANGE_LABELS[range]} />
         <p className="mt-2 text-xs text-text-muted">
@@ -188,7 +201,49 @@ const LlmUsagePage: React.FC = () => {
         {periodUsage.length === 0 ? (
           <p className="mt-3 text-sm text-text-muted">No usage recorded for this range.</p>
         ) : (
-          <div className="mt-3 overflow-x-auto" role="region" aria-label="Per-model LLM usage" tabIndex={0}>
+          <>
+          <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 md:hidden">
+            <label className="min-w-0 text-xs text-text-muted">
+              Sort by
+              <select
+                aria-label="Sort mobile LLM usage"
+                className="mt-1 min-h-11 w-full bg-[#07101d] px-2 text-sm text-text-primary"
+                value={sort.key}
+                onChange={event => toggleSort(event.target.value as UsageSortKey)}
+              >
+                <option value="model">Model</option>
+                <option value="requests">Requests</option>
+                <option value="promptTokens">Prompt</option>
+                <option value="completionTokens">Output</option>
+                <option value="avgTokensPerSecond">TPS</option>
+                <option value="avgPromptTokensPerSecond">Prompt processing</option>
+                <option value="peakTokensPerSecond">Peak TPS</option>
+                <option value="cost">Cost</option>
+              </select>
+            </label>
+            <Button onClick={() => setSort(current => ({ ...current, direction: current.direction === 'asc' ? 'desc' : 'asc' }))}>
+              {sort.direction === 'asc' ? 'Ascending' : 'Descending'}
+            </Button>
+          </div>
+          <div className="divide-y divide-white/10 md:hidden" aria-label="Per-model LLM usage cards">
+            {periodUsage.map(row => (
+              <article key={row.model} className="py-4 first:pt-3 last:pb-0">
+                <h3 className="break-words font-mono text-sm text-text-primary">{compactModel(row.model)}</h3>
+                <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
+                  <DetailItem label="Requests">
+                    {row.requests.toLocaleString()} <span className="text-xs text-text-muted">({row.successfulRequests.toLocaleString()} ok)</span>
+                  </DetailItem>
+                  <DetailItem label="Cost"><span className="text-success-green">{formatCurrency(row.cost)}</span></DetailItem>
+                  <DetailItem label="Prompt">{formatTokenCount(row.promptTokens)}</DetailItem>
+                  <DetailItem label="Output">{formatTokenCount(row.completionTokens)}</DetailItem>
+                  <DetailItem label="TPS">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</DetailItem>
+                  <DetailItem label="Prompt processing">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</DetailItem>
+                  <DetailItem label="Peak TPS">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</DetailItem>
+                </dl>
+              </article>
+            ))}
+          </div>
+          <div className="mt-3 hidden overflow-x-auto md:block" role="region" aria-label="Per-model LLM usage" tabIndex={0}>
             <table className="w-full min-w-[880px] text-left text-sm">
               <thead>
                 <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
@@ -210,9 +265,9 @@ const LlmUsagePage: React.FC = () => {
                       <td className="py-2 pr-4 text-text-secondary">{row.requests} <span className="text-text-muted">({row.successfulRequests} ok)</span></td>
                       <td className="py-2 pr-4 text-text-secondary">{formatTokenCount(row.promptTokens)}</td>
                       <td className="py-2 pr-4 text-text-secondary">{formatTokenCount(row.completionTokens)}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : '—'}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : '—'}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : '—'}</td>
+                      <td className="py-2 pr-4 text-text-secondary">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</td>
+                      <td className="py-2 pr-4 text-text-secondary">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</td>
+                      <td className="py-2 pr-4 text-text-secondary">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</td>
                       <td className="py-2 text-success-green">{formatCurrency(row.cost)}</td>
                     </tr>
                   );
@@ -220,6 +275,7 @@ const LlmUsagePage: React.FC = () => {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </Panel>
     </div>
@@ -236,7 +292,7 @@ const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
-  const handlePointerMove = (event: React.MouseEvent<SVGSVGElement>) => {
+  const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect || series.months.length === 0) return;
     const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
@@ -256,11 +312,12 @@ const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
               ref={svgRef}
               viewBox="0 0 680 150"
               preserveAspectRatio="none"
-              className="h-[150px] w-full overflow-visible"
+              className="h-[150px] w-full touch-pan-y overflow-visible"
               role="img"
               aria-label="Token usage over time. A data table follows the chart."
-              onMouseMove={handlePointerMove}
-              onMouseLeave={handlePointerLeave}
+              onPointerDown={handlePointerMove}
+              onPointerMove={handlePointerMove}
+              onPointerLeave={handlePointerLeave}
             >
               <g stroke="rgba(148,163,184,0.14)" strokeDasharray="4 5" vectorEffect="non-scaling-stroke">
                 {[0, 75, 150].map(y => <line key={y} x1="0" y1={y} x2="680" y2={y} vectorEffect="non-scaling-stroke" />)}
@@ -281,7 +338,7 @@ const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
             </svg>
             {hoverIndex !== null && (
               <div
-                className="pointer-events-none absolute z-10 whitespace-nowrap rounded-md border border-white/10 bg-[#0b1626] px-2.5 py-1.5 text-xs shadow-deck"
+                className="pointer-events-none absolute z-10 max-w-[min(18rem,calc(100vw-2rem))] rounded-md border border-white/10 bg-[#0b1626] px-2.5 py-1.5 text-xs shadow-deck"
                 style={{
                   left: `${(monthX(hoverIndex) / 680) * 100}%`,
                   top: `${(pointY(series.total[hoverIndex], tokenMax) / 150) * 100}%`,
@@ -298,7 +355,7 @@ const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
               </div>
             )}
           </div>
-          <div className="relative mt-1 h-4 text-xs text-text-muted">
+          <div className="chart-ticks relative mt-1 h-4 text-xs text-text-muted">
             {series.months.map((month, index) => tickIndices.includes(index) && (
               <span
                 key={index}
@@ -362,7 +419,7 @@ const SortableHeader: React.FC<{
         onClick={() => onSort(sortKey)}
         className="rounded text-left hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
       >
-        {label}{selected ? (active.direction === 'asc' ? ' ↑' : ' ↓') : ''}
+        {label}{selected ? (active.direction === 'asc' ? ' Ã¢â€ â€˜' : ' Ã¢â€ â€œ') : ''}
       </button>
     </th>
   );

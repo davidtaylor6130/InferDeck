@@ -6,6 +6,7 @@
 #include "model/model_info.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -22,6 +23,10 @@ struct LlamaChatAdapterResult {
     common_chat_templates_inputs inputs;
     std::vector<std::vector<std::uint8_t>> media;
 };
+
+std::size_t fit_chat_history(
+    common_chat_templates_inputs& inputs,
+    const std::function<bool(const common_chat_templates_inputs&)>& fits);
 
 foundation::Result<std::string> apply_reasoning_effort(
     common_chat_templates_inputs& inputs,

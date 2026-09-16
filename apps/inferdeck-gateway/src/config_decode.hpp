@@ -52,6 +52,9 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         const auto& a = root["auth"];
         if (a["required"]) cfg.auth_required = a["required"].as<bool>();
         if (a["token"]) cfg.auth_token = a["token"].as<std::string>();
+        if (a["api_keys_db"]) {
+            cfg.api_keys_db_path = a["api_keys_db"].as<std::string>();
+        }
     }
     if (root["cors"]) {
         const auto& c = root["cors"];
@@ -116,6 +119,10 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["vram_safety_margin_mb"]) cfg.vram_safety_margin_mb = g["vram_safety_margin_mb"].as<int>();
         if (g["max_queue_size"]) cfg.max_queue_size = g["max_queue_size"].as<int>();
         if (g["voice_session_grace_ms"]) cfg.voice_session_grace_ms = g["voice_session_grace_ms"].as<int>();
+        if (g["background_idle_after_seconds"]) {
+            cfg.background_idle_after_seconds =
+                g["background_idle_after_seconds"].as<int>();
+        }
         if (g["sampling"]) parse_sampling(g["sampling"], cfg.sampling);
     }
     if (root["compatibility"]) {
@@ -136,6 +143,8 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             if (info.modality == "image") info.capabilities = {"image_generation"};
             else if (info.modality == "audio_speech") info.capabilities = {"audio_speech"};
             else if (info.modality == "audio_transcription") info.capabilities = {"audio_transcription"};
+            else if (info.modality == "audio_generation") info.capabilities = {"audio_generation"};
+            else if (info.modality == "video") info.capabilities = {"video_generation"};
             else if (info.modality == "embedding") info.capabilities = {"embeddings"};
             if (m["capabilities"] && m["capabilities"].IsSequence()) {
                 info.capabilities.clear();
@@ -177,6 +186,10 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             info.vram_per_slot_mb = m["vram_per_slot_mb"] ? m["vram_per_slot_mb"].as<int>() : 0;
             info.context_size =
                 m["context_size"] ? m["context_size"].as<int>() : 65536;
+            if (m["kv_unified"]) info.kv_unified = m["kv_unified"].as<bool>();
+            if (m["context_pool_size"]) info.context_pool_size = m["context_pool_size"].as<int>();
+            if (m["context_pool_auto"]) info.context_pool_auto = m["context_pool_auto"].as<bool>();
+            if (m["concurrency_auto"]) info.concurrency_auto = m["concurrency_auto"].as<bool>();
             if (m["n_batch"]) info.n_batch = m["n_batch"].as<int>();
             if (m["n_ubatch"]) info.n_ubatch = m["n_ubatch"].as<int>();
             info.cache_type_k =
