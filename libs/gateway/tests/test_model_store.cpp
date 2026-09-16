@@ -1240,7 +1240,8 @@ TEST_CASE("Model store quantizes a managed GGUF without overwriting its source",
         CHECK_FALSE(std::filesystem::exists(job->output_path + ".partial"));
         CHECK(registry.has("source-model"));
         CHECK(registry.has("source-model-q4"));
-        CHECK(recording->source() == source_path);
+        CHECK(std::filesystem::canonical(recording->source()) ==
+              std::filesystem::canonical(source_path));
         CHECK(recording->destination().extension() == ".partial");
         CHECK(recording->quantization() == "q4_k_m");
         CHECK(recording->threads() == 3);
