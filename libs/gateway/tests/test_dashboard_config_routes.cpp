@@ -834,6 +834,34 @@ TEST_CASE("Pricing API exposes cached input rates for models and aliases",
     CHECK((*new_completion)["completion_price_per_million"] == 1.1);
 }
 
+TEST_CASE("Jobs API exposes measured prompt decode separately from elapsed prefill",
+          "[gateway][dashboard][jobs]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    inferdeck::observability::RequestRow row;
+    row.request_id = "decode-evidence";
+    row.timestamp_unix_ms = 1787011200000LL;
+    row.model = "test-model";
+    row.status_code = 200;
+    row.prompt_tokens = 100;
+    row.cached_prompt_tokens = 60;
+    row.cache_write_tokens = 40;
+    row.prompt_duration_ms = 20.0;
+    row.prompt_decode_duration_ms = 8.0;
+    row.prompt_decode_tokens = 40;
+    routes.stats_db.record_request(row);
+    auto client = routes.client();
+    const auto response = client.Get("/api/inferdeck/v1/jobs");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body["jobs"].size() == 1);
+    CHECK(body["jobs"][0]["id"] == row.request_id);
+    CHECK(body["jobs"][0]["promptDurationMs"] == 20.0);
+    CHECK(body["jobs"][0]["promptDecodeDurationMs"] == 8.0);
+    CHECK(body["jobs"][0]["promptDecodeTokens"] == 40);
+}
+
 TEST_CASE("Usage API exposes daily usage for the complete retained history",
           "[gateway][dashboard][usage]") {
     TempConfig config;

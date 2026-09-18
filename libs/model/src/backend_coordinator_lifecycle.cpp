@@ -282,6 +282,10 @@ foundation::Result<void> BackendCoordinator::swap_to_with_control(
   if (is_loaded(name)) {
     return load_with_lock_deadline(name, control.deadline, control.cancelled);
   }
+  if (!registry_.has_factory(info->runtime)) {
+    return foundation::Err<void>(foundation::ErrorCode::Unavailable,
+                                 "runtime not registered: " + info->runtime);
+  }
   if (vram_budget_mb() <= 0) {
     auto current = get_loaded_model();
     auto drain_r = current ? unload_with_control(*current, control)

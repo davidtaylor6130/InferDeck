@@ -61,6 +61,8 @@ struct RequestRecord {
   double output_audio_seconds{};
   int input_image_count{};
   int output_image_count{};
+  double prompt_decode_duration_ms{};
+  int prompt_decode_tokens{};
 };
 
 struct SwapRecord {

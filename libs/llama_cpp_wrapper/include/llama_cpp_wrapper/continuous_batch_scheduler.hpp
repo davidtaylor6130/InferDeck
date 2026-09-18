@@ -173,6 +173,9 @@ struct SlotTask {
     int out_checkpoint_pos{0};
     bool out_mtp_cache_synced{true};
     float out_prompt_duration_ms{0.0f};
+    double out_prompt_decode_duration_ms{0.0};
+    int out_prompt_decode_tokens{0};
+    bool out_prompt_decode_invalid{false};
     float out_generation_duration_ms{0.0f};
     float out_first_token_duration_ms{0.0f};
 
@@ -184,6 +187,8 @@ struct SlotTask {
 
 namespace detail {
 int prepare_batch_order(std::vector<SlotTask*>& tasks, int capacity, std::size_t turn);
+void record_prompt_decode(SlotTask& task, int prompt_tokens, int batch_tokens,
+                          double duration_ms);
 }
 
 // Central continuous-batching scheduler for one loaded model.

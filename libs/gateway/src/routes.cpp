@@ -118,6 +118,13 @@ void record_request(observability::Metrics* metrics,
     rec.prompt_tokens_per_second = rec.prompt_duration_ms > 0.0
         ? rec.cache_write_tokens * 1000.0 / rec.prompt_duration_ms
         : 0.0;
+    if (rec.modality == "text" && status_code >= 200 && status_code < 300 &&
+        rec.error_code.empty() && result.prompt_decode_tokens > 0 &&
+        result.prompt_decode_tokens == rec.cache_write_tokens &&
+        std::isfinite(result.prompt_decode_duration_ms) && result.prompt_decode_duration_ms > 0.0) {
+        rec.prompt_decode_tokens = result.prompt_decode_tokens;
+        rec.prompt_decode_duration_ms = result.prompt_decode_duration_ms;
+    }
     rec.queue_duration_ms = std::max(0.0, observation.queue_duration_ms);
     rec.swap_load_duration_ms = std::max(0.0, observation.swap_load_duration_ms);
     rec.first_token_duration_ms = result.first_token_duration_ms > 0.0f
@@ -171,6 +178,8 @@ void record_request(observability::Metrics* metrics,
             {"durationMs", rec.duration_ms},
             {"generationDurationMs", rec.generation_duration_ms},
             {"promptDurationMs", rec.prompt_duration_ms},
+            {"promptDecodeDurationMs", rec.prompt_decode_duration_ms},
+            {"promptDecodeTokens", rec.prompt_decode_tokens},
             {"firstTokenDurationMs", rec.first_token_duration_ms},
             {"queueDurationMs", rec.queue_duration_ms},
             {"swapLoadDurationMs", rec.swap_load_duration_ms},

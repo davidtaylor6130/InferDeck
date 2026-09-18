@@ -317,6 +317,8 @@ struct GenerationResult {
     int mtp_accepted_tokens{0};
     std::vector<ToolCall> tool_calls;
     std::vector<TokenLogprob> logprobs;
+    double prompt_decode_duration_ms{0.0};
+    int prompt_decode_tokens{0};
 };
 
 using RequestOutcome = std::variant<GenerationResult, DomainError>;

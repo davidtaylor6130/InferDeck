@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, rmdir } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, rmdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArguments, requestBody } from './measure-concurrency.mjs';
+import { parseArguments, requestBody, loadRequestFixture } from './measure-concurrency.mjs';
 
 const script = fileURLToPath(new URL('./measure-concurrency.mjs', import.meta.url));
 const pause = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -29,7 +29,7 @@ async function fixture(t, handler) {
     } catch (error) { if (!response.headersSent) json(response, { error: error.message }, 500); else response.destroy(); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(join(directory, 'result.json'), { force: true }); await rmdir(directory); });
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(join(directory, 'result.json'), { force: true }); await rm(join(directory, 'request.json'), { force: true }); await rmdir(directory); });
   return { directory, state, baseUrl: `http://127.0.0.1:${server.address().port}` };
 }
 
@@ -49,6 +49,46 @@ async function execute(fixture, extra = [], { concurrency = 4, samples = 1, work
   assert.deepEqual(JSON.parse(stdout), result, 'Persisted and printed evidence disagree');
   return { code, result };
 }
+
+test('request fixture preserves model defaults and tool conversation without filler', async t => {
+  const f = await fixture(t, async ({ kind, response, call, state }) => {
+    if (kind === 'request') { state.jobs.push(job(call.id)); completion(response); }
+    else json(response, { jobs: state.jobs });
+  });
+  const path = join(f.directory, 'request.json');
+  const body = { messages: [{ role: 'user', content: 'Review function sum(a, b) { return a - b; }' }], max_tokens: 512, reasoning_effort: 'xhigh' };
+  const raw = JSON.stringify(body);
+  await writeFile(path, raw);
+  t.after(() => rm(path, { force: true }));
+  const { code, result } = await execute(f, ['--request-fixture', path], { concurrency: 1, workload: 'pp' });
+  assert.equal(code, 0);
+  for (const call of f.state.calls) assert.deepEqual(call.body, { ...body, model: 'mock-model', stream: false });
+  assert.equal(result.workloadVersion, 'request-fixture-v1');
+  assert.match(result.fixture.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(result.fixture.bytes, Buffer.byteLength(raw));
+  assert.equal(result.fixture.cacheReset, false);
+  assert.equal(result.promptWords, null);
+  assert.equal(result.stream, false);
+});
+
+test('request fixture rejects invalid bodies before sending requests', async t => {
+  const f = await fixture(t, () => assert.fail('No requests expected'));
+  const path = join(f.directory, 'request.json');
+  const valid = { messages: [{ role: 'user', content: 'Review this code' }], max_tokens: 512 };
+  for (const body of [null, [], {}, { ...valid, messages: [] }, { ...valid, model: 'other' }, { ...valid, stream: true }, { ...valid, n: 2 }, { ...valid, max_tokens: 0 }]) {
+    await writeFile(path, JSON.stringify(body));
+    await assert.rejects(loadRequestFixture(path, 'model'), /fixture/);
+  }
+  await writeFile(path, '{');
+  await assert.rejects(loadRequestFixture(path, 'model'), SyntaxError);
+  assert.equal(f.state.calls.length, 0);
+});
+
+test('request fixture rejects incompatible workload flags', () => {
+  const args = ['http://127.0.0.1:11435', 'model', '1'];
+  assert.throws(() => parseArguments([...args, 'cache', '--request-fixture', 'request.json']), /fixture/);
+  assert.throws(() => parseArguments([...args, 'pp', '--request-fixture', 'request.json', '--prompt-words', '4096']), /fixture/);
+});
 
 test('rejects implicit live port and invalid options before any requests', () => {
   assert.throws(() => parseArguments(['http://127.0.0.1:11434', 'model', '4', 'tg']), /11434/);
@@ -140,6 +180,96 @@ test('preserves the PP workload and keeps four-token output outside the TG floor
   assert.equal(words.length, 4096); assert.deepEqual(words.slice(0, 8), ['amber', 'birch', 'cobalt', 'delta', 'ember', 'fjord', 'granite', 'harbour']);
 });
 
+
+test('PP requires measured uncached tokens and positive evaluation time', async t => {
+  for (const overrides of [{ cacheWriteTokens: 0 }, { promptDurationMs: 0 }]) {
+    await t.test(JSON.stringify(overrides), async t => {
+      const f = await fixture(t, async ({ kind, response, call, state }) => {
+        if (kind === 'request') { state.jobs.push(job(call.id, overrides)); completion(response); }
+        else json(response, { jobs: state.jobs });
+      });
+      const { code, result } = await execute(f, [], { concurrency: 1, workload: 'pp' });
+      assert.equal(code, 1);
+      assert.equal(result.summary.passes, false);
+      assert.ok(result.samples[0].requests[0].failures.includes('no_measured_prompt'));
+    });
+  }
+});
+
+test('PP summaries derive uncached rates and retain median and range across repetitions', async t => {
+  const durations = [300, 600, 150];
+  const f = await fixture(t, async ({ kind, response, call, state }) => {
+    if (kind === 'request') {
+      state.jobs.push(job(call.id, { promptDurationMs: durations[state.calls.length - 2], promptTokensPerSecond: 99999 }));
+      completion(response);
+    } else json(response, { jobs: state.jobs });
+  });
+  const { code, result } = await execute(f, [], { concurrency: 1, workload: 'pp', samples: 3 });
+  assert.equal(code, 0);
+  assert.deepEqual(result.samples.map(sample => sample.requests[0].uncachedPromptTokensPerSecond), [10240, 5120, 20480]);
+  assert.equal(result.samples[0].requests[0].promptTokensPerSecond, 99999);
+  assert.equal(result.summary.requestRateMedian, 10240);
+  assert.equal(result.summary.minimumRequestTokensPerSecond, 5120);
+  assert.equal(result.summary.maximumRequestTokensPerSecond, 20480);
+  assert.equal(result.summary.requestRateMean, (10240 + 5120 + 20480) / 3);
+});
+
+test('elapsed prefill telemetry cannot establish raw engine PP acceptance', async t => {
+  const f = await fixture(t, async ({ kind, response, call, state }) => {
+    if (kind === 'request') { state.jobs.push(job(call.id)); completion(response); }
+    else json(response, { jobs: state.jobs });
+  });
+  const { code, result } = await execute(f, [], { concurrency: 1, workload: 'pp' });
+  assert.equal(code, 0);
+  assert.equal(result.summary.passes, true);
+  assert.equal(result.rawPromptEvaluation.status, 'BLOCKED');
+  assert.equal(result.rawPromptEvaluation.tokensPerSecond, null);
+  assert.match(result.rawPromptEvaluation.reason, /scheduler elapsed/);
+  assert.match(result.rawPromptEvaluation.reason, /from task initialization to generation start/);
+  assert.match(result.rawPromptEvaluation.reason, /excludes tokenization and pre-initialization queueing/);
+  assert.match(result.timingSource, /not raw engine PP/);
+  assert.equal(result.samples[0].requests[0].uncachedPromptTokensPerSecond, 10240);
+});
+
+test('raw PP uses exclusive decode telemetry without replacing elapsed rates', async t => {
+  const f = await fixture(t, async ({ kind, response, call, state }) => {
+    if (kind === 'request') { state.jobs.push(job(call.id, { promptDecodeTokens: 3072, promptDecodeDurationMs: 150 })); completion(response); }
+    else json(response, { jobs: state.jobs });
+  });
+  const { code, result } = await execute(f, [], { concurrency: 1, workload: 'pp', samples: 2 });
+  assert.equal(code, 0);
+  assert.equal(result.rawPromptEvaluation.status, 'MEASURED');
+  assert.equal(result.rawPromptEvaluation.tokensPerSecond, 20480);
+  assert.equal(result.rawPromptEvaluation.measuredRequests, 2);
+  assert.equal(result.samples[0].requests[0].promptDecodeTokens, 3072);
+  assert.equal(result.samples[0].requests[0].promptDecodeDurationMs, 150);
+  assert.equal(result.samples[0].requests[0].rawPromptTokensPerSecond, 20480);
+  assert.equal(result.summary.requestRateMedian, 10240);
+});
+
+test('raw PP rejects incomplete, inconsistent and failed request telemetry', async t => {
+  for (const overrides of [
+    { promptDecodeTokens: 0 }, { promptDecodeDurationMs: 0 },
+    { promptDecodeTokens: 3071 }, { promptDecodeTokens: 3072.5 },
+    { promptDecodeDurationMs: null }, { promptDecodeDurationMs: '150' },
+    { promptDecodeDurationMs: -1 }, { httpStatus: 500 },
+    { promptTokens: 4097 }, { errorCode: 'cancelled' },
+  ]) {
+    await t.test(JSON.stringify(overrides), async t => {
+      const f = await fixture(t, async ({ kind, response, call, state }) => {
+        if (kind === 'request') {
+          state.jobs.push(job(call.id, { promptDecodeTokens: 3072, promptDecodeDurationMs: 150, ...(state.calls.length === 3 ? overrides : {}) }));
+          completion(response);
+        } else json(response, { jobs: state.jobs });
+      });
+      const { result } = await execute(f, [], { concurrency: 1, workload: 'pp', samples: 2 });
+      assert.equal(result.rawPromptEvaluation.status, 'BLOCKED');
+      assert.equal(result.rawPromptEvaluation.tokensPerSecond, null);
+      assert.equal(result.rawPromptEvaluation.measuredRequests, 1);
+      assert.equal(result.samples[1].requests[0].rawPromptTokensPerSecond, null);
+    });
+  }
+});
 
 test('incomplete successful telemetry cannot pass a baseline', async t => {
   const f = await fixture(t, async ({ kind, response, call, state }) => {

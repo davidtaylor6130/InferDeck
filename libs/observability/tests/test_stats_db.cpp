@@ -129,7 +129,7 @@ TEST_CASE("StatsDb: existing token ledger is migrated without losing history",
   REQUIRE(sqlite3_prepare_v2(migrated_raw, "PRAGMA user_version;", -1,
                              &version, nullptr) == SQLITE_OK);
   REQUIRE(sqlite3_step(version) == SQLITE_ROW);
-  CHECK(sqlite3_column_int(version, 0) == 4);
+  CHECK(sqlite3_column_int(version, 0) == 5);
   sqlite3_finalize(version);
   sqlite3_close(migrated_raw);
   const auto rows = migrated.recent_requests(10);

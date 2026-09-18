@@ -2518,8 +2518,10 @@ TEST_CASE("BackendCoordinator: zero-budget swap restores failed replacement",
 }
 
 TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model", "[model][coordinator][runtime-preflight]") {
+    int resident_creations = 0;
     ModelRegistry reg;
-    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        if (i.name == "resident") ++resident_creations;
         return std::make_unique<IModelMock>(i);
     });
     reg.register_model(make_info("resident"));
@@ -2535,6 +2537,7 @@ TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model"
     CHECK(coordinator.is_loaded("resident"));
     CHECK(coordinator.get_loaded_model().value_or("") == "resident");
     CHECK_FALSE(coordinator.is_loaded("broken-runtime"));
+    CHECK(resident_creations == 1);
     int unloads = 0;
     auto* resident_mock = as_mock(const_cast<IModel*>(coordinator.get_model("resident")));
     REQUIRE(resident_mock != nullptr);
@@ -2545,8 +2548,10 @@ TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model"
 }
 
 TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model even over budget", "[model][coordinator][runtime-preflight]") {
+    int resident_creations = 0;
     ModelRegistry reg;
-    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        if (i.name == "resident") ++resident_creations;
         auto backend = std::make_unique<IModelMock>(i);
         backend->vram_mb.store(i.vram_required_mb);
         return backend;
@@ -2566,6 +2571,43 @@ TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model 
     REQUIRE_FALSE(result.has_value());
     CHECK(coordinator.is_loaded("resident"));
     CHECK(coordinator.get_loaded_model().value_or("") == "resident");
+    CHECK(resident_creations == 1);
+}
+
+TEST_CASE("BackendCoordinator: missing runtime does not drain active resident work",
+          "[model][coordinator][runtime-preflight]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel> {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto resident = make_info("resident");
+    resident.vram_required_mb = 9000;
+    reg.register_model(resident);
+    auto broken = make_info("broken-runtime");
+    broken.runtime = "never_registered";
+    broken.vram_required_mb = 9000;
+    reg.register_model(broken);
+    BackendCoordinator coordinator(reg);
+    SECTION("single resident") {}
+    SECTION("memory budget") {
+        coordinator.set_vram_budget(10000, 0);
+    }
+    REQUIRE(coordinator.swap_to("resident"));
+    const auto slot = coordinator.acquire_slot("resident");
+    REQUIRE(slot);
+
+    const auto result = coordinator.swap_to_cancellable(
+        "broken-runtime", std::chrono::milliseconds{100});
+    CHECK_FALSE(result);
+    if (!result) CHECK(result.error().code == ErrorCode::Unavailable);
+    CHECK(coordinator.active_request_count("resident") == 1);
+    CHECK_FALSE(coordinator.swap_in_progress());
+    InferenceRequest request;
+    request.prompt = "continue resident work";
+    CHECK(coordinator.predict("resident", *slot, request));
+    REQUIRE(coordinator.release_slot("resident", *slot));
+    CHECK(coordinator.active_request_count() == 0);
+    CHECK(coordinator.is_ready("resident"));
 }
 
 TEST_CASE("BackendCoordinator: unregister refuses loaded model", "[model][coordinator]") {
