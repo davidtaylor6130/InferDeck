@@ -20,15 +20,16 @@ const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, millise
 
 export function parseArguments(args) {
   const positional = [];
-  const options = { requestTimeoutMs: 300000, historyTimeoutMs: 10000, historyRequestTimeoutMs: 2000, historyPollMs: 250, minTg: 20, promptWords: 4096, generationPromptWords: 0, allowLive: false };
-  const flags = new Map([['--request-timeout-ms', 'requestTimeoutMs'], ['--history-timeout-ms', 'historyTimeoutMs'], ['--history-request-timeout-ms', 'historyRequestTimeoutMs'], ['--history-poll-ms', 'historyPollMs'], ['--min-tg', 'minTg'], ['--prompt-words', 'promptWords'], ['--generation-prompt-words', 'generationPromptWords'], ['--output', 'output'], ['--request-fixture', 'requestFixture']]);
+  const options = { requestTimeoutMs: 300000, historyTimeoutMs: 10000, historyRequestTimeoutMs: 2000, historyPollMs: 250, minTg: 20, promptWords: 4096, generationPromptWords: 0, allowLive: false, tokenTarget: null, promptTokenTarget: null, cachedTokenTarget: null, tokenTolerancePct: 10, coldRepeat: false };
+  const flags = new Map([['--request-timeout-ms', 'requestTimeoutMs'], ['--history-timeout-ms', 'historyTimeoutMs'], ['--history-request-timeout-ms', 'historyRequestTimeoutMs'], ['--history-poll-ms', 'historyPollMs'], ['--min-tg', 'minTg'], ['--prompt-words', 'promptWords'], ['--generation-prompt-words', 'generationPromptWords'], ['--output', 'output'], ['--request-fixture', 'requestFixture'], ['--warmup-body', 'warmupBody'], ['--token-target', 'tokenTarget'], ['--prompt-token-target', 'promptTokenTarget'], ['--cached-token-target', 'cachedTokenTarget'], ['--token-tolerance-pct', 'tokenTolerancePct']]);
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
     if (argument === '--allow-live') options.allowLive = true;
+    else if (argument === '--cold-repeat') options.coldRepeat = true;
     else if (flags.has(argument)) {
       const value = args[++index];
       if (!value || value.startsWith('--')) throw new Error(`Missing value for ${argument}`);
-      options[flags.get(argument)] = ['--output', '--request-fixture'].includes(argument) ? value : Number(value);
+      options[flags.get(argument)] = ['--output', '--request-fixture', '--warmup-body'].includes(argument) ? value : Number(value);
     } else if (argument.startsWith('--')) throw new Error(`Unknown option ${argument}`);
     else positional.push(argument);
   }
@@ -47,6 +48,21 @@ export function parseArguments(args) {
   if (!Number.isSafeInteger(options.promptWords) || options.promptWords < 1 || options.promptWords > 96000) throw new Error('prompt-words must be an integer between 1 and 96000');
   if (!Number.isSafeInteger(options.generationPromptWords) || options.generationPromptWords < 0 || options.generationPromptWords > 96000 || (options.generationPromptWords > 0 && workload !== 'tg')) throw new Error('generation-prompt-words must be 0 to 96000 and positive only for tg');
   if (options.requestFixture && (workload === 'cache' || args.includes('--prompt-words') || args.includes('--generation-prompt-words'))) throw new Error('request-fixture supports pp/tg only and cannot be combined with word-count options');
+  if (options.tokenTarget !== null && (!Number.isSafeInteger(options.tokenTarget) || options.tokenTarget < 1)) throw new Error('token-target must be a positive integer');
+  if (!Number.isFinite(options.tokenTolerancePct) || options.tokenTolerancePct < 0 || options.tokenTolerancePct > 100) throw new Error('token-tolerance-pct must be between 0 and 100');
+  if (options.tokenTarget !== null && !(options.requestFixture && workload === 'pp')) throw new Error('token-target requires --request-fixture with the pp workload');
+  for (const [key, flag, minimum] of [['promptTokenTarget', 'prompt-token-target', 1], ['cachedTokenTarget', 'cached-token-target', 0]]) {
+    if (options[key] === null) continue;
+    if (!Number.isSafeInteger(options[key]) || options[key] < minimum) throw new Error(`${flag} must be an integer >= ${minimum}`);
+    if (!(options.requestFixture && workload === 'pp')) throw new Error(`${flag} requires --request-fixture with the pp workload`);
+    if (options.tokenTolerancePct >= 100) throw new Error('context targets require token-tolerance-pct below 100');
+  }
+  if (options.cachedTokenTarget !== null && options.promptTokenTarget === null) throw new Error('cached-token-target requires prompt-token-target');
+  if (options.cachedTokenTarget > options.promptTokenTarget) throw new Error('cached-token-target cannot exceed prompt-token-target');
+  if (options.coldRepeat && options.cachedTokenTarget > 0) throw new Error('cold-repeat cannot require a cached prefix');
+  if (options.coldRepeat && !(options.requestFixture && workload === 'pp')) throw new Error('cold-repeat requires --request-fixture with the pp workload');
+  if (options.warmupBody && !(options.requestFixture && workload === 'pp')) throw new Error('warmup-body requires --request-fixture with the pp workload');
+  if (options.warmupBody && options.coldRepeat) throw new Error('warmup-body cannot be combined with --cold-repeat');
   const safeLabel = label.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 20) || 'run';
   return { ...options, baseUrl: baseUrl.replace(/\/$/, ''), model, concurrency, workload, sampleCount, label: safeLabel, output: resolve(options.output || `build/perf/${safeLabel}-${workload}-c${concurrency}-${Date.now()}.json`) };
 }
@@ -70,6 +86,20 @@ export async function loadRequestFixture(path, model) {
   return { body: { ...body, model, stream: false }, evidence: { sha256: createHash('sha256').update(raw).digest('hex'), bytes: raw.length, cacheReset: false } };
 }
 
+// With --cold-repeat every PP fixture rep (warmup and each sample) prefixes the
+// first string user message with a per-rep session nonce. The diverging head
+// defeats KV prefix reuse in llama.cpp slots, so each rep is a genuine cold
+// prefill even though the base fixture text is unchanged. Append scenarios
+// omit the flag so the primed base stays cached and only the appended suffix
+// is measured.
+function fixtureBodyFor(options, id) {
+  if (!options.coldRepeat || !options.fixtureBody) return options.fixtureBody;
+  const slot = options.fixtureBody.messages.findIndex(message => message.role === 'user' && typeof message.content === 'string');
+  if (slot < 0) throw new Error('cold-repeat requires a fixture with a string-content user message');
+  const messages = options.fixtureBody.messages.map((message, index) => index === slot ? { ...message, content: `[cold measurement ${id}] ${message.content}` } : message);
+  return { ...options.fixtureBody, messages };
+}
+
 async function request(options, id, index, workload, messages) {
   const started = performance.now();
   const deadline = AbortSignal.timeout(options.requestTimeoutMs);
@@ -80,7 +110,7 @@ async function request(options, id, index, workload, messages) {
     const response = await fetch(`${options.baseUrl}/v1/chat/completions`, {
       method: 'POST', signal,
       headers: { 'Content-Type': 'application/json', 'X-Request-Id': id, ...(process.env.INFERDECK_API_KEY ? { Authorization: `Bearer ${process.env.INFERDECK_API_KEY}` } : {}) },
-      body: JSON.stringify({ ...(options.fixtureBody ?? requestBody(options.model, id, index, workload === 'cache' ? 'pp' : workload, options.promptWords, options.generationPromptWords)), ...(messages ? { messages } : {}) }),
+      body: JSON.stringify({ ...(options.fixtureBody ? fixtureBodyFor(options, id) : requestBody(options.model, id, index, workload === 'cache' ? 'pp' : workload, options.promptWords, options.generationPromptWords)), ...(messages ? { messages } : {}) }),
     });
     httpStatus = response.status;
     headersMs = performance.now() - started;
@@ -117,7 +147,7 @@ async function jobsById(options, ids) {
   return { jobs, errors, missingIds: ids.filter(id => !jobs.has(id)) };
 }
 
-function attachMetrics(options, record, history, workload) {
+function attachMetrics(options, record, history, workload, enforceTokenTarget = true) {
   const job = history.jobs.get(record.id);
   const metrics = Object.fromEntries(['promptTokens', 'cacheWriteTokens', 'cachedPromptTokens', 'completionTokens', 'durationMs', 'generationDurationMs', 'promptDurationMs', 'queueDurationMs', 'swapLoadDurationMs', 'firstTokenDurationMs', 'tokensPerSecond', 'promptTokensPerSecond'].map(key => [key, finite(job?.[key])]));
   const missingMetrics = Object.keys(metrics).filter(key => metrics[key] === null);
@@ -128,6 +158,20 @@ function attachMetrics(options, record, history, workload) {
     if (!Number.isInteger(job.httpStatus) || job.httpStatus < 200 || job.httpStatus >= 300 || job.errorCode) failures.push('history_failure');
     if (missingMetrics.length) failures.push('missing_metrics');
     if (workload === 'pp' && record.status === 'success' && (metrics.cacheWriteTokens === 0 || metrics.promptDurationMs === 0)) failures.push('no_measured_prompt');
+    if (enforceTokenTarget && workload === 'pp' && record.status === 'success' && options.tokenTarget !== null && metrics.cacheWriteTokens !== null) {
+      const deviationPct = Math.abs(metrics.cacheWriteTokens - options.tokenTarget) / options.tokenTarget * 100;
+      if (deviationPct > options.tokenTolerancePct) failures.push('token_deviation');
+    }
+    if (enforceTokenTarget && workload === 'pp') {
+      for (const [key, target, failure] of [
+        ['promptTokens', options.promptTokenTarget, 'prompt_depth'],
+        ['cachedPromptTokens', options.coldRepeat ? 0 : options.cachedTokenTarget, 'cached_prefix'],
+      ]) {
+        if (target == null) continue;
+        const observed = metrics[key];
+        if (!Number.isSafeInteger(observed) || (target === 0 ? observed !== 0 : Math.abs(observed - target) * 100 > target * options.tokenTolerancePct)) failures.push(failure);
+      }
+    }
     if (workload === 'tg' && record.status === 'success' && (metrics.completionTokens === 0 || metrics.generationDurationMs === 0)) failures.push('no_measured_generation');
     if (workload === 'tg' && record.status === 'success' && metrics.tokensPerSecond !== null && metrics.tokensPerSecond < options.minTg) failures.push('below_tg_floor');
   }
@@ -137,20 +181,25 @@ function attachMetrics(options, record, history, workload) {
   const rawPromptTokensPerSecond = failures.length === 0 && Number.isSafeInteger(promptDecodeTokens) && promptDecodeTokens > 0 &&
     promptDecodeTokens === metrics.cacheWriteTokens && Number.isSafeInteger(metrics.promptTokens) && Number.isSafeInteger(metrics.cachedPromptTokens) &&
     promptDecodeTokens === metrics.promptTokens - metrics.cachedPromptTokens && Number.isFinite(rawRate) && rawRate > 0 ? rawRate : null;
-  return { ...record, promptDecodeTokens, promptDecodeDurationMs, rawPromptTokensPerSecond, historyFound: Boolean(job), historyHttpStatus: job?.httpStatus ?? null, finishCode: job?.finishCode ?? null, errorCode: job?.errorCode ?? null, ...metrics, missingMetrics, uncachedPromptTokensPerSecond: metrics.cacheWriteTokens !== null && metrics.promptDurationMs ? metrics.cacheWriteTokens * 1000 / metrics.promptDurationMs : null, tgFloorApplicable: workload === 'tg', passes: failures.length === 0, failures };
+  return { ...record, promptDecodeTokens, promptDecodeDurationMs, rawPromptTokensPerSecond, historyFound: Boolean(job), historyHttpStatus: job?.httpStatus ?? null, finishCode: job?.finishCode ?? null, errorCode: job?.errorCode ?? null, ...metrics, missingMetrics, uncachedPromptTokensPerSecond: metrics.cacheWriteTokens !== null && metrics.promptDurationMs ? metrics.cacheWriteTokens * 1000 / metrics.promptDurationMs : null, tokenDeviationPct: metrics.cacheWriteTokens !== null && options.tokenTarget !== null ? Math.abs(metrics.cacheWriteTokens - options.tokenTarget) / options.tokenTarget * 100 : null, tgFloorApplicable: workload === 'tg', passes: failures.length === 0, failures };
 }
 
 function rawPromptSummary(result) {
   const rows = result.samples.flatMap(sample => sample.requests);
   const measured = rows.filter(row => row.rawPromptTokensPerSecond !== null);
   const complete = result.workload === 'pp' && result.summary.passes && rows.length > 0 && measured.length === rows.length;
+  const tokenTargetMet = complete && (result.tokenTarget === undefined || rows.every(row => row.tokenDeviationPct !== null && row.tokenDeviationPct <= result.tokenTolerancePct));
+  const final = complete && tokenTargetMet;
   return {
-    status: complete ? 'MEASURED' : 'BLOCKED',
-    tokensPerSecond: complete ? median(measured.map(row => row.rawPromptTokensPerSecond)) : null,
+    status: final ? 'MEASURED' : 'BLOCKED',
+    tokensPerSecond: final ? median(measured.map(row => row.rawPromptTokensPerSecond)) : null,
     measuredRequests: measured.length,
     expectedRequests: result.expectedRequests,
-    reason: complete
-      ? 'Median exclusive target-model text prefill decode rate; synchronized batch timing excludes draft processing. Measurement alone does not establish cold-cache, context-length or performance acceptance.'
+    tokenTargetMet,
+    reason: final
+      ? 'Median exclusive target-model text prefill decode rate; synchronized batch timing excludes draft processing. Token count verified against the frozen fixture target within tolerance.'
+      : complete
+      ? `Frozen token target${result.tokenTarget === undefined ? ' not set' : ` ${result.tokenTarget} (+/-${result.tokenTolerancePct}%) not met`}; run failed token deviation criteria.`
       : 'Complete successful PP samples with exclusive decode telemetry are required. Gateway promptDurationMs is scheduler elapsed time from task initialization to generation start; it excludes tokenization and pre-initialization queueing but includes cache setup and interleaved batch scheduling, not isolated prompt evaluation.',
   };
 }
@@ -250,20 +299,30 @@ async function conversationSample(options, runId, sample) {
 export async function runBenchmark(options) {
   const fixture = options.requestFixture ? await loadRequestFixture(options.requestFixture, options.model) : null;
   if (fixture) options = { ...options, fixtureBody: fixture.body };
+  // Append scenarios warm the slot with the base prefix only; measured samples
+  // replay the full fixture so only the appended delta is uncached. Without a
+  // distinct warmup body the warmup would cache the full text and every sample
+  // would hit it, failing the append token target with a near-zero write.
+  const warmupFixture = options.warmupBody ? await loadRequestFixture(options.warmupBody, options.model) : null;
   const runId = `${options.label.slice(0, 12)}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
   const result = {
     schemaVersion: 1, ...(fixture ? { fixture: fixture.evidence } : {}), workloadVersion: fixture ? 'request-fixture-v1' : options.workload === 'cache' ? 'three-turn-cache-v1' : options.generationPromptWords > 0 ? 'long-context-tg-v1' : 'frozen-pp-tg-v1', model: options.model, workload: options.workload, concurrency: options.concurrency,
     baseUrl: options.baseUrl, startedAt: new Date().toISOString(), stream: false, requestTimeoutMs: options.requestTimeoutMs, minTg: options.minTg, promptWords: fixture ? null : options.promptWords, generationPromptWords: fixture ? null : options.generationPromptWords ?? 0,
     historyTimeoutMs: options.historyTimeoutMs, historyRequestTimeoutMs: options.historyRequestTimeoutMs, historyPollMs: options.historyPollMs,
+    ...(options.tokenTarget !== null ? { tokenTarget: options.tokenTarget, tokenTolerancePct: options.tokenTolerancePct } : {}),
+    ...(options.promptTokenTarget != null ? { promptTokenTarget: options.promptTokenTarget } : {}),
+    ...(options.cachedTokenTarget != null ? { cachedTokenTarget: options.cachedTokenTarget } : {}),
+    ...(options.coldRepeat ? { coldRepeat: true } : {}),
+    ...(warmupFixture ? { warmupFixture: warmupFixture.evidence } : {}),
     timingSource: 'Client latency is end-to-end. TTFT, PP, TG, queue, load and cache metrics come from persisted gateway history. Non-streaming headers are not TTFT. Gateway promptDurationMs is scheduler elapsed time, not raw engine PP.',
     expectedRequests: options.sampleCount * options.concurrency * (options.workload === 'cache' ? 3 : 1),
     ...(options.workload === 'cache' ? { turnsPerLane: 3, expectedLanes: options.sampleCount * options.concurrency, sampleCount: options.sampleCount, cacheExpectation: 'Follow-up turns retain the prior conversation prefix. Report positive cached tokens as observed reuse; zero is a measured miss, not a transport failure. Lane latency excludes history lookup.' } : {}), warmup: null, samples: [], output: options.output,
   };
   const persist = async () => { result.summary = summarize(result); result.rawPromptEvaluation = rawPromptSummary(result); await mkdir(dirname(options.output), { recursive: true }); await writeFile(options.output, JSON.stringify(result, null, 2) + '\n'); };
   const warmupId = `bench-${runId}-warmup`;
-  const warmup = await request(options, warmupId, 0, 'pp');
+  const warmup = await request(options, warmupId, 0, 'pp', warmupFixture?.body.messages);
   const warmupHistory = await jobsById(options, [warmupId]);
-  result.warmup = { ...attachMetrics(options, warmup, warmupHistory, 'pp'), historyErrors: warmupHistory.errors };
+  result.warmup = { ...attachMetrics(options, warmup, warmupHistory, 'pp', false), historyErrors: warmupHistory.errors };
   await persist();
   if (!result.warmup.passes) { result.abortedAfterWarmup = true; await persist(); return result; }
   for (let sample = 0; sample < options.sampleCount; sample++) {
@@ -313,6 +372,30 @@ Ctrl+C cancels CACHE requests and writes the collected evidence before exiting.
                                No nonce, cache reset, token calibration or cold-prefix
                                guarantee; repeated requests may reuse cached tokens.
                                Cannot combine with CACHE or word-count options.
+                               Frozen fixtures: Testing/generate-pp-fixtures.mjs writes
+                               build/perf/pp-fixtures/*.json + manifest.json.
+--token-target N               PP must evaluate (write) about N prompt tokens per
+                               request, within --token-tolerance-pct (default 10).
+                               Checks uncached work only; use the context targets below
+                               to detect lost history in cached append scenarios.
+--prompt-token-target N        Expected TOTAL input tokens, including cached tokens.
+--cached-token-target N        Expected cached prefix tokens (0 requires no reuse).
+                               Both use token-tolerance-pct; warmup is exempt.
+                               Cached target requires a total prompt target.
+                               Requires --request-fixture and workload pp.
+--token-tolerance-pct N        Allowed deviation of cacheWriteTokens from target (0..100)
+--warmup-body FILE             Send this JSON chat body for the warmup request while
+                                samples replay --request-fixture. Append scenarios
+                                warm the slot with the base prefix file
+                                (pp-<scenario>-prefix.json) so measured samples
+                                evaluate only the appended delta against hot
+                                cache. Requires --request-fixture and workload
+                                pp; cannot combine with --cold-repeat.
+--cold-repeat                 For pp --request-fixture cold scenarios: prefix a per-rep
+                               session nonce to the first string user message so KV-prefix
+                               reuse is defeated and every warmup/sample is a genuine cold
+                               prefill. Omit for primed append scenarios that must reuse the
+                               base cache and measure only the appended suffix.
 --output FILE                  Persist warmup and each completed sample as JSON
 --allow-live                   Explicitly allow port 11434; obtain authorization first
 
@@ -325,6 +408,7 @@ The harness deadline is not evidence of an n8n or other client's timeout policy.
 Example (isolated gateway only):
 node Testing/measure-concurrency.mjs http://127.0.0.1:11435 qwen3.8-27b 4 tg 3 baseline --output build/perf/baseline-c4-tg.json
 node Testing/measure-concurrency.mjs http://127.0.0.1:11435 qwen3.8-27b 4 cache 3 cache-baseline --output build/perf/baseline-c4-cache.json
+node Testing/measure-concurrency.mjs http://127.0.0.1:11435 qwen3.8-27b 1 pp 3 cold-64k --request-fixture build/perf/pp-fixtures/pp-cold-64k.json --token-target 64000 --output build/perf/cold-64k-pp.json
 `;
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

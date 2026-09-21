@@ -4,6 +4,7 @@ project(gateway LANGUAGES CXX)
 set(GATEWAY_SOURCES
     src/streaming_sanitizer.cpp
     src/generation_session.cpp
+    src/gpu_backend.cpp
     src/routes.cpp
     src/openai_adapter.cpp
     src/responses_adapter.cpp
@@ -31,6 +32,7 @@ target_include_directories(gateway
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE
         ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/vendor
+        ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/ggml/include
 )
 
 target_link_libraries(gateway

@@ -61,7 +61,14 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
     {
         std::lock_guard<std::mutex> lock(mutex_);
         resizing_models_.erase(name);
-        if (result) ++resource_generation_;
+        if (result) {
+            const auto hold = continuation_holds_.find(name);
+            const bool preserve_continuation = hold != continuation_holds_.end() &&
+                hold->second.generation == resource_generation_ &&
+                model->info().runtime == "vllm_radiance" && model->n_slots() == 1;
+            ++resource_generation_;
+            if (preserve_continuation) hold->second.generation = resource_generation_;
+        }
     }
     cv_.notify_all();
     return result;

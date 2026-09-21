@@ -96,6 +96,8 @@ struct ModelInfo {
     std::string mmproj_path{};
     int n_slots{2};
     int min_slots{1};
+    int continuation_grace_ms{0};
+    int request_queue_timeout_seconds{300};
     int vram_required_mb{0};
     int vram_fixed_mb{0};
     int vram_per_slot_mb{0};

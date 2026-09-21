@@ -80,6 +80,96 @@ model_registry:
           std::string::npos);
 }
 
+TEST_CASE("Radiance runtime configuration preserves explicit artifact selection",
+          "[config][runtime-contract][radiance]")
+{
+    const std::string prefix = R"(
+model_registry:
+  - name: qwen-candidate
+    runtime: vllm_radiance
+    modality: text
+    context_size: 106496
+    n_slots: 1
+    artifacts:
+      model: C:/models/qwen-mxfp4
+)";
+    REQUIRE(validate_config_text(prefix +
+        "    capabilities: [chat_completions, responses]\n"));
+    const auto incompatible = validate_config_text(prefix +
+        "    capabilities: [image_generation]\n");
+    REQUIRE_FALSE(incompatible);
+    CHECK(incompatible.error().message.find("does not support capability image_generation") !=
+          std::string::npos);
+}
+
+TEST_CASE("Continuation grace configuration is opt-in and bounded",
+          "[config][admission][continuation]") {
+    const std::string prefix = R"(
+model_registry:
+  - name: qwen-candidate
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    n_slots: 1
+    artifacts:
+      model: C:/models/qwen-mxfp4
+)";
+    CHECK(validate_config_text(prefix + "    continuation_grace_ms: 0\n"));
+    CHECK(validate_config_text(prefix + "    continuation_grace_ms: 1000\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    continuation_grace_ms: -1\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    continuation_grace_ms: 1001\n"));
+
+    const auto path = std::filesystem::temp_directory_path() /
+        "inferdeck-continuation-grace-config.yml";
+    {
+        std::ofstream output(path);
+        output << prefix << "    continuation_grace_ms: 731\n";
+    }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    CHECK(config.models.front().continuation_grace_ms == 731);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
+TEST_CASE("Model request queue timeout is bounded and decoded",
+          "[config][admission][queue-timeout]") {
+    const std::string prefix = R"(
+model_registry:
+  - name: queue-model
+    runtime: llama_cpp
+    modality: text
+    capabilities: [chat_completions, responses]
+    gguf_path: C:/models/queue.gguf
+)";
+    CHECK(validate_config_text(prefix + "    request_queue_timeout_seconds: 1\n"));
+    CHECK(validate_config_text(prefix + "    request_queue_timeout_seconds: 1800\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    request_queue_timeout_seconds: 0\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    request_queue_timeout_seconds: 1801\n"));
+
+    const auto default_path = std::filesystem::temp_directory_path() /
+        "inferdeck-request-queue-timeout-default-config.yml";
+    {
+        std::ofstream output(default_path);
+        output << prefix;
+    }
+    const auto default_config = load_config(default_path);
+    REQUIRE(default_config.models.size() == 1);
+    CHECK(default_config.models.front().request_queue_timeout_seconds == 300);
+    std::error_code default_error;
+    std::filesystem::remove(default_path, default_error);
+
+    const auto path = std::filesystem::temp_directory_path() /
+        "inferdeck-request-queue-timeout-config.yml";
+    {
+        std::ofstream output(path);
+        output << prefix << "    request_queue_timeout_seconds: 600\n";
+    }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    CHECK(config.models.front().request_queue_timeout_seconds == 600);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
 TEST_CASE("Gateway configuration accepts native runtime artifacts", "[config]") {
     auto result = validate_config_text(R"(
 server:

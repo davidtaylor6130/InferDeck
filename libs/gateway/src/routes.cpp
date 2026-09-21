@@ -3,6 +3,7 @@
 #include "gateway/openai_adapter.hpp"
 #include "gateway/openai_error.hpp"
 #include "gateway/generation_session.hpp"
+#include "gateway/gpu_backend.hpp"
 #include "gateway/request_id.hpp"
 #include "gateway/streaming_sanitizer.hpp"
 #include "foundation/logging.hpp"
@@ -480,6 +481,12 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
                 (info ? info->runtime : std::string("unknown")))};
     }
     auto current = deps.coordinator.get_loaded_model();
+    if (info) {
+        if (const auto backend_error = validate_model_compute(*info); backend_error) {
+            return {503, make_error_json(
+                503, "backend_mismatch", *backend_error)};
+        }
+    }
     if (deps.coordinator.is_ready(target_name)) {
         return {200, {{"status", "ready"},
                       {"model", model_name},

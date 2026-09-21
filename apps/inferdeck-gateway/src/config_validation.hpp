@@ -289,6 +289,18 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "invalid slot bounds for model: " + name);
                 }
+                if (entry["continuation_grace_ms"] &&
+                    (entry["continuation_grace_ms"].as<int>() < 0 ||
+                     entry["continuation_grace_ms"].as<int>() > 1000)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "continuation_grace_ms must be between 0 and 1000: " + name);
+                }
+                if (entry["request_queue_timeout_seconds"] &&
+                    (entry["request_queue_timeout_seconds"].as<int>() < 1 ||
+                     entry["request_queue_timeout_seconds"].as<int>() > 1800)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "request_queue_timeout_seconds must be between 1 and 1800: " + name);
+                }
                 const std::array resource_keys{
                     "role", "compute", "residency", "admission_pool",
                     "concurrency_limit", "memory_required_mb",

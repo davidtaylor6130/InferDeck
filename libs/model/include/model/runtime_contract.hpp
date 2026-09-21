@@ -72,6 +72,14 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         true,
     });
     registry.register_runtime(RuntimeContract{
+        "vllm_radiance",
+        {{"text", {"chat_completions", "responses"}}},
+        RuntimeArtifactPolicy::ArtifactMap,
+        false,
+        true,
+        false,
+    });
+    registry.register_runtime(RuntimeContract{
         "stable_diffusion_cpp",
         {{"image", {"image_generation"}}},
         RuntimeArtifactPolicy::ArtifactMap,

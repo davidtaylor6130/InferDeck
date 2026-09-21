@@ -975,6 +975,7 @@ TEST_CASE("Non-stream disconnect cancels execution and preserves peer capacity",
         REQUIRE(key);
         std::atomic<bool> disconnected{false};
         httplib::Request request;
+        request.is_connection_closed = [] { return false; };
         request.set_header("Content-Type", "application/json");
         request.set_header("Authorization", "Bearer " + key->key);
         request.is_connection_closed = [&] { return disconnected.load(); };
@@ -1017,6 +1018,41 @@ TEST_CASE("Non-stream disconnect cancels execution and preserves peer capacity",
     }
 }
 
+TEST_CASE("Configured model queue timeout reaches Chat and Responses admission",
+          "[routes][admission][queue-timeout]") {
+    for (const bool responses : {false, true}) {
+        INFO("responses=" << responses);
+        TestServer server;
+        auto info = make_info("queue-timeout-model");
+        info.n_slots = 1;
+        info.min_slots = 1;
+        info.request_queue_timeout_seconds = 1;
+        server.registry.register_model(info);
+        REQUIRE(server.coordinator.load("queue-timeout-model"));
+        const auto held = server.coordinator.acquire_slot("queue-timeout-model");
+        REQUIRE(held);
+
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        request.set_header("Content-Type", "application/json");
+        request.body = responses
+            ? R"({"model":"queue-timeout-model","input":"test","max_output_tokens":16})"
+            : R"({"model":"queue-timeout-model","messages":[{"role":"user","content":"test"}],"max_completion_tokens":16})";
+        httplib::Response response;
+        const auto started = std::chrono::steady_clock::now();
+        if (responses) handle_responses(request, response, server.make_deps());
+        else handle_chat_completions(request, response, server.make_deps());
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started);
+
+        CHECK(response.status == 503);
+        CHECK(nlohmann::json::parse(response.body).at("error").at("code") ==
+              "slot_timeout");
+        CHECK(elapsed.count() >= 800);
+        CHECK(elapsed.count() < 3000);
+        CHECK(server.coordinator.release_slot("queue-timeout-model", *held));
+    }
+}
 TEST_CASE("Route manifest matches the pinned strict OpenAI snapshot",
           "[routes][manifest]") {
     const auto fixture_path = std::filesystem::path(INFERDECK_SOURCE_DIR) /

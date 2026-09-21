@@ -165,13 +165,16 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
         acquired.voice_session_token = deps.coordinator.hold_priority_session(
             voice_key, model_name);
     }
+    const auto model_info = deps.coordinator.registry().get_info_result(model_name);
+    const int request_queue_timeout_seconds = model_info
+        ? model_info->request_queue_timeout_seconds : 300;
     const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::minutes{5};
+        std::chrono::seconds{request_queue_timeout_seconds};
     const std::function<bool()> cancelled = [&req] {
         return req.is_connection_closed();
     };
     model::AcquireSlotOptions opts;
-    opts.timeout = std::chrono::minutes{5};
+    opts.timeout = std::chrono::seconds{request_queue_timeout_seconds};
     opts.block = true;
     opts.priority = resolve_request_priority(
         deps.api_keys.get(), header_value(req, "Authorization"), priority,

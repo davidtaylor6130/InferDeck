@@ -377,6 +377,26 @@ TEST_CASE("ModelRegistry: reports missing runtime", "[model][registry]") {
     REQUIRE(result.error().code == ErrorCode::Unavailable);
 }
 
+TEST_CASE("Unavailable Radiance runtime never falls back to llama",
+          "[model][registry][radiance]")
+{
+    ModelRegistry registry;
+    bool llama_called = false;
+    registry.register_factory("llama_cpp", [&](const ModelInfo& info)
+    {
+        llama_called = true;
+        return std::make_unique<IModelMock>(info);
+    });
+    ModelInfo info = make_info("qwen-candidate");
+    info.runtime = "vllm_radiance";
+    registry.register_model(info);
+    const auto result = registry.create_result(info.name);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::Unavailable);
+    CHECK(result.error().message == "runtime not registered: vllm_radiance");
+    CHECK_FALSE(llama_called);
+}
+
 TEST_CASE("ModelRegistry: register rejects empty name", "[model][registry]") {
     ModelRegistry reg;
     REQUIRE_THROWS_AS(reg.register_model(ModelInfo{}), std::invalid_argument);
@@ -3306,4 +3326,135 @@ TEST_CASE("BackendCoordinator dispatches video generation through its lease",
     CHECK(result->content_type == "video/x-msvideo");
     CHECK(result->output_video_seconds == 33.0 / 24.0);
     REQUIRE(coordinator.release_slot(info.name, *lease));
+}
+
+TEST_CASE("BackendCoordinator: opt-in continuation admission is bounded", "[model][continuation]") {
+    ModelRegistry registry;
+    const auto factory = [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots = 1;
+        return backend;
+    };
+    registry.register_factory("vllm_radiance", factory);
+    registry.set_factory(factory);
+    ModelInfo info = make_info("continuation-test");
+    info.runtime = "vllm_radiance";
+    info.n_slots = info.min_slots = 1;
+    info.continuation_grace_ms = 300;
+    SECTION("native opt-in") {}
+    SECTION("default off") { info.continuation_grace_ms = 0; }
+    SECTION("Vulkan ignores opt-in") { info.runtime = "llama_cpp"; }
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions owner;
+    owner.reservation_key = "openai-cache:owner";
+    owner.timeout = std::chrono::seconds(2);
+    const auto seed = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(seed);
+    REQUIRE(coordinator.release_slot(info.name, *seed));
+    AcquireSlotOptions peer;
+    peer.block = false;
+    peer.reservation_key = "openai-cache:peer";
+    const auto admitted = coordinator.acquire_slot(info.name, peer);
+    if (info.runtime == "llama_cpp" || info.continuation_grace_ms == 0) {
+        REQUIRE(admitted);
+        CHECK(coordinator.release_slot(info.name, *admitted));
+    } else {
+        REQUIRE_FALSE(admitted);
+    }
+}
+
+TEST_CASE("BackendCoordinator: one cached continuation yields to a queued peer", "[model][continuation]") {
+    ModelRegistry registry;
+    const auto factory = [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots = 1;
+        return backend;
+    };
+    registry.register_factory("vllm_radiance", factory);
+    registry.set_factory(factory);
+    ModelInfo info = make_info("continuation-fairness");
+    info.runtime = "vllm_radiance";
+    info.n_slots = info.min_slots = 1;
+    info.continuation_grace_ms = 500;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions owner;
+    owner.reservation_key = "openai-cache:owner";
+    owner.timeout = std::chrono::seconds(2);
+    AcquireSlotOptions peer = owner;
+    peer.reservation_key = "openai-cache:peer";
+    SECTION("basic admission") {}
+    SECTION("real capacity preparation preserves continuation") {
+        owner.demand = [] { return Ok(RequestDemand{0, 200, 200, 1, 0}); };
+        owner.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl& control) {
+            if (demand.aggregate_sequences > 1)
+                return Err<void>(ErrorCode::ResourceBusy, "one native sequence is active");
+            return coordinator.prepare_request_capacity(info.name, demand, control);
+        };
+        peer.demand = owner.demand;
+        peer.prepare_capacity = owner.prepare_capacity;
+    }
+    const auto seed = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(seed);
+    auto waiting = std::async(std::launch::async, [&] { return coordinator.acquire_slot(info.name, peer); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (coordinator.queued_request_count() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    REQUIRE(coordinator.queued_request_count() == 1);
+    REQUIRE(coordinator.release_slot(info.name, *seed));
+    CHECK(waiting.wait_for(std::chrono::milliseconds(30)) == std::future_status::timeout);
+    const auto continuation = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(continuation);
+    REQUIRE(coordinator.release_slot(info.name, *continuation));
+    REQUIRE(waiting.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    const auto peer_lease = waiting.get();
+    REQUIRE(peer_lease);
+    CHECK(coordinator.release_slot(info.name, *peer_lease));
+}
+
+TEST_CASE("BackendCoordinator: continuation hold respects interruption and expiry", "[model][continuation]") {
+    ModelRegistry registry;
+    const auto factory = [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots = 1;
+        return backend;
+    };
+    registry.register_factory("vllm_radiance", factory);
+    registry.set_factory(factory);
+    ModelInfo info = make_info("continuation-limits");
+    info.runtime = "vllm_radiance";
+    info.n_slots = info.min_slots = 1;
+    info.continuation_grace_ms = 100;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions owner;
+    owner.reservation_key = "openai-cache:owner";
+    const auto seed = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(seed);
+    REQUIRE(coordinator.release_slot(info.name, *seed));
+    AcquireSlotOptions peer;
+    peer.reservation_key = "openai-cache:peer";
+    peer.timeout = std::chrono::seconds(1);
+    SECTION("higher priority bypasses hold") { peer.priority = 1; peer.block = false; }
+    SECTION("expiry releases peer") {}
+    SECTION("cancelled waiter does not consume hold") {
+        AcquireSlotOptions cancelled = peer;
+        cancelled.reservation_key = owner.reservation_key;
+        cancelled.cancelled = [] { return true; };
+        CHECK_FALSE(coordinator.acquire_slot(info.name, cancelled));
+        CHECK(coordinator.queued_request_count() == 0);
+        peer.block = false;
+    }
+    SECTION("unload clears admission generation") {
+        REQUIRE(coordinator.unload(info.name));
+        REQUIRE(coordinator.load(info.name));
+        peer.block = false;
+    }
+    const auto lease = coordinator.acquire_slot(info.name, peer);
+    REQUIRE(lease);
+    CHECK(coordinator.release_slot(info.name, *lease));
 }

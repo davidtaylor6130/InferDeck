@@ -163,6 +163,10 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             }
             info.n_slots = m["n_slots"] ? m["n_slots"].as<int>() : 2;
             info.min_slots = m["min_slots"] ? m["min_slots"].as<int>() : 1;
+            info.continuation_grace_ms = m["continuation_grace_ms"]
+                ? m["continuation_grace_ms"].as<int>() : 0;
+            info.request_queue_timeout_seconds = m["request_queue_timeout_seconds"]
+                ? m["request_queue_timeout_seconds"].as<int>() : 300;
             if (m["role"]) {
                 info.role = *model::parse_model_role(
                     m["role"].as<std::string>());

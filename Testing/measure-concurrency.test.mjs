@@ -14,7 +14,7 @@ const job = (id, overrides = {}) => ({ id, httpStatus: 200, errorCode: '', finis
 const json = (response, value, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(value)); };
 const completion = response => json(response, { choices: [{ message: { role: 'assistant', content: 'benchmark' }, finish_reason: 'stop' }], usage: { prompt_tokens: 4096, completion_tokens: 192 } });
 
-async function fixture(t, handler) {
+async function fixture(t, handler, warmup = id => job(id)) {
   const directory = await mkdtemp(join(tmpdir(), 'inferdeck-concurrency-test-'));
   const state = { calls: [], jobs: [], polls: 0 };
   const server = createServer(async (request, response) => {
@@ -23,7 +23,7 @@ async function fixture(t, handler) {
         let text = ''; for await (const chunk of request) text += chunk;
         const call = { id: request.headers['x-request-id'], body: JSON.parse(text) };
         state.calls.push(call);
-        if (call.id.endsWith('-warmup')) { state.jobs.push(job(call.id)); completion(response); return; }
+        if (call.id.endsWith('-warmup')) { state.jobs.push(warmup(call.id)); completion(response); return; }
         await handler({ kind: 'request', request, response, call, state });
       } else { state.polls++; await handler({ kind: 'history', request, response, state }); }
     } catch (error) { if (!response.headersSent) json(response, { error: error.message }, 500); else response.destroy(); }
@@ -271,6 +271,145 @@ test('raw PP rejects incomplete, inconsistent and failed request telemetry', asy
   }
 });
 
+test('token-target requires the pp fixture workload', () => {
+  assert.throws(() => parseArguments(['http://127.0.0.1:11435', 'mock-model', '1', 'tg', '1', 'run', '--token-target', '64000']), /requires --request-fixture with the pp workload/);
+  assert.throws(() => parseArguments(['http://127.0.0.1:11435', 'mock-model', '1', 'pp', '1', 'run', '--token-target', '64000']), /requires --request-fixture with the pp workload/);
+  assert.throws(() => parseArguments(['http://127.0.0.1:11435', 'mock-model', '1', 'pp', '1', 'run', '--request-fixture', 'f.json', '--token-target', '0']), /token-target must be a positive integer/);
+  const parsed = parseArguments(['http://127.0.0.1:11435', 'mock-model', '1', 'pp', '1', 'run', '--request-fixture', 'f.json', '--token-target', '64000']);
+  assert.equal(parsed.tokenTarget, 64000);
+  assert.equal(parsed.tokenTolerancePct, 10);
+});
+
+test('token-target verifies the evaluated prompt depth on a cold fixture', async t => {
+  const correct = id => job(id, { cacheWriteTokens: 64000, promptTokens: 65000, cachedPromptTokens: 1000, promptDecodeTokens: 64000, promptDecodeDurationMs: 31250 });
+  const f = await fixture(t, async ({ kind, response, call, state }) => {
+    if (kind === 'request') { state.jobs.push(correct(call.id)); completion(response); }
+    else json(response, { jobs: state.jobs });
+  }, correct);
+  const path = join(f.directory, 'request.json');
+  const raw = JSON.stringify({ messages: [{ role: 'user', content: 'x '.repeat(1000) }], max_tokens: 32 });
+  await writeFile(path, raw);
+  t.after(() => rm(path, { force: true }));
+  const { code, result } = await execute(f, ['--request-fixture', path, '--token-target', '64000'], { concurrency: 1, workload: 'pp', samples: 2 });
+  assert.equal(code, 0);
+  assert.equal(result.summary.passes, true);
+  assert.equal(result.tokenTarget, 64000);
+  assert.equal(result.rawPromptEvaluation.status, 'MEASURED');
+  assert.equal(result.rawPromptEvaluation.tokenTargetMet, true);
+  assert.equal(result.rawPromptEvaluation.tokensPerSecond, 2048);
+  assert.equal(result.samples[0].requests[0].tokenDeviationPct, 0);
+});
+
+test('token-target failure detects an accidental cold-prefix reuse or truncation', async t => {
+  const correct = id => job(id, { cacheWriteTokens: 64000, promptTokens: 65000, cachedPromptTokens: 1000, promptDecodeTokens: 64000, promptDecodeDurationMs: 31250 });
+  const short = id => job(id, { cacheWriteTokens: 32000, promptTokens: 33000, cachedPromptTokens: 1000, promptDecodeTokens: 32000, promptDecodeDurationMs: 15625 });
+  const f = await fixture(t, async ({ kind, response, call, state }) => {
+    if (kind === 'request') { state.jobs.push(short(call.id)); completion(response); }
+    else json(response, { jobs: state.jobs });
+  }, correct);
+  const path = join(f.directory, 'request.json');
+  const raw = JSON.stringify({ messages: [{ role: 'user', content: 'x '.repeat(1000) }], max_tokens: 32 });
+  await writeFile(path, raw);
+  t.after(() => rm(path, { force: true }));
+  const { code, result } = await execute(f, ['--request-fixture', path, '--token-target', '64000'], { concurrency: 1, workload: 'pp', samples: 1 });
+  assert.equal(code, 1);
+  assert.equal(result.summary.passes, false);
+  assert.deepEqual(result.samples[0].requests[0].failures, ['token_deviation']);
+  assert.equal(result.samples[0].requests[0].tokenDeviationPct, 50);
+  assert.equal(result.samples[0].requests[0].rawPromptTokensPerSecond, null);
+  assert.equal(result.rawPromptEvaluation.status, 'BLOCKED');
+  assert.equal(result.rawPromptEvaluation.tokenTargetMet, false);
+});
+
+test('warmup priming write is exempt from the append token target', async t => {
+  const prime = id => job(id, { cacheWriteTokens: 66000, promptTokens: 66000, cachedPromptTokens: 0, promptDecodeTokens: 66000, promptDecodeDurationMs: 33000 });
+  const delta = id => job(id, { cacheWriteTokens: 2000, promptTokens: 68000, cachedPromptTokens: 66000, promptDecodeTokens: 2000, promptDecodeDurationMs: 4000 });
+  const f = await fixture(t, async ({ kind, response, call, state }) => {
+    if (kind === 'request') { state.jobs.push(delta(call.id)); completion(response); }
+    else json(response, { jobs: state.jobs });
+  }, prime);
+  const path = join(f.directory, 'request.json');
+  const raw = JSON.stringify({ messages: [{ role: 'user', content: 'x '.repeat(1000) }], max_tokens: 32 });
+  await writeFile(path, raw);
+  t.after(() => rm(path, { force: true }));
+  const { code, result } = await execute(f, ['--request-fixture', path, '--token-target', '2000'], { concurrency: 1, workload: 'pp', samples: 2 });
+  assert.equal(code, 0);
+  assert.equal(result.warmup.passes, true);
+  assert.equal(result.warmup.cacheWriteTokens, 66000);
+  assert.equal(result.summary.passes, true);
+  assert.equal(result.rawPromptEvaluation.status, 'MEASURED');
+  assert.equal(result.rawPromptEvaluation.tokenTargetMet, true);
+  assert.equal(result.rawPromptEvaluation.tokensPerSecond, 500);
+});
+
+test('warmup-body requires the pp fixture workload and rejects cold-repeat', () => {
+  const args = ['http://127.0.0.1:11435', 'mock-model', '1'];
+  assert.throws(() => parseArguments([...args, 'tg', '--request-fixture', 'f.json', '--warmup-body', 'w.json']), /warmup-body/);
+  assert.throws(() => parseArguments([...args, 'pp', '--warmup-body', 'w.json']), /warmup-body/);
+  assert.throws(() => parseArguments([...args, 'pp', '--request-fixture', 'f.json', '--warmup-body', 'w.json', '--cold-repeat']), /warmup-body/);
+  assert.equal(parseArguments([...args, 'pp']).warmupBody, undefined);
+  assert.equal(parseArguments([...args, 'pp', '--request-fixture', 'f.json', '--warmup-body', 'w.json']).warmupBody, 'w.json');
+});
+
+test('warmup-body sends the prefix while samples replay the full fixture', async t => {
+  const prime = id => job(id, { cacheWriteTokens: 64000, promptTokens: 64000, cachedPromptTokens: 0, promptDecodeTokens: 64000, promptDecodeDurationMs: 32000 });
+  const delta = id => job(id, { cacheWriteTokens: 2000, promptTokens: 66000, cachedPromptTokens: 64000, promptDecodeTokens: 2000, promptDecodeDurationMs: 4000 });
+  const f = await fixture(t, async ({ kind, response, call, state }) => {
+    if (kind === 'request') { state.jobs.push((state.calls.length === 1 ? prime : delta)(call.id)); completion(response); }
+    else json(response, { jobs: state.jobs });
+  }, prime);
+  const full = { messages: [{ role: 'system', content: 'rules' }, { role: 'user', content: 'x '.repeat(1000) }, { role: 'user', content: 'append this' }], max_tokens: 32 };
+  const prefix = { messages: full.messages.slice(0, -1), max_tokens: 32 };
+  // The full body reuses request.json so the shared fixture cleanup removes
+  // it; the prefix lives outside the fixture directory so hook ordering
+  // cannot leave the fixture directory non-empty.
+  const fullPath = join(f.directory, 'request.json');
+  const prefixPath = join(f.directory, '..', `inferdeck-warmup-prefix-${Date.now()}.json`);
+  await writeFile(fullPath, JSON.stringify(full));
+  await writeFile(prefixPath, JSON.stringify(prefix));
+  t.after(() => rm(prefixPath, { force: true }));
+  const { code, result } = await execute(f, ['--request-fixture', fullPath, '--warmup-body', prefixPath, '--token-target', '2000'], { concurrency: 1, workload: 'pp', samples: 2 });
+  assert.equal(code, 0);
+  assert.equal(result.summary.passes, true);
+  assert.equal(result.rawPromptEvaluation.status, 'MEASURED');
+  assert.equal(result.rawPromptEvaluation.tokensPerSecond, 500);
+  assert.equal(f.state.calls.length, 3);
+  assert.deepEqual(f.state.calls[0].body.messages, [...prefix.messages]);
+  for (const call of f.state.calls.slice(1)) assert.deepEqual(call.body.messages, [...full.messages]);
+});
+
+test('cold-repeat requires the pp fixture workload and stays opt-in', () => {
+  const args = ['http://127.0.0.1:11435', 'mock-model', '1'];
+  assert.throws(() => parseArguments([...args, 'tg', '--cold-repeat']), /cold-repeat/);
+  assert.throws(() => parseArguments([...args, 'pp', '--cold-repeat']), /cold-repeat/);
+  assert.equal(parseArguments([...args, 'pp']).coldRepeat, false);
+  assert.equal(parseArguments([...args, 'pp', '--request-fixture', 'f.json', '--cold-repeat']).coldRepeat, true);
+});
+
+test('cold-repeat defeats slot KV reuse by prefixing a per-call nonce and records the flag', async t => {
+  const correct = id => job(id, { cacheWriteTokens: 64000, promptTokens: 64000, cachedPromptTokens: 0, promptDecodeTokens: 64000, promptDecodeDurationMs: 31250 });
+  const f = await fixture(t, async ({ kind, response, call, state }) => {
+    if (kind === 'request') { state.jobs.push(correct(call.id)); completion(response); }
+    else json(response, { jobs: state.jobs });
+  }, correct);
+  const path = join(f.directory, 'request.json');
+  const raw = JSON.stringify({ messages: [{ role: 'system', content: 'System rules.' }, { role: 'user', content: 'x '.repeat(1000) }, { role: 'user', content: 'tail' }], max_tokens: 32 });
+  await writeFile(path, raw);
+  t.after(() => rm(path, { force: true }));
+  const { code, result } = await execute(f, ['--request-fixture', path, '--token-target', '64000', '--cold-repeat'], { concurrency: 1, workload: 'pp', samples: 2 });
+  assert.equal(code, 0);
+  assert.equal(result.coldRepeat, true);
+  assert.equal(result.rawPromptEvaluation.status, 'MEASURED');
+  assert.equal(f.state.calls.length, 3);
+  for (const call of f.state.calls) {
+    assert.equal(call.body.messages[0].content, 'System rules.');
+    assert.ok(call.body.messages[1].content.startsWith(`[cold measurement ${call.id}] `), 'per-call nonce must prefix the first user string message');
+    assert.equal(call.body.messages[2].content, 'tail');
+  }
+  const nonces = f.state.calls.map(call => call.body.messages[1].content.slice(0, `[cold measurement ${call.id}] ` .length));
+  assert.equal(new Set(nonces).size, 3, 'every rep must use a distinct nonce so KV reuse fails at token 0');
+});
+
 test('incomplete successful telemetry cannot pass a baseline', async t => {
   const f = await fixture(t, async ({ kind, response, call, state }) => {
     if (kind === 'request') { const row = job(call.id); delete row.swapLoadDurationMs; state.jobs.push(row); completion(response); }
@@ -409,4 +548,67 @@ test('long-context generation sends the requested context without changing froze
   assert.equal(result.workloadVersion, 'long-context-tg-v1');
   assert.equal(result.generationPromptWords, 512);
   assert.equal(result.summary.recordedRequests, 1);
+});
+
+test('append acceptance requires full context and retained prefix as well as the delta', async t => {
+  const { runBenchmark } = await import('./measure-concurrency.mjs');
+  for (const [name, delta, prompt, cached, expected] of [
+    ['truncated 2K', 2048, 2244, 196, false],
+    ['truncated 4K', 4099, 4295, 196, false],
+    ['retained 2K', 2048, 102258, 100210, true],
+    ['retained 4K', 4099, 104309, 100210, true],
+    ['missing depth', 2048, undefined, undefined, false],
+    ['prefix recomputed', 2048, 102258, 0, false],
+  ]) {
+    await t.test(name, async t => {
+      const f = await fixture(t, async ({ kind, response, call, state }) => {
+        if (kind === 'request') {
+          state.jobs.push(job(call.id, { promptTokens: prompt, cachedPromptTokens: cached, cacheWriteTokens: delta, promptDecodeTokens: delta, promptDecodeDurationMs: 4000 }));
+          completion(response);
+        } else json(response, { jobs: state.jobs });
+      });
+      const path = join(f.directory, 'request.json');
+      await writeFile(path, JSON.stringify({ messages: [{ role: 'user', content: 'frozen fixture' }], max_tokens: 32 }));
+      const options = parseArguments([f.baseUrl, 'mock-model', '1', 'pp', '1', 'depth', '--request-fixture', path, '--token-target', String(delta), '--output', join(f.directory, 'result.json')]);
+      options.promptTokenTarget = 100000 + delta;
+      options.cachedTokenTarget = 100000;
+      const result = await runBenchmark(options);
+      assert.equal(result.summary.passes, expected);
+      assert.equal(result.rawPromptEvaluation.status, expected ? 'MEASURED' : 'BLOCKED');
+      if (!expected) assert.ok(result.samples[0].requests[0].failures.some(failure => /prompt_depth|cached_prefix/.test(failure)));
+    });
+  }
+});
+
+test('context target CLI validates bounds and records both depth expectations', () => {
+  const args = ['http://127.0.0.1:11435', 'model', '1', 'pp', '--request-fixture', 'request.json'];
+  const parsed = parseArguments([...args, '--prompt-token-target', '102000', '--cached-token-target', '100000']);
+  assert.equal(parsed.promptTokenTarget, 102000);
+  assert.equal(parsed.cachedTokenTarget, 100000);
+  for (const flags of [
+    ['--prompt-token-target', '0'], ['--prompt-token-target', 'NaN'],
+    ['--prompt-token-target', '102000', '--cached-token-target', '-1'],
+    ['--cached-token-target', '100000'],
+    ['--prompt-token-target', '100', '--cached-token-target', '101'],
+    ['--prompt-token-target', '100', '--cached-token-target', '50', '--cold-repeat'],
+    ['--prompt-token-target', '100', '--token-tolerance-pct', '100'],
+  ]) assert.throws(() => parseArguments([...args, ...flags]), /target|cached prefix/);
+  assert.throws(() => parseArguments(['http://127.0.0.1:11435', 'model', '1', 'tg', '--request-fixture', 'request.json', '--prompt-token-target', '100']), /pp workload/);
+});
+
+test('cold-repeat rejects cached tokens even when the uncached target passes', async t => {
+  const f = await fixture(t, async ({ kind, response, call, state }) => {
+    if (kind === 'request') {
+      state.jobs.push(job(call.id, { promptTokens: 65000, cachedPromptTokens: 1000, cacheWriteTokens: 64000, promptDecodeTokens: 64000, promptDecodeDurationMs: 32000 }));
+      completion(response);
+    } else json(response, { jobs: state.jobs });
+  });
+  const path = join(f.directory, 'request.json');
+  await writeFile(path, JSON.stringify({ messages: [{ role: 'user', content: 'frozen' }], max_tokens: 32 }));
+  const { code, result } = await execute(f, ['--request-fixture', path, '--token-target', '64000', '--prompt-token-target', '64000', '--cached-token-target', '0', '--cold-repeat'], { concurrency: 1, workload: 'pp' });
+  assert.equal(code, 1);
+  assert.equal(result.promptTokenTarget, 64000);
+  assert.equal(result.cachedTokenTarget, 0);
+  assert.deepEqual(result.samples[0].requests[0].failures, ['cached_prefix']);
+  assert.equal(result.rawPromptEvaluation.status, 'BLOCKED');
 });

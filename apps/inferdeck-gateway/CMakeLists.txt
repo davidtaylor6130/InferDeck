@@ -38,6 +38,32 @@ target_link_libraries(inferdeck-gateway PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
+if(INFERDECK_VLLM_RADIANCE_ENABLE)
+    target_link_libraries(inferdeck-gateway PRIVATE vllm_radiance_wrapper)
+    target_compile_definitions(inferdeck-gateway PRIVATE INFERDECK_VLLM_RADIANCE_ENABLE=1)
+    add_custom_command(TARGET inferdeck-gateway POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${INFERDECK_PYTHON312_ROOT}/python312.dll"
+                "$<TARGET_FILE_DIR:inferdeck-gateway>/python312.dll"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:inferdeck-gateway>/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_profile.py"
+                "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_lifecycle.py"
+                "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_tokenizer.py"
+                "$<TARGET_FILE_DIR:inferdeck-gateway>/python")
+endif()
+
+if(INFERDECK_VLLM_RADIANCE_ENABLE)
+    install(FILES "${INFERDECK_PYTHON312_ROOT}/python312.dll"
+            DESTINATION .)
+    install(FILES
+                "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_profile.py"
+                "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_lifecycle.py"
+                "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_tokenizer.py"
+            DESTINATION python)
+endif()
+
 if(WIN32)
     target_link_libraries(inferdeck-gateway PRIVATE dbghelp)
     target_link_options(inferdeck-gateway PRIVATE /STACK:33554432)

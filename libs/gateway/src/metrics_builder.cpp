@@ -1,5 +1,7 @@
 #include "gateway/metrics_builder.hpp"
 
+#include "gateway/gpu_backend.hpp"
+
 #include <cstdint>
 
 namespace inferdeck::gateway {
@@ -140,6 +142,7 @@ json MetricsBuilder::build_health(const observability::Metrics& m,
     {"db_path", db.path()},
     {"gpu_available", live.available},
     {"gpu_provider", live.provider},
+    {"gpu_backend", gpu_backend_diagnostics()},
     {"requests", m.total_requests()}
   };
 }

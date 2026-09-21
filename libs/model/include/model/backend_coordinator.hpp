@@ -208,7 +208,18 @@ private:
         int backend_slot{0};
         int context_reservation{0};
         int sequence_reservation{0};
+        std::string reservation_key;
+        int priority{0};
+        bool continuation{false};
     };
+
+    struct ContinuationHold {
+        std::string key;
+        int priority{0};
+        time_point deadline{};
+        std::uint64_t generation{0};
+    };
+    bool continuation_hold_valid_locked(const std::string& name, time_point now) const;
 
     bool priority_media_active_locked() const;
     bool model_is_primary_locked(const std::string& name) const;
@@ -221,7 +232,8 @@ private:
     bool waiter_is_resource_barrier_locked(const SlotWaiter& waiter) const;
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
-    foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot, const RequestDemand* demand = nullptr);
+    foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot, const RequestDemand* demand = nullptr,
+        const std::string& reservation_key = {}, int priority = 0);
     foundation::Result<int> backend_slot_for_lease_locked(
         const std::string& name, int lease_id) const;
     foundation::Result<void> unload_with_control(
@@ -247,6 +259,7 @@ private:
     int active_requests_{0};
     std::unordered_map<std::string, int> active_requests_by_model_;
     std::unordered_map<int, ActiveLease> active_leases_;
+    std::unordered_map<std::string, ContinuationHold> continuation_holds_;
     std::unordered_map<std::string, int> active_context_reservation_by_model_;
     std::unordered_map<std::string, int> active_sequence_reservation_by_model_;
     std::int64_t next_lease_id_{1};
