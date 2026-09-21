@@ -51,6 +51,7 @@ if(INFERDECK_VLLM_RADIANCE_ENABLE)
                 "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_profile.py"
                 "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_lifecycle.py"
                 "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_tokenizer.py"
+                "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_penalties.py"
                 "$<TARGET_FILE_DIR:inferdeck-gateway>/python")
 endif()
 
@@ -61,6 +62,7 @@ if(INFERDECK_VLLM_RADIANCE_ENABLE)
                 "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_profile.py"
                 "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_lifecycle.py"
                 "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_tokenizer.py"
+                "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_penalties.py"
             DESTINATION python)
 endif()
 

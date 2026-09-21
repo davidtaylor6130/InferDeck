@@ -1,4 +1,4 @@
-﻿# Experimental native vLLM/Radiance runtime
+# Experimental native vLLM/Radiance runtime
 
 This branch contains an opt-in Windows experiment, not a production-ready release or a proven 2,000-PP profile. The default build continues to use llama.cpp/Vulkan.
 
@@ -19,7 +19,7 @@ cmake -S . -B build -DINFERDECK_VLLM_RADIANCE_ENABLE=ON -DINFERDECK_PYTHON312_RO
 cmake --build build --target inferdeck-gateway --config Release -j
 ```
 
-The build packages three Python bridge modules and `python312.dll`. Model weights, ROCm packages, vLLM/Radiance source, overlays and compiled kernels remain external. This repository does not provide a complete fresh-install bundle or redistribute those dependencies.
+The build packages four Python bridge modules and `python312.dll`. Model weights, ROCm packages, vLLM/Radiance source, overlays and compiled kernels remain external. This repository does not provide a complete fresh-install bundle or redistribute those dependencies.
 
 The tested vLLM source revision is `bf87782b97a961f86ab3a709800ef1b4561d5cda`. The bridge enforces Radiance extension SHA-256 `64124749ed12f72c3d13544b313dcdcff33582e3bd7e001b519a2c5bb1f2ed4d` and the configured prefill DLL digest. Different binaries require separate validation.
 
@@ -72,3 +72,11 @@ Long-context quality, fully matched multi-agent elapsed time, final-build endura
 `Test-NativeRuntimeRelease.ps1` accepts `-CandidateManifest` and `-Acceptance`. Supply a local acceptance JSON containing `gates` with `id` and `status` fields. Statuses are `PENDING`, `IN_PROGRESS`, `PASS`, `FAIL` or `BLOCKED`. Missing evidence/configuration returns a non-pass result; unresolved gates return exit 2. The default goal-state path is local and is not distributed.
 
 Before activation, back up the matching executable, DLLs, Python modules, static assets and configuration. Stop only the intended service, replace the package consistently, restart and verify an actual request. Restore the complete backup on failure. Selecting the original Vulkan model remains the normal runtime fallback.
+
+## Sampling compatibility
+
+The native adapter must resolve omitted temperature, top-p, top-k, min-p and repetition settings from the model configuration, with explicit request values taking precedence. A disabled top-k is represented as `-1` in vLLM. Native sampling diagnostics record effective values, not prompt text.
+
+Penalty implementations have different history semantics. The native runtime uses a request-local logits processor for repetition, frequency and presence penalties over the requested generated-token window. Zero disables penalties; positive values retain that many recent output tokens; `-1` retains all output tokens. Native built-in penalties are disabled to avoid double application. Unsupported samplers such as DRY remain explicitly rejected. Matching supported settings does not imply identical sampled text across different kernels and quantizations.
+
+For a private request replay, an operator can place capture-next-request.json beside the deployed Python profile with an expires_at Unix timestamp no more than ten minutes ahead. The next admitted native request consumes the marker and writes captured-request.json exclusively in that directory, including normalized messages, tools, settings and rendered token IDs. Existing captures are never overwritten. Capture is disabled without the marker; expired markers do not capture. Treat the resulting file as private conversation data and keep it out of commits and release packages. This diagnostic does not change sampling or establish output quality.

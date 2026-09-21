@@ -10,6 +10,7 @@ import re
 from inferdeck_vllm_radiance_lifecycle import release_language_model_cache, capture_lifecycle_refs, lifecycle_diagnostics, finalize_engine_caches
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from typing import Any
 _DLL_HANDLES = []
 _RELEASED_SNAPSHOT = None
 _EXTENSION_SHA256 = "64124749ed12f72c3d13544b313dcdcff33582e3bd7e001b519a2c5bb1f2ed4d"
+_CAPTURE_MARKER_PATH = Path(__file__).with_name("capture-next-request.json")
+_CAPTURE_OUTPUT_PATH = Path(__file__).with_name("captured-request.json")
 
 _REQUIRED=("model","python_root","python_site","vllm_source","radiance_source","radiance_extension","rocm","selector_overlay","pread_overlay","prefill_overlay","prefill_dll","prefill_dll_sha256")
 def _need(c:dict[str,Any],k:str)->str:
@@ -46,6 +49,32 @@ def _register_qwen35_model_class()->type:
     from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
     ModelRegistry.register_model("Qwen3_5ForConditionalGeneration", Qwen3_5ForConditionalGeneration)
     return Qwen3_5ForConditionalGeneration
+def _capture_next_request(r:dict[str,Any], ids:list[Any])->None:
+    """Consume a short-lived operator marker and save one rendered request privately."""
+    try:
+        try:
+            with _CAPTURE_MARKER_PATH.open("r", encoding="utf-8") as marker_file:
+                marker = json.load(marker_file)
+        except FileNotFoundError:
+            return
+        expires_at = float(marker["expires_at"])
+        now = time.time()
+        _CAPTURE_MARKER_PATH.unlink()
+        if not math.isfinite(expires_at) or expires_at < now or expires_at > now + 600:
+            return
+        payload = {
+            "captured_at_epoch": now,
+            "captured_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "request": json.loads(json.dumps(r, default=str)),
+            "rendered_ids": [int(token_id) for token_id in ids],
+        }
+        with _CAPTURE_OUTPUT_PATH.open("x", encoding="utf-8") as output_file:
+            json.dump(payload, output_file, ensure_ascii=False, indent=2)
+            output_file.write("\n")
+    except Exception:
+        print("vllm_radiance request capture failed", file=sys.stderr, flush=True)
+
+
 def create(c:dict[str,Any])->dict[str,Any]:
     validate_config(c)
     for path in reversed([_need(c,key) for key in ("python_site","vllm_source","radiance_source","radiance_extension")]):
@@ -68,6 +97,7 @@ def create(c:dict[str,Any])->dict[str,Any]:
     from vllm.utils.import_utils import has_quark
     from vllm.v1.engine.core_client import InprocClient
     from vllm.v1.engine.llm_engine import LLMEngine
+    from inferdeck_vllm_radiance_penalties import InferDeckPenaltiesProcessor
     _register_qwen35_model_class()
     if not has_quark():raise RuntimeError("amd-quark is required")
     import torch
@@ -82,7 +112,7 @@ def create(c:dict[str,Any])->dict[str,Any]:
         selector=_load("inferdeck_selector",_need(c,"selector_overlay")).install_radiance_overlay(observe_apply=False,max_observations=128);selector.__enter__();contexts.insert(0,selector)
         prefill=_load("inferdeck_prefill",_need(c,"prefill_overlay")).install_r4d_prefill_overlay(Path(_need(c,"prefill_dll")),compare_reference=False,expected_dll_sha256=c["prefill_dll_sha256"]);prefill.__enter__();contexts.insert(0,prefill)
         model=_need(c,"model");tokenizer_revision=register_tokenizer(model)
-        engine=LLMEngine.from_engine_args(EngineArgs(model=model,tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",max_model_len=106496,max_num_batched_tokens=4096,max_num_seqs=1,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=.90,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config={"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}),enable_multiprocessing=False)
+        engine=LLMEngine.from_engine_args(EngineArgs(model=model,logits_processors=[InferDeckPenaltiesProcessor],tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",max_model_len=106496,max_num_batched_tokens=4096,max_num_seqs=1,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=.90,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config={"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}),enable_multiprocessing=False)
         tokenizer=cached_tokenizer_from_config(engine.vllm_config.model_config)
         if engine.vllm_config.model_config.enable_prompt_embeds:raise RuntimeError("native pooled tokenizer does not support prompt embeds")
         if not isinstance(engine.engine_core,InprocClient):raise RuntimeError("V1 InprocClient was not constructed")
@@ -136,8 +166,28 @@ def begin(s:dict[str,Any],r:dict[str,Any])->str:
         maximum = 106496 - len(ids)
     if maximum <= 0 or len(ids) + maximum > 106496:
         raise RuntimeError("request exceeds configured context")
+    _capture_next_request(r, ids)
     sampling=request.to_sampling_params(maximum,{})
+    penalties = {
+        "repeat_last_n": int(r.get("repeat_last_n", 64)),
+        "repetition_penalty": float(r["sampling"].get("repetition_penalty", 1.0)),
+        "frequency_penalty": float(r["sampling"].get("frequency_penalty", 0.0)),
+        "presence_penalty": float(r["sampling"].get("presence_penalty", 0.0)),
+    }
+    sampling.extra_args = {**(getattr(sampling, "extra_args", None) or {}), "inferdeck_penalties": penalties}
+    sampling.repetition_penalty = 1.0
+    sampling.frequency_penalty = 0.0
+    sampling.presence_penalty = 0.0
     sampling.output_kind=RequestOutputKind.DELTA
+    print("event=sampling_resolved runtime=vllm_radiance " + json.dumps({
+        "model": r["model"], "inferdeck_penalties": penalties,
+        "temperature": getattr(sampling, "temperature", None), "top_p": getattr(sampling, "top_p", None),
+        "top_k": getattr(sampling, "top_k", None), "min_p": getattr(sampling, "min_p", None),
+        "repetition_penalty": getattr(sampling, "repetition_penalty", None),
+        "frequency_penalty": getattr(sampling, "frequency_penalty", None),
+        "presence_penalty": getattr(sampling, "presence_penalty", None),
+        "seed": getattr(sampling, "seed", None), "max_tokens": getattr(sampling, "max_tokens", None),
+    }), file=sys.stderr, flush=True)
     if r.get("stop"):sampling.stop=r["stop"]
     rid=uuid.uuid4().hex;s["engine"].add_request(rid,ids,sampling,priority=0);s["active"].add(rid);s["requests"][rid]={"request":request,"parser":Qwen3Parser(s["tokenizer"],request.tools,chat_template_kwargs={"enable_thinking":r.get("enable_reasoning",True)}),"ids":ids,"completion_tokens":0,"had_tools":False};return rid
 def step(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:

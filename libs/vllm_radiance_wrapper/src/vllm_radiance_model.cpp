@@ -55,7 +55,13 @@ PyPtr json_value(const std::string& text) {
     if (!value) throw std::runtime_error("invalid JSON value: " + python_error());
     return value;
 }
-PyObject* text_dict(const model::InferenceRequest& request) {
+std::optional<std::string> validate_sampling(const model::SamplingConfig& defaults) {
+    if (defaults.dry_multiplier != 0.0f)
+        return "vllm_radiance does not support nonzero dry_multiplier";
+    return std::nullopt;
+}
+PyObject* text_dict(const model::InferenceRequest& request,
+                    const model::SamplingConfig& defaults) {
     PyPtr result = owned(PyDict_New()); PyPtr messages = owned(PyList_New(0));
     for (const auto& message : request.messages) {
         PyPtr item = owned(PyDict_New()); const char* role = "user";
@@ -71,14 +77,23 @@ PyObject* text_dict(const model::InferenceRequest& request) {
     set_owned(result.get(),"messages",std::move(messages)); PyPtr tools=owned(PyList_New(0));
     for(const auto& tool:request.tools){PyPtr function=owned(PyDict_New());set_owned(function.get(),"name",owned(PyUnicode_FromString(tool.name.c_str())));set_owned(function.get(),"description",owned(PyUnicode_FromString(tool.description.c_str())));set_owned(function.get(),"parameters",json_value(tool.parameters_schema));PyPtr item=owned(PyDict_New());set_owned(item.get(),"type",owned(PyUnicode_FromString("function")));set_owned(item.get(),"function",std::move(function));if(PyList_Append(tools.get(),item.get())!=0)return nullptr;}
     set_owned(result.get(),"tools",std::move(tools)); PyPtr sampling=owned(PyDict_New());
-    if(request.sampling.temperature)set_owned(sampling.get(),"temperature",owned(PyFloat_FromDouble(*request.sampling.temperature)));if(request.sampling.top_p)set_owned(sampling.get(),"top_p",owned(PyFloat_FromDouble(*request.sampling.top_p)));if(request.sampling.top_k)set_owned(sampling.get(),"top_k",owned(PyLong_FromLong(*request.sampling.top_k)));if(request.sampling.min_p)set_owned(sampling.get(),"min_p",owned(PyFloat_FromDouble(*request.sampling.min_p)));if(request.sampling.seed>=0)set_owned(sampling.get(),"seed",owned(PyLong_FromLongLong(request.sampling.seed)));set_owned(result.get(),"sampling",std::move(sampling));
-    if (request.sampling.repeat_penalty) set_owned(PyDict_GetItemString(result.get(), "sampling"), "repetition_penalty", owned(PyFloat_FromDouble(*request.sampling.repeat_penalty)));
+    const float temperature = request.sampling.temperature.value_or(defaults.temperature);
+    const float top_p = request.sampling.top_p.value_or(defaults.top_p);
+    const int top_k = request.sampling.top_k.value_or(defaults.top_k) <= 0 ? -1 : request.sampling.top_k.value_or(defaults.top_k);
+    const float min_p = request.sampling.min_p.value_or(defaults.min_p);
+    const float repeat_penalty = request.sampling.repeat_penalty.value_or(defaults.repeat_penalty);
+    const int repeat_last_n = request.sampling.repeat_last_n.value_or(defaults.repeat_last_n);
+    set_owned(sampling.get(),"temperature",owned(PyFloat_FromDouble(temperature)));
+    set_owned(sampling.get(),"top_p",owned(PyFloat_FromDouble(top_p)));
+    set_owned(sampling.get(),"top_k",owned(PyLong_FromLong(top_k)));
+    set_owned(sampling.get(),"min_p",owned(PyFloat_FromDouble(min_p)));
+    if(request.sampling.seed>=0)set_owned(sampling.get(),"seed",owned(PyLong_FromLongLong(request.sampling.seed)));set_owned(result.get(),"sampling",std::move(sampling));
+    set_owned(result.get(), "repeat_last_n", owned(PyLong_FromLong(repeat_last_n)));
+    set_owned(PyDict_GetItemString(result.get(), "sampling"), "repetition_penalty", owned(PyFloat_FromDouble(repeat_penalty)));
     if (request.sampling.frequency_penalty) set_owned(PyDict_GetItemString(result.get(), "sampling"), "frequency_penalty", owned(PyFloat_FromDouble(*request.sampling.frequency_penalty)));
     if (request.sampling.presence_penalty) set_owned(PyDict_GetItemString(result.get(), "sampling"), "presence_penalty", owned(PyFloat_FromDouble(*request.sampling.presence_penalty)));
     if (request.sampling.mirostat.value_or(0) != 0 || request.sampling.tfs_z.value_or(1.0f) != 1.0f)
         throw std::runtime_error("vllm_radiance does not support mirostat or tail-free sampling");
-    if (request.sampling.repeat_penalty.value_or(1.0f) != 1.0f && request.sampling.repeat_last_n && *request.sampling.repeat_last_n != -1)
-        throw std::runtime_error("vllm_radiance repetition penalty requires full-history repeat_last_n=-1");
     if (!request.sampling.logit_bias.empty())
     {
         PyPtr bias = owned(PyDict_New());
@@ -267,10 +282,12 @@ foundation::Result<model::InferenceResult> VllmRadianceModel::predict_stream(
     };
     try
     {
+        if (const auto sampling_error = validate_sampling(state_->info.sampling))
+            return foundation::Err<model::InferenceResult>(foundation::ErrorCode::InvalidArgument, *sampling_error);
         const auto cancelled = [&]() { return state_->cancel.load() || (external && external->load()); };
         if (cancelled()) return foundation::Err<model::InferenceResult>(foundation::ErrorCode::Cancelled, "request cancelled");
         const auto began = std::chrono::steady_clock::now();
-        PyPtr input = owned(text_dict(request));
+        PyPtr input = owned(text_dict(request, state_->info.sampling));
         if (!input) throw std::runtime_error(python_error());
         set_owned(input.get(), "model", owned(PyUnicode_FromString(state_->info.name.c_str())));
         if (request.tool_choice.kind == inference::ToolChoiceKind::Function)

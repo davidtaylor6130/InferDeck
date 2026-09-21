@@ -1,6 +1,8 @@
+import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -11,6 +13,69 @@ import inferdeck_vllm_radiance_profile as profile
 
 
 class ProfileTests(unittest.TestCase):
+    def _capture_patches(self, directory):
+        return (
+            patch.object(profile, "_CAPTURE_MARKER_PATH", Path(directory) / "capture-next-request.json"),
+            patch.object(profile, "_CAPTURE_OUTPUT_PATH", Path(directory) / "captured-request.json"),
+        )
+
+    def test_request_capture_ignores_absent_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker_patch, output_patch = self._capture_patches(directory)
+            with marker_patch, output_patch:
+                profile._capture_next_request({"messages": [{"content": "private"}]}, [1, 2])
+            self.assertFalse((Path(directory) / "captured-request.json").exists())
+
+    def test_request_capture_consumes_expired_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "capture-next-request.json"
+            marker.write_text(json.dumps({"expires_at": time.time() - 1}), encoding="utf-8")
+            marker_patch, output_patch = self._capture_patches(directory)
+            with marker_patch, output_patch:
+                profile._capture_next_request({"messages": []}, [1])
+            self.assertFalse(marker.exists())
+            self.assertFalse((Path(directory) / "captured-request.json").exists())
+
+    def test_request_capture_is_one_shot_and_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "capture-next-request.json"
+            output = Path(directory) / "captured-request.json"
+            marker.write_text(json.dumps({"expires_at": time.time() + 60}), encoding="utf-8")
+            marker_patch, output_patch = self._capture_patches(directory)
+            with marker_patch, output_patch:
+                profile._capture_next_request({"messages": []}, [7, 8])
+                first = output.read_text(encoding="utf-8")
+                marker.write_text(json.dumps({"expires_at": time.time() + 60}), encoding="utf-8")
+                profile._capture_next_request({"messages": []}, [9])
+            self.assertEqual(json.loads(first)["rendered_ids"], [7, 8])
+            self.assertEqual(output.read_text(encoding="utf-8"), first)
+            self.assertFalse(marker.exists())
+
+    def test_request_capture_rejects_nan_and_malformed_markers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "capture-next-request.json"
+            marker.write_text(json.dumps({"expires_at": float("nan")}), encoding="utf-8")
+            marker_patch, output_patch = self._capture_patches(directory)
+            with marker_patch, output_patch:
+                profile._capture_next_request({"messages": []}, [1])
+            self.assertFalse(marker.exists())
+            self.assertFalse((Path(directory) / "captured-request.json").exists())
+            marker.write_text("not-json", encoding="utf-8")
+            with marker_patch, output_patch:
+                profile._capture_next_request({"messages": []}, [2])
+            self.assertTrue(marker.exists())
+            self.assertFalse((Path(directory) / "captured-request.json").exists())
+
+    def test_request_capture_rejects_marker_over_ten_minutes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "capture-next-request.json"
+            marker.write_text(json.dumps({"expires_at": time.time() + 601}), encoding="utf-8")
+            marker_patch, output_patch = self._capture_patches(directory)
+            with marker_patch, output_patch:
+                profile._capture_next_request({"messages": []}, [1])
+            self.assertFalse(marker.exists())
+            self.assertFalse((Path(directory) / "captured-request.json").exists())
+
     def test_digest_is_not_a_path(self):
         with tempfile.TemporaryDirectory() as directory:
             config = {key: directory for key in profile._REQUIRED}
@@ -101,7 +166,7 @@ class ProfileTests(unittest.TestCase):
                  "engine": NS(add_request=add_request), "active": set(), "requests": {}}
         request = {"model": "qwen", "messages": [], "tools": [{"type": "function"}],
                    "tool_choice": {"type": "function", "function": {"name": "lookup"}},
-                   "sampling": {}, "structured_outputs": structured_outputs,
+                   "sampling": {"repetition_penalty": 1.2, "frequency_penalty": 0.5, "presence_penalty": 0.25}, "repeat_last_n": 64, "structured_outputs": structured_outputs,
                    "stop": ["END"], "max_output_tokens": -1}
         with patch.dict(sys.modules, modules):
             profile.begin(state, request)
@@ -109,6 +174,12 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(captured["defaults"], {})
             self.assertIs(captured["engine_sampling"], captured["sampling"])
             self.assertIs(captured["sampling"].output_kind, delta_kind)
+            self.assertEqual(captured["sampling"].repetition_penalty, 1.0)
+            self.assertEqual(captured["sampling"].frequency_penalty, 0.0)
+            self.assertEqual(captured["sampling"].presence_penalty, 0.0)
+            self.assertEqual(captured["sampling"].extra_args["inferdeck_penalties"], {
+                "repeat_last_n": 64, "repetition_penalty": 1.2,
+                "frequency_penalty": 0.5, "presence_penalty": 0.25})
             self.assertEqual(captured["sampling"].structured_outputs.structural_tag, '{"format": "qwen"}')
             self.assertEqual(captured["sampling"].stop, ["END"])
             self.assertIs(captured["adjusted_request"], state["requests"][next(iter(state["requests"]))]["request"])

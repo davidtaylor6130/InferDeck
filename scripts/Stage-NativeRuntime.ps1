@@ -18,7 +18,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Gateway version check failed' }
 if ($version -notmatch 'revision=([0-9a-f]{40}) dirty=(true|false)') { throw 'Gateway version lacks build provenance' }
 $revision = $Matches[1]
 $dirty = $Matches[2] -eq 'true'
-foreach ($required in @('python312.dll','python/inferdeck_vllm_radiance_profile.py','python/inferdeck_vllm_radiance_lifecycle.py','python/inferdeck_vllm_radiance_tokenizer.py','static/index.html')) {
+foreach ($required in @('python312.dll','python/inferdeck_vllm_radiance_profile.py','python/inferdeck_vllm_radiance_lifecycle.py','python/inferdeck_vllm_radiance_tokenizer.py','python/inferdeck_vllm_radiance_penalties.py','static/index.html')) {
     if (!(Test-Path -LiteralPath (Join-Path $build $required) -PathType Leaf)) { throw ('Missing candidate artifact: ' + $required) }
 }
 New-Item -ItemType Directory -Path $target | Out-Null
@@ -26,7 +26,7 @@ Copy-Item -LiteralPath $exe -Destination $target
 Get-ChildItem -LiteralPath $build -Filter '*.dll' -File | Where-Object Name -NotIn @('fmtd.dll','spdlogd.dll') | Copy-Item -Destination $target
 Copy-Item -LiteralPath (Join-Path $build 'static') -Destination $target -Recurse
 New-Item -ItemType Directory -Path (Join-Path $target 'python') | Out-Null
-foreach ($module in @('inferdeck_vllm_radiance_profile.py','inferdeck_vllm_radiance_lifecycle.py','inferdeck_vllm_radiance_tokenizer.py')) {
+foreach ($module in @('inferdeck_vllm_radiance_profile.py','inferdeck_vllm_radiance_lifecycle.py','inferdeck_vllm_radiance_tokenizer.py','inferdeck_vllm_radiance_penalties.py')) {
     Copy-Item -LiteralPath (Join-Path $build ('python/' + $module)) -Destination (Join-Path $target 'python')
 }
 if ($configPath) { New-Item -ItemType Directory -Path (Join-Path $target 'config') | Out-Null; Copy-Item -LiteralPath $configPath -Destination (Join-Path $target 'config/gateway.yml') }

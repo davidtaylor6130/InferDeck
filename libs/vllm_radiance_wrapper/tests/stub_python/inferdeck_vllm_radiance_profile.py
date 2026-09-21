@@ -2,9 +2,14 @@ def create(config):
     return {"active": set(), "request": None, "step": 0}
 def begin(state, request):
     assert request["tool_choice"] == "required"
+    assert abs(request["sampling"]["temperature"] - 0.65) < 1e-6
+    assert abs(request["sampling"]["top_p"] - 0.87) < 1e-6
+    assert request["sampling"]["top_k"] == 17
+    assert abs(request["sampling"]["min_p"] - 0.0) < 1e-6
     assert request["sampling"]["presence_penalty"] == 1.0
     assert request["sampling"]["frequency_penalty"] == 0.5
-    assert request["sampling"]["repetition_penalty"] == 1.0
+    assert any(abs(request["sampling"]["repetition_penalty"] - value) < 1e-6 for value in (1.0, 1.2))
+    assert request["repeat_last_n"] in (-1, 64)
     assert request["sampling"]["logit_bias"] == {42: -2.0}
     assistant = request["messages"][0]
     assert assistant["reasoning_content"] == "prior reasoning"
