@@ -695,6 +695,7 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     CHECK(created_body["name"] == "stable-chat");
     CHECK(created_body["target"] == "concrete-model");
     CHECK(created_body["requiredContextSize"] == 16384);
+    CHECK(routes.reloads.load() == 0);
 
     const auto listed = client.Get("/api/inferdeck/v1/model-aliases");
     REQUIRE(listed);
@@ -713,8 +714,15 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     REQUIRE(removed);
     REQUIRE(removed->status == 200);
     CHECK(routes.registry.aliases().empty());
-    const auto after_delete = YAML::Load(TempConfig::read(config.active));
+    const auto after_delete_response = client.Get("/api/inferdeck/v1/model-aliases");
+    REQUIRE(after_delete_response);
+    REQUIRE(after_delete_response->status == 200);
+    CHECK(nlohmann::json::parse(after_delete_response->body)["aliases"].empty());
+    CHECK(routes.reloads.load() == 0);
+    const auto deleted_yaml = TempConfig::read(config.active);
+    const auto after_delete = YAML::Load(deleted_yaml);
     CHECK(after_delete["model_aliases"].size() == 0);
+    CHECK(routes.reloads.load() == 0);
 }
 
 TEST_CASE("Model alias API retargets an indentless YAML sequence at EOF",
@@ -762,11 +770,38 @@ TEST_CASE("Model alias API retargets an indentless YAML sequence at EOF",
         "/api/inferdeck/v1/model-aliases/deep", change.dump(), "application/json");
     REQUIRE(updated);
     REQUIRE(updated->status == 200);
-    const auto persisted = YAML::Load(TempConfig::read(config.active));
+    CHECK(routes.reloads.load() == 0);
+    const auto after_update = client.Get("/api/inferdeck/v1/model-aliases");
+    REQUIRE(after_update);
+    REQUIRE(after_update->status == 200);
+    const auto updated_aliases = nlohmann::json::parse(after_update->body)["aliases"];
+    REQUIRE(updated_aliases.size() == 2);
+    CHECK(updated_aliases[0]["target"] == "model-b");
+    const auto persisted_text = TempConfig::read(config.active);
+    const auto persisted = YAML::Load(persisted_text);
     REQUIRE(persisted["model_aliases"].size() == 2);
     CHECK(persisted["model_aliases"][0]["name"].as<std::string>() == "deep");
     CHECK(persisted["model_aliases"][0]["target"].as<std::string>() == "model-b");
     CHECK(persisted["model_aliases"][1]["name"].as<std::string>() == "everyday");
+    CHECK(routes.reloads.load() == 0);
+
+    routes.validate = [](const std::string&) {
+        return inferdeck::foundation::Err<void>(
+            ErrorCode::InvalidArgument, "expected validation failure");
+    };
+    const nlohmann::json failed_update_body{
+        {"target", "model-a"},
+        {"revision", nlohmann::json::parse(after_update->body)["revision"]},
+    };
+    const auto failed_update = client.Put(
+        "/api/inferdeck/v1/model-aliases/deep", failed_update_body.dump(),
+        "application/json");
+    REQUIRE(failed_update);
+    CHECK(failed_update->status == 400);
+    REQUIRE(routes.registry.aliases().size() == 2);
+    CHECK(routes.registry.aliases()[0].target == "model-b");
+    CHECK(TempConfig::read(config.active) == persisted_text);
+    CHECK(routes.reloads.load() == 0);
 }
 
 TEST_CASE("Pricing API exposes cached input rates for models and aliases",
