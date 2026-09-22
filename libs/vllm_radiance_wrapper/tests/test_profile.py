@@ -13,6 +13,17 @@ import inferdeck_vllm_radiance_profile as profile
 
 
 class ProfileTests(unittest.TestCase):
+    def test_pal_resource_cache_is_bounded_before_runtime_dependencies(self):
+        for explicit in (None, "128"):
+            with self.subTest(explicit=explicit):
+                environment = {} if explicit is None else {"GPU_RESOURCE_CACHE_SIZE": explicit}
+                def dependency_boundary(*args):
+                    self.assertEqual(environment.get("GPU_RESOURCE_CACHE_SIZE"), explicit or "64")
+                    raise RuntimeError("dependency boundary reached")
+                with patch.object(profile, "os", NS(environ=environment)), patch.object(profile, "validate_config"), patch.object(profile, "_need", side_effect=dependency_boundary):
+                    with self.assertRaisesRegex(RuntimeError, "dependency boundary reached"):
+                        profile._create({})
+
     def test_load_stack_diagnostics_stop_after_success_or_failure(self):
         for failure in (None, RuntimeError("engine load failed")):
             with self.subTest(failure=failure), patch.object(profile, "faulthandler") as handler, patch.object(profile, "_create", side_effect=failure, return_value={"engine": "loaded"}) as create:

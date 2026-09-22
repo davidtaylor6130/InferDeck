@@ -117,6 +117,7 @@ def create(c:dict[str,Any])->dict[str,Any]:
 
 def _create(c:dict[str,Any])->dict[str,Any]:
     validate_config(c)
+    os.environ.setdefault("GPU_RESOURCE_CACHE_SIZE", "64")
     prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
     for path in reversed([_need(c,key) for key in ("python_site","vllm_source","radiance_source","radiance_extension")]):
         if path not in sys.path:sys.path.insert(0,path)
