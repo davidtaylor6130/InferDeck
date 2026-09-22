@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import importlib
 import copy
+import faulthandler
 import json
 import gc
 import hashlib
@@ -101,6 +102,20 @@ def _capture_next_request(r:dict[str,Any], ids:list[Any])->None:
 
 
 def create(c:dict[str,Any])->dict[str,Any]:
+    diagnostic_started = False
+    try:
+        try:
+            faulthandler.dump_traceback_later(60, repeat=True, file=sys.stderr)
+            diagnostic_started = True
+        except (RuntimeError, OSError, ValueError, AttributeError) as error:
+            print(f"vllm_radiance load stack diagnostics unavailable: {error}", file=sys.stderr, flush=True)
+        return _create(c)
+    finally:
+        if diagnostic_started:
+            faulthandler.cancel_dump_traceback_later()
+
+
+def _create(c:dict[str,Any])->dict[str,Any]:
     validate_config(c)
     prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
     for path in reversed([_need(c,key) for key in ("python_site","vllm_source","radiance_source","radiance_extension")]):
