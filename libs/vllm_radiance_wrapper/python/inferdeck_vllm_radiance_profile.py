@@ -189,7 +189,8 @@ def begin(s:dict[str,Any],r:dict[str,Any])->str:
         "seed": getattr(sampling, "seed", None), "max_tokens": getattr(sampling, "max_tokens", None),
     }), file=sys.stderr, flush=True)
     if r.get("stop"):sampling.stop=r["stop"]
-    rid=uuid.uuid4().hex;s["engine"].add_request(rid,ids,sampling,priority=0);s["active"].add(rid);s["requests"][rid]={"request":request,"parser":Qwen3Parser(s["tokenizer"],request.tools,chat_template_kwargs={"enable_thinking":r.get("enable_reasoning",True)}),"ids":ids,"completion_tokens":0,"had_tools":False};return rid
+    parser_kwargs = {"enable_thinking": kwargs["enable_thinking"]} if "enable_thinking" in kwargs else {}
+    rid=uuid.uuid4().hex;s["engine"].add_request(rid,ids,sampling,priority=0);s["active"].add(rid);s["requests"][rid]={"request":request,"parser":Qwen3Parser(s["tokenizer"],request.tools,chat_template_kwargs=parser_kwargs),"ids":ids,"completion_tokens":0,"had_tools":False};return rid
 def step(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
     state=s["requests"].get(rid)
     if state is None:raise RuntimeError("unknown vllm_radiance request")

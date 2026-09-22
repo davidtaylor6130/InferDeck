@@ -187,6 +187,57 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "exceeds configured context"):
                 profile.begin(state, request)
 
+    def test_begin_parser_reasoning_kwargs_preserve_absent_null_and_explicit_values(self):
+        parser_calls = []
+        template_calls = []
+
+        class Request:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                self.tools = kwargs["tools"]
+
+            def to_sampling_params(self, maximum, defaults):
+                return NS(output_kind=None, structured_outputs=None, stop=[])
+
+        class ToolParser:
+            def __init__(self, tokenizer, tools):
+                pass
+
+            def adjust_request(self, request):
+                return request
+
+        def parser(*args, **kwargs):
+            parser_calls.append(kwargs)
+            return NS()
+
+        modules = {
+            "vllm.entrypoints.openai.chat_completion.protocol": NS(ChatCompletionRequest=Request),
+            "vllm.parser.qwen3": NS(Qwen3Parser=parser),
+            "vllm.sampling_params": NS(RequestOutputKind=NS(DELTA=object()), StructuredOutputsParams=lambda **kw: NS(**kw)),
+            "vllm.tool_parsers.structural_tag_registry": NS(get_model_structural_tag=lambda *args, **kw: None),
+            "vllm.tool_parsers.qwen3_engine_tool_parser": NS(Qwen3EngineToolParser=ToolParser),
+        }
+
+        def tokenize(*args, **kwargs):
+            template_calls.append(kwargs)
+            return [1, 2]
+
+        state = {"tokenizer": NS(apply_chat_template=tokenize),
+                 "engine": NS(add_request=lambda *args, **kwargs: None), "active": set(), "requests": {}}
+        base = {"model": "qwen", "messages": [], "sampling": {}, "max_output_tokens": 1}
+        with patch.dict(sys.modules, modules):
+            for value in ("absent", None, False, True):
+                request = dict(base)
+                if value != "absent":
+                    request["enable_reasoning"] = value
+                profile.begin(state, request)
+
+        self.assertEqual([call["chat_template_kwargs"].get("enable_thinking", True)
+                          for call in parser_calls], [True, True, False, True])
+        self.assertEqual([call.get("enable_thinking", True)
+                          for call in template_calls], [True, True, False, True])
+        self.assertEqual([call["add_generation_prompt"] for call in template_calls], [True] * 4)
+        self.assertEqual([call["tokenize"] for call in template_calls], [True] * 4)
     def test_stream_counts_delta_tokens_and_tool_finish(self):
         seen = []
         class Parser:
