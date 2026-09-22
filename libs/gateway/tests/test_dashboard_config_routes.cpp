@@ -717,6 +717,58 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     CHECK(after_delete["model_aliases"].size() == 0);
 }
 
+TEST_CASE("Model alias API retargets an indentless YAML sequence at EOF",
+          "[gateway][dashboard][aliases]") {
+    TempConfig config;
+    TempConfig::write(config.base,
+        "gateway:\n  host: 127.0.0.1\n  port: 11434\n"
+        "model_aliases:\n"
+        "- name: deep\n  target: model-a\n"
+        "  required_context_size: 32768\n"
+        "  required_capabilities:\n  - chat_completions\n  - responses\n"
+        "- name: everyday\n  target: model-a\n"
+        "  required_context_size: 32768\n"
+        "  required_capabilities:\n  - chat_completions\n  - responses\n");
+    ConfigRouteServer routes(config);
+    for (const std::string& name : {"model-a", "model-b"}) {
+        inferdeck::model::ModelInfo target;
+        target.name = name;
+        target.gguf_path = "C:/fake/model.gguf";
+        target.context_size = 32768;
+        target.capabilities = {"chat_completions", "responses"};
+        routes.registry.register_model(target);
+    }
+    for (const std::string& name : {"deep", "everyday"}) {
+        inferdeck::model::ModelAlias alias;
+        alias.name = name;
+        alias.target = "model-a";
+        alias.required_context_size = 32768;
+        alias.required_capabilities = {"chat_completions", "responses"};
+        REQUIRE(routes.registry.set_alias(alias));
+    }
+    routes.validate = [](const std::string& value) {
+        YAML::Load(value);
+        return Ok();
+    };
+    auto client = routes.client();
+    const auto listed = client.Get("/api/inferdeck/v1/model-aliases");
+    REQUIRE(listed);
+    REQUIRE(listed->status == 200);
+    const nlohmann::json change{
+        {"target", "model-b"},
+        {"revision", nlohmann::json::parse(listed->body)["revision"]},
+    };
+    const auto updated = client.Put(
+        "/api/inferdeck/v1/model-aliases/deep", change.dump(), "application/json");
+    REQUIRE(updated);
+    REQUIRE(updated->status == 200);
+    const auto persisted = YAML::Load(TempConfig::read(config.active));
+    REQUIRE(persisted["model_aliases"].size() == 2);
+    CHECK(persisted["model_aliases"][0]["name"].as<std::string>() == "deep");
+    CHECK(persisted["model_aliases"][0]["target"].as<std::string>() == "model-b");
+    CHECK(persisted["model_aliases"][1]["name"].as<std::string>() == "everyday");
+}
+
 TEST_CASE("Pricing API exposes cached input rates for models and aliases",
           "[gateway][dashboard][pricing]") {
     TempConfig config;

@@ -23,7 +23,8 @@ std::string replace_top_level_yaml_section(
             start = line_start;
         } else if (start != std::string::npos && !line.empty() &&
                    line.front() != ' ' && line.front() != '\t' &&
-                   line.front() != '\r') {
+                   line.front() != '\r' &&
+                   line != "-" && !line.starts_with("- ")) {
             end = line_start;
             break;
         }
