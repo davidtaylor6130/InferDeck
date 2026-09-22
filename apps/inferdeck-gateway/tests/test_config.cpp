@@ -819,3 +819,21 @@ TEST_CASE("Published LTX profile loads through gateway configuration", "[config]
     CHECK(config.models.front().modality == "video");
     CHECK(config.models.front().n_slots == 1);
 }
+
+TEST_CASE("Radiance prefill selection is validated before startup", "[config][radiance]")
+{
+    const std::string prefix = R"(
+model_registry:
+  - name: prefill-candidate
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    artifacts:
+      model: C:/models/qwen-mxfp4
+)";
+    CHECK(validate_config_text(prefix));
+    CHECK(validate_config_text(prefix + "      prefill_attention: r4d\n"));
+    CHECK(validate_config_text(prefix + "      prefill_attention: upstream\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: automatic\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: ''\n"));
+}

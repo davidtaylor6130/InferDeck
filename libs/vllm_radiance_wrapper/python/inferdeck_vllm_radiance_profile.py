@@ -1,6 +1,7 @@
 """Pinned synchronous V1 InprocClient bridge. No inference worker or HTTP server; Triton may invoke compiler tools."""
 from __future__ import annotations
 import importlib.util
+import importlib
 import copy
 import json
 import gc
@@ -22,6 +23,8 @@ _CAPTURE_MARKER_PATH = Path(__file__).with_name("capture-next-request.json")
 _CAPTURE_OUTPUT_PATH = Path(__file__).with_name("captured-request.json")
 
 _REQUIRED=("model","python_root","python_site","vllm_source","radiance_source","radiance_extension","rocm","selector_overlay","pread_overlay","prefill_overlay","prefill_dll","prefill_dll_sha256")
+_PREFILL_ATTENTION_DEFAULT = "r4d"
+_PREFILL_ATTENTION_OPTIONS = frozenset(("r4d", "upstream"))
 def _need(c:dict[str,Any],k:str)->str:
     v=c.get(k)
     if not isinstance(v,str) or not v or not Path(v).exists(): raise RuntimeError(f"required vllm_radiance artifact is unavailable: {k}")
@@ -33,7 +36,13 @@ def _load(n:str,p:str)->Any:
 def validate_config(c:dict[str,Any])->None:
     if c.get("runtime")!="vllm_radiance":raise RuntimeError("runtime must be vllm_radiance")
     if int(c.get("context_size",0))!=106496 or int(c.get("n_slots",0))!=1 or int(c.get("min_slots",0))!=1:raise RuntimeError("requires 106496 context and exactly one slot")
+    prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
+    if not isinstance(prefill_attention, str) or prefill_attention not in _PREFILL_ATTENTION_OPTIONS:
+        raise RuntimeError("prefill_attention must be one of: r4d, upstream")
+    optional_r4d = {"prefill_overlay", "prefill_dll", "prefill_dll_sha256"}
     for key in _REQUIRED:
+        if prefill_attention == "upstream" and key in optional_r4d:
+            continue
         if key == "prefill_dll_sha256":
             if not re.fullmatch(r"[0-9a-fA-F]{64}", str(c.get(key, ""))):
                 raise RuntimeError("prefill_dll_sha256 must be a SHA-256 digest")
@@ -49,6 +58,22 @@ def _register_qwen35_model_class()->type:
     from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
     ModelRegistry.register_model("Qwen3_5ForConditionalGeneration", Qwen3_5ForConditionalGeneration)
     return Qwen3_5ForConditionalGeneration
+def _verify_upstream_prefill_attention()->Any:
+    """Return the active vLLM Triton attention binding after identity validation."""
+    module_name = "vllm.v1.attention.ops.triton_unified_attention"
+    backend_name = "vllm.v1.attention.backends.triton_attn"
+    try:
+        definition_module = importlib.import_module(module_name)
+        backend_module = importlib.import_module(backend_name)
+    except Exception as error:
+        raise RuntimeError(f"upstream prefill attention module is unavailable: {error}") from error
+    definition = getattr(definition_module, "unified_attention", None)
+    active = getattr(backend_module, "unified_attention", None)
+    if not callable(definition) or getattr(definition, "__module__", None) != module_name:
+        raise RuntimeError("upstream prefill attention definition is not the expected callable")
+    if active is not definition or getattr(active, "__module__", None) != module_name:
+        raise RuntimeError("vLLM Triton attention backend has an unexpected unified_attention binding")
+    return active
 def _capture_next_request(r:dict[str,Any], ids:list[Any])->None:
     """Consume a short-lived operator marker and save one rendered request privately."""
     try:
@@ -77,6 +102,7 @@ def _capture_next_request(r:dict[str,Any], ids:list[Any])->None:
 
 def create(c:dict[str,Any])->dict[str,Any]:
     validate_config(c)
+    prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
     for path in reversed([_need(c,key) for key in ("python_site","vllm_source","radiance_source","radiance_extension")]):
         if path not in sys.path:sys.path.insert(0,path)
     os.environ.update({"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1","VLLM_TARGET_DEVICE":"rocm","VLLM_ENABLE_V1_MULTIPROCESSING":"0","VLLM_NO_USAGE_STATS":"1","VLLM_USE_RUST_FRONTEND":"0","ROCM_PATH":_need(c,"rocm"),"HIP_PATH":_need(c,"rocm"),"RADIANCE_MXFP4_W4A8":"1","RADIANCE_MXFP4":"1","RADIANCE_MXFP4_WPERM":"1","RADIANCE_MXFP4_A_TILED_MIN_M":"513","RADIANCE_MXFP4_W4A8_MIN_M":"0","RADIANCE_MXFP4_DECODE_MAX_M":"8","RADIANCE_MXFP4_R4D_DECODE_MAX_M":"0","RADIANCE_FUSE_RMS_QUANT":"1"})
@@ -110,14 +136,20 @@ def create(c:dict[str,Any])->dict[str,Any]:
     try:
         pread=_load("inferdeck_pread",_need(c,"pread_overlay")).install_pread_overlay();pread.__enter__();contexts.insert(0,pread)
         selector=_load("inferdeck_selector",_need(c,"selector_overlay")).install_radiance_overlay(observe_apply=False,max_observations=128);selector.__enter__();contexts.insert(0,selector)
-        prefill=_load("inferdeck_prefill",_need(c,"prefill_overlay")).install_r4d_prefill_overlay(Path(_need(c,"prefill_dll")),compare_reference=False,expected_dll_sha256=c["prefill_dll_sha256"]);prefill.__enter__();contexts.insert(0,prefill)
+        if prefill_attention == "r4d":
+            prefill=_load("inferdeck_prefill",_need(c,"prefill_overlay")).install_r4d_prefill_overlay(Path(_need(c,"prefill_dll")),compare_reference=False,expected_dll_sha256=c["prefill_dll_sha256"]);prefill.__enter__();contexts.insert(0,prefill)
+        else:
+            _verify_upstream_prefill_attention()
         model=_need(c,"model");tokenizer_revision=register_tokenizer(model)
         engine=LLMEngine.from_engine_args(EngineArgs(model=model,logits_processors=[InferDeckPenaltiesProcessor],tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",max_model_len=106496,max_num_batched_tokens=4096,max_num_seqs=1,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=.90,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config={"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}),enable_multiprocessing=False)
         tokenizer=cached_tokenizer_from_config(engine.vllm_config.model_config)
         if engine.vllm_config.model_config.enable_prompt_embeds:raise RuntimeError("native pooled tokenizer does not support prompt embeds")
         if not isinstance(engine.engine_core,InprocClient):raise RuntimeError("V1 InprocClient was not constructed")
         if engine.vllm_config.model_config.enforce_eager or engine.vllm_config.scheduler_config.max_num_batched_tokens!=4096 or engine.vllm_config.scheduler_config.max_num_seqs!=1:raise RuntimeError("effective engine differs from measured profile")
-        return {"engine":engine,"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts)}
+        if prefill_attention == "upstream":
+            _verify_upstream_prefill_attention()
+        print(f"vllm_radiance prefill_attention={prefill_attention}", file=sys.stderr, flush=True)
+        return {"engine":engine,"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention}
     except Exception as load_error:
         try:
             shutdown({"engine": engine, "active": set(), "requests": {},

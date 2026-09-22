@@ -50,10 +50,15 @@ Use an explicit model entry; existing aliases and default models remain unchange
     rocm: C:/private/venv/Lib/site-packages/_rocm_sdk_devel
     selector_overlay: C:/private/radiance_selector_overlay.py
     pread_overlay: C:/private/pread_safetensors_overlay.py
+    prefill_attention: r4d
     prefill_overlay: C:/private/r4d_strided_prefill_overlay.py
     prefill_dll: C:/private/r4d_strided_attn.dll
     prefill_dll_sha256: <64-character SHA-256>
 ```
+
+`artifacts.prefill_attention` accepts `r4d` (the backward-compatible default) or `upstream`. `r4d` installs the custom prefill overlay and requires its three `prefill_*` artifact fields. `upstream` uses the pinned vLLM Triton attention implementation and does not require `prefill_overlay`, `prefill_dll`, or `prefill_dll_sha256`. Both retain the same Radiance model and decode kernels. Invalid values are rejected during configuration validation and registry admission. An unexpected attention binding fails loading instead of silently selecting another path.
+
+Selection takes effect when the model is loaded; it is not a per-request switch. Use the existing drain/unload/load lifecycle and expect cache invalidation. Successful startup logs the selected prefill implementation. The upstream option is experimental: scoped greeting and tool checks passed in standalone tests, but it was slower than custom prefill in a historical two-agent long-context workload. Those measurements do not establish current gateway performance or full quality acceptance. Subsequent isolated gateway checks passed the captured greeting, seven API checks and two long-context tool tasks. Both long continuations missed reuse at the one-second grace boundary, so cached-turn performance acceptance remains unmet.
 
 `continuation_grace_ms` defaults to zero and accepts 0–1000. On an enabled native single-slot model, an existing client cache key can reserve one continuation before yielding to waiting peers. The measured reuse path is Chat Completions; do not assume equivalent Responses cache behavior.
 

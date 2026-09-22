@@ -2,6 +2,7 @@
 
 #include <initializer_list>
 #include <optional>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -57,6 +58,20 @@ public:
 private:
     std::unordered_map<std::string, RuntimeContract> contracts_;
 };
+
+inline std::optional<std::string> validate_runtime_artifacts(
+    const std::string& runtime,
+    const std::map<std::string, std::string>& artifacts)
+{
+    const std::map<std::string, std::string>::const_iterator selection =
+        artifacts.find("prefill_attention");
+    if (runtime == "vllm_radiance" && selection != artifacts.end() &&
+        selection->second != "r4d" && selection->second != "upstream")
+    {
+        return "vllm_radiance prefill_attention must be r4d or upstream";
+    }
+    return std::nullopt;
+}
 
 inline RuntimeContractRegistry standard_runtime_contracts() {
     RuntimeContractRegistry registry;

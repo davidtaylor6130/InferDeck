@@ -452,6 +452,22 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "native model requires artifacts: " + name);
                 }
+                std::map<std::string, std::string> runtime_artifacts;
+                if (entry["artifacts"] && entry["artifacts"].IsMap())
+                {
+                    for (const YAML::detail::iterator_value& artifact : entry["artifacts"])
+                    {
+                        runtime_artifacts.emplace(artifact.first.as<std::string>(),
+                                                  artifact.second.as<std::string>());
+                    }
+                }
+                const std::optional<std::string> profile_error =
+                    model::validate_runtime_artifacts(runtime, runtime_artifacts);
+                if (profile_error)
+                {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 *profile_error + ": " + name);
+                }
                 if (entry["has_vision"] && entry["has_vision"].as<bool>() &&
                     (!runtime_contract->vision ||
                      !entry["mmproj_path"] || entry["mmproj_path"].IsNull() ||

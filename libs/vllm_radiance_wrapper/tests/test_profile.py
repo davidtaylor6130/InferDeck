@@ -76,6 +76,57 @@ class ProfileTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertFalse((Path(directory) / "captured-request.json").exists())
 
+    def test_prefill_attention_defaults_to_r4d_and_upstream_skips_custom_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = {key: directory for key in profile._REQUIRED}
+            config.update(runtime="vllm_radiance", context_size=106496,
+                          n_slots=1, min_slots=1, prefill_dll_sha256="a" * 64)
+            profile.validate_config(config)
+            upstream = dict(config, prefill_attention="upstream")
+            for key in ("prefill_overlay", "prefill_dll", "prefill_dll_sha256"):
+                upstream.pop(key)
+            profile.validate_config(upstream)
+
+    def test_invalid_prefill_attention_is_rejected_before_loading(self):
+        config = {"runtime": "vllm_radiance", "context_size": 106496,
+                  "n_slots": 1, "min_slots": 1, "prefill_attention": "other"}
+        with patch.object(profile, "_load", side_effect=AssertionError("load happened")):
+            with self.assertRaisesRegex(RuntimeError, "prefill_attention"):
+                profile.create(config)
+
+    def test_upstream_attention_requires_expected_callable(self):
+        with patch.dict(sys.modules, {
+            "vllm.v1.attention.ops.triton_unified_attention": NS(unified_attention=object()),
+            "vllm.v1.attention.backends.triton_attn": NS(unified_attention=object()),
+        }):
+            with self.assertRaisesRegex(RuntimeError, "expected callable"):
+                profile._verify_upstream_prefill_attention()
+
+    def test_upstream_attention_rejects_stale_backend_binding(self):
+        def upstream_attention(*args, **kwargs):
+            return None
+        upstream_attention.__module__ = "vllm.v1.attention.ops.triton_unified_attention"
+        def stale_attention(*args, **kwargs):
+            return None
+        with patch.dict(sys.modules, {
+            "vllm.v1.attention.ops.triton_unified_attention": NS(unified_attention=upstream_attention),
+            "vllm.v1.attention.backends.triton_attn": NS(unified_attention=stale_attention),
+        }):
+            with self.assertRaisesRegex(RuntimeError, "unexpected unified_attention binding"):
+                profile._verify_upstream_prefill_attention()
+
+    def test_upstream_attention_accepts_matching_backend_binding_without_custom_hook(self):
+        def upstream_attention(*args, **kwargs):
+            return None
+        upstream_attention.__module__ = "vllm.v1.attention.ops.triton_unified_attention"
+        upstream = NS(unified_attention=upstream_attention)
+        with patch.dict(sys.modules, {
+            "vllm.v1.attention.ops.triton_unified_attention": upstream,
+            "vllm.v1.attention.backends.triton_attn": NS(unified_attention=upstream_attention),
+        }):
+            with patch.object(profile, "_load", side_effect=AssertionError("custom hook loaded")):
+                self.assertIs(profile._verify_upstream_prefill_attention(), upstream_attention)
+
     def test_digest_is_not_a_path(self):
         with tempfile.TemporaryDirectory() as directory:
             config = {key: directory for key in profile._REQUIRED}

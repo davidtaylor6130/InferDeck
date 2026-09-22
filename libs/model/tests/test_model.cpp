@@ -3458,3 +3458,20 @@ TEST_CASE("BackendCoordinator: continuation hold respects interruption and expir
     REQUIRE(lease);
     CHECK(coordinator.release_slot(info.name, *lease));
 }
+
+TEST_CASE("ModelRegistry: rejects invalid Radiance prefill before admission", "[model][registry][radiance]")
+{
+    ModelRegistry registry;
+    ModelInfo info = make_info("prefill-candidate");
+    info.runtime = "vllm_radiance";
+    registry.register_model(info);
+    for (const std::string& selection : {std::string("r4d"), std::string("upstream")})
+    {
+        info.artifacts["prefill_attention"] = selection;
+        registry.register_model(info);
+        CHECK(registry.get_info(info.name).artifacts.at("prefill_attention") == selection);
+    }
+    info.artifacts["prefill_attention"] = "automatic";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    CHECK(registry.get_info(info.name).artifacts.at("prefill_attention") == "upstream");
+}
