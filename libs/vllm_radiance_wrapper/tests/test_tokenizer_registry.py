@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,6 +64,44 @@ class TokenizerRegistryTests(unittest.TestCase):
             first.add_tokens(["forbidden"])
         with self.assertRaises(RuntimeError):
             first.chat_template = "changed"
+
+    def test_transient_deserialize_retries_only_once(self):
+        from inferdeck_vllm_radiance_tokenizer import ImmutablePooledTokenizer
+        from vllm.tokenizers.hf import CachedHfTokenizer
+        revision = artifact_revision(str(MODEL))
+        original = CachedHfTokenizer.from_pretrained
+        calls = 0
+
+        def fail_first(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("Error while attempting to unpickle Tokenizer: transient")
+            return original(*args, **kwargs)
+
+        with mock.patch.object(CachedHfTokenizer, "from_pretrained", side_effect=fail_first):
+            tokenizer = ImmutablePooledTokenizer.from_pretrained(
+                str(MODEL), revision=revision, truncation_side="left")
+        self.assertEqual(calls, 2)
+        self.assertTrue(tokenizer.is_fast)
+        self.assertEqual(tokenizer.encode("Hello"), original(
+            str(MODEL), local_files_only=True, use_fast=True,
+            truncation_side="left").encode("Hello"))
+
+        with mock.patch.object(CachedHfTokenizer, "from_pretrained",
+                               side_effect=RuntimeError("unrelated failure")) as loader:
+            with self.assertRaisesRegex(RuntimeError, "unrelated failure"):
+                ImmutablePooledTokenizer.from_pretrained(
+                    str(MODEL), revision=revision, truncation_side="left")
+            self.assertEqual(loader.call_count, 1)
+
+        with mock.patch.object(CachedHfTokenizer, "from_pretrained",
+                               side_effect=ValueError(
+                                   "Error while attempting to unpickle Tokenizer: persistent")) as loader:
+            with self.assertRaisesRegex(ValueError, "persistent"):
+                ImmutablePooledTokenizer.from_pretrained(
+                    str(MODEL), revision=revision, truncation_side="left")
+            self.assertEqual(loader.call_count, 2)
 
     def test_artifact_revision_changes(self):
         with tempfile.TemporaryDirectory() as directory:

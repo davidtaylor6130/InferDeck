@@ -1,6 +1,7 @@
 """Reuse immutable tokenizer pools through vLLM's official tokenizer registry."""
 from __future__ import annotations
 import hashlib
+import sys
 from pathlib import Path
 
 MODE = "inferdeck_hf_pool"
@@ -56,9 +57,18 @@ class ImmutablePooledTokenizer:
         if kwargs.get("truncation_side", "left") != "left":
             raise RuntimeError("native tokenizer requires left truncation semantics")
         kwargs.update(local_files_only=True, use_fast=True, truncation_side="left")
-        tokenizer = CachedHfTokenizer.from_pretrained(
-            path_or_repo_id, trust_remote_code=False, download_dir=download_dir, **kwargs)
-        pooled = maybe_make_thread_pool(tokenizer, COPIES)
+        for attempt in range(2):
+            try:
+                tokenizer = CachedHfTokenizer.from_pretrained(
+                    path_or_repo_id, trust_remote_code=False, download_dir=download_dir, **kwargs)
+                pooled = maybe_make_thread_pool(tokenizer, COPIES)
+                break
+            except Exception as error:
+                if attempt or "Error while attempting to unpickle Tokenizer" not in str(error):
+                    raise
+                if artifact_revision(str(path_or_repo_id)) != revision:
+                    raise RuntimeError("tokenizer artifacts changed during native runtime load") from error
+                print("event=tokenizer_deserialize_retry attempt=1", file=sys.stderr, flush=True)
         if not isinstance(pooled, (TokenizersBackend,)) or not isinstance(pooled, ThreadSafeHFTokenizerMixin):
             raise RuntimeError("native tokenizer did not construct a thread-safe fast pool")
 
