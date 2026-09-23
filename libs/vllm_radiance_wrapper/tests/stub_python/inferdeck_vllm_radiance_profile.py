@@ -20,9 +20,9 @@ def step(state, request_id, request):
     if request_id not in state["active"]: return []
     state["step"] += 1
     rows = [
-      {"text":"","reasoning":"","tool_calls":[{"index":0,"id":"call_1","type":"function","name":"weather","arguments":"{\"city\":"}],"finished":False,"prompt_tokens":8,"cached_tokens":2,"completion_tokens":1,"finish_reason":"stop"},
-      {"text":"","reasoning":"","tool_calls":[{"index":0,"id":"","type":"","name":"","arguments":"\"Le"}],"finished":False,"prompt_tokens":8,"cached_tokens":2,"completion_tokens":2,"finish_reason":"stop"},
-      {"text":"","reasoning":"","tool_calls":[{"index":0,"id":"","type":"","name":"","arguments":"eds\"}"}],"finished":True,"prompt_tokens":8,"cached_tokens":2,"completion_tokens":3,"finish_reason":"tool_calls"},
+      {"text":"","reasoning":"","tool_calls":[{"index":0,"id":"call_1","type":"function","name":"weather","arguments":"{\"city\":"}],"finished":False,"prompt_tokens":8,"cached_tokens":2,"completion_tokens":1,"prompt_duration_ms":4.0,"generation_duration_ms":2.0,"finish_reason":"stop"},
+      {"text":"","reasoning":"","tool_calls":[{"index":0,"id":"","type":"","name":"","arguments":"\"Le"}],"finished":False,"prompt_tokens":8,"cached_tokens":2,"completion_tokens":2,"prompt_duration_ms":4.0,"generation_duration_ms":4.0,"finish_reason":"stop"},
+      {"text":"","reasoning":"","tool_calls":[{"index":0,"id":"","type":"","name":"","arguments":"eds\"}"}],"finished":True,"prompt_tokens":8,"cached_tokens":2,"completion_tokens":3,"prompt_duration_ms":4.0,"generation_duration_ms":6.0,"finish_reason":"tool_calls"},
     ]
     row=rows[state["step"]-1]
     if row["finished"]: state["active"].discard(request_id)

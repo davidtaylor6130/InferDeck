@@ -277,7 +277,7 @@ def step(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
         scheduled = float(getattr(metrics, "scheduled_ts", 0.0))
         first = float(getattr(metrics, "first_token_ts", 0.0))
         last = float(getattr(metrics, "last_token_ts", 0.0))
-        if done and all(math.isfinite(value) for value in (scheduled, first, last)) and 0 < scheduled <= first <= last:
+        if all(math.isfinite(value) for value in (scheduled, first, last)) and 0 < scheduled <= first <= last:
             result[-1]["prompt_duration_ms"] = (first - scheduled) * 1000.0
             result[-1]["generation_duration_ms"] = (last - first) * 1000.0
         if done:s["active"].discard(rid);s["requests"].pop(rid,None)

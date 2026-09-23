@@ -354,6 +354,8 @@ class ProfileTests(unittest.TestCase):
         first = profile.step(state, "r", {})[0]
         final = profile.step(state, "r", {})[0]
         self.assertEqual(first["completion_tokens"], 2)
+        self.assertEqual(first["prompt_duration_ms"], 1000.0)
+        self.assertEqual(first["generation_duration_ms"], 2000.0)
         self.assertEqual(final["completion_tokens"], 3)
         self.assertEqual(final["prompt_duration_ms"], 1000.0)
         self.assertEqual(final["generation_duration_ms"], 2000.0)

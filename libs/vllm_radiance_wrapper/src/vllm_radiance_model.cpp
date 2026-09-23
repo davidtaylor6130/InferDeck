@@ -305,6 +305,7 @@ foundation::Result<model::InferenceResult> VllmRadianceModel::predict_stream(
         if (!chars) throw std::runtime_error(python_error());
         request_id = chars;
         model::InferenceResult result;
+        if (request.progress) request.progress->phase.store(2);
         std::map<std::size_t, model::ToolCall> merged_calls;
         bool observed_first_token = false;
         while (true)
@@ -337,6 +338,36 @@ foundation::Result<model::InferenceResult> VllmRadianceModel::predict_stream(
                 model::InferenceDelta delta;
                 delta.content = text(event, "text");
                 delta.reasoning_text = text(event, "reasoning");
+                const auto count = [&](const char* key)
+                {
+                    PyObject* value = PyDict_GetItemString(event, key);
+                    const long number = value ? PyLong_AsLong(value) : 0;
+                    if (PyErr_Occurred() || number < 0) throw std::runtime_error("invalid bridge token count");
+                    return static_cast<int>(number);
+                };
+                const auto milliseconds = [&](const char* key)
+                {
+                    PyObject* value = PyDict_GetItemString(event, key);
+                    const double duration = value ? PyFloat_AsDouble(value) : 0.0;
+                    if (PyErr_Occurred() || !std::isfinite(duration) || duration < 0)
+                        throw std::runtime_error("invalid bridge timing");
+                    return static_cast<float>(duration);
+                };
+                const int prompt_tokens = count("prompt_tokens");
+                const int cached_tokens = count("cached_tokens");
+                const int completion_tokens = count("completion_tokens");
+                const float prompt_ms = milliseconds("prompt_duration_ms");
+                const float generation_ms = milliseconds("generation_duration_ms");
+                if (request.progress)
+                {
+                    request.progress->prompt_tokens.store(prompt_tokens);
+                    request.progress->processed_tokens.store(prompt_tokens);
+                    request.progress->cached_tokens.store(cached_tokens);
+                    request.progress->output_tokens.store(completion_tokens);
+                    request.progress->prompt_ms.store(prompt_ms);
+                    request.progress->generation_ms.store(generation_ms);
+                    request.progress->phase.store(3);
+                }
                 PyObject* calls = PyDict_GetItemString(event, "tool_calls");
                 if (calls && PyList_Check(calls))
                 {
@@ -376,27 +407,12 @@ foundation::Result<model::InferenceResult> VllmRadianceModel::predict_stream(
                 PyObject* finished = PyDict_GetItemString(event, "finished");
                 if (finished && PyObject_IsTrue(finished) == 1)
                 {
-                    const auto count = [&](const char* key)
-                    {
-                        PyObject* value = PyDict_GetItemString(event, key);
-                        const long number = value ? PyLong_AsLong(value) : 0;
-                        if (PyErr_Occurred() || number < 0) throw std::runtime_error("invalid bridge token count");
-                        return static_cast<int>(number);
-                    };
-                    result.prompt_tokens = count("prompt_tokens");
-                    result.cached_prompt_tokens = count("cached_tokens");
-                    result.completion_tokens = count("completion_tokens");
+                    result.prompt_tokens = prompt_tokens;
+                    result.cached_prompt_tokens = cached_tokens;
+                    result.completion_tokens = completion_tokens;
                     result.finish_reason = text(event, "finish_reason");
-                    const auto milliseconds = [&](const char* key)
-                    {
-                        PyObject* value = PyDict_GetItemString(event, key);
-                        const double duration = value ? PyFloat_AsDouble(value) : 0.0;
-                        if (PyErr_Occurred() || !std::isfinite(duration) || duration < 0)
-                            throw std::runtime_error("invalid bridge timing");
-                        return static_cast<float>(duration);
-                    };
-                    result.prompt_duration_ms = milliseconds("prompt_duration_ms");
-                    result.generation_duration_ms = milliseconds("generation_duration_ms");
+                    result.prompt_duration_ms = prompt_ms;
+                    result.generation_duration_ms = generation_ms;
                     for (auto& [index, call] : merged_calls) result.tool_calls.push_back(std::move(call));
                     result.duration_ms = static_cast<float>(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count());
                     request_id.clear();
