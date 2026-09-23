@@ -2,6 +2,7 @@ import concurrent.futures
 import copy
 import importlib.util
 import json
+import pickle
 import shutil
 import sys
 import tempfile
@@ -88,6 +89,21 @@ class TokenizerRegistryTests(unittest.TestCase):
             str(MODEL), local_files_only=True, use_fast=True,
             truncation_side="left").encode("Hello"))
 
+        calls = 0
+
+        def fail_bpe_first(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("Error while initializing BPE: Token worker out of vocabulary")
+            return original(*args, **kwargs)
+
+        with mock.patch.object(CachedHfTokenizer, "from_pretrained", side_effect=fail_bpe_first):
+            recovered = ImmutablePooledTokenizer.from_pretrained(
+                str(MODEL), revision=revision, truncation_side="left")
+        self.assertEqual(calls, 2)
+        self.assertEqual(recovered.encode("Hello"), tokenizer.encode("Hello"))
+
         with mock.patch.object(CachedHfTokenizer, "from_pretrained",
                                side_effect=RuntimeError("unrelated failure")) as loader:
             with self.assertRaisesRegex(RuntimeError, "unrelated failure"):
@@ -102,6 +118,35 @@ class TokenizerRegistryTests(unittest.TestCase):
                 ImmutablePooledTokenizer.from_pretrained(
                     str(MODEL), revision=revision, truncation_side="left")
             self.assertEqual(loader.call_count, 2)
+
+    def test_locked_tokenizer_methods_and_serialization(self):
+        from inferdeck_vllm_radiance_tokenizer import ImmutablePooledTokenizer
+        from vllm.tokenizers.hf import CachedHfTokenizer
+
+        revision = artifact_revision(str(MODEL))
+        pooled = ImmutablePooledTokenizer.from_pretrained(
+            str(MODEL), revision=revision, truncation_side="left",
+            model_max_length=1024)
+        fresh = CachedHfTokenizer.from_pretrained(
+            str(MODEL), local_files_only=True, use_fast=True,
+            truncation_side="left", model_max_length=1024)
+        sample = "Hello, tokenizer!"
+        ids = fresh.encode(sample)
+        tokens = fresh.convert_ids_to_tokens(ids)
+        self.assertEqual(pooled.encode(sample), ids)
+        self.assertEqual(pooled.decode(ids), fresh.decode(ids))
+        with self.assertRaises(AttributeError):
+            pooled.batch_encode([sample])
+        self.assertEqual(pooled.batch_decode([ids]), fresh.batch_decode([ids]))
+        self.assertEqual(pooled.convert_ids_to_tokens(ids), tokens)
+        self.assertEqual(pooled.convert_tokens_to_ids(tokens), ids)
+        self.assertEqual(pooled.convert_tokens_to_string(tokens),
+                         fresh.convert_tokens_to_string(tokens))
+        self.assertEqual(pooled(sample).input_ids, fresh(sample).input_ids)
+        restored = pickle.loads(pickle.dumps(pooled))
+        self.assertEqual(restored.encode(sample), ids)
+        self.assertEqual(restored.model_max_length, 1024)
+        self.assertIs(copy.copy(restored), restored)
 
     def test_artifact_revision_changes(self):
         with tempfile.TemporaryDirectory() as directory:
