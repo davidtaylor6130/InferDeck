@@ -117,7 +117,8 @@ model_registry:
     CHECK(validate_config_text(prefix + "    continuation_grace_ms: 0\n"));
     CHECK(validate_config_text(prefix + "    continuation_grace_ms: 1000\n"));
     CHECK_FALSE(validate_config_text(prefix + "    continuation_grace_ms: -1\n"));
-    CHECK_FALSE(validate_config_text(prefix + "    continuation_grace_ms: 1001\n"));
+    CHECK(validate_config_text(prefix + "    continuation_grace_ms: 2000\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    continuation_grace_ms: 2001\n"));
 
     const auto path = std::filesystem::temp_directory_path() /
         "inferdeck-continuation-grace-config.yml";

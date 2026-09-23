@@ -291,9 +291,9 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 }
                 if (entry["continuation_grace_ms"] &&
                     (entry["continuation_grace_ms"].as<int>() < 0 ||
-                     entry["continuation_grace_ms"].as<int>() > 1000)) {
+                     entry["continuation_grace_ms"].as<int>() > 2000)) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
-                        "continuation_grace_ms must be between 0 and 1000: " + name);
+                        "continuation_grace_ms must be between 0 and 2000: " + name);
                 }
                 if (entry["request_queue_timeout_seconds"] &&
                     (entry["request_queue_timeout_seconds"].as<int>() < 1 ||

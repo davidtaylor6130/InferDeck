@@ -60,7 +60,7 @@ Use an explicit model entry; existing aliases and default models remain unchange
 
 Selection takes effect when the model is loaded; it is not a per-request switch. Use the existing drain/unload/load lifecycle and expect cache invalidation. Successful startup logs the selected prefill implementation. The upstream option is experimental: scoped greeting and tool checks passed in standalone tests, but it was slower than custom prefill in a historical two-agent long-context workload. Those measurements do not establish current gateway performance or full quality acceptance. Subsequent isolated gateway checks passed the captured greeting, seven API checks and two long-context tool tasks. Both long continuations missed reuse at the one-second grace boundary, so cached-turn performance acceptance remains unmet.
 
-`continuation_grace_ms` defaults to zero and accepts 0–1000. On an enabled native single-slot model, an existing client cache key can reserve one continuation before yielding to waiting peers. The measured reuse path is Chat Completions; do not assume equivalent Responses cache behavior.
+`continuation_grace_ms` defaults to zero and accepts 0–2000. On an enabled native single-slot model, an existing client cache key can reserve one continuation before yielding to waiting peers. The measured reuse path is Chat Completions; do not assume equivalent Responses cache behavior. The two-second setting remains experimental pending a matched real-model run.
 
 `request_queue_timeout_seconds` defaults to 300 and accepts 1–1800. The experimental four-agent profile uses 600. This extends queue patience; it does not create additional execution slots or context capacity.
 

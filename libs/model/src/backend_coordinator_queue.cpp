@@ -310,7 +310,7 @@ foundation::Result<void> BackendCoordinator::release_slot(
             !draining_models_.contains(name) && !resizing_models_.contains(name)) {
             continuation_holds_[name] = ContinuationHold{
                 released_lease.reservation_key, released_lease.priority,
-                clock::now() + std::chrono::milliseconds{std::min(1000, info.continuation_grace_ms)},
+                clock::now() + std::chrono::milliseconds{std::min(2000, info.continuation_grace_ms)},
                 resource_generation_};
         }
     }

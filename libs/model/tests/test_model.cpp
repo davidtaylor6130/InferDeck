@@ -3377,7 +3377,7 @@ TEST_CASE("BackendCoordinator: one cached continuation yields to a queued peer",
     ModelInfo info = make_info("continuation-fairness");
     info.runtime = "vllm_radiance";
     info.n_slots = info.min_slots = 1;
-    info.continuation_grace_ms = 500;
+    info.continuation_grace_ms = 1500;
     registry.register_model(info);
     BackendCoordinator coordinator(registry);
     REQUIRE(coordinator.load(info.name));
@@ -3405,7 +3405,7 @@ TEST_CASE("BackendCoordinator: one cached continuation yields to a queued peer",
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     REQUIRE(coordinator.queued_request_count() == 1);
     REQUIRE(coordinator.release_slot(info.name, *seed));
-    CHECK(waiting.wait_for(std::chrono::milliseconds(30)) == std::future_status::timeout);
+    CHECK(waiting.wait_for(std::chrono::milliseconds(1100)) == std::future_status::timeout);
     const auto continuation = coordinator.acquire_slot(info.name, owner);
     REQUIRE(continuation);
     REQUIRE(coordinator.release_slot(info.name, *continuation));
