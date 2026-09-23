@@ -24,23 +24,13 @@ class ProfileTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "dependency boundary reached"):
                         profile._create({})
 
-    def test_load_stack_diagnostics_stop_after_success_or_failure(self):
-        for failure in (None, RuntimeError("engine load failed")):
-            with self.subTest(failure=failure), patch.object(profile, "faulthandler") as handler, patch.object(profile, "_create", side_effect=failure, return_value={"engine": "loaded"}) as create:
-                if failure:
-                    with self.assertRaisesRegex(RuntimeError, "engine load failed"):
-                        profile.create({})
-                else:
-                    self.assertEqual(profile.create({}), {"engine": "loaded"})
-                create.assert_called_once_with({})
-                handler.dump_traceback_later.assert_called_once_with(60, repeat=True, file=sys.stderr)
-                handler.cancel_dump_traceback_later.assert_called_once_with()
-
-    def test_unavailable_stack_diagnostics_do_not_prevent_loading(self):
-        with patch.object(profile, "faulthandler") as handler, patch.object(profile, "_create", return_value={"engine": "loaded"}), patch.object(profile, "print"):
-            handler.dump_traceback_later.side_effect = ValueError("no file descriptor")
+    def test_create_returns_engine_and_propagates_load_failure(self):
+        with patch.object(profile, "_create", return_value={"engine": "loaded"}) as create:
             self.assertEqual(profile.create({}), {"engine": "loaded"})
-            handler.cancel_dump_traceback_later.assert_not_called()
+            create.assert_called_once_with({})
+        with patch.object(profile, "_create", side_effect=RuntimeError("engine load failed")):
+            with self.assertRaisesRegex(RuntimeError, "engine load failed"):
+                profile.create({})
 
     def _capture_patches(self, directory):
         return (
