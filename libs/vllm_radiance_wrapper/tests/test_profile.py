@@ -32,6 +32,32 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "engine load failed"):
                 profile.create({})
 
+    def test_r4d_retention_scope_restores_environment(self):
+        key = "VLLM_PREFIX_CACHE_RETENTION_INTERVAL"
+        with patch.dict(os.environ, {key: "512"}):
+            with profile._r4d_cache_retention("r4d"):
+                self.assertEqual(os.environ[key], "0")
+            self.assertEqual(os.environ[key], "512")
+            with self.assertRaisesRegex(RuntimeError, "engine load failed"):
+                with profile._r4d_cache_retention("r4d"):
+                    raise RuntimeError("engine load failed")
+            self.assertEqual(os.environ[key], "512")
+            with profile._r4d_cache_retention("upstream"):
+                self.assertEqual(os.environ[key], "512")
+        with patch.dict(os.environ, {}, clear=False):
+            previous = os.environ.pop(key, None)
+            try:
+                with profile._r4d_cache_retention("r4d"):
+                    self.assertEqual(os.environ[key], "0")
+                self.assertNotIn(key, os.environ)
+            finally:
+                if previous is not None:
+                    os.environ[key] = previous
+
+    def test_r4d_gpu_memory_profile_preserves_upstream_default(self):
+        self.assertEqual(profile._gpu_memory_utilization("r4d"), 0.925)
+        self.assertEqual(profile._gpu_memory_utilization("upstream"), 0.90)
+
     def _capture_patches(self, directory):
         return (
             patch.object(profile, "_CAPTURE_MARKER_PATH", Path(directory) / "capture-next-request.json"),

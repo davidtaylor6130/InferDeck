@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import importlib
 import copy
+from contextlib import contextmanager
 import json
 import gc
 import hashlib
@@ -25,6 +26,26 @@ _CAPTURE_OUTPUT_PATH = Path(__file__).with_name("captured-request.json")
 _REQUIRED=("model","python_root","python_site","vllm_source","radiance_source","radiance_extension","rocm","selector_overlay","pread_overlay","prefill_overlay","prefill_dll","prefill_dll_sha256")
 _PREFILL_ATTENTION_DEFAULT = "r4d"
 _PREFILL_ATTENTION_OPTIONS = frozenset(("r4d", "upstream"))
+
+def _gpu_memory_utilization(prefill_attention:str)->float:
+    return 0.925 if prefill_attention == "r4d" else 0.90
+
+@contextmanager
+def _r4d_cache_retention(prefill_attention:str):
+    if prefill_attention != "r4d":
+        yield
+        return
+    key = "VLLM_PREFIX_CACHE_RETENTION_INTERVAL"
+    previous = os.environ.get(key)
+    os.environ[key] = "0"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
 def _need(c:dict[str,Any],k:str)->str:
     v=c.get(k)
     if not isinstance(v,str) or not v or not Path(v).exists(): raise RuntimeError(f"required vllm_radiance artifact is unavailable: {k}")
@@ -146,7 +167,17 @@ def _create(c:dict[str,Any])->dict[str,Any]:
         else:
             _verify_upstream_prefill_attention()
         model=_need(c,"model");tokenizer_revision=register_tokenizer(model)
-        engine=LLMEngine.from_engine_args(EngineArgs(model=model,logits_processors=[InferDeckPenaltiesProcessor],tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",max_model_len=106496,max_num_batched_tokens=4096,max_num_seqs=1,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=.90,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config={"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}),enable_multiprocessing=False)
+        scheduler_options = {"async_scheduling": False} if prefill_attention == "r4d" else {}
+        engine_args=EngineArgs(model=model,logits_processors=[InferDeckPenaltiesProcessor],tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",max_model_len=106496,max_num_batched_tokens=4096,max_num_seqs=1,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=_gpu_memory_utilization(prefill_attention),seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config={"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]},**scheduler_options)
+        with _r4d_cache_retention(prefill_attention):
+            engine=LLMEngine.from_engine_args(engine_args,enable_multiprocessing=False)
+        if prefill_attention == "r4d":
+            cache_manager=engine.engine_core.engine_core.scheduler.kv_cache_manager
+            free_bytes,total_bytes=torch.cuda.mem_get_info()
+            actual={"async":engine.vllm_config.scheduler_config.async_scheduling,"retention":cache_manager.coordinator.retention_interval,"blocks":cache_manager.kv_cache_config.num_blocks,"context":engine.vllm_config.model_config.max_model_len,"memory_utilization":engine.vllm_config.cache_config.gpu_memory_utilization,"free_bytes":free_bytes,"total_bytes":total_bytes}
+            print("event=isolated_cache_profile "+json.dumps(actual),file=sys.stderr,flush=True)
+            if actual["async"] or actual["retention"] != 0 or actual["context"] != 106496 or actual["memory_utilization"] != 0.925 or actual["blocks"] < 185 or free_bytes < 1073741824:
+                raise RuntimeError("R4D cache profile or free-memory guard failed")
         tokenizer=cached_tokenizer_from_config(engine.vllm_config.model_config)
         if engine.vllm_config.model_config.enable_prompt_embeds:raise RuntimeError("native pooled tokenizer does not support prompt embeds")
         if not isinstance(engine.engine_core,InprocClient):raise RuntimeError("V1 InprocClient was not constructed")
