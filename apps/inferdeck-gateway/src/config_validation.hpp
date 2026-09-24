@@ -521,7 +521,9 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     }
                     const auto default_effort = reasoning["default"]
                         ? reasoning["default"].as<std::string>() : std::string{};
-                    if (supported && !efforts.contains(default_effort)) {
+                    if (supported && !efforts.contains(default_effort) &&
+                        !(default_effort == "none" && reasoning["none_disables"] &&
+                          reasoning["none_disables"].as<bool>())) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
                             "reasoning default must be a supported effort: " + name);

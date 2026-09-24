@@ -640,6 +640,23 @@ model_registry:
       efforts: [low, high]
       default: medium
 )"));
+    CHECK(validate_config_text(R"(
+model_registry:
+  - name: no-thinking-by-default
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [low, high]
+      default: none
+      none_disables: true
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: invalid-no-thinking-default
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [low, high]
+      default: none
+)"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:
   - name: bad-reasoning-alias
