@@ -30,7 +30,7 @@
       "id": "two-agent-total-time",
       "status": "PASS",
       "evidence": [".UAM/AINotes/r4d-timer-free-three-rep.json", ".UAM/AINotes/q4kv-64k2k-20260924T012822657Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T013439553Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T025521601Z-worker.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T025417631Z.json", ".UAM/AINotes/q4kv-64k2k-20260924T033717616Z-worker.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T033612811Z.json"],
-      "next": "Changed-profile alpha68 passed the exact two-agent 64K+2K tool fixture in 128.559 s, 63840 cached tokens per continuation and 442 generated tokens. Prior alpha68 was 128.786 s with 442 generated; a single 0.227 s difference is noise. BF16/R4D median was 133.684 s with 1183 generated, so task time does not isolate compute speed."
+      "next": "Changed-profile alpha68 passed the exact two-agent 64K+2K tool fixture in 128.559 s, 63840 cached tokens per continuation and 442 generated tokens. Cold-pair aggregate PP was about 1360.2 and generation ranged 7.448-9.770 TPS; the original 2000 PP target was not met. Prior alpha68 was 128.786 s with 442 generated; 0.227 s is one-run noise. BF16/R4D median was 133.684 s with 1183 generated, so task time does not isolate compute speed."
     },
     {
       "id": "context-cache-and-quality",
