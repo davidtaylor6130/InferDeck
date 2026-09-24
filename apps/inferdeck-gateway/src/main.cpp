@@ -330,7 +330,7 @@ int run_gateway(const fs::path& config_path) {
                         "request Content-Length is invalid");
         } else if (validation == RequestValidationStatus::UnsupportedTransferEncoding) {
             write_error(resp, 411, "content_length_required",
-                        "chunked request bodies are not supported");
+                        "request Transfer-Encoding is not supported for this endpoint");
         }
     };
 
