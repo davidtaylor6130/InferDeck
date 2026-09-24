@@ -6,6 +6,7 @@
 #endif
 #include <Windows.h>
 #include <algorithm>
+#include <array>
 #include <thread>
 
 #include <chrono>
@@ -32,6 +33,7 @@ std::string python_error() {
     PyObject* text = value ? PyObject_Str(value) : nullptr;
     const char* utf8 = text ? PyUnicode_AsUTF8(text) : nullptr;
     std::string result = utf8 ? utf8 : "unprintable Python exception";
+    if (type && value) PyErr_Display(type, value, traceback);
     Py_XDECREF(text); Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(traceback);
     return result;
 }
@@ -41,6 +43,13 @@ public:
     GIL() : state_(PyGILState_Ensure()) {}
     ~GIL() { PyGILState_Release(state_); }
 private: PyGILState_STATE state_;
+};
+
+class GILRelease final {
+public:
+    GILRelease() : state_(PyEval_SaveThread()) {}
+    ~GILRelease() { PyEval_RestoreThread(state_); }
+private: PyThreadState* state_;
 };
 
 using PyPtr = std::unique_ptr<PyObject, decltype(&Py_DecRef)>;
@@ -127,7 +136,8 @@ class VllmRadianceModel::State {
 public:
     explicit State(model::ModelInfo value) : info(std::move(value)) {}
     model::ModelInfo info; mutable std::mutex mutex; std::condition_variable cv;
-    bool loaded{false}; bool slot{false}; std::atomic<bool> healthy{true}; std::atomic<bool> cancel{false};
+    bool loaded{false}; bool unloading{false}; std::array<bool, 4> slots{}; int active_slots{0};
+    std::atomic<bool> healthy{true}; std::atomic<bool> cancel{false};
     PyObject* module{nullptr}; PyObject* engine{nullptr};
 };
 
@@ -139,9 +149,12 @@ foundation::Result<void> VllmRadianceModel::load()
 {
     std::lock_guard lock(state_->mutex);
     if (state_->loaded) return foundation::Ok();
+    const auto attention = state_->info.artifacts.find("prefill_attention");
+    const bool int4 = attention != state_->info.artifacts.end() && attention->second == "r4d_int4";
     if (state_->info.runtime != "vllm_radiance" || state_->info.compute != model::ModelCompute::RocmGpu ||
-        state_->info.context_size != 106496 || state_->info.n_slots != 1 || state_->info.min_slots != 1)
-        return fail("vllm_radiance requires ROCm compute, 106496 context, and one slot");
+        state_->info.context_size != 106496 || state_->info.n_slots < 1 ||
+        state_->info.n_slots > (int4 ? 4 : 1) || state_->info.min_slots != state_->info.n_slots)
+        return fail("vllm_radiance requires ROCm compute, 106496 context, and fixed slots (one for BF16 or up to four for INT4)");
     const auto root = state_->info.artifacts.find("python_root");
     if (root == state_->info.artifacts.end()) return fail("python_root artifact is required");
     const std::filesystem::path python_root = std::filesystem::weakly_canonical(root->second);
@@ -193,6 +206,9 @@ foundation::Result<void> VllmRadianceModel::load()
         state_->module = module.release();
         state_->engine = created.release();
         state_->loaded = true;
+        state_->unloading = false;
+        state_->slots.fill(false);
+        state_->active_slots = 0;
         state_->healthy.store(true);
         state_->cancel.store(false);
         return foundation::Ok();
@@ -216,13 +232,23 @@ foundation::Result<void> VllmRadianceModel::unload(const model::LifecycleControl
 {
     std::unique_lock lock(state_->mutex);
     if (!state_->loaded) return foundation::Ok();
+    state_->unloading = true;
     state_->cancel.store(true);
     const auto deadline = std::min(control.deadline, model::LifecycleControl::clock::now() + std::chrono::seconds(30));
-    while (state_->slot)
+    while (state_->active_slots != 0)
     {
-        if (control.is_cancelled()) return foundation::Err<void>(foundation::ErrorCode::Cancelled, "backend unload cancelled");
+        if (control.is_cancelled())
+        {
+            state_->unloading = false;
+            state_->cancel.store(false);
+            return foundation::Err<void>(foundation::ErrorCode::Cancelled, "backend unload cancelled");
+        }
         if (model::LifecycleControl::clock::now() >= deadline)
+        {
+            state_->unloading = false;
+            state_->cancel.store(false);
             return fail("vllm_radiance unload timed out waiting for its active request");
+        }
         state_->cv.wait_for(lock, std::chrono::milliseconds(25));
     }
     GIL gil;
@@ -244,17 +270,48 @@ foundation::Result<void> VllmRadianceModel::unload(const model::LifecycleControl
     }
     Py_CLEAR(state_->module);
     state_->loaded = false;
+    state_->unloading = false;
     state_->cancel.store(false);
     return foundation::Ok();
 }
 bool VllmRadianceModel::is_loaded() const { std::lock_guard lock(state_->mutex); return state_->loaded; }
 bool VllmRadianceModel::execution_healthy() const { return state_->healthy.load(); }
 int VllmRadianceModel::vram_usage_mb() const { return is_loaded() ? state_->info.vram_required_mb : 0; }
-int VllmRadianceModel::n_slots() const { return 1; }
-int VllmRadianceModel::n_free_slots() const { std::lock_guard lock(state_->mutex); return state_->loaded && !state_->slot ? 1 : 0; }
-foundation::Result<int> VllmRadianceModel::acquire_slot() { std::lock_guard lock(state_->mutex); if (!state_->loaded || state_->slot || !state_->healthy.load()) return foundation::Err<int>(foundation::ErrorCode::ResourceBusy,"vllm_radiance slot unavailable"); state_->cancel.store(false); state_->slot=true; return 0; }
-foundation::Result<void> VllmRadianceModel::release_slot(int slot_id) { if(slot_id!=0)return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,"invalid vllm_radiance slot"); {std::lock_guard lock(state_->mutex);state_->slot=false;}state_->cv.notify_all();return foundation::Ok(); }
-bool VllmRadianceModel::slot_busy(int slot_id) const { std::lock_guard lock(state_->mutex); return slot_id==0 && state_->slot; }
+int VllmRadianceModel::n_slots() const { return state_->info.n_slots; }
+int VllmRadianceModel::n_free_slots() const { std::lock_guard lock(state_->mutex); return state_->loaded && !state_->unloading && state_->healthy.load() ? state_->info.n_slots - state_->active_slots : 0; }
+foundation::Result<int> VllmRadianceModel::acquire_slot()
+{
+    std::lock_guard lock(state_->mutex);
+    if (!state_->loaded || state_->unloading || !state_->healthy.load() || state_->cancel.load())
+        return foundation::Err<int>(foundation::ErrorCode::ResourceBusy, "vllm_radiance slot unavailable");
+    for (int slot_id = 0; slot_id < state_->info.n_slots; ++slot_id)
+    {
+        if (!state_->slots[slot_id])
+        {
+            state_->slots[slot_id] = true;
+            ++state_->active_slots;
+            return slot_id;
+        }
+    }
+    return foundation::Err<int>(foundation::ErrorCode::ResourceBusy, "vllm_radiance slot unavailable");
+}
+foundation::Result<void> VllmRadianceModel::release_slot(int slot_id)
+{
+    {
+        std::lock_guard lock(state_->mutex);
+        if (slot_id < 0 || slot_id >= state_->info.n_slots || !state_->slots[slot_id])
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument, "invalid vllm_radiance slot");
+        state_->slots[slot_id] = false;
+        --state_->active_slots;
+    }
+    state_->cv.notify_all();
+    return foundation::Ok();
+}
+bool VllmRadianceModel::slot_busy(int slot_id) const
+{
+    std::lock_guard lock(state_->mutex);
+    return slot_id >= 0 && slot_id < state_->info.n_slots && state_->slots[slot_id];
+}
 void VllmRadianceModel::request_cancel() { state_->cancel.store(true); }
 foundation::Result<model::InferenceResult> VllmRadianceModel::predict(int slot_id,const model::InferenceRequest& r){return predict_cancellable(slot_id,r,nullptr);}
 foundation::Result<model::InferenceResult> VllmRadianceModel::predict_cancellable(int slot_id,const model::InferenceRequest& r,const std::atomic<bool>* c){ return predict_stream(slot_id,r,[](const model::InferenceDelta&){return true;},c); }
@@ -264,7 +321,8 @@ foundation::Result<model::InferenceResult> VllmRadianceModel::predict_stream(
 {
     {
         std::lock_guard lock(state_->mutex);
-        if (slot_id != 0 || !state_->loaded || !state_->slot || !state_->healthy.load())
+        if (slot_id < 0 || slot_id >= state_->info.n_slots || !state_->loaded ||
+            !state_->slots[slot_id] || !state_->healthy.load())
             return foundation::Err<model::InferenceResult>(foundation::ErrorCode::InvalidArgument, "inactive vllm_radiance slot");
     }
     GIL gil;
@@ -317,12 +375,6 @@ foundation::Result<model::InferenceResult> VllmRadianceModel::predict_stream(
             }
             PyPtr events = owned(PyObject_CallMethod(state_->module, "step", "OsO", state_->engine, request_id.c_str(), input.get()));
             if (!events || !PyList_Check(events.get())) throw std::runtime_error(python_error());
-            if (PyList_Size(events.get()) == 0)
-            {
-                PyThreadState* thread = PyEval_SaveThread();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                PyEval_RestoreThread(thread);
-            }
             for (Py_ssize_t i = 0; i < PyList_Size(events.get()); ++i)
             {
                 PyObject* event = PyList_GetItem(events.get(), i);
@@ -384,7 +436,13 @@ foundation::Result<model::InferenceResult> VllmRadianceModel::predict_stream(
                         delta.tool_calls.push_back(std::move(tool));
                     }
                 }
-                if ((!delta.content.empty() || !delta.reasoning_text.empty() || !delta.tool_calls.empty()) && !callback(delta))
+                bool keep_streaming = true;
+                if (!delta.content.empty() || !delta.reasoning_text.empty() || !delta.tool_calls.empty())
+                {
+                    GILRelease release;
+                    keep_streaming = callback(delta);
+                }
+                if (!keep_streaming)
                 {
                     abort();
                     return foundation::Err<model::InferenceResult>(foundation::ErrorCode::Cancelled, "stream disconnected");
@@ -418,6 +476,10 @@ foundation::Result<model::InferenceResult> VllmRadianceModel::predict_stream(
                     request_id.clear();
                     return result;
                 }
+            }
+            {
+                GILRelease release;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }
     }
