@@ -3474,4 +3474,46 @@ TEST_CASE("ModelRegistry: rejects invalid Radiance prefill before admission", "[
     info.artifacts["prefill_attention"] = "automatic";
     CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
     CHECK(registry.get_info(info.name).artifacts.at("prefill_attention") == "upstream");
+
+    info.artifacts["prefill_attention"] = "r4d_int4";
+    info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
+    info.artifacts["prefill_overlay"] = "C:/runtime/r4d_int4_prefill_overlay.py";
+    info.artifacts["prefill_dll"] = "C:/runtime/r4d_int4_tiled.dll";
+    info.artifacts["prefill_dll_sha256"] = std::string(64, 'a');
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+
+    info.artifacts["decode_dll"] = "C:/runtime/r4d_int4_decode.dll";
+    info.artifacts["decode_dll_sha256"] = std::string(64, 'b');
+    registry.register_model(info);
+    CHECK(registry.get_info(info.name).artifacts.at("prefill_attention") == "r4d_int4");
+    CHECK(registry.get_info(info.name).artifacts.at("decode_dll") == "C:/runtime/r4d_int4_decode.dll");
+    info.artifacts.erase("decode_dll_sha256");
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["decode_dll_sha256"] = std::string(64, 'b');
+    info.artifacts["decode_dll_sha256"][0] = 'z';
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["decode_dll_sha256"] = std::string(64, 'b');
+    info.artifacts["prefill_attention"] = "r4d";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_attention"] = "r4d_int4";
+    info.artifacts.erase("decode_dll");
+    info.artifacts.erase("decode_dll_sha256");
+
+    info.artifacts.erase("prefill_dll_sha256");
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_dll_sha256"] = "not-a-digest";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_dll_sha256"] = std::string(64, 'a');
+    info.artifacts["kv_cache_dtype"] = "auto";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+
+    info.artifacts["prefill_attention"] = "r4d";
+    info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_attention"] = "upstream";
+    info.artifacts["kv_cache_dtype"] = "int8";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts.erase("prefill_attention");
+    info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
 }

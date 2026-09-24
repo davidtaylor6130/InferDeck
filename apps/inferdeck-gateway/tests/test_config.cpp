@@ -835,6 +835,58 @@ model_registry:
     CHECK(validate_config_text(prefix));
     CHECK(validate_config_text(prefix + "      prefill_attention: r4d\n"));
     CHECK(validate_config_text(prefix + "      prefill_attention: upstream\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      gpu_memory_utilization: 0.80\n"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+)"));
+    CHECK(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+      decode_dll_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+)"));
+    CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: r4d_int4\n"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+      decode_dll_sha256: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+      decode_dll_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: auto
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d
+      kv_cache_dtype: int4_per_token_head
+)"));
+    CHECK_FALSE(validate_config_text(prefix + "      kv_cache_dtype: int8\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      kv_cache_dtype: int4_per_token_head\n"));
     CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: automatic\n"));
     CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: ''\n"));
 }

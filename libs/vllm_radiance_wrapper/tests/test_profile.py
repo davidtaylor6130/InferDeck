@@ -2,8 +2,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -44,6 +46,8 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(os.environ[key], "512")
             with profile._r4d_cache_retention("upstream"):
                 self.assertEqual(os.environ[key], "512")
+            with profile._r4d_cache_retention("r4d_int4"):
+                self.assertEqual(os.environ[key], "0")
         with patch.dict(os.environ, {}, clear=False):
             previous = os.environ.pop(key, None)
             try:
@@ -54,9 +58,140 @@ class ProfileTests(unittest.TestCase):
                 if previous is not None:
                     os.environ[key] = previous
 
-    def test_r4d_gpu_memory_profile_preserves_upstream_default(self):
+    def test_profile_uses_fixed_memory_default_and_rejects_removed_override(self):
         self.assertEqual(profile._gpu_memory_utilization("r4d"), 0.925)
-        self.assertEqual(profile._gpu_memory_utilization("upstream"), 0.90)
+        for attention in ("r4d_int4", "upstream"):
+            self.assertEqual(profile._gpu_memory_utilization(attention), 0.90)
+        with self.assertRaisesRegex(RuntimeError, "not a supported profile setting"):
+            profile.validate_config({"runtime": "vllm_radiance", "context_size": 106496,
+                "n_slots": 1, "min_slots": 1, "gpu_memory_utilization": 0.80})
+
+    def test_int4_accepts_up_to_four_slots_and_other_profiles_remain_single_slot(self):
+        base = {"runtime": "vllm_radiance", "context_size": 106496,
+                "prefill_attention": "r4d_int4", "kv_cache_dtype": "int4_per_token_head",
+                "prefill_dll_sha256": "a" * 64, "decode_dll": "decode.dll",
+                "decode_dll_sha256": "b" * 64}
+        with tempfile.TemporaryDirectory() as directory, patch.object(profile, "_need", return_value=directory):
+            for slots in range(1, 5):
+                with self.subTest(slots=slots):
+                    profile.validate_config(dict(base, n_slots=slots, min_slots=slots))
+            for n_slots, min_slots in ((0, 0), (1, 0), (1, 2), (5, 5), (2, 1), (2, 3)):
+                with self.subTest(n_slots=n_slots, min_slots=min_slots), self.assertRaisesRegex(RuntimeError, "min_slots == n_slots"):
+                    profile.validate_config(dict(base, n_slots=n_slots, min_slots=min_slots))
+            for attention in ("r4d", "upstream"):
+                config = dict(base, prefill_attention=attention, kv_cache_dtype="auto",
+                              n_slots=2, min_slots=1)
+                with self.subTest(attention=attention), self.assertRaisesRegex(RuntimeError, "min_slots == n_slots"):
+                    profile.validate_config(config)
+
+    def test_four_bit_cache_requires_matching_attention(self):
+        config = {"runtime": "vllm_radiance", "context_size": 106496,
+                  "n_slots": 1, "min_slots": 1,
+                  "kv_cache_dtype": "int4_per_token_head"}
+        with self.assertRaisesRegex(RuntimeError, "select r4d_int4"):
+            profile.validate_config(config)
+        config["prefill_attention"] = "upstream"
+        with patch.object(profile, "_need", return_value="available"):
+            profile.validate_config(config)
+        config["prefill_attention"] = "r4d_int4"
+        with tempfile.TemporaryDirectory() as directory, patch.object(profile, "_need", return_value=directory):
+            config.update({key: directory for key in profile._REQUIRED})
+            config["prefill_dll_sha256"] = "a" * 64
+            with self.assertRaisesRegex(RuntimeError, "requires decode_dll"):
+                profile.validate_config(config)
+            config.update(decode_dll=directory, decode_dll_sha256="b" * 64)
+            profile.validate_config(config)
+            for partial in ({"decode_dll": directory}, {"decode_dll_sha256": "b" * 64}):
+                invalid = dict(config)
+                invalid.pop("decode_dll", None)
+                invalid.pop("decode_dll_sha256", None)
+                invalid.update(partial)
+                with self.assertRaisesRegex(RuntimeError, "configured together"):
+                    profile.validate_config(invalid)
+            invalid = dict(config, decode_dll_sha256="invalid")
+            with self.assertRaisesRegex(RuntimeError, "decode_dll_sha256"):
+                profile.validate_config(invalid)
+            invalid = dict(config, prefill_attention="r4d", kv_cache_dtype="auto")
+            with self.assertRaisesRegex(RuntimeError, "require prefill_attention r4d_int4"):
+                profile.validate_config(invalid)
+        config["kv_cache_dtype"] = "q4_0"
+        with self.assertRaisesRegex(RuntimeError, "kv_cache_dtype must be one of"):
+            profile.validate_config(config)
+
+    def test_r4d_int4_requires_int4_cache_and_retains_decode_graph(self):
+        with self.assertRaisesRegex(RuntimeError, "requires kv_cache_dtype int4_per_token_head"):
+            profile.validate_config({"runtime": "vllm_radiance", "context_size": 106496,
+                "n_slots": 1, "min_slots": 1, "prefill_attention": "r4d_int4"})
+        self.assertEqual(profile._compilation_config("int4_per_token_head", "r4d_int4"), {
+            "mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]})
+        self.assertEqual(profile._compilation_config("int4_per_token_head", "upstream"), {
+            "mode": 0, "cudagraph_mode": "NONE"})
+        self.assertEqual(profile._compilation_config("auto", "r4d"), {
+            "mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]})
+
+    def test_prefill_overlay_selection_calls_int4_installer_with_pinned_artifact(self):
+        calls = []
+        expected = object()
+        overlay = NS(
+            install_r4d_prefill_overlay=lambda *args, **kwargs: calls.append(("r4d", args, kwargs)) or expected,
+            install_int4_prefill_overlay=lambda *args, **kwargs: calls.append(("int4", args, kwargs)) or expected)
+        config = {"prefill_overlay": "overlay.py", "prefill_dll": "kernel.dll",
+                  "prefill_dll_sha256": "a" * 64, "decode_dll": "decode.dll",
+                  "decode_dll_sha256": "b" * 64}
+        with patch.object(profile, "_need", side_effect=lambda config, key: config[key]), \
+             patch.object(profile, "_verify_upstream_prefill_attention", side_effect=lambda: calls.append(("verify", (), {}))), \
+             patch.object(profile, "_load", side_effect=lambda *args: calls.append(("load", args, {})) or overlay):
+            selected = profile._install_prefill_overlay(config, "r4d_int4")
+        self.assertIs(selected, expected)
+        self.assertEqual(calls, [("verify", (), {}), ("load", ("inferdeck_prefill", "overlay.py"), {}),
+            ("int4", (Path("kernel.dll"),), {
+                "compare_reference": False, "expected_dll_sha256": "a" * 64,
+                "decode_dll_path": Path("decode.dll"), "expected_decode_dll_sha256": "b" * 64,
+                "decode_fallback_to_upstream": False})])
+
+    def test_prefill_overlay_passes_opt_in_int4_decode_artifact(self):
+        calls = []
+        overlay = NS(install_int4_prefill_overlay=lambda *args, **kwargs: calls.append((args, kwargs)))
+        config = {"prefill_overlay": "overlay.py", "prefill_dll": "prefill.dll",
+                  "prefill_dll_sha256": "a" * 64, "decode_dll": "decode.dll",
+                  "decode_dll_sha256": "b" * 64}
+        with patch.object(profile, "_need", side_effect=lambda config, key: config[key]), \
+             patch.object(profile, "_verify_upstream_prefill_attention"), \
+             patch.object(profile, "_load", return_value=overlay):
+            profile._install_prefill_overlay(config, "r4d_int4")
+        self.assertEqual(calls, [((Path("prefill.dll"),), {
+            "compare_reference": False, "expected_dll_sha256": "a" * 64,
+            "decode_dll_path": Path("decode.dll"), "expected_decode_dll_sha256": "b" * 64,
+            "decode_fallback_to_upstream": False})])
+
+    def test_kv_cache_token_capacity_uses_limiting_group(self):
+        cache_config = NS(num_blocks=700, kv_cache_groups=[
+            NS(kv_cache_spec=NS(block_size=160)),
+            NS(kv_cache_spec=NS(block_size=152))])
+        self.assertEqual(profile._kv_cache_token_capacity(cache_config), 106400)
+        cache_config.num_blocks = 701
+        self.assertEqual(profile._kv_cache_token_capacity(cache_config), 106552)
+        with self.assertRaisesRegex(RuntimeError, "invalid block capacity"):
+            profile._kv_cache_token_capacity(NS(num_blocks=700, kv_cache_groups=[]))
+
+    def test_kv_cache_concurrency_sums_rounded_group_block_demands(self):
+        class Spec:
+            def __init__(self, memory_usage, page_size):
+                self.memory_usage = memory_usage
+                self.page_size_bytes = page_size
+
+            def max_memory_usage_bytes(self, vllm_config):
+                return self.memory_usage
+
+        cache_config = NS(num_blocks=170, kv_cache_groups=[
+            NS(kv_cache_spec=Spec(240, 10)),
+            NS(kv_cache_spec=Spec(171, 10))])
+        concurrency = profile._kv_cache_max_concurrency(cache_config, object())
+        self.assertAlmostEqual(concurrency, 170 / 42)
+        self.assertGreaterEqual(concurrency, 4)
+        self.assertLess(concurrency, 4.1)
+        with self.assertRaisesRegex(RuntimeError, "invalid block capacity"):
+            profile._kv_cache_max_concurrency(NS(num_blocks=0, kv_cache_groups=[]), object())
 
     def _capture_patches(self, directory):
         return (
@@ -131,6 +266,9 @@ class ProfileTests(unittest.TestCase):
             for key in ("prefill_overlay", "prefill_dll", "prefill_dll_sha256"):
                 upstream.pop(key)
             profile.validate_config(upstream)
+            int4 = dict(config, prefill_attention="r4d_int4", kv_cache_dtype="int4_per_token_head")
+            int4.update(decode_dll=directory, decode_dll_sha256="b" * 64)
+            profile.validate_config(int4)
 
     def test_invalid_prefill_attention_is_rejected_before_loading(self):
         config = {"runtime": "vllm_radiance", "context_size": 106496,
@@ -259,7 +397,7 @@ class ProfileTests(unittest.TestCase):
             captured["engine_ids"] = ids
 
         state = {"tokenizer": NS(apply_chat_template=tokenize),
-                 "engine": NS(add_request=add_request), "active": set(), "requests": {}}
+                 "engine": NS(add_request=add_request), "engine_lock": threading.RLock(), "active": set(), "requests": {}}
         request = {"model": "qwen", "messages": [], "tools": [{"type": "function"}],
                    "tool_choice": {"type": "function", "function": {"name": "lookup"}},
                    "sampling": {"repetition_penalty": 1.2, "frequency_penalty": 0.5, "presence_penalty": 0.25}, "repeat_last_n": 64, "structured_outputs": structured_outputs,
@@ -319,7 +457,7 @@ class ProfileTests(unittest.TestCase):
             return [1, 2]
 
         state = {"tokenizer": NS(apply_chat_template=tokenize),
-                 "engine": NS(add_request=lambda *args, **kwargs: None), "active": set(), "requests": {}}
+                 "engine": NS(add_request=lambda *args, **kwargs: None), "engine_lock": threading.RLock(), "active": set(), "requests": {}}
         base = {"model": "qwen", "messages": [], "sampling": {}, "max_output_tokens": 1}
         with patch.dict(sys.modules, modules):
             for value in ("absent", None, False, True):
@@ -348,7 +486,7 @@ class ProfileTests(unittest.TestCase):
                 return [NS(request_id="r", finished=last, prompt_token_ids=[1, 2],
                            num_cached_tokens=1, metrics=NS(scheduled_ts=10.0, first_token_ts=11.0, last_token_ts=13.0), outputs=[NS(text='}' if last else '{"x":1',
                            token_ids=[5] if last else [3, 4], finish_reason="stop" if last else None)])]
-        state = {"engine": Engine(), "active": {"r"}, "requests": {
+        state = {"engine": Engine(), "engine_lock": threading.RLock(), "active": {"r"}, "requests": {
             "r": {"parser": Parser(), "request": object(), "ids": [1, 2],
                   "completion_tokens": 0, "had_tools": False}}}
         first = profile.step(state, "r", {})[0]
@@ -363,6 +501,59 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(seen, [('{"x":1', [3, 4]), ('}', [5])])
         self.assertFalse(state["active"])
         self.assertFalse(state["requests"])
+
+    def test_step_demultiplexes_concurrent_requests_and_abort_discards_queued_output(self):
+        class Parser:
+            def parse_delta(self, text, tokens, *args, **kwargs):
+                return NS(content=text, reasoning="", tool_calls=[])
+
+        def output(rid, text, done=False):
+            return NS(request_id=rid, finished=done, prompt_token_ids=[1],
+                      num_cached_tokens=0, metrics=None,
+                      outputs=[NS(text=text, token_ids=[2], finish_reason="stop" if done else None)])
+
+        class Engine:
+            def __init__(self):
+                self.batches = [[output("a", "A"), output("b", "B", True)], []]
+                self.aborted = []
+
+            def step(self):
+                return self.batches.pop(0)
+
+            def abort_request(self, request_ids):
+                self.aborted.extend(request_ids)
+
+        engine = Engine()
+        request_state = {rid: {"parser": Parser(), "request": object(), "ids": [1],
+                               "completion_tokens": 0, "had_tools": False, "pending": []}
+                         for rid in ("a", "b")}
+        state = {"engine": engine, "engine_lock": threading.RLock(), "active": {"a", "b"}, "requests": request_state}
+
+        self.assertEqual(profile.step(state, "a", {})[0]["text"], "A")
+        self.assertEqual(len(state["requests"]["b"]["pending"]), 1)
+        profile.abort(state, "b")
+        self.assertEqual(engine.aborted, ["b"])
+        self.assertNotIn("b", state["requests"])
+        self.assertEqual(profile.step(state, "a", {}), [])
+
+    def test_shared_engine_step_is_serialized_across_slot_threads(self):
+        class Engine:
+            active_calls = 0
+            maximum_calls = 0
+
+            def step(self):
+                self.active_calls += 1
+                self.maximum_calls = max(self.maximum_calls, self.active_calls)
+                time.sleep(0.02)
+                self.active_calls -= 1
+                return []
+
+        engine = Engine()
+        state = {"engine": engine, "engine_lock": threading.RLock(),
+                 "active": {"r"}, "requests": {"r": {"pending": []}}}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            self.assertEqual(list(pool.map(lambda _: profile.step(state, "r", {}), range(4))), [[], [], [], []])
+        self.assertEqual(engine.maximum_calls, 1)
 
     def test_post_state_cleanup_releases_unused_pinned_host_cache(self):
         calls = []

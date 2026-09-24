@@ -12,6 +12,7 @@ import re
 from inferdeck_vllm_radiance_lifecycle import release_language_model_cache, capture_lifecycle_refs, lifecycle_diagnostics, finalize_engine_caches
 import os
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -25,14 +26,47 @@ _CAPTURE_OUTPUT_PATH = Path(__file__).with_name("captured-request.json")
 
 _REQUIRED=("model","python_root","python_site","vllm_source","radiance_source","radiance_extension","rocm","selector_overlay","pread_overlay","prefill_overlay","prefill_dll","prefill_dll_sha256")
 _PREFILL_ATTENTION_DEFAULT = "r4d"
-_PREFILL_ATTENTION_OPTIONS = frozenset(("r4d", "upstream"))
+_PREFILL_ATTENTION_OPTIONS = frozenset(("r4d", "r4d_int4", "upstream"))
+_KV_CACHE_DTYPE_OPTIONS = frozenset(("auto", "int4_per_token_head"))
 
 def _gpu_memory_utilization(prefill_attention:str)->float:
     return 0.925 if prefill_attention == "r4d" else 0.90
 
+def _is_r4d_prefill(prefill_attention:str)->bool:
+    return prefill_attention in ("r4d", "r4d_int4")
+
+def _compilation_config(kv_cache_dtype:str, prefill_attention:str)->dict[str,Any]:
+    if kv_cache_dtype == "int4_per_token_head" and prefill_attention == "upstream":
+        return {"mode":0,"cudagraph_mode":"NONE"}
+    return {"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}
+
+def _kv_cache_token_capacity(kv_cache_config:Any)->int:
+    num_blocks = int(kv_cache_config.num_blocks)
+    block_sizes = [int(group.kv_cache_spec.block_size) for group in kv_cache_config.kv_cache_groups]
+    if num_blocks <= 0 or not block_sizes or any(block_size <= 0 for block_size in block_sizes):
+        raise RuntimeError("R4D KV cache has invalid block capacity metadata")
+    return num_blocks * min(block_sizes)
+
+def _kv_cache_max_concurrency(kv_cache_config:Any, vllm_config:Any)->float:
+    num_blocks = int(kv_cache_config.num_blocks)
+    groups = kv_cache_config.kv_cache_groups
+    if num_blocks <= 0 or not groups:
+        raise RuntimeError("R4D KV cache has invalid block capacity metadata")
+    blocks_per_request = 0
+    for group in groups:
+        spec = group.kv_cache_spec
+        page_size_bytes = int(spec.page_size_bytes)
+        memory_usage_bytes = int(spec.max_memory_usage_bytes(vllm_config))
+        if page_size_bytes <= 0 or memory_usage_bytes <= 0:
+            raise RuntimeError("R4D KV cache has invalid per-request memory metadata")
+        blocks_per_request += math.ceil(memory_usage_bytes / page_size_bytes)
+    if blocks_per_request <= 0:
+        raise RuntimeError("R4D KV cache has invalid per-request block demand")
+    return num_blocks / blocks_per_request
+
 @contextmanager
 def _r4d_cache_retention(prefill_attention:str):
-    if prefill_attention != "r4d":
+    if not _is_r4d_prefill(prefill_attention):
         yield
         return
     key = "VLLM_PREFIX_CACHE_RETENTION_INTERVAL"
@@ -56,10 +90,26 @@ def _load(n:str,p:str)->Any:
     module=importlib.util.module_from_spec(spec);sys.modules[n]=module;spec.loader.exec_module(module);return module
 def validate_config(c:dict[str,Any])->None:
     if c.get("runtime")!="vllm_radiance":raise RuntimeError("runtime must be vllm_radiance")
-    if int(c.get("context_size",0))!=106496 or int(c.get("n_slots",0))!=1 or int(c.get("min_slots",0))!=1:raise RuntimeError("requires 106496 context and exactly one slot")
+    context_size = int(c.get("context_size", 0))
+    n_slots = int(c.get("n_slots", 0))
+    min_slots = int(c.get("min_slots", 0))
+    if context_size != 106496:
+        raise RuntimeError("requires 106496 context")
     prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
     if not isinstance(prefill_attention, str) or prefill_attention not in _PREFILL_ATTENTION_OPTIONS:
-        raise RuntimeError("prefill_attention must be one of: r4d, upstream")
+        raise RuntimeError("prefill_attention must be one of: r4d, r4d_int4, upstream")
+    if "gpu_memory_utilization" in c:
+        raise RuntimeError("gpu_memory_utilization is not a supported profile setting")
+    maximum_slots = 4 if prefill_attention == "r4d_int4" else 1
+    if not 1 <= min_slots == n_slots <= maximum_slots:
+        raise RuntimeError(f"{prefill_attention} requires min_slots == n_slots between 1 and {maximum_slots}")
+    kv_cache_dtype = c.get("kv_cache_dtype", "auto")
+    if not isinstance(kv_cache_dtype, str) or kv_cache_dtype not in _KV_CACHE_DTYPE_OPTIONS:
+        raise RuntimeError("kv_cache_dtype must be one of: auto, int4_per_token_head")
+    if kv_cache_dtype == "int4_per_token_head" and prefill_attention == "r4d":
+        raise RuntimeError("R4D prefill requires BF16 KV; select r4d_int4 for the native four-bit kernel")
+    if prefill_attention == "r4d_int4" and kv_cache_dtype != "int4_per_token_head":
+        raise RuntimeError("r4d_int4 prefill requires kv_cache_dtype int4_per_token_head")
     optional_r4d = {"prefill_overlay", "prefill_dll", "prefill_dll_sha256"}
     for key in _REQUIRED:
         if prefill_attention == "upstream" and key in optional_r4d:
@@ -69,6 +119,18 @@ def validate_config(c:dict[str,Any])->None:
                 raise RuntimeError("prefill_dll_sha256 must be a SHA-256 digest")
         else:
             _need(c, key)
+    decode_keys = ("decode_dll", "decode_dll_sha256")
+    decode_present = [key in c for key in decode_keys]
+    if any(decode_present):
+        if not all(decode_present):
+            raise RuntimeError("decode_dll and decode_dll_sha256 must be configured together")
+        if prefill_attention != "r4d_int4":
+            raise RuntimeError("decode DLL artifacts require prefill_attention r4d_int4")
+        _need(c, "decode_dll")
+        if not isinstance(c.get("decode_dll_sha256"), str) or not re.fullmatch(r"[0-9a-fA-F]{64}", c["decode_dll_sha256"]):
+            raise RuntimeError("decode_dll_sha256 must be a SHA-256 digest")
+    elif prefill_attention == "r4d_int4":
+        raise RuntimeError("r4d_int4 requires decode_dll and decode_dll_sha256")
 def _configure_native_compiler(python_site: str)->str:
     cc=Path(python_site)/"_rocm_sdk_core"/"lib"/"llvm"/"bin"/"clang-cl.exe"
     if not cc.is_file(): raise RuntimeError(f"pinned native compiler is unavailable: {cc}")
@@ -95,6 +157,25 @@ def _verify_upstream_prefill_attention()->Any:
     if active is not definition or getattr(active, "__module__", None) != module_name:
         raise RuntimeError("vLLM Triton attention backend has an unexpected unified_attention binding")
     return active
+
+def _install_prefill_overlay(c:dict[str,Any], prefill_attention:str)->Any:
+    if prefill_attention == "upstream":
+        return None
+    if prefill_attention == "r4d_int4":
+        _verify_upstream_prefill_attention()
+    overlay = _load("inferdeck_prefill", _need(c, "prefill_overlay"))
+    dll_path = Path(_need(c, "prefill_dll"))
+    dll_sha256 = c["prefill_dll_sha256"]
+    if prefill_attention == "r4d_int4":
+        decode_dll = Path(_need(c, "decode_dll"))
+        return overlay.install_int4_prefill_overlay(
+            dll_path, compare_reference=False, expected_dll_sha256=dll_sha256,
+            decode_dll_path=decode_dll,
+            expected_decode_dll_sha256=c.get("decode_dll_sha256"),
+            decode_fallback_to_upstream=False)
+    return overlay.install_r4d_prefill_overlay(
+        dll_path, compare_reference=False, expected_dll_sha256=dll_sha256)
+
 def _capture_next_request(r:dict[str,Any], ids:list[Any])->None:
     """Consume a short-lived operator marker and save one rendered request privately."""
     try:
@@ -162,30 +243,44 @@ def _create(c:dict[str,Any])->dict[str,Any]:
     try:
         pread=_load("inferdeck_pread",_need(c,"pread_overlay")).install_pread_overlay();pread.__enter__();contexts.insert(0,pread)
         selector=_load("inferdeck_selector",_need(c,"selector_overlay")).install_radiance_overlay(observe_apply=False,max_observations=128);selector.__enter__();contexts.insert(0,selector)
-        if prefill_attention == "r4d":
-            prefill=_load("inferdeck_prefill",_need(c,"prefill_overlay")).install_r4d_prefill_overlay(Path(_need(c,"prefill_dll")),compare_reference=False,expected_dll_sha256=c["prefill_dll_sha256"]);prefill.__enter__();contexts.insert(0,prefill)
-        else:
+        if prefill_attention == "upstream":
             _verify_upstream_prefill_attention()
+        else:
+            prefill = _install_prefill_overlay(c, prefill_attention)
+            prefill.__enter__()
+            contexts.insert(0, prefill)
         model=_need(c,"model");tokenizer_revision=register_tokenizer(model)
-        scheduler_options = {"async_scheduling": False} if prefill_attention == "r4d" else {}
-        engine_args=EngineArgs(model=model,logits_processors=[InferDeckPenaltiesProcessor],tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",max_model_len=106496,max_num_batched_tokens=4096,max_num_seqs=1,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=_gpu_memory_utilization(prefill_attention),seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config={"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]},**scheduler_options)
+        scheduler_options = {"async_scheduling": False} if _is_r4d_prefill(prefill_attention) else {}
+        kv_cache_dtype = c.get("kv_cache_dtype", "auto")
+        compilation_config = _compilation_config(kv_cache_dtype, prefill_attention)
+        memory_utilization = _gpu_memory_utilization(prefill_attention)
+        n_slots = int(c["n_slots"])
+        engine_args=EngineArgs(model=model,logits_processors=[InferDeckPenaltiesProcessor],tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",kv_cache_dtype=kv_cache_dtype,max_model_len=106496,max_num_batched_tokens=4096,max_num_seqs=n_slots,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=memory_utilization,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config=compilation_config,**scheduler_options)
         with _r4d_cache_retention(prefill_attention):
             engine=LLMEngine.from_engine_args(engine_args,enable_multiprocessing=False)
-        if prefill_attention == "r4d":
+        if engine.vllm_config.cache_config.cache_dtype != kv_cache_dtype:
+            raise RuntimeError("effective KV cache dtype differs from requested profile")
+        if _is_r4d_prefill(prefill_attention):
             cache_manager=engine.engine_core.engine_core.scheduler.kv_cache_manager
             free_bytes,total_bytes=torch.cuda.mem_get_info()
-            actual={"async":engine.vllm_config.scheduler_config.async_scheduling,"retention":cache_manager.coordinator.retention_interval,"blocks":cache_manager.kv_cache_config.num_blocks,"context":engine.vllm_config.model_config.max_model_len,"memory_utilization":engine.vllm_config.cache_config.gpu_memory_utilization,"free_bytes":free_bytes,"total_bytes":total_bytes}
+            kv_token_capacity = _kv_cache_token_capacity(cache_manager.kv_cache_config)
+            kv_max_concurrency = _kv_cache_max_concurrency(cache_manager.kv_cache_config, engine.vllm_config)
+            actual={"async":engine.vllm_config.scheduler_config.async_scheduling,"retention":cache_manager.coordinator.retention_interval,"blocks":cache_manager.kv_cache_config.num_blocks,"kv_token_capacity":kv_token_capacity,"kv_max_concurrency":kv_max_concurrency,"context":engine.vllm_config.model_config.max_model_len,"memory_utilization":engine.vllm_config.cache_config.gpu_memory_utilization,"free_bytes":free_bytes,"total_bytes":total_bytes}
             print("event=isolated_cache_profile "+json.dumps(actual),file=sys.stderr,flush=True)
-            if actual["async"] or actual["retention"] != 0 or actual["context"] != 106496 or actual["memory_utilization"] != 0.925 or actual["blocks"] < 185 or free_bytes < 1073741824:
+            expected_memory_utilization = memory_utilization
+            minimum_blocks = 185 if prefill_attention == "r4d" else 0
+            capacity_valid = kv_max_concurrency >= n_slots if prefill_attention == "r4d_int4" else actual["blocks"] >= minimum_blocks
+            if actual["async"] or actual["retention"] != 0 or actual["context"] != 106496 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < 1073741824:
                 raise RuntimeError("R4D cache profile or free-memory guard failed")
         tokenizer=cached_tokenizer_from_config(engine.vllm_config.model_config)
         if engine.vllm_config.model_config.enable_prompt_embeds:raise RuntimeError("native pooled tokenizer does not support prompt embeds")
         if not isinstance(engine.engine_core,InprocClient):raise RuntimeError("V1 InprocClient was not constructed")
-        if engine.vllm_config.model_config.enforce_eager or engine.vllm_config.scheduler_config.max_num_batched_tokens!=4096 or engine.vllm_config.scheduler_config.max_num_seqs!=1:raise RuntimeError("effective engine differs from measured profile")
+        if engine.vllm_config.model_config.enforce_eager or engine.vllm_config.scheduler_config.max_num_batched_tokens!=4096 or engine.vllm_config.scheduler_config.max_num_seqs!=n_slots:raise RuntimeError("effective engine differs from configured profile")
         if prefill_attention == "upstream":
             _verify_upstream_prefill_attention()
-        print(f"vllm_radiance prefill_attention={prefill_attention}", file=sys.stderr, flush=True)
-        return {"engine":engine,"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention}
+        decode_kernel_enabled = prefill_attention == "r4d_int4" and "decode_dll" in c
+        print(f"vllm_radiance prefill_attention={prefill_attention} kv_cache_dtype={kv_cache_dtype} gpu_memory_utilization={memory_utilization} int4_decode_kernel={str(decode_kernel_enabled).lower()}", file=sys.stderr, flush=True)
+        return {"engine":engine,"engine_lock":threading.RLock(),"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention,"int4_decode_kernel":decode_kernel_enabled}
     except Exception as load_error:
         try:
             shutdown({"engine": engine, "active": set(), "requests": {},
@@ -258,13 +353,26 @@ def begin(s:dict[str,Any],r:dict[str,Any])->str:
     }), file=sys.stderr, flush=True)
     if r.get("stop"):sampling.stop=r["stop"]
     parser_kwargs = {"enable_thinking": kwargs["enable_thinking"]} if "enable_thinking" in kwargs else {}
-    rid=uuid.uuid4().hex;s["engine"].add_request(rid,ids,sampling,priority=0);s["active"].add(rid);s["requests"][rid]={"request":request,"parser":Qwen3Parser(s["tokenizer"],request.tools,chat_template_kwargs=parser_kwargs),"ids":ids,"completion_tokens":0,"had_tools":False};return rid
+    rid=uuid.uuid4().hex
+    state={"request":request,"parser":Qwen3Parser(s["tokenizer"],request.tools,chat_template_kwargs=parser_kwargs),"ids":ids,"completion_tokens":0,"had_tools":False,"pending":[]}
+    with s["engine_lock"]:
+        s["engine"].add_request(rid,ids,sampling,priority=0)
+        s["active"].add(rid)
+        s["requests"][rid]=state
+    return rid
 def step(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
+    with s["engine_lock"]:
+        return _step_locked(s,rid,r)
+def _step_locked(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
     state=s["requests"].get(rid)
     if state is None:raise RuntimeError("unknown vllm_radiance request")
-    result=[]
     for output in s["engine"].step():
-        if output.request_id!=rid:continue
+        output_state = s["requests"].get(output.request_id)
+        if output_state is not None:
+            output_state.setdefault("pending", []).append(output)
+    result=[]
+    while state["pending"]:
+        output = state["pending"].pop(0)
         completion=output.outputs[0] if output.outputs else None;done=bool(output.finished)
         delta=state["parser"].parse_delta(completion.text if completion else "",list(completion.token_ids or []) if completion else [],state["request"],state["ids"],finished=done)
         state["completion_tokens"] += len(completion.token_ids or []) if completion else 0
@@ -280,11 +388,23 @@ def step(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
         if all(math.isfinite(value) for value in (scheduled, first, last)) and 0 < scheduled <= first <= last:
             result[-1]["prompt_duration_ms"] = (first - scheduled) * 1000.0
             result[-1]["generation_duration_ms"] = (last - first) * 1000.0
+            queued = float(getattr(metrics, "queued_ts", 0.0))
+            if done and s.get("prefill_attention") == "r4d_int4" and math.isfinite(queued) and 0 < queued <= scheduled:
+                print("event=vllm_radiance_request_timing " + json.dumps({
+                    "engine_queue_ms": round((scheduled - queued) * 1000.0, 1),
+                    "engine_prefill_ms": round((first - scheduled) * 1000.0, 1),
+                    "engine_generation_ms": round((last - first) * 1000.0, 1),
+                    "prompt_tokens": len(output.prompt_token_ids or []),
+                    "cached_tokens": int(output.num_cached_tokens or 0),
+                    "completion_tokens": state["completion_tokens"],
+                }), file=sys.stderr, flush=True)
         if done:s["active"].discard(rid);s["requests"].pop(rid,None)
     return result
 def abort(s:dict[str,Any],rid:str)->None:
-    if rid in s["active"]:s["engine"].abort_request([rid]);s["active"].discard(rid);s["requests"].pop(rid,None)
-def active_count(s:dict[str,Any])->int:return len(s["active"])
+    with s["engine_lock"]:
+        if rid in s["active"]:s["engine"].abort_request([rid]);s["active"].discard(rid);s["requests"].pop(rid,None)
+def active_count(s:dict[str,Any])->int:
+    with s["engine_lock"]:return len(s["active"])
 def shutdown(s: dict[str, Any]) -> None:
     global _RELEASED_SNAPSHOT
     errors = []

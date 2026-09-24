@@ -1,0 +1,54 @@
+{
+  "goal": "q4-kv-qwen3.8-27b-real-inferdeck",
+  "status": "IN_PROGRESS",
+  "gates": [
+    {
+      "id": "source-reproducible",
+      "status": "PASS",
+      "evidence": ["libs/vllm_radiance_wrapper/native/int4/README.md", "build/private-releases/alpha66-int4layout/candidate-manifest.json", ".UAM/AINotes/alpha66-int4layout-smoke-20260924T011354761Z.json"],
+      "next": "Local build and real-app use passed; upstream source-license provenance is unresolved for publication. Invalidate after native source, config, or profile changes."
+    },
+    {
+      "id": "real-model-load-and-coherent-output",
+      "status": "PASS",
+      "evidence": [".UAM/AINotes/alpha66-int4layout-smoke-20260924T011354761Z.json"],
+      "next": "Invalidate after any relevant source/config change."
+    },
+    {
+      "id": "four-concurrent-short-requests",
+      "status": "PASS",
+      "evidence": [".UAM/AINotes/alpha66-int4layout-smoke-20260924T011354761Z.four-slots.json"],
+      "next": "Four distinct requests returned HTTP 200 with peak active four; long-context capacity remains a separate gate."
+    },
+    {
+      "id": "four-100k-contexts",
+      "status": "PENDING",
+      "evidence": [".UAM/AINotes/alpha64-int4loaded-smoke-20260924T005613404Z.gateway.stderr.log"],
+      "next": "Engine capacity calculation is 4.0238x at 106496 tokens; run four actual near-100K API requests with output headroom."
+    },
+    {
+      "id": "two-agent-total-time",
+      "status": "FAIL",
+      "evidence": [".UAM/AINotes/r4d-timer-free-three-rep.json", ".UAM/AINotes/q4kv-64k2k-20260924T011502948Z-worker.json", "build/private-releases/alpha66-int4layout/data/stats.db"],
+      "next": "151.354 s Q4 versus 133.684 s BF16 median; vLLM internal queue was 43.937 s for the second cold request. Try one bounded scheduler change and compare complete loop time."
+    },
+    {
+      "id": "context-cache-and-quality",
+      "status": "IN_PROGRESS",
+      "evidence": [".UAM/AINotes/q4kv-64k2k-20260924T011502948Z-worker.json"],
+      "next": "Corrected outer worker, both exact tool tasks and 63840-token warm cache reuse passed; verify 100K and broader behavior."
+    },
+    {
+      "id": "stability-and-recovery",
+      "status": "IN_PROGRESS",
+      "evidence": [".UAM/AINotes/alpha66-int4layout-smoke-20260924T011354761Z.json"],
+      "next": "Original BF16 service and model restored after another real-app test; repeated long-context and switching operation remain untested."
+    },
+    {
+      "id": "build-deployment-and-rollback",
+      "status": "PENDING",
+      "evidence": [],
+      "next": "After a passing candidate, document Windows source build, config, deployment, rollback, and actual prod validation; preserve current production meanwhile."
+    }
+  ]
+}
