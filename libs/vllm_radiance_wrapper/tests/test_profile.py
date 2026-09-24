@@ -426,9 +426,11 @@ class ProfileTests(unittest.TestCase):
     def test_begin_parser_reasoning_kwargs_preserve_absent_null_and_explicit_values(self):
         parser_calls = []
         template_calls = []
+        request_calls = []
 
         class Request:
             def __init__(self, **kwargs):
+                request_calls.append(kwargs)
                 self.__dict__.update(kwargs)
                 self.tools = kwargs["tools"]
 
@@ -467,13 +469,16 @@ class ProfileTests(unittest.TestCase):
                 if value != "absent":
                     request["enable_reasoning"] = value
                 profile.begin(state, request)
+            profile.begin(state, {**base, "reasoning_effort": "none"})
 
         self.assertEqual([call["chat_template_kwargs"].get("enable_thinking", True)
-                          for call in parser_calls], [True, True, False, True])
+                          for call in parser_calls], [True, True, False, True, False])
         self.assertEqual([call.get("enable_thinking", True)
-                          for call in template_calls], [True, True, False, True])
-        self.assertEqual([call["add_generation_prompt"] for call in template_calls], [True] * 4)
-        self.assertEqual([call["tokenize"] for call in template_calls], [True] * 4)
+                          for call in template_calls], [True, True, False, True, False])
+        self.assertNotIn("reasoning_effort", template_calls[-1])
+        self.assertFalse(request_calls[-1]["include_reasoning"])
+        self.assertEqual([call["add_generation_prompt"] for call in template_calls], [True] * 5)
+        self.assertEqual([call["tokenize"] for call in template_calls], [True] * 5)
     def test_stream_counts_delta_tokens_and_tool_finish(self):
         seen = []
         class Parser:
