@@ -251,6 +251,8 @@ def _create(c:dict[str,Any])->dict[str,Any]:
             contexts.insert(0, prefill)
         model=_need(c,"model");tokenizer_revision=register_tokenizer(model)
         scheduler_options = {"async_scheduling": False} if _is_r4d_prefill(prefill_attention) else {}
+        if prefill_attention == "r4d_int4":
+            scheduler_options["long_prefill_token_threshold"] = 2048
         kv_cache_dtype = c.get("kv_cache_dtype", "auto")
         compilation_config = _compilation_config(kv_cache_dtype, prefill_attention)
         memory_utilization = _gpu_memory_utilization(prefill_attention)
@@ -265,12 +267,12 @@ def _create(c:dict[str,Any])->dict[str,Any]:
             free_bytes,total_bytes=torch.cuda.mem_get_info()
             kv_token_capacity = _kv_cache_token_capacity(cache_manager.kv_cache_config)
             kv_max_concurrency = _kv_cache_max_concurrency(cache_manager.kv_cache_config, engine.vllm_config)
-            actual={"async":engine.vllm_config.scheduler_config.async_scheduling,"retention":cache_manager.coordinator.retention_interval,"blocks":cache_manager.kv_cache_config.num_blocks,"kv_token_capacity":kv_token_capacity,"kv_max_concurrency":kv_max_concurrency,"context":engine.vllm_config.model_config.max_model_len,"memory_utilization":engine.vllm_config.cache_config.gpu_memory_utilization,"free_bytes":free_bytes,"total_bytes":total_bytes}
+            actual={"async":engine.vllm_config.scheduler_config.async_scheduling,"long_prefill_token_threshold":engine.vllm_config.scheduler_config.long_prefill_token_threshold,"retention":cache_manager.coordinator.retention_interval,"blocks":cache_manager.kv_cache_config.num_blocks,"kv_token_capacity":kv_token_capacity,"kv_max_concurrency":kv_max_concurrency,"context":engine.vllm_config.model_config.max_model_len,"memory_utilization":engine.vllm_config.cache_config.gpu_memory_utilization,"free_bytes":free_bytes,"total_bytes":total_bytes}
             print("event=isolated_cache_profile "+json.dumps(actual),file=sys.stderr,flush=True)
             expected_memory_utilization = memory_utilization
             minimum_blocks = 185 if prefill_attention == "r4d" else 0
             capacity_valid = kv_max_concurrency >= n_slots if prefill_attention == "r4d_int4" else actual["blocks"] >= minimum_blocks
-            if actual["async"] or actual["retention"] != 0 or actual["context"] != 106496 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < 1073741824:
+            if actual["async"] or actual["long_prefill_token_threshold"] != scheduler_options.get("long_prefill_token_threshold", 0) or actual["retention"] != 0 or actual["context"] != 106496 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < 1073741824:
                 raise RuntimeError("R4D cache profile or free-memory guard failed")
         tokenizer=cached_tokenizer_from_config(engine.vllm_config.model_config)
         if engine.vllm_config.model_config.enable_prompt_embeds:raise RuntimeError("native pooled tokenizer does not support prompt embeds")
