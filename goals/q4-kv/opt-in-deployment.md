@@ -10,6 +10,8 @@ Configure with `cmake -S . -B build -DINFERDECK_LOCAL_BUILD_NUMBER=68`, then bui
 
 Alpha67's frozen two-agent 64K+2K tool-loop times were 137.930 and 136.871 seconds versus the BF16/R4D 133.684-second median. Its four simultaneous cold inputs each contained 100194 tokens and returned HTTP 200, but two answers reached the explicitly requested 256-token output cap. A separate 100K tool continuation completed normally with exact `read_file` and `BUILD_TAG` checks, 100320 cached tokens, and 99.074 seconds from first send to final answer. These results support an opt-in trial, not a claim of higher raw PP or complete long-term stability.
 
+The 29557.65625 MiB post-batch reading is GPU-wide VRAM used from `windows_pdh_dxgi`; process-dedicated allocation and peak usage were not measured. No same-workload Vulkan four-100K memory comparison is saved, so dedicated-VRAM parity remains an open goal gate.
+
 ## Configuration boundary
 
 Production currently uses `C:\InferDeck\config\gateway.active.yml`, **not** the base `gateway.yml`. The active profile has a different default model, aliases and model set. The package's `config/gateway.active.optin.yml` preserves every existing active-profile byte and inserts one model before `model_aliases:`. YAML structural comparison confirms only one additional registry entry. Its new ID is `qwen3.8-27b-radiance-q4`, with four fixed 106496-token slots, `r4d_int4`, `int4_per_token_head` KV and text-only capability. The existing one-slot BF16 `qwen3.8-27b-radiance`, default, aliases and Vulkan `qwen3.8-27b` with `mmproj_path`/vision remain unchanged. Select Q4 explicitly by its new ID.
