@@ -46,9 +46,9 @@
     },
     {
       "id": "build-deployment-and-rollback",
-      "status": "PENDING",
-      "evidence": [],
-      "next": "After a passing candidate, document Windows source build, config, deployment, rollback, and actual prod validation; preserve current production meanwhile."
+      "status": "IN_PROGRESS",
+      "evidence": ["goals/q4-kv/opt-in-deployment.md", "build/private-releases/alpha68-q4-active-optin/manifest.json", "build/private-releases/alpha67-prefill2048/deployment-active/prepare-result.json", ".UAM/AINotes/alpha68-q4-optin-20260924T022938735Z.json"],
+      "next": "Alpha68 builds cleanly and 148/148 C++ checks pass. The append-only active-profile package, rollback procedure and read-only deployment preflight passed. The alpha68 executable has not run the real model or been deployed. Production executable/active-config replacement requires explicit authorization; then test Q4 and BF16 recovery and record live evidence."
     }
   ]
 }
