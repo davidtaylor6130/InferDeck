@@ -300,6 +300,17 @@ def begin(s:dict[str,Any],r:dict[str,Any])->str:
     with s["engine_lock"]:
         return _begin_locked(s,r)
 
+def _template_messages(messages:list[dict[str,Any]])->list[dict[str,Any]]:
+    system = [message["content"] for message in messages
+              if message.get("role") == "system" and message.get("content")]
+    developer = [message["content"] for message in messages
+                 if message.get("role") == "developer" and message.get("content")]
+    result = [copy.deepcopy(message) for message in messages
+              if message.get("role") not in ("system", "developer")]
+    if system or developer:
+        result.insert(0, {"role": "system", "content": "\n\n".join(system + developer)})
+    return result
+
 def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
     if r.get("logprobs"):raise RuntimeError("logprobs are unsupported by vllm_radiance")
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -327,7 +338,7 @@ def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
     else:
         if r.get("enable_reasoning") is not None:kwargs["enable_thinking"]=r["enable_reasoning"]
         if reasoning_effort:kwargs["reasoning_effort"]=reasoning_effort
-    template_messages = copy.deepcopy(r["messages"])
+    template_messages = _template_messages(r["messages"])
     for message in template_messages:
         for call in message.get("tool_calls", ()):
             function = call.get("function", {})
