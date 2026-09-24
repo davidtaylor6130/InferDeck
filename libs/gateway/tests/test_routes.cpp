@@ -349,6 +349,7 @@ public:
     std::atomic<bool> speech_should_cancel{false};
     std::atomic<bool> transcription_should_cancel{false};
     std::atomic<int> transcription_delay_ms{0};
+    std::string transcription_text{"test transcript"};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
     InferenceRequest last_request;
@@ -737,7 +738,7 @@ public:
         }
         if (progress && !progress(75)) return inferdeck::foundation::Err<TranscriptionResult>(ErrorCode::Cancelled, "cancelled");
         TranscriptionResult result;
-        result.text = "test transcript";
+        result.text = transcription_text;
         result.language = request.language.empty() ? "en" : request.language;
         result.duration_seconds = static_cast<float>(request.pcm.size()) / request.sample_rate;
         result.inference_ms = 7;
@@ -745,7 +746,7 @@ public:
         segment.id = 0;
         segment.start_seconds = 0.0f;
         segment.end_seconds = 0.5f;
-        segment.text = " test transcript";
+        segment.text = " " + transcription_text;
         segment.tokens = {50364, 1234, 50389};
         segment.avg_logprob = -0.25f;
         segment.no_speech_probability = 0.01f;
@@ -786,6 +787,7 @@ std::string test_wav() {
     put16(34, 16);
     std::memcpy(wav.data() + 36, "data", 4);
     put32(40, 320);
+    put16(44, 1024);
     return wav;
 }
 
@@ -3314,18 +3316,17 @@ TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speec
 
     response = client.Post("/v1/audio/speech",
         nlohmann::json{{"model", "speech-model"}, {"input", "hello"},
-                       {"voice", "default"}, {"response_format", "mp3"},
+                       {"voice", "default"},
                        {"speed", 1.0}}.dump(), "application/json");
     REQUIRE(response);
-    CHECK(response->status == 400);
-    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
-          "unsupported_capability");
+    CHECK(response->status == 200);
+    CHECK(response->get_header_value("Content-Type") == "audio/mpeg");
     const auto usage = ts.stats_db.model_usage();
     REQUIRE(usage.size() == 1);
     CHECK(usage[0].model == "speech-model");
-    CHECK(usage[0].requests == 2);
-    CHECK(usage[0].successful_requests == 1);
-    CHECK(usage[0].input_characters == 5);
+    CHECK(usage[0].requests == 3);
+    CHECK(usage[0].successful_requests == 2);
+    CHECK(usage[0].input_characters == 10);
     CHECK(usage[0].input_audio_seconds == 0.0);
     const auto rows = ts.stats_db.recent_requests(10);
     const auto successful = std::find_if(rows.begin(), rows.end(),
@@ -3403,8 +3404,6 @@ TEST_CASE("Routes: speech validates the OpenAI request contract before admission
     expect_error({{"model", info.name}, {"input", "hello"},
                   {"voice", {{"id", "voice_custom"}, {"ignored", true}}},
                   {"response_format", "wav"}}, "invalid_speech_request");
-    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"}},
-                 "unsupported_capability");
     expect_error({{"model", info.name}, {"input", "hello"},
                   {"voice", "not-a-voice"}, {"response_format", "wav"}},
                  "invalid_speech_request");
@@ -3516,6 +3515,48 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     CHECK(rows[0].modality == "audio_transcription");
     CHECK(rows[0].input_audio_seconds == Catch::Approx(0.01));
     CHECK_FALSE(rows[0].request_id.empty());
+    ts.stop();
+}
+
+TEST_CASE("Transcription rejects silent audio and punctuation-only output",
+          "[routes][transcriptions]") {
+    TestServer ts;
+    auto info = make_info("whisper-model");
+    info.runtime = "whisper_cpp";
+    info.modality = "audio_transcription";
+    info.capabilities = {"audio_transcription"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    auto* backend = const_cast<IModelMock*>(dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend(info.name)));
+    REQUIRE(backend);
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+    std::string silence = test_wav();
+    silence[44] = '\0';
+    silence[45] = '\0';
+    const auto post = [&client](const std::string& audio) {
+        return client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+            {"file", audio, "test.wav", "audio/wav"},
+            {"model", "whisper-model", "", ""},
+        });
+    };
+    auto response = post(silence);
+    REQUIRE(response);
+    CHECK(response->status == 422);
+    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
+          "no_speech_detected");
+    backend->transcription_text = " -  -  - ";
+    response = post(test_wav());
+    REQUIRE(response);
+    CHECK(response->status == 422);
+    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
+          "no_speech_detected");
+    backend->transcription_text = "clear speech";
+    response = post(test_wav());
+    REQUIRE(response);
+    CHECK(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body)["text"] == "clear speech");
     ts.stop();
 }
 

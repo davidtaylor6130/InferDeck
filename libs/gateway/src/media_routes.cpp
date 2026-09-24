@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
