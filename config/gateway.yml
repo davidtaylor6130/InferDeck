@@ -226,6 +226,7 @@ model_registry:
     min_slots: 2
     vram_required_mb: 26000
     context_size: 100096
+    default_max_output_tokens: 1024
     has_vision: false
     # Corrected Qwen3.6 chat template: avoids the "No user query found in messages."
     # crash during multi-step tool calling (e.g. OpenCode). See config/templates/.
@@ -237,6 +238,8 @@ model_registry:
       top_k: 20
       min_p: 0.0
       repeat_penalty: 1.0
+      dry_multiplier: 0.8
+      dry_penalty_last_n: 2048
 
   - name: "ornith-1.5-35b-a3b"
     family: "ornith-1.5"

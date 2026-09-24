@@ -511,6 +511,8 @@ TEST_CASE("Repository gateway configuration exposes native speech models",
 
 TEST_CASE("Gateway configuration rejects unsafe operational values", "[config]") {
     CHECK_FALSE(validate_config_text("server:\n  port: 70000\n"));
+    CHECK(validate_config_text("model_registry:\n  - name: bounded\n    gguf_path: model.gguf\n    default_max_output_tokens: 1024\n"));
+    CHECK_FALSE(validate_config_text("model_registry:\n  - name: unbounded\n    gguf_path: model.gguf\n    default_max_output_tokens: 0\n"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:
   - name: duplicate

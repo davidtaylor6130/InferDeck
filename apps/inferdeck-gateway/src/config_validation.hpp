@@ -376,6 +376,12 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "model context_size must be positive: " + name);
                 }
+                if (entry["default_max_output_tokens"] &&
+                    (entry["default_max_output_tokens"].as<int>() < 1 ||
+                     entry["default_max_output_tokens"].as<int>() > 65536)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "model default_max_output_tokens must be between 1 and 65536: " + name);
+                }
                 if (entry["concurrency_auto"] && entry["concurrency_auto"].as<bool>() &&
                     (!(entry["context_pool_auto"] && entry["context_pool_auto"].as<bool>()) ||
                      (entry["runtime"] && entry["runtime"].as<std::string>() != "llama_cpp"))) {
