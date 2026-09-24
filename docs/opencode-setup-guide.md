@@ -31,13 +31,14 @@ the default selections stable:
 ```json
 {
   "model": "inferdeck/Normal",
-  "small_model": "inferdeck/n8n-model"
+  "small_model": "inferdeck/qwen2.5-0.5b-instruct"
 }
 ```
 
-`Normal`, `Pro`, and `n8n-model` are resolved by InferDeck. Changing an alias
-target on the server does not require changing these OpenCode model names.
-Keep unrelated OpenCode plugins, MCP servers, and settings in `opencode.json`.
+`Normal` is an InferDeck alias. Changing its target on the server does not
+require changing the OpenCode model name. The small model uses the configured
+CPU helper directly. The checked-in `opencode.json` contains only these two
+models.
 
 ## Provider
 
@@ -47,8 +48,7 @@ base.
 | Provider | Endpoint | Use Case |
 |---|---|---|
 | `inferdeck/Normal` | configured by `options.baseURL` | Stable normal-work alias |
-| `inferdeck/Pro` | configured by `options.baseURL` | Stable demanding-work alias |
-| `inferdeck/n8n-model` | configured by `options.baseURL` | Stable automation alias |
+| `inferdeck/qwen2.5-0.5b-instruct` | configured by `options.baseURL` | CPU helper model |
 
 ## Context Limits
 
