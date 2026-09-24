@@ -39,10 +39,16 @@
       "next": "Two-agent 64K exact tasks passed twice with 63840 cached tokens per continuation. One frozen 100K tool-quality case passed with 100320 cached tokens, exact read_file/BUILD_TAG checks and a normal stop. Four simultaneous 100K inputs completed, but two answers hit the explicitly requested 256-token output cap; four complete long answers and broader repeated quality remain unverified."
     },
     {
+      "id": "dedicated-vram-comparability",
+      "status": "IN_PROGRESS",
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.four-100k.json"],
+      "next": "The recorded 29557.65625 MiB is a windows_pdh_dxgi GPU-wide VRAM-used sample after the four-100K batch, not Q4 process-dedicated allocation or peak usage. No matched Vulkan four-100K dedicated-VRAM comparison exists. Measure both paths with the same metric and workload before claiming memory parity."
+    },
+    {
       "id": "stability-and-recovery",
       "status": "IN_PROGRESS",
       "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T013335202Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.json"],
-      "next": "Production BF16 service and original model restored after each guarded alpha67 run, including the 100K quality run. Repeated switch cycles and 100 mixed requests remain untested."
+      "next": "Four guarded alpha67 service switch/recovery cycles completed. Stage stats contain 34 HTTP-200 requests, including 16 repetitions of the same four-short fixture; this is not 100 mixed requests. No cancellation trial was found. The 20-cycle/100-mixed reliability scope remains untested."
     },
     {
       "id": "build-deployment-and-rollback",
