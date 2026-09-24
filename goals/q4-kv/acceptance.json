@@ -41,20 +41,20 @@
     {
       "id": "dedicated-vram-comparability",
       "status": "IN_PROGRESS",
-      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.four-100k.json"],
-      "next": "The recorded 29557.65625 MiB is a windows_pdh_dxgi GPU-wide VRAM-used sample after the four-100K batch, not Q4 process-dedicated allocation or peak usage. No matched Vulkan four-100K dedicated-VRAM comparison exists. Measure both paths with the same metric and workload before claiming memory parity."
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.four-100k.json", ".UAM/AINotes/alpha68-process-vram-20260924T031947264Z.json"],
+      "next": "Same alpha68 executable and R9700 process-dedicated Windows counter measured three identical idle samples: Q4 Radiance 27559.316 MiB versus Vulkan 26914.594 MiB, +644.722 MiB (+2.4%). Vulkan allocates a 400384-token pool for four roughly 100K slots; Q4 config uses four 106496-token slots. Artifacts, vision/MTP and context sizes differ, and TOKENIZERS_PARALLELISM=false was set only for this isolated diagnostic run. Peak four-long-request dedicated VRAM and comparable workload remain unmeasured; do not treat this as an isolated KV saving or full parity PASS."
     },
     {
       "id": "stability-and-recovery",
-      "status": "IN_PROGRESS",
-      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T013335202Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024026738Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024851035Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T025417631Z.json"],
-      "next": "Four guarded alpha67 and three guarded alpha68 service switch/recovery cycles completed; first alpha68 stage failed on missing kernel files, then repaired short and long stages passed. Alpha67 stats contain 34 HTTP-200 requests; no cancellation trial or 20-cycle/100-mixed scope has been executed."
+      "status": "FAIL",
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T013335202Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024026738Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024851035Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T025417631Z.json", ".UAM/AINotes/alpha68-process-vram-20260924T031355295Z.json", ".UAM/AINotes/alpha68-process-vram-20260924T031947264Z.json", ".UAM/AINotes/alpha68-tokenizers-crash-20260924.json"],
+      "next": "Windows Application events 85300 and 86004 show intermittent 0xc0000005 at the same tokenizers.pyd offset 0x2ceaf1 during BF16 and Q4 model loads. The unchanged alpha68 Q4 startup failed in the first memory run; one guarded retry with TOKENIZERS_PARALLELISM=false loaded Q4 and Vulkan and restored production, but does not prove a fix. Diagnose or mitigate this native cold-load crash before promotion; then execute repeated switches, cancellation and mixed requests."
     },
     {
       "id": "build-deployment-and-rollback",
       "status": "IN_PROGRESS",
       "evidence": ["goals/q4-kv/opt-in-deployment.md", "build/private-releases/alpha68-q4-active-optin/manifest.json", "build/private-releases/alpha67-prefill2048/deployment-active/prepare-result.json", ".UAM/AINotes/alpha68-q4-optin-20260924T030113072Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024851035Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T025417631Z.json"],
-      "next": "Alpha68 builds cleanly and 148/148 C++ checks pass. The corrected active-profile package includes pinned kernel files, passed read-only preflight and served real Q4 short and two-agent 64K+2K tests in isolated InferDeck. Production executable/active-config replacement and live rollback remain untested and require explicit authorization."
+      "next": "Alpha68 builds cleanly and 148/148 C++ checks pass. The corrected active-profile package includes pinned kernel files, passed read-only preflight and served real Q4 short and two-agent 64K+2K tests in isolated InferDeck. The subsequent intermittent tokenizers.pyd cold-load crash blocks a stability claim. Production executable/active-config replacement and live rollback remain untested and require explicit authorization."
     }
   ]
 }
