@@ -35,14 +35,14 @@
     {
       "id": "context-cache-and-quality",
       "status": "IN_PROGRESS",
-      "evidence": [".UAM/AINotes/q4kv-64k2k-20260924T012822657Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T013439553Z-worker.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.four-100k.json"],
-      "next": "Two-agent 64K exact tasks and 63840-token cached continuations passed twice. Four 100K inputs completed, but two answers hit the explicit 256-token cap; long-context answer quality with sufficient output allowance remains unverified."
+      "evidence": [".UAM/AINotes/q4kv-64k2k-20260924T012822657Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T013439553Z-worker.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.four-100k.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.quality100k.result.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.quality100k.validation.txt"],
+      "next": "Two-agent 64K exact tasks passed twice with 63840 cached tokens per continuation. One frozen 100K tool-quality case passed with 100320 cached tokens, exact read_file/BUILD_TAG checks and a normal stop. Four simultaneous 100K inputs completed, but two answers hit the explicitly requested 256-token output cap; four complete long answers and broader repeated quality remain unverified."
     },
     {
       "id": "stability-and-recovery",
       "status": "IN_PROGRESS",
-      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T013335202Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json"],
-      "next": "Production BF16 service and original model restored after each guarded alpha67 run. Repeated switch cycles and 100 mixed requests remain untested."
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T013335202Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.json"],
+      "next": "Production BF16 service and original model restored after each guarded alpha67 run, including the 100K quality run. Repeated switch cycles and 100 mixed requests remain untested."
     },
     {
       "id": "build-deployment-and-rollback",
