@@ -142,10 +142,8 @@ if(INFERDECK_SHERPA_ONNX_INCLUDE AND INFERDECK_SHERPA_ONNX_LIBRARY)
     target_link_libraries(native_runtimes PRIVATE ${INFERDECK_SHERPA_ONNX_LIBRARY} mp3lame::mp3lame)
     target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_SHERPA_ONNX=1)
     if(WIN32)
-        install(FILES "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/libmp3lame.DLL"
-                DESTINATION .)
-        install(FILES "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/mp3lame/copyright"
-                DESTINATION licenses/mp3lame-3.100 RENAME LICENSE)
+        install(FILES "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/libmp3lame.DLL" DESTINATION .)
+        install(FILES "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/mp3lame/copyright" DESTINATION licenses/mp3lame-3.100 RENAME LICENSE)
     endif()
 elseif(INFERDECK_REQUIRE_SHERPA_ONNX)
     message(FATAL_ERROR "sherpa-onnx is required but headers or libraries are unavailable under: ${INFERDECK_SHERPA_ONNX_ROOT}")
