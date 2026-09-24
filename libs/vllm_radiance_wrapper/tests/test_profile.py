@@ -356,6 +356,7 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIsInstance(captured["model_cls"], str)
     def test_begin_uses_adjusted_request_sampling_and_reserves_context_budget(self):
         captured = {}
+        engine_lock = threading.Lock()
         delta_kind = object()
         structured_outputs = {"json": {"type": "object"}}
 
@@ -389,6 +390,7 @@ class ProfileTests(unittest.TestCase):
         }
 
         def tokenize(*args, **kwargs):
+            self.assertTrue(engine_lock.locked(), "request tokenization must exclude engine stepping")
             self.assertIs(kwargs.get("return_dict"), False)
             return list(range(10))
 
@@ -397,7 +399,7 @@ class ProfileTests(unittest.TestCase):
             captured["engine_ids"] = ids
 
         state = {"tokenizer": NS(apply_chat_template=tokenize),
-                 "engine": NS(add_request=add_request), "engine_lock": threading.RLock(), "active": set(), "requests": {}}
+                 "engine": NS(add_request=add_request), "engine_lock": engine_lock, "active": set(), "requests": {}}
         request = {"model": "qwen", "messages": [], "tools": [{"type": "function"}],
                    "tool_choice": {"type": "function", "function": {"name": "lookup"}},
                    "sampling": {"repetition_penalty": 1.2, "frequency_penalty": 0.5, "presence_penalty": 0.25}, "repeat_last_n": 64, "structured_outputs": structured_outputs,

@@ -297,6 +297,10 @@ def _create(c:dict[str,Any])->dict[str,Any]:
 
 
 def begin(s:dict[str,Any],r:dict[str,Any])->str:
+    with s["engine_lock"]:
+        return _begin_locked(s,r)
+
+def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
     if r.get("logprobs"):raise RuntimeError("logprobs are unsupported by vllm_radiance")
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.parser.qwen3 import Qwen3Parser
@@ -359,10 +363,9 @@ def begin(s:dict[str,Any],r:dict[str,Any])->str:
     parser_kwargs = {"enable_thinking": kwargs["enable_thinking"]} if "enable_thinking" in kwargs else {}
     rid=uuid.uuid4().hex
     state={"request":request,"parser":Qwen3Parser(s["tokenizer"],request.tools,chat_template_kwargs=parser_kwargs),"ids":ids,"completion_tokens":0,"had_tools":False,"pending":[]}
-    with s["engine_lock"]:
-        s["engine"].add_request(rid,ids,sampling,priority=0)
-        s["active"].add(rid)
-        s["requests"][rid]=state
+    s["engine"].add_request(rid,ids,sampling,priority=0)
+    s["active"].add(rid)
+    s["requests"][rid]=state
     return rid
 def step(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
     with s["engine_lock"]:
