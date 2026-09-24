@@ -11,14 +11,14 @@
     {
       "id": "real-model-load-and-coherent-output",
       "status": "PASS",
-      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json"],
-      "next": "Real Qwen3.8 Q4 load and a coherent greeting passed on the active alpha67 profile."
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024851035Z.json"],
+      "next": "Real Qwen3.8 Q4 load and coherent greetings passed on alpha67 and final-binary alpha68. The alpha68 greeting took 3.393 s in isolated InferDeck."
     },
     {
       "id": "four-concurrent-short-requests",
       "status": "PASS",
-      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.four-slots.json"],
-      "next": "Four distinct short requests returned HTTP 200 with four active slots; long-context capacity remains separate."
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.four-slots.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024851035Z.four-slots.json"],
+      "next": "Final alpha68 returned four distinct expected HTTP-200 answers with four observed active slots in 4.788 s; long-context capacity remains separate and alpha67-specific."
     },
     {
       "id": "four-100k-contexts",
@@ -29,14 +29,14 @@
     {
       "id": "two-agent-total-time",
       "status": "PASS",
-      "evidence": [".UAM/AINotes/r4d-timer-free-three-rep.json", ".UAM/AINotes/q4kv-64k2k-20260924T012822657Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T013439553Z-worker.json"],
-      "next": "Scoped two-agent tool-loop times 137.930/136.871 s versus BF16/R4D median 133.684 s, both under the 147.052 s similar-speed screen; exact tasks and warm cache reuse passed. Output count differs from alpha66, so do not infer compute speed from wall time alone."
+      "evidence": [".UAM/AINotes/r4d-timer-free-three-rep.json", ".UAM/AINotes/q4kv-64k2k-20260924T012822657Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T013439553Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T025521601Z-worker.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T025417631Z.json"],
+      "next": "Final alpha68 passed the exact two-agent 64K+2K tool fixture in 128.786 s with 63840 cached tokens per continuation; BF16/R4D median was 133.684 s and alpha67 Q4 took 136.871/137.930 s. Alpha68 generated 442 tokens versus 1183 for BF16, so task time does not prove compute or decode speedup."
     },
     {
       "id": "context-cache-and-quality",
       "status": "IN_PROGRESS",
-      "evidence": [".UAM/AINotes/q4kv-64k2k-20260924T012822657Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T013439553Z-worker.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.four-100k.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.quality100k.result.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.quality100k.validation.txt"],
-      "next": "Two-agent 64K exact tasks passed twice with 63840 cached tokens per continuation. One frozen 100K tool-quality case passed with 100320 cached tokens, exact read_file/BUILD_TAG checks and a normal stop. Four simultaneous 100K inputs completed, but two answers hit the explicitly requested 256-token output cap; four complete long answers and broader repeated quality remain unverified."
+      "evidence": [".UAM/AINotes/q4kv-64k2k-20260924T012822657Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T013439553Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T025521601Z-worker.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.four-100k.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.quality100k.result.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.quality100k.validation.txt"],
+      "next": "Final alpha68 and two alpha67 two-agent 64K exact tasks passed with 63840 cached tokens per continuation. One alpha67 frozen 100K tool-quality case passed with 100320 cached tokens and exact checks. Four simultaneous alpha67 100K inputs completed, but two answers hit the explicit 256-token cap; four complete long answers and broader repeated quality remain unverified."
     },
     {
       "id": "dedicated-vram-comparability",
@@ -47,14 +47,14 @@
     {
       "id": "stability-and-recovery",
       "status": "IN_PROGRESS",
-      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T013335202Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.json"],
-      "next": "Four guarded alpha67 service switch/recovery cycles completed. Stage stats contain 34 HTTP-200 requests, including 16 repetitions of the same four-short fixture; this is not 100 mixed requests. No cancellation trial was found. The 20-cycle/100-mixed reliability scope remains untested."
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T013335202Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024026738Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024851035Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T025417631Z.json"],
+      "next": "Four guarded alpha67 and three guarded alpha68 service switch/recovery cycles completed; first alpha68 stage failed on missing kernel files, then repaired short and long stages passed. Alpha67 stats contain 34 HTTP-200 requests; no cancellation trial or 20-cycle/100-mixed scope has been executed."
     },
     {
       "id": "build-deployment-and-rollback",
       "status": "IN_PROGRESS",
-      "evidence": ["goals/q4-kv/opt-in-deployment.md", "build/private-releases/alpha68-q4-active-optin/manifest.json", "build/private-releases/alpha67-prefill2048/deployment-active/prepare-result.json", ".UAM/AINotes/alpha68-q4-optin-20260924T022938735Z.json"],
-      "next": "Alpha68 builds cleanly and 148/148 C++ checks pass. The append-only active-profile package, rollback procedure and read-only deployment preflight passed. The alpha68 executable has not run the real model or been deployed. Production executable/active-config replacement requires explicit authorization; then test Q4 and BF16 recovery and record live evidence."
+      "evidence": ["goals/q4-kv/opt-in-deployment.md", "build/private-releases/alpha68-q4-active-optin/manifest.json", "build/private-releases/alpha67-prefill2048/deployment-active/prepare-result.json", ".UAM/AINotes/alpha68-q4-optin-20260924T030113072Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024851035Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T025417631Z.json"],
+      "next": "Alpha68 builds cleanly and 148/148 C++ checks pass. The corrected active-profile package includes pinned kernel files, passed read-only preflight and served real Q4 short and two-agent 64K+2K tests in isolated InferDeck. Production executable/active-config replacement and live rollback remain untested and require explicit authorization."
     }
   ]
 }
