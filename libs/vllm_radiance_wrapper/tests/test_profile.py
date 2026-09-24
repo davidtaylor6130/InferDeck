@@ -15,6 +15,26 @@ import inferdeck_vllm_radiance_profile as profile
 
 
 class ProfileTests(unittest.TestCase):
+    def test_template_messages_combine_instructions_before_conversation(self):
+        messages = [
+            {"role": "developer", "content": "developer rules"},
+            {"role": "user", "content": "first turn"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "system", "content": "system rules"},
+            {"role": "system", "content": "later system rules"},
+            {"role": "user", "content": "second turn"},
+        ]
+        result = profile._template_messages(messages)
+        self.assertEqual(result, [
+            {"role": "system", "content": "system rules\n\nlater system rules\n\ndeveloper rules"},
+            {"role": "user", "content": "first turn"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "second turn"},
+        ])
+        result[1]["content"] = "changed"
+        self.assertEqual(messages[1]["content"], "first turn")
+        self.assertEqual(profile._template_messages(messages[1:2]), messages[1:2])
+
     def test_pal_resource_cache_is_bounded_before_runtime_dependencies(self):
         for explicit in (None, "128"):
             with self.subTest(explicit=explicit):
