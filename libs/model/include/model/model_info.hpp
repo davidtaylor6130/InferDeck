@@ -102,6 +102,7 @@ struct ModelInfo {
     int vram_fixed_mb{0};
     int vram_per_slot_mb{0};
     int context_size{65536};
+    int default_max_output_tokens{0};
     bool kv_unified{false};
     int context_pool_size{0};
     bool context_pool_auto{false};
