@@ -240,6 +240,11 @@ model_registry:
       repeat_penalty: 1.0
       dry_multiplier: 0.8
       dry_penalty_last_n: 2048
+    reasoning:
+      supported: true
+      efforts: [low, medium, high]
+      default: none
+      none_disables: true
 
   - name: "ornith-1.5-35b-a3b"
     family: "ornith-1.5"
