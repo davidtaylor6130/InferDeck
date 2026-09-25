@@ -102,7 +102,7 @@ default-off OpenAI-derivative profile is enabled and its `/compat` base is used.
 |---|---|
 | `connect ECONNREFUSED` | Gateway not running — start InferDeck first |
 | `context length exceeded` | Reduce context or output limit |
-| `reasoning_content` missing | Use OpenAI Responses reasoning events, or explicitly enable and target the derivative compatibility profile |
+| `reasoning_content` missing | Check that the gateway build forwards Chat Completions reasoning and that the model's reasoning effort is not `none` |
 
 ## Reference
 

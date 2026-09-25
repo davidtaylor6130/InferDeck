@@ -1499,7 +1499,7 @@ TEST_CASE("Routes: stable aliases resolve while preserving request attribution",
     ts.stop();
 }
 
-TEST_CASE("Strict Chat never emits derivative reasoning fields",
+TEST_CASE("Strict Chat forwards assistant reasoning in both directions",
           "[routes][chat][profile][reasoning]") {
     TestServer ts;
     ts.registry.register_model(make_info("strict-reasoning"));
@@ -1512,13 +1512,18 @@ TEST_CASE("Strict Chat never emits derivative reasoning fields",
 
     const auto nonstream = client.Post(
         "/v1/chat/completions",
-        "{\"model\":\"strict-reasoning\",\"messages\":[{\"role\":\"user\",\"content\":\"list files\"}]," +
+        "{\"model\":\"strict-reasoning\",\"messages\":[{\"role\":\"assistant\",\"content\":\"prior reply\",\"reasoning_content\":\"prior thought\"},{\"role\":\"user\",\"content\":\"list files\"}]," +
             tools + "}",
         "application/json");
     REQUIRE(nonstream);
     REQUIRE(nonstream->status == 200);
-    CHECK_FALSE(nlohmann::json::parse(nonstream->body)["choices"][0]["message"]
-                    .contains("reasoning_content"));
+    CHECK(nlohmann::json::parse(nonstream->body)["choices"][0]["message"]
+                  ["reasoning_content"] == "need a tool");
+    const auto* model = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_model("strict-reasoning"));
+    REQUIRE(model);
+    REQUIRE(model->last_request.messages.size() == 2);
+    CHECK(model->last_request.messages[0].reasoning == "prior thought");
 
     const auto stream = client.Post(
         "/v1/chat/completions",
@@ -1527,7 +1532,8 @@ TEST_CASE("Strict Chat never emits derivative reasoning fields",
         "application/json");
     REQUIRE(stream);
     REQUIRE(stream->status == 200);
-    CHECK(stream->body.find("reasoning_content") == std::string::npos);
+    CHECK(stream->body.find("\"reasoning_content\":\"need a tool\"") !=
+          std::string::npos);
     CHECK(stream->body.ends_with("data: [DONE]\n\n"));
     ts.stop();
 }
@@ -1732,6 +1738,12 @@ TEST_CASE("Routes: complete Chat shape validates before model resolution",
     auto unknown_message = base();
     unknown_message["messages"][0]["reasoning_content"] = "private";
     invalid.push_back(std::move(unknown_message));
+    auto invalid_reasoning = base();
+    invalid_reasoning["messages"][0] = {
+        {"role", "assistant"}, {"content", "reply"},
+        {"reasoning_content", nlohmann::json::array({"wrong type"})},
+    };
+    invalid.push_back(std::move(invalid_reasoning));
     auto missing_content = base();
     missing_content["messages"][0].erase("content");
     invalid.push_back(std::move(missing_content));
@@ -1781,22 +1793,18 @@ TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering"
           "[routes][chat][stream][golden]") {
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123, {{"content", "Hi"}}, true,
-        false, "", false) ==
+        "", false) ==
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123,
-        {{"reasoning_content", "thinking"}}, true, true, "", false) ==
+        {{"reasoning_content", "thinking"}}, true, "", false) ==
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
-    REQUIRE(serialize_chat_stream_delta(
-        "chatcmpl-test", "model", 123,
-        {{"reasoning_content", "thinking"}}, true, false, "", false) ==
-        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123,
         {{"tool_calls", nlohmann::json::array({{
             {"index", 0}, {"id", "call_1"}, {"type", "function"},
             {"function", {{"name", "f"}, {"arguments", "{}"}}},
-        }})}}, true, false, "", false) ==
+        }})}}, true, "", false) ==
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{}\",\"name\":\"f\"},\"id\":\"call_1\",\"index\":0,\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
 
     InferenceResult result;
@@ -1815,18 +1823,18 @@ TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering"
     std::string actual;
     actual += serialize_chat_stream_delta(
         "chatcmpl-contract", "contract-model", 1787171200,
-        {{"content", "Hi"}}, true, false, "", false);
+        {{"content", "Hi"}}, true, "", false);
     actual += serialize_chat_stream_delta(
         "chatcmpl-contract", "contract-model", 1787171200,
         {{"tool_calls", nlohmann::json::array({{
             {"index", 0}, {"id", "call_1"}, {"type", "function"},
             {"function", {{"name", "lookup"}, {"arguments", ""}}},
-        }})}}, true, false, "", false);
+        }})}}, true, "", false);
     actual += serialize_chat_stream_delta(
         "chatcmpl-contract", "contract-model", 1787171200,
         {{"tool_calls", nlohmann::json::array({{
             {"index", 0}, {"function", {{"arguments", "{}"}}},
-        }})}}, true, false, "", false);
+        }})}}, true, "", false);
     actual += serialize_chat_stream_terminal(
         "chatcmpl-contract", "contract-model", 1787171200,
         "tool_calls", &result, true, "", false);
@@ -4098,7 +4106,7 @@ TEST_CASE("Routes: chat stream applies producer backpressure until disconnect",
         chunk["id"].get<std::string>(), chunk["model"].get<std::string>(),
         chunk["created"].get<std::int64_t>(),
         {{"content", std::string(64 * 1024, 'x')}}, false,
-        false, "", false));
+        "", false));
     CHECK(emitted.find("finish_reason\":\"stop") == std::string::npos);
     CHECK(emitted.find("\"usage\"") == std::string::npos);
     CHECK(emitted.find("[DONE]") == std::string::npos);
