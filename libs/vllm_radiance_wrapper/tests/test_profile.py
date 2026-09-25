@@ -504,7 +504,7 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "exceeds configured context"):
                 profile.begin(state, request)
 
-    def test_begin_parser_reasoning_kwargs_preserve_absent_null_and_explicit_values(self):
+    def test_begin_forwards_reasoning_effort_to_vllm_and_qwen_template(self):
         parser_calls = []
         template_calls = []
         request_calls = []
@@ -551,15 +551,22 @@ class ProfileTests(unittest.TestCase):
                     request["enable_reasoning"] = value
                 profile.begin(state, request)
             profile.begin(state, {**base, "reasoning_effort": "none"})
+            for effort in ("low", "medium", "xhigh"):
+                profile.begin(state, {**base, "reasoning_effort": effort})
 
         self.assertEqual([call["chat_template_kwargs"].get("enable_thinking", True)
-                          for call in parser_calls], [True, True, False, True, False])
+                          for call in parser_calls], [True, True, False, True, False, True, True, True])
         self.assertEqual([call.get("enable_thinking", True)
-                          for call in template_calls], [True, True, False, True, False])
-        self.assertNotIn("reasoning_effort", template_calls[-1])
-        self.assertFalse(request_calls[-1]["include_reasoning"])
-        self.assertEqual([call["add_generation_prompt"] for call in template_calls], [True] * 5)
-        self.assertEqual([call["tokenize"] for call in template_calls], [True] * 5)
+                          for call in template_calls], [True, True, False, True, False, True, True, True])
+        self.assertNotIn("reasoning_effort", template_calls[4])
+        self.assertFalse(request_calls[4]["include_reasoning"])
+        self.assertEqual(request_calls[4]["reasoning_effort"], "none")
+        self.assertEqual([call.get("reasoning_effort") for call in request_calls[-3:]],
+                         ["low", "medium", "xhigh"])
+        self.assertEqual([call.get("reasoning_effort") for call in template_calls[-3:]],
+                         ["low", "medium", "xhigh"])
+        self.assertEqual([call["add_generation_prompt"] for call in template_calls], [True] * 8)
+        self.assertEqual([call["tokenize"] for call in template_calls], [True] * 8)
     def test_stream_counts_delta_tokens_and_tool_finish(self):
         seen = []
         class Parser:

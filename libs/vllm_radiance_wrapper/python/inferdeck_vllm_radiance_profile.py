@@ -346,7 +346,7 @@ def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
     from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
     from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
     reasoning_effort = r.get("reasoning_effort")
-    request_kwargs=dict(model=r["model"],messages=r["messages"],tools=r.get("tools") or None,tool_choice=(r.get("tool_choice") or "auto") if r.get("tools") else "none",include_reasoning=bool(r.get("include_reasoning",True)) and reasoning_effort != "none",stream=True)
+    request_kwargs=dict(model=r["model"],messages=r["messages"],tools=r.get("tools") or None,tool_choice=(r.get("tool_choice") or "auto") if r.get("tools") else "none",reasoning_effort=reasoning_effort,include_reasoning=bool(r.get("include_reasoning",True)) and reasoning_effort != "none",stream=True)
     request_kwargs.update({key:value for key,value in r["sampling"].items() if value is not None})
     if request_kwargs.get("logit_bias"):
         request_kwargs["logit_bias"] = {str(token): bias for token, bias in request_kwargs["logit_bias"].items()}
@@ -365,6 +365,11 @@ def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
     else:
         if r.get("enable_reasoning") is not None:kwargs["enable_thinking"]=r["enable_reasoning"]
         if reasoning_effort:kwargs["reasoning_effort"]=reasoning_effort
+    if reasoning_effort:
+        print("event=reasoning_effort_applied runtime=vllm_radiance " + json.dumps({
+            "model": r["model"], "effort": reasoning_effort,
+            "enable_thinking": kwargs.get("enable_thinking", True),
+        }), file=sys.stderr, flush=True)
     template_messages = _template_messages(r["messages"])
     for message in template_messages:
         for call in message.get("tool_calls", ()):
