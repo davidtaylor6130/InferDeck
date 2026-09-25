@@ -476,11 +476,12 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 }
                 if (entry["has_vision"] && entry["has_vision"].as<bool>() &&
                     (!runtime_contract->vision ||
-                     !entry["mmproj_path"] || entry["mmproj_path"].IsNull() ||
-                     entry["mmproj_path"].as<std::string>().empty())) {
+                     (runtime == "llama_cpp" &&
+                      (!entry["mmproj_path"] || entry["mmproj_path"].IsNull() ||
+                       entry["mmproj_path"].as<std::string>().empty())))) {
                     return foundation::Err<void>(
                         foundation::ErrorCode::InvalidArgument,
-                        "vision model requires llama_cpp and mmproj_path: " + name);
+                        "vision model requires a vision-capable runtime; llama_cpp also requires mmproj_path: " + name);
                 }
                 if (entry["reasoning"]) {
                     const auto reasoning = entry["reasoning"];

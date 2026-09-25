@@ -374,6 +374,66 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(captured["model_arch"], "Qwen3_5ForConditionalGeneration")
         self.assertIs(captured["model_cls"], ActualModel)
         self.assertNotIsInstance(captured["model_cls"], str)
+    def test_begin_routes_image_messages_through_vllm_multimodal_renderer(self):
+        captured = {}
+        engine_input = {"prompt_token_ids": [10, 11],
+                        "multi_modal_data": {"image": [object()]}}
+
+        class Request:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                self.tools = kwargs["tools"]
+                self.response_format = kwargs.get("response_format")
+
+            def to_sampling_params(self, maximum, defaults):
+                return NS(output_kind=None, structured_outputs=None, stop=[])
+
+        class ToolParser:
+            def __init__(self, tokenizer, tools):
+                pass
+
+            def adjust_request(self, request):
+                return request
+
+        def render_chat(conversations, params):
+            captured["messages"] = conversations[0]
+            captured["params"] = params
+            return ([[]], [engine_input])
+
+        class ChatParams:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        modules = {
+            "vllm.entrypoints.openai.chat_completion.protocol": NS(ChatCompletionRequest=Request),
+            "vllm.parser.qwen3": NS(Qwen3Parser=lambda *a, **kw: NS()),
+            "vllm.sampling_params": NS(RequestOutputKind=NS(DELTA=object()), StructuredOutputsParams=lambda **kw: NS(**kw)),
+            "vllm.tool_parsers.structural_tag_registry": NS(get_model_structural_tag=lambda *args, **kw: None),
+            "vllm.tool_parsers.qwen3_engine_tool_parser": NS(Qwen3EngineToolParser=ToolParser),
+            "vllm.renderers": NS(ChatParams=ChatParams),
+        }
+
+        def tokenize(*args, **kwargs):
+            self.fail("image requests must use the multimodal renderer")
+
+        def add_request(request_id, prompt, sampling, **kwargs):
+            captured["engine_input"] = prompt
+
+        state = {"tokenizer": NS(apply_chat_template=tokenize),
+                 "engine": NS(renderer=NS(render_chat=render_chat), add_request=add_request),
+                 "engine_lock": threading.RLock(), "active": set(), "requests": {}}
+        request = {"model": "qwen", "messages": [{"role": "user", "content": [
+                       {"type": "text", "text": "Describe this."},
+                       {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+                   ]}], "sampling": {}, "max_output_tokens": 8}
+        with patch.dict(sys.modules, modules):
+            profile.begin(state, request)
+
+        self.assertIs(captured["engine_input"], engine_input)
+        self.assertEqual(captured["messages"], request["messages"])
+        self.assertTrue(captured["params"].chat_template_kwargs["tokenize"])
+        self.assertEqual(state["requests"][next(iter(state["requests"]))]["ids"], [10, 11])
+
     def test_begin_uses_adjusted_request_sampling_and_reserves_context_budget(self):
         captured = {}
         engine_lock = threading.Lock()

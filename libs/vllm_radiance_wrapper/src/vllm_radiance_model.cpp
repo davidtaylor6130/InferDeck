@@ -64,6 +64,27 @@ PyPtr json_value(const std::string& text) {
     if (!value) throw std::runtime_error("invalid JSON value: " + python_error());
     return value;
 }
+std::string encode_base64(const std::vector<std::byte>& bytes) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string encoded;
+    encoded.reserve(((bytes.size() + 2) / 3) * 4);
+    for (std::size_t index = 0; index < bytes.size(); index += 3) {
+        const std::uint32_t first = std::to_integer<unsigned char>(bytes[index]);
+        const std::uint32_t second = index + 1 < bytes.size()
+            ? std::to_integer<unsigned char>(bytes[index + 1]) : 0;
+        const std::uint32_t third = index + 2 < bytes.size()
+            ? std::to_integer<unsigned char>(bytes[index + 2]) : 0;
+        const std::uint32_t value = (first << 16) | (second << 8) | third;
+        encoded.push_back(alphabet[(value >> 18) & 0x3f]);
+        encoded.push_back(alphabet[(value >> 12) & 0x3f]);
+        encoded.push_back(index + 1 < bytes.size()
+            ? alphabet[(value >> 6) & 0x3f] : '=');
+        encoded.push_back(index + 2 < bytes.size()
+            ? alphabet[value & 0x3f] : '=');
+    }
+    return encoded;
+}
 std::optional<std::string> validate_sampling(const model::SamplingConfig& defaults) {
     if (defaults.dry_multiplier != 0.0f)
         return "vllm_radiance does not support nonzero dry_multiplier";
@@ -75,9 +96,53 @@ PyObject* text_dict(const model::InferenceRequest& request,
     for (const auto& message : request.messages) {
         PyPtr item = owned(PyDict_New()); const char* role = "user";
         switch (message.role) { case inference::MessageRole::Developer: role="developer"; break; case inference::MessageRole::System: role="system"; break; case inference::MessageRole::Assistant: role="assistant"; break; case inference::MessageRole::Tool: role="tool"; break; case inference::MessageRole::Function: role="function"; break; default: break; }
-        set_owned(item.get(),"role",owned(PyUnicode_FromString(role))); std::string content;
-        for(const auto& part:message.content) { const auto* text=std::get_if<inference::TextContent>(&part); if(!text){PyErr_SetString(PyExc_NotImplementedError,"vllm_radiance supports text content only");return nullptr;} content+=text->text; }
-        set_owned(item.get(),"content",owned(PyUnicode_FromString(content.c_str())));
+        set_owned(item.get(),"role",owned(PyUnicode_FromString(role)));
+        const bool has_image = std::any_of(message.content.begin(), message.content.end(),
+            [](const inference::Content& part) {
+                return std::holds_alternative<inference::ImageContent>(part);
+            });
+        if (!has_image) {
+            std::string content;
+            for (const auto& part : message.content) {
+                const auto* text = std::get_if<inference::TextContent>(&part);
+                if (!text) {
+                    PyErr_SetString(PyExc_NotImplementedError,
+                                    "vllm_radiance supports image input but not audio input");
+                    return nullptr;
+                }
+                content += text->text;
+            }
+            set_owned(item.get(), "content", owned(PyUnicode_FromStringAndSize(
+                content.data(), static_cast<Py_ssize_t>(content.size()))));
+        } else {
+            PyPtr content = owned(PyList_New(0));
+            for (const auto& part : message.content) {
+                PyPtr content_part = owned(PyDict_New());
+                if (const auto* text = std::get_if<inference::TextContent>(&part)) {
+                    set_owned(content_part.get(), "type", owned(PyUnicode_FromString("text")));
+                    set_owned(content_part.get(), "text", owned(PyUnicode_FromStringAndSize(
+                        text->text.data(), static_cast<Py_ssize_t>(text->text.size()))));
+                } else if (const auto* image = std::get_if<inference::ImageContent>(&part)) {
+                    PyPtr image_url = owned(PyDict_New());
+                    const std::string data_url = "data:" + image->media_type +
+                        ";base64," + encode_base64(image->bytes);
+                    set_owned(image_url.get(), "url", owned(PyUnicode_FromStringAndSize(
+                        data_url.data(), static_cast<Py_ssize_t>(data_url.size()))));
+                    if (!image->detail.empty()) {
+                        set_owned(image_url.get(), "detail", owned(PyUnicode_FromString(
+                            image->detail.c_str())));
+                    }
+                    set_owned(content_part.get(), "type", owned(PyUnicode_FromString("image_url")));
+                    set_owned(content_part.get(), "image_url", std::move(image_url));
+                } else {
+                    PyErr_SetString(PyExc_NotImplementedError,
+                                    "vllm_radiance supports image input but not audio input");
+                    return nullptr;
+                }
+                if (PyList_Append(content.get(), content_part.get()) != 0) return nullptr;
+            }
+            set_owned(item.get(), "content", std::move(content));
+        }
         if(!message.reasoning.empty()) set_owned(item.get(),"reasoning_content",owned(PyUnicode_FromString(message.reasoning.c_str())));
         if(!message.tool_call_id.empty()) set_owned(item.get(),"tool_call_id",owned(PyUnicode_FromString(message.tool_call_id.c_str())));
         if(!message.tool_calls.empty()) { PyPtr calls=owned(PyList_New(0)); for(const auto& call:message.tool_calls){ PyPtr function=owned(PyDict_New());set_owned(function.get(),"name",owned(PyUnicode_FromString(call.name.c_str())));set_owned(function.get(),"arguments",owned(PyUnicode_FromString(call.arguments.c_str())));PyPtr tool=owned(PyDict_New());set_owned(tool.get(),"id",owned(PyUnicode_FromString(call.id.c_str())));set_owned(tool.get(),"type",owned(PyUnicode_FromString("function")));set_owned(tool.get(),"function",std::move(function));if(PyList_Append(calls.get(),tool.get())!=0)return nullptr;}set_owned(item.get(),"tool_calls",std::move(calls)); }

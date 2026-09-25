@@ -311,6 +311,32 @@ def _template_messages(messages:list[dict[str,Any]])->list[dict[str,Any]]:
         result.insert(0, {"role": "system", "content": "\n\n".join(system + developer)})
     return result
 
+def _has_image_input(messages:list[dict[str,Any]])->bool:
+    return any(
+        isinstance(part, dict) and part.get("type") == "image_url"
+        for message in messages
+        for part in (message.get("content")
+                     if isinstance(message.get("content"), list) else [])
+    )
+
+def _render_image_prompt(s:dict[str,Any], request:Any,
+                         messages:list[dict[str,Any]], kwargs:dict[str,Any])->tuple[list[int],Any]:
+    from vllm.renderers import ChatParams
+    params=ChatParams(
+        chat_template_content_format="auto",
+        chat_template_kwargs=kwargs,
+        tool_choice=request.tool_choice,
+        response_format=request.response_format,
+    )
+    _, engine_inputs=s["engine"].renderer.render_chat([messages],params)
+    if len(engine_inputs) != 1:
+        raise RuntimeError("vLLM renderer returned an invalid image prompt count")
+    engine_input=engine_inputs[0]
+    ids=engine_input.get("prompt_token_ids")
+    if not isinstance(ids, list) or not engine_input.get("multi_modal_data"):
+        raise RuntimeError("vLLM renderer did not produce multimodal image input")
+    return ids,engine_input
+
 def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
     if r.get("logprobs"):raise RuntimeError("logprobs are unsupported by vllm_radiance")
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -344,9 +370,13 @@ def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
             function = call.get("function", {})
             if isinstance(function.get("arguments"), str):
                 function["arguments"] = json.loads(function["arguments"])
-    ids=s["tokenizer"].apply_chat_template(template_messages,**kwargs)
-    if not isinstance(ids, list):
-        raise RuntimeError("tokenizer did not return token IDs")
+    engine_input=None
+    if _has_image_input(template_messages):
+        ids,engine_input=_render_image_prompt(s,request,template_messages,kwargs)
+    else:
+        ids=s["tokenizer"].apply_chat_template(template_messages,**kwargs)
+        if not isinstance(ids, list):
+            raise RuntimeError("tokenizer did not return token IDs")
     maximum = int(r["max_output_tokens"])
     if maximum == -1:
         maximum = 106496 - len(ids)
@@ -378,7 +408,8 @@ def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
     parser_kwargs = {"enable_thinking": kwargs["enable_thinking"]} if "enable_thinking" in kwargs else {}
     rid=uuid.uuid4().hex
     state={"request":request,"parser":Qwen3Parser(s["tokenizer"],request.tools,chat_template_kwargs=parser_kwargs),"ids":ids,"completion_tokens":0,"had_tools":False,"pending":[]}
-    s["engine"].add_request(rid,ids,sampling,priority=0)
+    s["engine"].add_request(rid,engine_input if engine_input is not None else ids,
+                            sampling,priority=0)
     s["active"].add(rid)
     s["requests"][rid]=state
     return rid

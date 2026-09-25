@@ -171,7 +171,7 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         "vllm_radiance",
         {{"text", {"chat_completions", "responses"}}},
         RuntimeArtifactPolicy::ArtifactMap,
-        false,
+        true,
         true,
         false,
     });
