@@ -1,10 +1,11 @@
 param(
     [string]$BaseUrl = "http://127.0.0.1:11434",
-    [string]$Model = "deep",
+    [string]$Model = "qwen3.8-27b-radiance-q4",
     [string]$ApiKey = ""
 )
 
 $ErrorActionPreference = "Stop"
+[System.Net.ServicePointManager]::Expect100Continue = $false
 Add-Type -AssemblyName System.Drawing
 
 $bitmap = New-Object System.Drawing.Bitmap 64, 64
@@ -31,8 +32,9 @@ $payload = @{
             )
         }
     )
-    max_tokens = 32
+    max_tokens = 64
     temperature = 0
+    reasoning_effort = "none"
 } | ConvertTo-Json -Depth 10
 
 $headers = @{}
