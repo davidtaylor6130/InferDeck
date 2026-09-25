@@ -100,6 +100,19 @@ model_registry:
     REQUIRE_FALSE(incompatible);
     CHECK(incompatible.error().message.find("does not support capability image_generation") !=
           std::string::npos);
+    const auto vision = validate_config_text(R"(
+model_registry:
+  - name: qwen-vision
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    has_vision: true
+    context_size: 106496
+    n_slots: 1
+    artifacts:
+      model: C:/models/qwen-multimodal
+)");
+    REQUIRE(vision);
 }
 
 TEST_CASE("Continuation grace configuration is opt-in and bounded",
