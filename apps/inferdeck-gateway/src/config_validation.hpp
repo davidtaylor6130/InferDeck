@@ -554,7 +554,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     if (type == "mtp" && !runtime_contract->speculative) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP requires a llama_cpp text model: " + name);
+                            "MTP is unavailable for model runtime: " + name);
                     }
                     const int draft_tokens = speculative["draft_tokens"]
                         ? speculative["draft_tokens"].as<int>() : 2;
@@ -576,6 +576,20 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
                             "MTP max_active_requests exceeds slot bounds: " + name);
+                    }
+                    if (type == "mtp" && runtime == "vllm_radiance") {
+                        const YAML::Node artifacts = entry["artifacts"];
+                        const bool int4_profile = artifacts && artifacts.IsMap() &&
+                            artifacts["prefill_attention"] &&
+                            artifacts["prefill_attention"].as<std::string>() == "r4d_int4" &&
+                            artifacts["kv_cache_dtype"] &&
+                            artifacts["kv_cache_dtype"].as<std::string>() == "int4_per_token_head";
+                        if (!int4_profile || draft_tokens != 2 || p_min != 0.0f ||
+                            max_active != slots) {
+                            return foundation::Err<void>(
+                                foundation::ErrorCode::InvalidArgument,
+                                "Radiance MTP requires r4d_int4, INT4 KV, two draft tokens, p_min 0, and max_active_requests equal to n_slots: " + name);
+                        }
                     }
                 }
                 auto sampling = validate_sampling_node(

@@ -155,6 +155,10 @@ foundation::Result<void> VllmRadianceModel::load()
         state_->info.context_size != 106496 || state_->info.n_slots < 1 ||
         state_->info.n_slots > (int4 ? 4 : 1) || state_->info.min_slots != state_->info.n_slots)
         return fail("vllm_radiance requires ROCm compute, 106496 context, and fixed slots (one for BF16 or up to four for INT4)");
+    if (state_->info.mtp_enabled &&
+        (!int4 || state_->info.mtp_draft_tokens != 2 || state_->info.mtp_p_min != 0.0f ||
+         state_->info.mtp_max_active_requests != state_->info.n_slots))
+        return fail("vllm_radiance MTP requires r4d_int4, exactly two draft tokens, mtp_p_min=0, and mtp_max_active_requests equal to fixed slots");
     const auto root = state_->info.artifacts.find("python_root");
     if (root == state_->info.artifacts.end()) return fail("python_root artifact is required");
     const std::filesystem::path python_root = std::filesystem::weakly_canonical(root->second);
@@ -201,6 +205,8 @@ foundation::Result<void> VllmRadianceModel::load()
         set_owned(config.get(), "context_size", owned(PyLong_FromLong(state_->info.context_size)));
         set_owned(config.get(), "n_slots", owned(PyLong_FromLong(state_->info.n_slots)));
         set_owned(config.get(), "min_slots", owned(PyLong_FromLong(state_->info.min_slots)));
+        set_owned(config.get(), "mtp_enabled", owned(PyBool_FromLong(state_->info.mtp_enabled)));
+        set_owned(config.get(), "mtp_draft_tokens", owned(PyLong_FromLong(state_->info.mtp_draft_tokens)));
         PyPtr created = owned(PyObject_CallMethod(module.get(), "create", "O", config.get()));
         if (!created) return fail(python_error());
         state_->module = module.release();
