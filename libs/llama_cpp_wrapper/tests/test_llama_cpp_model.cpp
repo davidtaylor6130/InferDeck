@@ -14,8 +14,10 @@
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
 #include "llama_cpp_wrapper/llama_chat_adapter.hpp"
 #include "llama_cpp_wrapper/streaming_tool_call_state.hpp"
+#include "../src/sampling_windows.hpp"
 #include "foundation/logging.hpp"
 #include "model/imodel.hpp"
+#include "llama.h"
 
 using namespace inferdeck;
 using namespace inferdeck::llama_wrapper;
@@ -31,6 +33,33 @@ std::filesystem::path write_fake_gguf(const std::filesystem::path& dir) {
   return path;
 }
 
+}
+
+TEST_CASE("Llama sampler full-context history windows survive current llama.cpp",
+          "[llama][sampling]") {
+  common_params_sampling sampling;
+  sampling.penalty_last_n = -1;
+  sampling.dry_penalty_last_n = -1;
+  detail::resolve_sampling_windows(sampling, 4096);
+  CHECK(sampling.penalty_last_n == 4096);
+  CHECK(sampling.dry_penalty_last_n == 4096);
+
+  llama_sampler* penalty = llama_sampler_init_penalties(8, sampling.penalty_last_n,
+                                                      2.0f, 0.0f, 0.0f);
+  REQUIRE(penalty != nullptr);
+  llama_sampler_accept(penalty, 3);
+  llama_token_data tokens[] = {{3, 2.0f, 0.0f}, {4, 1.0f, 0.0f}};
+  llama_token_data_array candidates = {tokens, 2, -1, false};
+  llama_sampler_apply(penalty, &candidates);
+  llama_sampler_free(penalty);
+  CHECK(tokens[0].logit == 1.0f);
+  CHECK(tokens[1].logit == 1.0f);
+
+  sampling.penalty_last_n = 64;
+  sampling.dry_penalty_last_n = 0;
+  detail::resolve_sampling_windows(sampling, 4096);
+  CHECK(sampling.penalty_last_n == 64);
+  CHECK(sampling.dry_penalty_last_n == 0);
 }
 
 TEST_CASE("LlamaCppModel: version string non-empty", "[llama][meta]") {
