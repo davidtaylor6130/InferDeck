@@ -376,8 +376,9 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIsInstance(captured["model_cls"], str)
     def test_begin_routes_image_messages_through_vllm_multimodal_renderer(self):
         captured = {}
-        engine_input = {"prompt_token_ids": [10, 11],
-                        "multi_modal_data": {"image": [object()]}}
+        engine_input = {"type": "multimodal", "prompt_token_ids": [10, 11],
+                        "mm_kwargs": {"image": object()}, "mm_hashes": {},
+                        "mm_placeholders": {"image": []}}
 
         class Request:
             def __init__(self, **kwargs):

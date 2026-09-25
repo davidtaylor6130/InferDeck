@@ -333,7 +333,8 @@ def _render_image_prompt(s:dict[str,Any], request:Any,
         raise RuntimeError("vLLM renderer returned an invalid image prompt count")
     engine_input=engine_inputs[0]
     ids=engine_input.get("prompt_token_ids")
-    if not isinstance(ids, list) or not engine_input.get("multi_modal_data"):
+    if (not isinstance(ids, list) or engine_input.get("type") != "multimodal"
+            or not engine_input.get("mm_kwargs")):
         raise RuntimeError("vLLM renderer did not produce multimodal image input")
     return ids,engine_input
 
