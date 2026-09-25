@@ -359,8 +359,9 @@ def _run_batched_sequences(
         raise RuntimeError("INT4 R4D batched routing requires positive per-sequence KV lengths")
     if int(kwargs.get("max_seqlen_q", 0)) != max(q_lengths):
         raise RuntimeError("INT4 R4D max_seqlen_q must equal the longest packed query sequence")
-    if int(kwargs.get("max_seqlen_k", 0)) != max(kv_lengths):
-        raise RuntimeError("INT4 R4D max_seqlen_k must equal the longest KV sequence")
+    max_seqlen_k = int(kwargs.get("max_seqlen_k", 0))
+    if max_seqlen_k < max(kv_lengths):
+        raise RuntimeError(f"INT4 R4D max_seqlen_k {max_seqlen_k} is shorter than the longest KV sequence {max(kv_lengths)}")
 
     results: list[dict[str, Any]] = []
     for i_seq, (i_start, i_end, i_kv_len) in enumerate(zip(offsets, offsets[1:], kv_lengths)):

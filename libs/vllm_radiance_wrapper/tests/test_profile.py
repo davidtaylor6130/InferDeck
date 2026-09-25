@@ -35,6 +35,108 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(messages[1]["content"], "first turn")
         self.assertEqual(profile._template_messages(messages[1:2]), messages[1:2])
 
+    def test_mtp_is_opt_in_and_limited_to_int4_two_token_candidate(self):
+        self.assertIsNone(profile._speculative_config(False, 2))
+        self.assertEqual(profile._speculative_config(True, 2),
+                         {"method": "mtp", "num_speculative_tokens": 2})
+        penalty_processor = object()
+        self.assertEqual(profile._runtime_logits_processors(True, penalty_processor), [])
+        self.assertEqual(profile._runtime_logits_processors(False, penalty_processor), [penalty_processor])
+        profile._validate_mtp_sampling({"sampling": {"repetition_penalty": 1.0,
+            "frequency_penalty": 0.0, "presence_penalty": 0.0}})
+        for penalty, value in (("repetition_penalty", 1.1), ("frequency_penalty", 0.1),
+                               ("presence_penalty", 0.1)):
+            with self.subTest(penalty=penalty), self.assertRaisesRegex(RuntimeError, "does not support non-neutral penalties"):
+                profile._validate_mtp_sampling({"sampling": {penalty: value}})
+        self.assertEqual(profile._gpu_memory_utilization("r4d_int4", True), 0.98)
+        base = {"runtime": "vllm_radiance", "context_size": 106496,
+                "prefill_attention": "r4d_int4", "kv_cache_dtype": "int4_per_token_head",
+                "prefill_dll_sha256": "a" * 64, "decode_dll": "decode.dll",
+                "decode_dll_sha256": "b" * 64, "n_slots": 4, "min_slots": 4,
+                "mtp_enabled": True, "mtp_draft_tokens": 2}
+        with tempfile.TemporaryDirectory() as directory, patch.object(profile, "_need", return_value=directory):
+            base.update({key: directory for key in profile._REQUIRED})
+            base["prefill_dll_sha256"] = "a" * 64
+            profile.validate_config(base)
+            with self.assertRaisesRegex(RuntimeError, "r4d_int4"):
+                profile.validate_config(dict(base, prefill_attention="r4d"))
+            with self.assertRaisesRegex(RuntimeError, "exactly two"):
+                profile.validate_config(dict(base, mtp_draft_tokens=3))
+            profile.validate_config(dict(base, mtp_enabled=False, mtp_draft_tokens=1))
+
+    def test_mtp_bf16_exclusions_and_qwen_mtp_registration(self):
+        dummy = NS(model_type="dummy_qwen")
+        self.assertEqual(profile.apply_mtp_bf16_exclusions(dummy).model_type, "dummy_qwen")
+        with self.assertRaisesRegex(RuntimeError, "dictionary quantization_config"):
+            profile.apply_mtp_bf16_exclusions(NS(model_type="qwen3_5"))
+        with self.assertRaisesRegex(RuntimeError, "no existing BF16 mtp"):
+            profile.apply_mtp_bf16_exclusions({"quantization_config": {"exclude": ["other.weight"]}})
+        original = {"quantization_config": {"exclude": ["mtp.fc.weight", "keep.weight"]}}
+        updated = profile.apply_mtp_bf16_exclusions(original)
+        self.assertEqual(updated["quantization_config"]["exclude"], ["keep.weight", "mtp.fc", "mtp.fc.weight"])
+        self.assertEqual(original["quantization_config"]["exclude"], ["mtp.fc.weight", "keep.weight"])
+        captured = {}
+        class Registry:
+            @staticmethod
+            def register_model(name, model):
+                captured[name] = model
+        qwen_mtp = type("Qwen3_5MTP", (), {})
+        with patch.dict(sys.modules, {
+            "vllm.model_executor.models": NS(ModelRegistry=Registry),
+            "vllm.model_executor.models.qwen3_5_mtp": NS(Qwen3_5MTP=qwen_mtp),
+        }):
+            profile.register_qwen_mtp_models()
+        self.assertIs(captured["Qwen3_5MTP"], qwen_mtp)
+
+    def test_mtp_runtime_asserts_method_tokens_draft_backend_dtype_and_no_graphs(self):
+        class Attention:
+            def __init__(self, name, kv_dtype="int4_per_token_head"):
+                self.attn_backend = NS(get_name=lambda: name)
+                self.kv_cache_dtype = kv_dtype
+
+        class DraftModel:
+            def __init__(self, name, kv_dtype="int4_per_token_head"):
+                self.attention = Attention(name, kv_dtype)
+
+            def named_modules(self):
+                return [("", self), ("attention", self.attention)]
+
+        def engine(tokens=2, backend="TRITON_ATTN", dtype="int4_per_token_head", graph_mode="NONE", graph_sizes=None, actual_dtype="int4_per_token_head"):
+            draft = NS(model=DraftModel(backend, actual_dtype),
+                       vllm_config=NS(attention_config=NS(backend="TRITON_ATTN")))
+            runner = NS(drafter=draft)
+            executor = NS(driver_worker=NS(worker=NS(model_runner=runner)))
+            core = NS(model_executor=executor)
+            return NS(vllm_config=NS(
+                speculative_config=NS(method="mtp", num_speculative_tokens=tokens,
+                                       attention_backend="TRITON_ATTN", kv_cache_dtype=dtype,
+                                       draft_model_config=NS(dtype="torch.bfloat16")),
+                compilation_config=NS(cudagraph_mode=NS(name=graph_mode),
+                                      cudagraph_capture_sizes=graph_sizes or [])),
+                engine_core=NS(engine_core=core))
+        candidate = engine()
+        bad_engine = engine(backend="ROCM_ATTN")
+        bad_effective_dtype = engine(actual_dtype="auto")
+        modules = {
+            "vllm": NS(), "vllm.model_executor": NS(),
+            "vllm.model_executor.layers": NS(),
+            "vllm.model_executor.layers.attention": NS(),
+            "vllm.model_executor.layers.attention.attention": NS(Attention=Attention),
+        }
+        with patch.dict(sys.modules, modules):
+            runtime = profile._require_effective_speculative_config(candidate, True, 2)
+            with self.assertRaisesRegex(RuntimeError, "effective MTP draft attention KV dtype mismatch"):
+                profile._require_effective_speculative_config(bad_effective_dtype, True, 2)
+            self.assertEqual(runtime["mtp_method"], "mtp")
+            with self.assertRaisesRegex(RuntimeError, "effective MTP draft attention backend mismatch"):
+                profile._require_effective_speculative_config(bad_engine, True, 2)
+            with self.assertRaisesRegex(RuntimeError, "effective speculative config mismatch"):
+                profile._require_effective_speculative_config(engine(tokens=1), True, 2)
+            with self.assertRaisesRegex(RuntimeError, "CUDA graphs disabled"):
+                profile._require_effective_speculative_config(engine(graph_mode="FULL_DECODE_ONLY", graph_sizes=[1]), True, 2)
+            with self.assertRaisesRegex(RuntimeError, "None was not preserved"):
+                profile._require_effective_speculative_config(candidate, False, 2)
+
     def test_pal_resource_cache_is_bounded_before_runtime_dependencies(self):
         for explicit in (None, "128"):
             with self.subTest(explicit=explicit):

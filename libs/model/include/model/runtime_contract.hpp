@@ -173,7 +173,7 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         RuntimeArtifactPolicy::ArtifactMap,
         false,
         true,
-        false,
+        true,
     });
     registry.register_runtime(RuntimeContract{
         "stable_diffusion_cpp",

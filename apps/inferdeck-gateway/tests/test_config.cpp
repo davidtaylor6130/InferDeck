@@ -890,3 +890,55 @@ model_registry:
     CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: automatic\n"));
     CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: ''\n"));
 }
+
+TEST_CASE("Radiance MTP is admitted only for the four-bit two-token profile", "[config][radiance]")
+{
+    const std::string base = R"(
+model_registry:
+  - name: qwen-radiance-mtp
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    context_size: 106496
+    n_slots: 4
+    min_slots: 4
+    artifacts:
+      model: C:/models/qwen-mxfp4
+      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+      decode_dll_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+)";
+    const std::string valid = base + R"(    speculative:
+      type: mtp
+      draft_tokens: 2
+      p_min: 0
+      max_active_requests: 4
+)";
+    CHECK(validate_config_text(valid));
+    CHECK_FALSE(validate_config_text(base + R"(    speculative:
+      type: mtp
+      draft_tokens: 1
+      max_active_requests: 4
+)"));
+    CHECK_FALSE(validate_config_text(base + R"(    speculative:
+      type: mtp
+      draft_tokens: 2
+      p_min: 0.2
+      max_active_requests: 4
+)"));
+    CHECK_FALSE(validate_config_text(base + R"(    speculative:
+      type: mtp
+      draft_tokens: 2
+      max_active_requests: 1
+)"));
+    std::string non_int4 = valid;
+    const std::string selected = "prefill_attention: r4d_int4";
+    const std::size_t position = non_int4.find(selected);
+    REQUIRE(position != std::string::npos);
+    non_int4.replace(position, selected.size(), "prefill_attention: upstream");
+    CHECK_FALSE(validate_config_text(non_int4));
+}
