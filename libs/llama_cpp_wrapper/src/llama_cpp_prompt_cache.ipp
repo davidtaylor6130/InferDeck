@@ -487,6 +487,7 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
     s.mtp_cache_synced     = slots_[slot_id].mtp_cache_synced;
   }
 
+  detail::resolve_sampling_windows(s.sampling_params, s.n_ctx_seq);
   common_sampler* smp = common_sampler_init(model_, s.sampling_params);
   if (smp == nullptr)
     return Result<PredictSetup>(std::unexpect,
