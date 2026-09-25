@@ -114,7 +114,6 @@ std::string serialize_chat_stream_delta(const std::string& id,
                                         std::int64_t created,
                                         const nlohmann::json& delta,
                                         bool include_usage,
-                                        bool include_reasoning_content = false,
                                         const std::string& service_tier = {},
                                         bool include_obfuscation = true);
 std::string serialize_chat_stream_terminal(const std::string& id,

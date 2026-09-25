@@ -90,10 +90,11 @@ function fields and function-role history translate to canonical function tools.
 
 The response `model` is the requested public identity, including an alias, in
 both streamed and non-streamed output; the resolved backend identity remains
-internal operational metadata. Native priority, template kwargs, and
-`reasoning_content` are not part of strict `/v1`. They remain available only
-through the explicitly enabled OpenAI-derivative profile, and strict output
-never emits derivative reasoning fields.
+internal operational metadata. Native priority and template kwargs remain
+available only through the explicitly enabled OpenAI-derivative profile.
+Chat Completions forwards model thinking as `reasoning_content` in streamed and
+non-streamed `/v1` responses, and accepts that string in assistant history so
+OpenCode can continue a reasoning conversation.
 
 Open WebUI may forward its advanced model settings at the top level even when
 the target is an OpenAI-compatible connection. Core therefore recognizes the

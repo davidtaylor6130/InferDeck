@@ -143,7 +143,7 @@ foundation::Result<inference::Message> parse_message(
     }
     static const std::unordered_set<std::string> strict_fields{
         "role", "content", "name", "tool_call_id", "tool_calls", "audio",
-        "function_call", "refusal", "phase",
+        "function_call", "refusal", "phase", "reasoning_content",
     };
     if (!allow_extensions) {
         auto fields = require_fields(value, strict_fields, "message");
@@ -200,8 +200,13 @@ foundation::Result<inference::Message> parse_message(
             foundation::ErrorCode::InvalidArgument,
             "assistant message phase must be commentary or final_answer");
     }
-    if (allow_extensions && value.contains("reasoning_content") &&
-        value["reasoning_content"].is_string()) {
+    if (value.contains("reasoning_content") &&
+        !value["reasoning_content"].is_null()) {
+        if (role != "assistant" || !value["reasoning_content"].is_string()) {
+            return foundation::Err<inference::Message>(
+                foundation::ErrorCode::InvalidArgument,
+                "assistant message reasoning_content must be a string");
+        }
         message.reasoning = value["reasoning_content"].get<std::string>();
     }
     if (value.contains("content") && value["content"].is_string()) {

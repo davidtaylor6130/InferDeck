@@ -253,7 +253,7 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
 }
 
 void handle_non_stream_chat(
-    const httplib::Request& req, httplib::Response& resp, const GatewayDeps& deps,
+    const httplib::Request& req, httplib::Response& resp,
     const std::string& requested_model, const std::string& model_name,
     const std::string& id, GenerationSession& session,
     const model::InferenceRequest& inference_request,
@@ -274,8 +274,7 @@ void handle_non_stream_chat(
         {"role", "assistant"},
         {"content", result.text},
     };
-    if (deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative &&
-        !result.reasoning_text.empty()) {
+    if (!result.reasoning_text.empty()) {
         message["reasoning_content"] = result.reasoning_text;
     }
     if (!result.tool_calls.empty()) {
@@ -375,16 +374,6 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                 field.key(),
                             field.key());
                 return;
-            }
-        }
-        if (body.contains("messages") && body["messages"].is_array()) {
-            for (const auto& message : body["messages"]) {
-                if (message.is_object() && message.contains("reasoning_content")) {
-                    write_error(resp, 400, "unsupported_parameter",
-                                "unsupported Chat Completions message parameter: reasoning_content",
-                                "messages");
-                    return;
-                }
             }
         }
     }
@@ -624,7 +613,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         std::move(observation));
 
     if (!stream) {
-        handle_non_stream_chat(req, resp, deps, requested_model, model_name,
+        handle_non_stream_chat(req, resp, requested_model, model_name,
                                id, *state, *inference_request,
                                response_service_tier);
         return;
@@ -637,7 +626,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     resp.set_chunked_content_provider(
         "text/event-stream",
         [id, stream_model, stream_created, state, include_stream_usage,
-         include_stream_obfuscation, derivative, response_service_tier](
+         include_stream_obfuscation, response_service_tier](
             std::size_t, httplib::DataSink& sink) mutable {
             try {
             std::unique_lock<std::mutex> lk(state->mtx);
@@ -681,11 +670,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 }
 
                 for (const auto& delta : deltas) {
-                    auto json_delta = delta_json(state->utf8.on_delta(delta), derivative);
+                    auto json_delta = delta_json(state->utf8.on_delta(delta));
                     if (json_delta.empty()) continue;
                     std::string out = serialize_chat_stream_delta(
                         id, stream_model, stream_created, json_delta,
-                        include_stream_usage, derivative,
+                        include_stream_usage,
                         response_service_tier, include_stream_obfuscation);
                     if (!sink.write(out.data(), out.size())) {
                         LOG_WARN("stream_abort", "model={} slot_id={} reason=chunk_write_failed",
@@ -703,11 +692,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             const auto final_result = state->final_result;
             lk.unlock();
 
-            auto trailing_delta = delta_json(state->utf8.finish(), derivative);
+            auto trailing_delta = delta_json(state->utf8.finish());
             if (!trailing_delta.empty()) {
                 std::string out = serialize_chat_stream_delta(
                     id, stream_model, stream_created, trailing_delta,
-                    include_stream_usage, derivative,
+                    include_stream_usage,
                     response_service_tier, include_stream_obfuscation);
                 if (!sink.write(out.data(), out.size())) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=trailing_chunk_write_failed",
