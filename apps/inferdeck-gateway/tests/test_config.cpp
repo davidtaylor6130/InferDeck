@@ -80,6 +80,110 @@ model_registry:
           std::string::npos);
 }
 
+TEST_CASE("Radiance runtime configuration preserves explicit artifact selection",
+          "[config][runtime-contract][radiance]")
+{
+    const std::string prefix = R"(
+model_registry:
+  - name: qwen-candidate
+    runtime: vllm_radiance
+    modality: text
+    context_size: 106496
+    n_slots: 1
+    artifacts:
+      model: C:/models/qwen-mxfp4
+)";
+    REQUIRE(validate_config_text(prefix +
+        "    capabilities: [chat_completions, responses]\n"));
+    const auto incompatible = validate_config_text(prefix +
+        "    capabilities: [image_generation]\n");
+    REQUIRE_FALSE(incompatible);
+    CHECK(incompatible.error().message.find("does not support capability image_generation") !=
+          std::string::npos);
+    const auto vision = validate_config_text(R"(
+model_registry:
+  - name: qwen-vision
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    has_vision: true
+    context_size: 106496
+    n_slots: 1
+    artifacts:
+      model: C:/models/qwen-multimodal
+)");
+    REQUIRE(vision);
+}
+
+TEST_CASE("Continuation grace configuration is opt-in and bounded",
+          "[config][admission][continuation]") {
+    const std::string prefix = R"(
+model_registry:
+  - name: qwen-candidate
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    n_slots: 1
+    artifacts:
+      model: C:/models/qwen-mxfp4
+)";
+    CHECK(validate_config_text(prefix + "    continuation_grace_ms: 0\n"));
+    CHECK(validate_config_text(prefix + "    continuation_grace_ms: 1000\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    continuation_grace_ms: -1\n"));
+    CHECK(validate_config_text(prefix + "    continuation_grace_ms: 2000\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    continuation_grace_ms: 2001\n"));
+
+    const auto path = std::filesystem::temp_directory_path() /
+        "inferdeck-continuation-grace-config.yml";
+    {
+        std::ofstream output(path);
+        output << prefix << "    continuation_grace_ms: 731\n";
+    }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    CHECK(config.models.front().continuation_grace_ms == 731);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
+TEST_CASE("Model request queue timeout is bounded and decoded",
+          "[config][admission][queue-timeout]") {
+    const std::string prefix = R"(
+model_registry:
+  - name: queue-model
+    runtime: llama_cpp
+    modality: text
+    capabilities: [chat_completions, responses]
+    gguf_path: C:/models/queue.gguf
+)";
+    CHECK(validate_config_text(prefix + "    request_queue_timeout_seconds: 1\n"));
+    CHECK(validate_config_text(prefix + "    request_queue_timeout_seconds: 1800\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    request_queue_timeout_seconds: 0\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    request_queue_timeout_seconds: 1801\n"));
+
+    const auto default_path = std::filesystem::temp_directory_path() /
+        "inferdeck-request-queue-timeout-default-config.yml";
+    {
+        std::ofstream output(default_path);
+        output << prefix;
+    }
+    const auto default_config = load_config(default_path);
+    REQUIRE(default_config.models.size() == 1);
+    CHECK(default_config.models.front().request_queue_timeout_seconds == 300);
+    std::error_code default_error;
+    std::filesystem::remove(default_path, default_error);
+
+    const auto path = std::filesystem::temp_directory_path() /
+        "inferdeck-request-queue-timeout-config.yml";
+    {
+        std::ofstream output(path);
+        output << prefix << "    request_queue_timeout_seconds: 600\n";
+    }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    CHECK(config.models.front().request_queue_timeout_seconds == 600);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
 TEST_CASE("Gateway configuration accepts native runtime artifacts", "[config]") {
     auto result = validate_config_text(R"(
 server:
@@ -91,6 +195,25 @@ model_registry:
     modality: image
     artifacts:
       model: C:/models/image.gguf
+    n_slots: 1
+)");
+    REQUIRE(result);
+}
+
+TEST_CASE("Gateway configuration accepts ACE-Step audio artifacts",
+          "[config][audio-generation]") {
+    const auto result = validate_config_text(R"(
+server:
+  port: 11434
+default_model: music
+model_registry:
+  - name: music
+    runtime: ace_step_cpp
+    modality: audio_generation
+    artifacts:
+      text_encoder: C:/models/Qwen3-Embedding-0.6B-Q8_0.gguf
+      dit: C:/models/acestep-v15-turbo-Q4_K_M.gguf
+      vae: C:/models/vae-BF16.gguf
     n_slots: 1
 )");
     REQUIRE(result);
@@ -212,6 +335,8 @@ TEST_CASE("Repository gateway configuration keeps remote control disabled", "[co
     const auto config = load_config(path);
     CHECK(config.host == "0.0.0.0");
     CHECK_FALSE(config.auth_required);
+    CHECK(config.api_keys_db_path == "C:/InferDeck/data/api-keys.db");
+    CHECK(config.background_idle_after_seconds == 900);
     REQUIRE(config.cors_origins.size() == 1);
     CHECK(config.cors_origins.front() == "*");
     CHECK_FALSE(config.control_allow_remote);
@@ -253,24 +378,6 @@ TEST_CASE("Repository gateway configuration keeps statistics in the installed ru
     CHECK(config.stats_db_path == "C:/InferDeck/data/stats.db");
 }
 
-TEST_CASE("Repository retains the tuned Gemma 31B profile",
-          "[config][gemma4]") {
-    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
-        "config" / "gateway.yml";
-    const auto config = load_config(path);
-    const auto gemma = std::find_if(
-        config.models.begin(), config.models.end(),
-        [](const auto& model) { return model.name == "gemma-4-31b"; });
-    REQUIRE(gemma != config.models.end());
-    CHECK(gemma->gguf_path ==
-          "C:/Inferdeck/models/unsloth/gemma-4-31B-it-GGUF/"
-          "gemma-4-31B-it-UD-Q4_K_XL.gguf");
-    CHECK(gemma->n_slots == 1);
-    CHECK(gemma->context_size == 262144);
-    CHECK(gemma->vram_required_mb == 29000);
-    CHECK_FALSE(gemma->mtp_enabled);
-}
-
 TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
           "[config][mtp]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
@@ -290,14 +397,17 @@ TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
     CHECK(*qwen->completion_price_per_million == 3.20);
     CHECK(qwen->gguf_path ==
           "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/"
-          "Qwen3.8-27B-Q4_K_M.gguf");
+          "Qwen3.8-27B-UD-IQ4_XS.gguf");
     CHECK(qwen->mmproj_path ==
           "E:/InferDeck/models/unsloth/Qwen3.8-27B-GGUF/"
           "mmproj-F16.gguf");
     CHECK(qwen->n_slots == 4);
-    CHECK(qwen->min_slots == 4);
+    CHECK(qwen->min_slots == 1);
     CHECK(qwen->context_size == 100000);
     CHECK(qwen->vram_required_mb == 30000);
+    CHECK(qwen->kv_unified);
+    CHECK(qwen->context_pool_auto);
+    CHECK(qwen->concurrency_auto);
     REQUIRE(qwen->n_batch);
     REQUIRE(qwen->n_ubatch);
     CHECK(*qwen->n_batch == 2048);
@@ -322,44 +432,7 @@ TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
     CHECK(qwen->sampling.repeat_penalty == 1.0f);
 }
 
-TEST_CASE("Repository Qwen 3.6 27B profile enables the measured adaptive MTP settings",
-          "[config][mtp]") {
-    const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
-        "config" / "gateway.yml";
-    const auto config = load_config(path);
-    const auto qwen = std::find_if(
-        config.models.begin(), config.models.end(),
-        [](const auto& model) { return model.name == "qwen3.6-27b"; });
-    REQUIRE(qwen != config.models.end());
-    CHECK(qwen->gguf_path ==
-          "E:/InferDeck/models/unsloth/Qwen3.6-27B-MTP-GGUF/"
-          "Qwen3.6-27B-Q4_K_M.gguf");
-    CHECK(qwen->n_slots == 4);
-    CHECK(qwen->min_slots == 4);
-    CHECK(qwen->context_size == 100000);
-    CHECK(qwen->vram_required_mb == 29791);
-    REQUIRE(qwen->n_batch);
-    REQUIRE(qwen->n_ubatch);
-    CHECK(*qwen->n_batch == 2048);
-    CHECK(*qwen->n_ubatch == 2048);
-    CHECK(qwen->cache_type_k == "q4_0");
-    CHECK(qwen->cache_type_v == "q4_0");
-    CHECK(qwen->mtp_enabled);
-    CHECK(qwen->mtp_draft_tokens == 2);
-    CHECK(qwen->mtp_p_min == 0.0f);
-    CHECK(qwen->mtp_max_active_requests == 1);
-    CHECK(qwen->optimization.status == "measured");
-    CHECK(qwen->optimization.measured_at == "2026-07-26");
-    CHECK(qwen->optimization.quality_passes == 3);
-    CHECK(qwen->optimization.quality_total == 3);
-    CHECK(qwen->optimization.single_tokens_per_second == 50.16);
-    CHECK(qwen->optimization.parallel_tokens_per_second == 51.24);
-    CHECK_FALSE(qwen->optimization.schedule_enabled);
-    CHECK(qwen->optimization.schedule_window_start == "03:00");
-    CHECK(qwen->optimization.schedule_window_end == "04:00");
-}
-
-TEST_CASE("Repository gateway configuration reserves measured Qwen resources",
+TEST_CASE("Repository gateway configuration reserves measured target model resources",
           "[config][resources][vram]") {
     const auto path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
         "config" / "gateway.yml";
@@ -367,14 +440,25 @@ TEST_CASE("Repository gateway configuration reserves measured Qwen resources",
     const auto qwen35 = std::find_if(
         config.models.begin(), config.models.end(),
         [](const auto& model) { return model.name == "qwen3.6-35b-a3b"; });
+    const auto ornith = std::find_if(
+        config.models.begin(), config.models.end(),
+        [](const auto& model) { return model.name == "ornith-1.5-35b-a3b"; });
     const auto helper = std::find_if(
         config.models.begin(), config.models.end(),
         [](const auto& model) {
             return model.name == "qwen2.5-0.5b-instruct";
         });
     REQUIRE(qwen35 != config.models.end());
+    REQUIRE(ornith != config.models.end());
     REQUIRE(helper != config.models.end());
+    CHECK(qwen35->n_slots == 3);
+    CHECK(qwen35->min_slots == 2);
     CHECK(qwen35->vram_required_mb == 26000);
+    CHECK(ornith->n_slots == 4);
+    CHECK(ornith->min_slots == 2);
+    CHECK(ornith->vram_required_mb == 27000);
+    REQUIRE(ornith->n_batch);
+    CHECK(*ornith->n_batch == 4096);
     CHECK(helper->n_slots == 1);
     CHECK(helper->context_size == 4096);
     CHECK(helper->vram_required_mb == 900);
@@ -440,6 +524,8 @@ TEST_CASE("Repository gateway configuration exposes native speech models",
 
 TEST_CASE("Gateway configuration rejects unsafe operational values", "[config]") {
     CHECK_FALSE(validate_config_text("server:\n  port: 70000\n"));
+    CHECK(validate_config_text("model_registry:\n  - name: bounded\n    gguf_path: model.gguf\n    default_max_output_tokens: 1024\n"));
+    CHECK_FALSE(validate_config_text("model_registry:\n  - name: unbounded\n    gguf_path: model.gguf\n    default_max_output_tokens: 0\n"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:
   - name: duplicate
@@ -462,6 +548,12 @@ model_registry:
     cached_prompt_price_per_million: -0.01
 )"));
     CHECK_FALSE(validate_config_text("gateway:\n  n_batch: 128\n  n_ubatch: 256\n"));
+    CHECK_FALSE(validate_config_text(
+        "gateway:\n  background_idle_after_seconds: 59\n"));
+    CHECK_FALSE(validate_config_text(
+        "gateway:\n  background_idle_after_seconds: 86401\n"));
+    CHECK(validate_config_text(
+        "gateway:\n  background_idle_after_seconds: 900\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\nauth:\n  required: true\n  token: secret\n"));
     CHECK_FALSE(validate_config_text("control:\n  allow_remote: true\n"));
@@ -561,6 +653,23 @@ model_registry:
       efforts: [low, high]
       default: medium
 )"));
+    CHECK(validate_config_text(R"(
+model_registry:
+  - name: no-thinking-by-default
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [low, high]
+      default: none
+      none_disables: true
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: invalid-no-thinking-default
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [low, high]
+      default: none
+)"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:
   - name: bad-reasoning-alias
@@ -649,4 +758,167 @@ TEST_CASE("Active configuration is preferred and invalid profiles fall back safe
 
     std::error_code error;
     std::filesystem::remove_all(directory, error);
+}
+
+TEST_CASE("Unified KV configuration is opt-in and boolean", "[config][pool]") {
+    CHECK(validate_config_text("model_registry:\n  - name: pool\n    gguf_path: model.gguf\n    kv_unified: true\n"));
+    CHECK_FALSE(validate_config_text("model_registry:\n  - name: pool\n    gguf_path: model.gguf\n    kv_unified: invalid\n"));
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "inferdeck-pool-config.yml";
+    {
+        std::ofstream output(path);
+        output << "model_registry:\n  - name: pool\n    gguf_path: model.gguf\n    kv_unified: true\n  - name: split\n    gguf_path: model.gguf\n";
+    }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 2);
+    CHECK(config.models[0].kv_unified);
+    CHECK_FALSE(config.models[1].kv_unified);
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("Shared context capacity validates request and draft headroom", "[config][pool]") {
+    const std::string prefix = "model_registry:\n  - name: pool\n    gguf_path: model.gguf\n    context_size: 32768\n";
+    CHECK(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 65536\n"));
+    CHECK(validate_config_text(prefix + "    context_pool_size: 0\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    context_pool_size: 65536\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 32767\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    context_pool_size: -1\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 32768\n    speculative:\n      type: mtp\n      draft_tokens: 2\n"));
+    CHECK(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 32770\n    speculative:\n      type: mtp\n      draft_tokens: 2\n"));
+}
+
+TEST_CASE("Automatic shared pools require unified storage and no fixed size", "[config][pool]") {
+    const std::string prefix = "model_registry:\n  - name: pool\n    gguf_path: model.gguf\n";
+    CHECK(validate_config_text(prefix + "    kv_unified: true\n    context_pool_auto: true\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    context_pool_auto: true\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    kv_unified: true\n    context_pool_auto: true\n    context_pool_size: 65536\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    kv_unified: true\n    context_pool_auto: invalid\n"));
+}
+
+TEST_CASE("VRAM reserve accepts zero and rejects invalid sizes", "[config][pool][reserve]") {
+    CHECK(validate_config_text("gateway:\n  vram_safety_margin_mb: 0\n"));
+    CHECK(validate_config_text("gateway:\n  vram_safety_margin_mb: 1024\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  vram_safety_margin_mb: -1\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  vram_safety_margin_mb: 2147483648\n"));
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "inferdeck-reserve-config.yml";
+    {
+        std::ofstream output(path);
+        output << "gateway:\n  vram_safety_margin_mb: 0\n";
+    }
+    CHECK(load_config(path).vram_safety_margin_mb == 0);
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("Automatic concurrency requires a fitted llama pool", "[config][pool]") {
+    const std::string prefix = "model_registry:\n  - name: auto\n    gguf_path: model.gguf\n";
+    CHECK(validate_config_text(prefix + "    concurrency_auto: true\n    kv_unified: true\n    context_pool_auto: true\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    concurrency_auto: true\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    concurrency_auto: invalid\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    concurrency_auto: true\n    kv_unified: true\n    context_pool_auto: true\n    runtime: sherpa_onnx\n"));
+}
+TEST_CASE("LTX video runtime contract accepts native artifacts",
+          "[config][video-generation]") {
+    const auto valid = validate_config_text(R"(
+model_registry:
+  - name: ltx-video
+    runtime: ltx_video_cpp
+    modality: video
+    artifacts:
+      diffusion_model: C:/models/ltx-video.gguf
+      llm: C:/models/text-encoder.gguf
+      embeddings_connectors: C:/models/connectors.safetensors
+      vae: C:/models/vae.safetensors
+    n_slots: 1
+)");
+    REQUIRE(valid);
+
+    const auto invalid = validate_config_text(R"(
+model_registry:
+  - name: ltx-video
+    runtime: ltx_video_cpp
+    modality: video
+    capabilities: [image_generation]
+    artifacts:
+      diffusion_model: C:/models/ltx-video.gguf
+)");
+    REQUIRE_FALSE(invalid);
+}
+
+TEST_CASE("Published LTX profile loads through gateway configuration", "[config][video-generation]") {
+    const std::filesystem::path path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
+        "mcp" / "ltx-2.3-profile.example.yml";
+    const inferdeck::gateway::GatewayConfig config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    CHECK(config.models.front().runtime == "ltx_video_cpp");
+    CHECK(config.models.front().modality == "video");
+    CHECK(config.models.front().n_slots == 1);
+}
+
+TEST_CASE("Radiance prefill selection is validated before startup", "[config][radiance]")
+{
+    const std::string prefix = R"(
+model_registry:
+  - name: prefill-candidate
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    artifacts:
+      model: C:/models/qwen-mxfp4
+)";
+    CHECK(validate_config_text(prefix));
+    CHECK(validate_config_text(prefix + "      prefill_attention: r4d\n"));
+    CHECK(validate_config_text(prefix + "      prefill_attention: upstream\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      gpu_memory_utilization: 0.80\n"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+)"));
+    CHECK(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+      decode_dll_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+)"));
+    CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: r4d_int4\n"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+      decode_dll_sha256: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+      decode_dll_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: auto
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d
+      kv_cache_dtype: int4_per_token_head
+)"));
+    CHECK_FALSE(validate_config_text(prefix + "      kv_cache_dtype: int8\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      kv_cache_dtype: int4_per_token_head\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: automatic\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: ''\n"));
 }

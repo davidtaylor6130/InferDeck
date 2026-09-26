@@ -2,7 +2,9 @@
 
 #include <initializer_list>
 #include <optional>
+#include <map>
 #include <string>
+#include <cctype>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -58,6 +60,100 @@ private:
     std::unordered_map<std::string, RuntimeContract> contracts_;
 };
 
+inline std::optional<std::string> validate_runtime_artifacts(
+    const std::string& runtime,
+    const std::map<std::string, std::string>& artifacts)
+{
+    if (runtime != "vllm_radiance")
+    {
+        return std::nullopt;
+    }
+
+    const std::map<std::string, std::string>::const_iterator selection = artifacts.find("prefill_attention");
+    const std::string prefill = selection == artifacts.end() ? "r4d" : selection->second;
+    if (prefill != "r4d" && prefill != "r4d_int4" && prefill != "upstream")
+    {
+        return "vllm_radiance prefill_attention must be r4d, r4d_int4, or upstream";
+    }
+
+    const std::map<std::string, std::string>::const_iterator kv_dtype = artifacts.find("kv_cache_dtype");
+    if (kv_dtype != artifacts.end() && kv_dtype->second != "auto" &&
+        kv_dtype->second != "int4_per_token_head")
+    {
+        return "vllm_radiance kv_cache_dtype must be auto or int4_per_token_head";
+    }
+    const bool int4_kv = kv_dtype != artifacts.end() &&
+                         kv_dtype->second == "int4_per_token_head";
+    if (artifacts.contains("gpu_memory_utilization"))
+    {
+        return "vllm_radiance gpu_memory_utilization is not a supported profile setting";
+    }
+    const std::map<std::string, std::string>::const_iterator decode_dll = artifacts.find("decode_dll");
+    const std::map<std::string, std::string>::const_iterator decode_digest = artifacts.find("decode_dll_sha256");
+    if ((decode_dll == artifacts.end()) != (decode_digest == artifacts.end()))
+    {
+        return "vllm_radiance decode_dll and decode_dll_sha256 must be configured together";
+    }
+    if (decode_dll != artifacts.end())
+    {
+        if (prefill != "r4d_int4")
+        {
+            return "vllm_radiance decode DLL artifacts require prefill_attention: r4d_int4";
+        }
+        if (decode_dll->second.empty())
+        {
+            return "vllm_radiance decode_dll must not be empty";
+        }
+        if (decode_digest->second.size() != 64)
+        {
+            return "vllm_radiance decode_dll_sha256 must be a 64-character SHA-256 digest";
+        }
+        for (const unsigned char ch : decode_digest->second)
+        {
+            if (!std::isxdigit(ch))
+            {
+                return "vllm_radiance decode_dll_sha256 must be a SHA-256 hex digest";
+            }
+        }
+    }
+    if (prefill == "r4d_int4")
+    {
+        if (!int4_kv)
+        {
+            return "vllm_radiance r4d_int4 requires kv_cache_dtype: int4_per_token_head";
+        }
+        if (decode_dll == artifacts.end())
+        {
+            return "vllm_radiance r4d_int4 requires decode_dll and decode_dll_sha256";
+        }
+        for (const char* key : {"prefill_overlay", "prefill_dll"})
+        {
+            const std::map<std::string, std::string>::const_iterator artifact = artifacts.find(key);
+            if (artifact == artifacts.end() || artifact->second.empty())
+            {
+                return std::string("vllm_radiance r4d_int4 requires artifact: ") + key;
+            }
+        }
+        const std::map<std::string, std::string>::const_iterator digest = artifacts.find("prefill_dll_sha256");
+        if (digest == artifacts.end() || digest->second.size() != 64)
+        {
+            return "vllm_radiance r4d_int4 requires a 64-character prefill_dll_sha256";
+        }
+        for (const unsigned char ch : digest->second)
+        {
+            if (!std::isxdigit(ch))
+            {
+                return "vllm_radiance prefill_dll_sha256 must be a SHA-256 hex digest";
+            }
+        }
+    }
+    else if (prefill == "r4d" && int4_kv)
+    {
+        return "vllm_radiance r4d prefill requires the default BF16 KV cache; use r4d_int4 for INT4 KV";
+    }
+    return std::nullopt;
+}
+
 inline RuntimeContractRegistry standard_runtime_contracts() {
     RuntimeContractRegistry registry;
     registry.register_runtime(RuntimeContract{
@@ -72,8 +168,26 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         true,
     });
     registry.register_runtime(RuntimeContract{
+        "vllm_radiance",
+        {{"text", {"chat_completions", "responses"}}},
+        RuntimeArtifactPolicy::ArtifactMap,
+        true,
+        true,
+        false,
+    });
+    registry.register_runtime(RuntimeContract{
         "stable_diffusion_cpp",
         {{"image", {"image_generation"}}},
+        RuntimeArtifactPolicy::ArtifactMap,
+    });
+    registry.register_runtime(RuntimeContract{
+        "ace_step_cpp",
+        {{"audio_generation", {"audio_generation"}}},
+        RuntimeArtifactPolicy::ArtifactMap,
+    });
+    registry.register_runtime(RuntimeContract{
+        "ltx_video_cpp",
+        {{"video", {"video_generation"}}},
         RuntimeArtifactPolicy::ArtifactMap,
     });
     registry.register_runtime(RuntimeContract{

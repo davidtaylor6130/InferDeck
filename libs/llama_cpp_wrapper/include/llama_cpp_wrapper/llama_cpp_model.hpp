@@ -45,6 +45,8 @@ struct LlamaCppConfig {
   std::optional<int> n_gpu_layers{};
   std::string flash_attn{"auto"};
   bool kv_offload{true};
+  bool kv_unified{false};
+  int vram_safety_margin_mb{1024};
   bool op_offload{true};
   std::string cache_type_k{"q8_0"};
   std::string cache_type_v{"q8_0"};
@@ -72,17 +74,30 @@ public:
 
   const inferdeck::model::ChatTemplateMeta& chat_template_meta() const noexcept override { return chat_template_meta_; }
 
+  inferdeck::foundation::Result<inferdeck::model::RequestDemand> estimate_request_demand(
+      const inferdeck::model::InferenceRequest& request) const override;
+  inferdeck::foundation::Result<void> ensure_request_capacity(
+      const inferdeck::model::RequestDemand& demand,
+      const inferdeck::model::LifecycleControl& control) override;
+
   inferdeck::foundation::Result<void> load() override;
   inferdeck::foundation::Result<void> load(
       const inferdeck::model::LifecycleControl& control) override;
   inferdeck::foundation::Result<void> unload() override;
   bool is_loaded() const noexcept override { return loaded_.load(); }
+  bool execution_healthy() const override;
 
   int vram_usage_mb() const noexcept override;
-  int n_slots() const noexcept override { return info_.n_slots; }
+  bool live_vram_accounting_complete() const override { return true; }
+  int n_slots() const noexcept override { const int capacity = sequence_capacity_.load(); return capacity > 0 ? capacity : info_.n_slots; }
   int n_free_slots() const noexcept override;
-  int min_slots() const noexcept override { return info_.min_slots; }
+  int context_pool_capacity() const noexcept override { return pool_capacity_.load(); }
+  int min_slots() const noexcept override { return info_.concurrency_auto ? 1 : info_.min_slots; }
   bool can_resize_slots() const noexcept override;
+  bool can_reclaim_idle_context() const override;
+  inferdeck::foundation::Result<bool> reclaim_idle_context(
+      int additional_reserve_mb,
+      const inferdeck::model::LifecycleControl& control) override;
   int estimate_vram_mb(int slots) const noexcept override;
   inferdeck::foundation::Result<void> resize_slots(int slots) override;
 
@@ -93,6 +108,10 @@ public:
 
   inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict(
       int slot_id, const inferdeck::model::InferenceRequest& req) override;
+  inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict_cancellable(
+      int slot_id, const inferdeck::model::InferenceRequest& req,
+      const std::atomic<bool>* cancel) override;
+
   inferdeck::foundation::Result<inferdeck::model::InferenceResult> predict_stream(
       int slot_id, const inferdeck::model::InferenceRequest& req,
       const inferdeck::model::IModel::TokenCallback& callback,
@@ -106,26 +125,34 @@ public:
   static void shutdown_backend();
 
 private:
-  // Per-slot bookkeeping (no llama_context here — all slots share shared_ctx_)
+  // Per-slot bookkeeping (no llama_context here â€” all slots share shared_ctx_)
   struct SlotState {
+    int sequence_id{-1};
     bool busy{false};
+    bool sequence_bound{false};
     std::vector<int> last_prompt_tokens;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_draft_checkpoint;
-    std::shared_ptr<const std::vector<uint8_t>> recurrent_mtp_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_replay_checkpoint;
     int checkpoint_pos{0};
     bool mtp_cache_synced{true};
   };
 
-  inferdeck::foundation::Result<void> init_shared_context_locked();
+  llama_context_params shared_context_params_locked(int capacity) const;
+  inferdeck::foundation::Result<void> init_shared_context_locked(
+      const llama_model_params& model_params,
+      const inferdeck::model::LifecycleControl& control,
+      std::optional<int> automatic_max_capacity = std::nullopt,
+      std::optional<int> vram_safety_margin_mb = std::nullopt);
   // max_prompt_tokens > 0 enables history-aware truncation: oldest whole
-  // non-system messages are dropped (preserving recency + coherence) until the
+  // non-system turns are dropped (preserving recency + coherence) until the
   // templated prompt fits the budget. 0 disables truncation.
   inferdeck::foundation::Result<ChatTemplateResult> apply_chat_template(
-      const inferdeck::model::InferenceRequest& req, int max_prompt_tokens = 0);
+      const inferdeck::model::InferenceRequest& req, int max_prompt_tokens = 0) const;
 
   // Per-inference setup: tokenize, KV-state snapshot, sampler construction.
   struct PredictSetup {
+    int sequence_id{-1};
     std::vector<llama_token> prompt_tokens;
     std::vector<SlotTask::MediaChunk> media_chunks;
     int prompt_position_count{0};
@@ -139,11 +166,14 @@ private:
     std::vector<int> last_prompt_tokens;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_checkpoint;
     std::shared_ptr<const std::vector<uint8_t>> recurrent_draft_checkpoint;
-    std::shared_ptr<const std::vector<uint8_t>> recurrent_mtp_checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> recurrent_replay_checkpoint;
     int checkpoint_pos{0};
     int checkpoint_capture_pos{0};
     bool mtp_cache_synced{true};
   };
+  inferdeck::foundation::Result<PredictSetup> prepare_prompt(
+      const inferdeck::model::InferenceRequest& req,
+      int request_context_limit) const;
   inferdeck::foundation::Result<PredictSetup> prepare_inference(
       int slot_id, const inferdeck::model::InferenceRequest& req);
 
@@ -155,10 +185,13 @@ private:
   inferdeck::model::ModelInfo info_;
   LlamaCppConfig cfg_;
   std::atomic<bool> loaded_{false};
+  std::atomic<int> sequence_capacity_{0};
+  std::atomic<int> sequence_capacity_limit_{0};
+  std::atomic<int> pool_capacity_{0};
+  std::atomic<int> reclaimed_context_vram_mb_{0};
   mutable std::mutex mtx_;        // guards slot state (acquire/release/status/last_prompt_tokens)
   llama_model* model_{nullptr};
   const llama_vocab* vocab_{nullptr};
-  // Shared context: n_ctx = context_size * n_slots, n_seq_max = n_slots
   llama_context* shared_ctx_{nullptr};
   llama_context* draft_ctx_{nullptr};
   common_speculative* speculative_{nullptr};

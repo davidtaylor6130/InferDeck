@@ -1,0 +1,60 @@
+{
+  "goal": "q4-kv-qwen3.8-27b-real-inferdeck",
+  "status": "IN_PROGRESS",
+  "gates": [
+    {
+      "id": "source-reproducible",
+      "status": "PASS",
+      "evidence": ["libs/vllm_radiance_wrapper/native/int4/README.md", "build/private-releases/alpha67-prefill2048/candidate-manifest.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", "build/private-releases/alpha68-tokenizer-serial/candidate-manifest.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T033612811Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T052240731Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T053324965Z.json", "build/private-releases/alpha68-q4-active-optin/manifest.json", ".UAM/AINotes/alpha68-q4-optin-20260924T055133652Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T063451647Z.json", "goals/q4-kv/q4-optin-model.yml"],
+      "next": "Deployed source profile is local commit b9b7708, SHA-256 b29d20315791ca5ec5f89a948589428171813ca58ff6c998fca00f4a86cc8436; active YAML and kernel hashes are pinned in the package manifest. The Python no-reasoning fix passed a real Q4 request. Upstream source-license provenance remains unresolved for publication."
+    },
+    {
+      "id": "real-model-load-and-coherent-output",
+      "status": "PASS",
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024851035Z.json", ".UAM/AINotes/alpha68-process-vram-20260924T033122990Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T053324965Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T054357345Z.json", ".UAM/AINotes/q4kv-64k2k-20260924T054508110Z-worker.json", ".UAM/AINotes/alpha68-q4-optin-20260924T062917248Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T063451647Z.json"],
+      "next": "Final deployed Q4 profile loaded in the real LocalSystem service. Low and none reasoning requests each returned HTTP 200, finish_reason stop and the requested ready answer; the earlier four-100K and two-agent xhigh tests were on the pre-hotfix profile whose xhigh path was not changed."
+    },
+    {
+      "id": "four-concurrent-short-requests",
+      "status": "PASS",
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.four-slots.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024851035Z.four-slots.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T033612811Z.four-slots.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T053324965Z.four-slots.json"],
+      "next": "Final profile returned four distinct expected HTTP-200 short answers with four observed active slots; long-context capacity is separately evidenced by its four-100K run."
+    },
+    {
+      "id": "four-100k-contexts",
+      "status": "PASS",
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-four100k-capacity-audit.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.four-100k.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T035955870Z.four-100k.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T035955870Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T053324965Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T053324965Z.four-100k-complete.json"],
+      "next": "Final profile completed four simultaneous real-app requests, each with exactly 100194 uncached input tokens: all HTTP 200, finish_reason stop, no output cap, 378.109 s batch and peakActive 4."
+    },
+    {
+      "id": "two-agent-total-time",
+      "status": "FAIL",
+      "evidence": [".UAM/AINotes/r4d-timer-free-three-rep.json", ".UAM/AINotes/q4kv-64k2k-20260924T012822657Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T013439553Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T025521601Z-worker.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T025417631Z.json", ".UAM/AINotes/q4kv-64k2k-20260924T033717616Z-worker.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T033612811Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T054357345Z.json", ".UAM/AINotes/q4kv-64k2k-20260924T054508110Z-worker.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T055617431Z.json", ".UAM/AINotes/q4kv-64k2k-20260924T055720692Z-worker.json"],
+      "next": "Two exact pre-hotfix engine-lock profile 64K+2K loops passed with 63840 cached tokens per lane but took 154.029 s and 154.611 s, each generating 902 tokens, versus BF16/R4D median 133.684 s. The none-only hotfix does not modify xhigh, but the long-context benchmark was not repeated on its new source hash. Requested total-time target remains FAIL."
+    },
+    {
+      "id": "context-cache-and-quality",
+      "status": "IN_PROGRESS",
+      "evidence": [".UAM/AINotes/q4kv-64k2k-20260924T012822657Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T013439553Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T025521601Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T033717616Z-worker.json", ".UAM/AINotes/q4kv-64k2k-20260924T054508110Z-worker.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.four-100k.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.quality100k.result.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.quality100k.validation.txt", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T035240958Z.quality100k.result.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T035240958Z.quality100k.validation.txt", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T053324965Z.four-100k-complete.json", ".UAM/AINotes/alpha68-q4-optin-20260924T063451647Z.json"],
+      "next": "The prior xhigh two-agent tool fixture reused 63840 cached tokens per lane; the final live short low/none requests finished coherently. Broader cache, coding, tool and image quality were not rerun after the none-only profile hotfix. Keep IN_PROGRESS."
+    },
+    {
+      "id": "dedicated-vram-comparability",
+      "status": "IN_PROGRESS",
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.four-100k.json", ".UAM/AINotes/alpha68-process-vram-20260924T031947264Z.json", ".UAM/AINotes/alpha68-process-vram-20260924T033122990Z.json", ".UAM/AINotes/alpha68-four100k-process-vram-20260924.jsonl", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T035955870Z.four-100k.json", ".UAM/AINotes/alpha68-process-vram-20260924T050255854Z.json", ".UAM/AINotes/alpha68-process-vram-20260924T050255854Z.vulkan-four-99k.json", ".UAM/AINotes/alpha68-process-vram-20260924T050255854Z.vulkan-active-memory.jsonl", "build/private-releases/alpha68-process-vram-20260924T050255854Z-vulkan/logs/gateway.log"],
+      "next": "Same alpha68 executable and R9700 process-dedicated Windows counter measured Q4 idle 27559.316 MiB versus Vulkan idle 26914.594 MiB, +644.722 MiB (+2.4%). Seven Q4 four-active-100194-token samples were 28704.840 MiB. A guarded Vulkan four-active-near-100K run logged 99831 reserved context positions per request and yielded 71 dedicated samples at 27459.492-27459.496 MiB; observed Q4 active memory was about 1245.3 MiB (+4.54%) higher. All four Vulkan requests timed out after 720 seconds, so no completed matched workload, prompt usage, generation rate or true VRAM peak was measured. Keep IN_PROGRESS; do not claim full parity or a completed Vulkan speed comparison."
+    },
+    {
+      "id": "stability-and-recovery",
+      "status": "IN_PROGRESS",
+      "evidence": [".UAM/AINotes/alpha67-prefill2048-smoke-20260924T012715261Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T013335202Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T014547546Z.json", ".UAM/AINotes/alpha67-prefill2048-smoke-20260924T020225436Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024026738Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T024851035Z.json", ".UAM/AINotes/alpha68-q4-smoke-smoke-20260924T025417631Z.json", ".UAM/AINotes/alpha68-process-vram-20260924T031355295Z.json", ".UAM/AINotes/alpha68-process-vram-20260924T031947264Z.json", ".UAM/AINotes/alpha68-process-vram-20260924T033122990Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T033612811Z.json", ".UAM/AINotes/alpha68-process-vram-20260924T034509037Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T035240958Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T035955870Z.json", ".UAM/AINotes/alpha68-tokenizer-construction-probe-20260924.txt", ".UAM/AINotes/alpha68-pooled-tokenizer-construction-probe-20260924.txt", ".UAM/AINotes/alpha68-tokenizers-crash-20260924.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T042330971Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T042330971Z.switch20.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T042330971Z.switch20-audit.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T052240731Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T052240731Z.gateway.stderr.log", ".UAM/AINotes/alpha68-engine-lock-python-tests-20260924.txt", ".UAM/AINotes/alpha68-tokenizer-100k-cpu-repro-20260924.txt", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T053324965Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T054357345Z.json", ".UAM/AINotes/alpha68-reasoning-none-python-tests-20260924.txt", ".UAM/AINotes/alpha68-q4-optin-20260924T061252376Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T061938276Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T062449261Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T062917248Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T063451647Z.json"],
+      "next": "Three guarded activation failures each rolled back; initial opt-in and final hotfix passed live LocalSystem activation and original-model restoration. Full Python test discovery crashed in unchanged real fast-tokenizer construction, so native startup stability remains unresolved. Required post-fix 20 switch cycles and 100 mixed requests have not run on the final profile."
+    },
+    {
+      "id": "build-deployment-and-rollback",
+      "status": "PASS",
+      "evidence": ["goals/q4-kv/opt-in-deployment.md", "build/private-releases/alpha68-q4-active-optin/manifest.json", "build/private-releases/alpha67-prefill2048/deployment-active/prepare-result.json", ".UAM/AINotes/alpha68-q4-optin-20260924T030113072Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T034940578Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T045337715Z.json", ".UAM/AINotes/alpha68-engine-lock-python-tests-20260924.txt", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T033612811Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T042330971Z.switch20-audit.json", ".UAM/AINotes/alpha68-q4-optin-20260924T055133652Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T052240731Z.json", ".UAM/AINotes/alpha68-tokenizer-serial-smoke-20260924T053324965Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T063442486Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T061252376Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T061938276Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T062449261Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T062917248Z.json", ".UAM/AINotes/alpha68-q4-optin-20260924T063451647Z.json"],
+      "next": "Alpha68 executable, Q4 config and b9b7708 profile are live in the LocalSystem service; active profile, Q4/BF16/Vulkan registry, low/none Q4 chat, previous-model restoration and three guarded rollbacks were executed. Package and rollback paths are documented. This gate covers deployment/recovery, not long-term stability or performance."
+    }
+  ]
+}

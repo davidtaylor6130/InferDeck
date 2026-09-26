@@ -83,3 +83,18 @@ void Metrics::reset() {
 }
 
 }
+
+namespace inferdeck::observability {
+void Metrics::track_request(const std::shared_ptr<LiveRequest>& request) {
+    std::lock_guard lock(live_mtx_);
+    std::erase_if(live_requests_, [](const auto& item) { const auto value = item.lock(); return !value || value->finished.load(); });
+    live_requests_.push_back(request);
+}
+std::vector<std::shared_ptr<LiveRequest>> Metrics::live_requests() const {
+    std::lock_guard lock(live_mtx_);
+    std::vector<std::shared_ptr<LiveRequest>> result;
+    std::erase_if(live_requests_, [](const auto& item) { const auto value = item.lock(); return !value || value->finished.load(); });
+    for (const auto& item : live_requests_) if (auto value = item.lock()) result.push_back(std::move(value));
+    return result;
+}
+}

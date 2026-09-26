@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { XMarkIcon } from '@heroicons/react/24/outline';
-import { authenticateDashboard, getHealth, getPricing } from './api';
+import { ChevronRightIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { getHealth, getPricing } from './api';
+import { DashboardAccess, useDashboardAccess } from './components/DashboardAccess';
+import { RequestsPage } from './pages/RequestsPage';
 import { Badge } from './components/ui';
 import { COST_STORAGE_KEY } from './cost';
-import type { DashboardSection } from './dashboardSections';
+import { DASHBOARD_SECTIONS, sectionLabel, type DashboardSection } from './dashboardSections';
 import { GatewayProvider, useGateway } from './gateway';
 import { OverviewPage } from './pages/OverviewPage';
 import { ModelsPage } from './pages/ModelsPage';
@@ -11,12 +13,23 @@ import { OperatePage } from './pages/OperatePage';
 import { UsagePage } from './pages/UsagePage';
 import { SystemPage } from './pages/SystemPage';
 import { FutureWorkspacePage } from './pages/FutureWorkspacePage';
+import { ImagePage } from './pages/ImagePage';
+import { MusicPage } from './pages/MusicPage';
+import { VideoPage } from './pages/VideoPage';
+import { ApiSettingsPage } from './pages/ApiSettingsPage';
+import {
+  loadCollapsedSidebarSections,
+  SIDEBAR_SECTION_STORAGE_KEY,
+  toggleCollapsedSidebarSection,
+} from './sidebarPreferences';
 import { compactModel, timeAgo } from './utils';
 import { INFERDECK_VERSION } from './version';
 import logoUrl from '../../../Assets/Logo.png';
 
 export type PageId =
   | 'home'
+  | 'requests'
+  | 'settings'
   | 'llm/settings'
   | 'llm/models'
   | 'llm/usage'
@@ -25,8 +38,21 @@ export type PageId =
   | 'dictation/models'
   | 'dictation/usage'
   | 'dictation/diagnostics'
-  | 'image'
-  | 'music'
+  | 'image/generate'
+  | 'image/settings'
+  | 'image/models'
+  | 'image/usage'
+  | 'image/diagnostics'
+  | 'music/generate'
+  | 'music/settings'
+  | 'music/models'
+  | 'music/usage'
+  | 'music/diagnostics'
+  | 'video/generate'
+  | 'video/settings'
+  | 'video/models'
+  | 'video/usage'
+  | 'video/diagnostics'
   | 'post-training';
 
 interface DashboardPage {
@@ -38,6 +64,8 @@ interface DashboardPage {
 
 export const DASHBOARD_PAGES: ReadonlyArray<DashboardPage> = [
   { id: 'home', label: 'Home' },
+  { id: 'requests', label: 'Requests' },
+  { id: 'settings', label: 'API Settings' },
   { id: 'llm/settings', label: 'Model Settings', section: 'llm' },
   { id: 'llm/models', label: 'Model Store', section: 'llm' },
   { id: 'llm/usage', label: 'Usage', section: 'llm' },
@@ -46,10 +74,31 @@ export const DASHBOARD_PAGES: ReadonlyArray<DashboardPage> = [
   { id: 'dictation/models', label: 'Model Store', section: 'dictation' },
   { id: 'dictation/usage', label: 'Usage', section: 'dictation' },
   { id: 'dictation/diagnostics', label: 'Health & alerts', section: 'dictation' },
-  { id: 'image', label: 'Image', preview: true },
-  { id: 'music', label: 'Music', preview: true },
+  { id: 'image/generate', label: 'Generate', section: 'image' },
+  { id: 'image/settings', label: 'Model Settings', section: 'image' },
+  { id: 'image/models', label: 'Model Store', section: 'image' },
+  { id: 'image/usage', label: 'Usage', section: 'image' },
+  { id: 'image/diagnostics', label: 'Health & alerts', section: 'image' },
+  { id: 'music/generate', label: 'Generate', section: 'music' },
+  { id: 'music/settings', label: 'Model Settings', section: 'music' },
+  { id: 'music/models', label: 'Model Store', section: 'music' },
+  { id: 'music/usage', label: 'Usage', section: 'music' },
+  { id: 'music/diagnostics', label: 'Health & alerts', section: 'music' },
+  { id: 'video/generate', label: 'Generate', section: 'video' },
+  { id: 'video/settings', label: 'Model Settings', section: 'video' },
+  { id: 'video/models', label: 'Model Store', section: 'video' },
+  { id: 'video/usage', label: 'Usage', section: 'video' },
+  { id: 'video/diagnostics', label: 'Health & alerts', section: 'video' },
   { id: 'post-training', label: 'Post Training', preview: true },
 ];
+
+const SECTION_SETTINGS_HELP: Record<DashboardSection, string> = {
+  llm: 'Profiles, aliases, pricing, and model loading',
+  dictation: 'Speech runtimes, costs, and model configuration',
+  image: 'Image runtimes, model loading, and active profiles',
+  music: 'Music runtimes, model loading, and active profiles',
+  video: 'Video runtimes, model loading, and active profiles',
+};
 
 const LEGACY_ROUTES: Record<string, PageId> = {
   overview: 'home',
@@ -58,6 +107,10 @@ const LEGACY_ROUTES: Record<string, PageId> = {
   system: 'llm/diagnostics',
   'llm/operate': 'llm/settings',
   'dictation/operate': 'dictation/settings',
+  image: 'image/generate',
+  music: 'music/generate',
+  'image/operate': 'image/settings',
+  'music/operate': 'music/settings',
 };
 
 function pageFromHash(): PageId {
@@ -68,13 +121,24 @@ function pageFromHash(): PageId {
 }
 
 const App: React.FC = () => (
-  <GatewayProvider>
+  <DashboardAccess><GatewayProvider>
     <Shell />
-  </GatewayProvider>
+  </GatewayProvider></DashboardAccess>
 );
 
 const Shell: React.FC = () => {
   const [page, setPage] = useState<PageId>(() => (typeof window === 'undefined' ? 'home' : pageFromHash()));
+  const [collapsedSections, setCollapsedSections] =
+    useState<DashboardSection[]>(() => {
+      if (typeof window === 'undefined') return [];
+      try {
+        return loadCollapsedSidebarSections(
+          window.localStorage.getItem(SIDEBAR_SECTION_STORAGE_KEY),
+        );
+      } catch {
+        return [];
+      }
+    });
 
   useEffect(() => {
     const onHashChange = () => setPage(pageFromHash());
@@ -82,30 +146,67 @@ const Shell: React.FC = () => {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
+  const toggleSection = (section: DashboardSection) => {
+    setCollapsedSections(current => {
+      const next = toggleCollapsedSidebarSection(current, section);
+      try {
+        window.localStorage.setItem(
+          SIDEBAR_SECTION_STORAGE_KEY,
+          JSON.stringify(next),
+        );
+      } catch {
+      }
+      return next;
+    });
+  };
+
   return (
-    <div className="app-shell flex min-h-screen">
-      <aside className="hidden w-52 shrink-0 flex-col border-r border-border-slate bg-deck-navy px-4 py-5 md:flex">
-        <div className="mb-6 flex items-center gap-3 px-2">
+    <div className="app-shell flex h-dvh overflow-hidden">
+      <aside className="hidden w-56 shrink-0 flex-col border-r border-border-slate bg-deck-navy px-3 py-5 md:flex">
+        <div className="mb-5 flex items-center gap-3 px-2">
           <img src={logoUrl} alt="" className="h-9 w-9 rounded-md object-cover" />
           <div>
             <span className="text-base font-semibold text-text-primary">InferDeck</span>
             <span className="mt-0.5 block text-xs text-text-muted">Local inference</span>
           </div>
         </div>
-        <nav className="flex flex-col" aria-label="Dashboard">
+        <nav className="flex min-h-0 flex-1 flex-col overflow-y-auto" aria-label="Dashboard">
           <NavLink id="home" label="Home" page={page} />
-          {(['llm', 'dictation'] as DashboardSection[]).map(section => (
-            <div key={section} className="mt-5">
-              <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
-                {section === 'llm' ? 'LLM' : 'Dictation'}
+          <NavLink id="requests" label="Requests" page={page} />
+          <NavLink id="settings" label="API Settings" page={page} />
+          {DASHBOARD_SECTIONS.map(section => {
+            const collapsed = collapsedSections.includes(section);
+            const label = sectionLabel(section);
+            const controls = 'sidebar-' + section + '-navigation';
+            return (
+              <div key={section} className="mt-4">
+                <button
+                  type="button"
+                  aria-expanded={!collapsed}
+                  aria-controls={controls}
+                  aria-label={(collapsed ? 'Show ' : 'Hide ') + label + ' navigation'}
+                  onClick={() => toggleSection(section)}
+                  className="mb-1 flex min-h-9 w-full items-center justify-between rounded px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted hover:bg-white/[0.04] hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
+                >
+                  <span className="flex items-center gap-2"><span className={`h-2.5 w-1 rounded ${section === 'llm' ? 'bg-queue-blue' : section === 'dictation' ? 'bg-warning-amber' : section === 'image' ? 'bg-infer-violet' : 'bg-gaming-orange'}`} /><span className="text-text-secondary">{label}</span></span>
+                  <span className="ml-auto mr-2 text-[10px] font-normal">{DASHBOARD_PAGES.filter(item => item.section === section).length}</span>
+                  <ChevronRightIcon
+                    aria-hidden="true"
+                    className={'h-3.5 w-3.5 transition-transform ' + (collapsed ? '' : 'rotate-90')}
+                  />
+                </button>
+                <div
+                  id={controls}
+                  hidden={collapsed}
+                  className={sidebarNavigationClass(collapsed)}
+                >
+                  {DASHBOARD_PAGES.filter(item => item.section === section).map(({ id, label: itemLabel }) => (
+                    <NavLink key={id} id={id} label={itemLabel} page={page} nested />
+                  ))}
+                </div>
               </div>
-              <div className="flex flex-col gap-1">
-                {DASHBOARD_PAGES.filter(item => item.section === section).map(({ id, label }) => (
-                  <NavLink key={id} id={id} label={label} page={page} nested />
-                ))}
-              </div>
-            </div>
-          ))}
+            );
+          })}
           <div className="mt-5 border-t border-white/10 pt-4">
             <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
               Planned
@@ -117,19 +218,18 @@ const Shell: React.FC = () => {
             </div>
           </div>
         </nav>
-        <div className="mt-auto px-2 pt-6 text-xs text-text-muted">
-          <span className="block">InferDeck v{INFERDECK_VERSION}</span>
-          <span className="mt-0.5 block text-[10px]">In-process runtime</span>
-        </div>
+        <SidebarAccount />
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <TopBar page={page} />
         <ConnectionBanner />
         <HealthNotices />
-        <main className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+        <main className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
           <div className="mx-auto max-w-[1280px]">
             {page === 'home' && <OverviewPage />}
+            {page === 'requests' && <RequestsPage />}
+            {page === 'settings' && <ApiSettingsPage />}
             {page === 'llm/settings' && <OperatePage section="llm" />}
             {page === 'llm/models' && <ModelsPage section="llm" />}
             {page === 'llm/usage' && <UsagePage section="llm" />}
@@ -138,8 +238,21 @@ const Shell: React.FC = () => {
             {page === 'dictation/models' && <ModelsPage section="dictation" />}
             {page === 'dictation/usage' && <UsagePage section="dictation" />}
             {page === 'dictation/diagnostics' && <SystemPage section="dictation" />}
-            {page === 'image' && <FutureWorkspacePage area="image" />}
-            {page === 'music' && <FutureWorkspacePage area="music" />}
+            {page === 'image/generate' && <ImagePage />}
+            {page === 'image/settings' && <OperatePage section="image" />}
+            {page === 'image/models' && <ModelsPage section="image" />}
+            {page === 'image/usage' && <UsagePage section="image" />}
+            {page === 'image/diagnostics' && <SystemPage section="image" />}
+            {page === 'music/generate' && <MusicPage />}
+            {page === 'music/settings' && <OperatePage section="music" />}
+            {page === 'music/models' && <ModelsPage section="music" />}
+            {page === 'music/usage' && <UsagePage section="music" />}
+            {page === 'music/diagnostics' && <SystemPage section="music" />}
+            {page === 'video/generate' && <VideoPage />}
+            {page === 'video/settings' && <OperatePage section="video" />}
+            {page === 'video/models' && <ModelsPage section="video" />}
+            {page === 'video/usage' && <UsagePage section="video" />}
+            {page === 'video/diagnostics' && <SystemPage section="video" />}
             {page === 'post-training' && <FutureWorkspacePage area="post-training" />}
           </div>
         </main>
@@ -148,19 +261,46 @@ const Shell: React.FC = () => {
   );
 };
 
+export function sidebarNavigationClass(collapsed: boolean): string {
+  return collapsed ? 'hidden' : 'flex flex-col gap-1';
+}
+
+const SidebarAccount: React.FC = () => {
+  const access = useDashboardAccess();
+  const [error, setError] = useState('');
+  return <div className="shrink-0 pt-5">
+    <details className="relative">
+      <summary className="flex cursor-pointer list-none items-center gap-2.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-2 hover:bg-white/[0.08]">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-queue-blue/40 bg-queue-blue/15 text-queue-blue" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+        <span className="min-w-0 flex-1"><span className="block text-sm font-medium">{access?.remote ? 'Dashboard session' : 'Local access'}</span><span className="block truncate text-[11px] text-text-muted">{access?.remembered ? 'Remembered browser' : 'Dashboard administration'}</span></span>
+        <ChevronRightIcon className="h-3.5 w-3.5 text-text-muted" />
+      </summary>
+      <nav aria-label="Account" className="absolute bottom-full left-0 z-40 mb-1 w-full border border-border-slate bg-[#07101d] p-1 text-sm shadow-2xl">
+        <a href="#settings" className="block rounded px-3 py-2 hover:bg-white/[0.05]">API keys</a>
+        {access?.remote && <button className="w-full px-3 py-2 text-left hover:bg-white/[0.05]" onClick={() => { void access.logout().catch(() => setError('Log out failed. Try again.')); }}>Log out</button>}
+      </nav>
+    </details>
+    {error && <p role="alert" className="mt-2 text-xs text-danger-rose">{error}</p>}
+    <p className="mt-2 px-1 text-[10px] text-text-muted">InferDeck v{INFERDECK_VERSION} / In-process runtime</p>
+  </div>;
+};
+
 const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
   const { connection, stats, swap } = useGateway();
+  const access = useDashboardAccess();
+  const [logoutError, setLogoutError] = useState('');
+  const [loggingOut, setLoggingOut] = useState(false);
   const loaded = stats?.loadedModel || '';
   const pageInfo = DASHBOARD_PAGES.find(item => item.id === page);
   const connectionTone = connection === 'connected' ? 'good' : connection === 'offline' ? 'critical' : 'warn';
   const connectionLabel = connection === 'connected' ? 'Live' : connection === 'connecting' ? 'Connecting' : connection === 'reconnecting' ? 'Reconnecting' : 'Offline';
   const pageLabel = pageInfo?.section
-    ? `${pageInfo.section === 'llm' ? 'LLM' : 'Dictation'} / ${pageInfo.label}`
+    ? `${sectionLabel(pageInfo.section)} / ${pageInfo.label}`
     : pageInfo?.label;
-  const healthTarget = pageInfo?.section === 'dictation' ? 'dictation/diagnostics' : 'llm/diagnostics';
+  const healthTarget = pageInfo?.section ? `${pageInfo.section}/diagnostics` : 'llm/diagnostics';
 
   return (
-    <header className="border-b border-border-slate bg-deck-navy px-4 py-3 sm:px-6">
+    <header className="sticky top-0 z-20 border-b border-border-slate bg-deck-navy px-4 py-3 md:static sm:px-6">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="min-w-0">
           <span className="block text-[10px] font-medium uppercase tracking-[0.14em] text-text-muted md:hidden">InferDeck</span>
@@ -178,31 +318,41 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
             href={`#${healthTarget}`}
             aria-label={`${connectionLabel}. Open Health and alerts`}
             title="Open Health & alerts"
-            className="rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue md:min-h-0 md:min-w-0"
           >
             <Badge label={connectionLabel} tone={connectionTone} />
           </a>
+          {access?.remote && <>
+            <span className="hidden text-xs sm:inline">{access.remembered === true ? 'This browser is remembered' : access.remembered === false ? 'Signed in for this session' : 'Signed in'}</span>
+            <button className="min-h-11 border border-white/25 px-3 text-sm" disabled={loggingOut} onClick={() => {
+              setLoggingOut(true); setLogoutError('');
+              void access.logout().catch(reason => { setLogoutError(reason instanceof Error ? reason.message : 'Log out failed. Try again.'); setLoggingOut(false); });
+            }}>{loggingOut ? 'Logging out...' : 'Log out'}</button>
+          </>}
           <details className="relative z-30">
-            <summary className="min-h-10 cursor-pointer rounded border border-white/15 bg-white/[0.06] px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-white/[0.12]">
+            <summary className="flex min-h-11 cursor-pointer items-center rounded border border-white/15 bg-white/[0.06] px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-white/[0.12] sm:min-h-10">
               Settings
             </summary>
-            <nav className="absolute right-0 z-40 mt-2 w-72 border border-border-slate bg-[#07101d] shadow-deck" aria-label="Settings">
+            <nav className="absolute right-0 z-40 mt-2 w-[min(18rem,calc(100vw-2rem))] border border-border-slate bg-[#07101d] shadow-deck" aria-label="Settings">
               <a
-                href="#llm/settings"
+                href="#settings"
                 onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
                 className="block border-b border-white/10 px-4 py-3 hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-queue-blue"
               >
-                <span className="block text-sm font-medium text-text-primary">LLM settings</span>
-                <span className="mt-0.5 block text-xs text-text-muted">Profiles, aliases, pricing, and model loading</span>
+                <span className="block text-sm font-medium text-text-primary">API settings</span>
+                <span className="mt-0.5 block text-xs text-text-muted">Public access and managed client priorities</span>
               </a>
-              <a
-                href="#dictation/settings"
-                onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
-                className="block border-b border-white/10 px-4 py-3 hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-queue-blue"
-              >
-                <span className="block text-sm font-medium text-text-primary">Dictation settings</span>
-                <span className="mt-0.5 block text-xs text-text-muted">Speech runtimes, costs, and model configuration</span>
-              </a>
+              {DASHBOARD_SECTIONS.map(section => (
+                <a
+                  key={section}
+                  href={`#${section}/settings`}
+                  onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
+                  className="block border-b border-white/10 px-4 py-3 hover:bg-white/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-queue-blue"
+                >
+                  <span className="block text-sm font-medium text-text-primary">{sectionLabel(section)} settings</span>
+                  <span className="mt-0.5 block text-xs text-text-muted">{SECTION_SETTINGS_HELP[section]}</span>
+                </a>
+              ))}
               <a
                 href={`#${healthTarget}`}
                 onClick={event => event.currentTarget.closest('details')?.removeAttribute('open')}
@@ -215,21 +365,23 @@ const TopBar: React.FC<{ page: PageId }> = ({ page }) => {
           </details>
         </div>
       </div>
+      {logoutError && <p role="alert" className="mt-2 text-sm text-danger-rose">{logoutError}</p>}
       <label className="mt-3 block md:hidden">
         <span className="sr-only">Dashboard page</span>
         <select
           aria-label="Dashboard page"
-          className="min-h-10 w-full border-white/15 bg-[#07101d] px-3 text-sm text-text-primary"
+          className="min-h-11 w-full border-white/15 bg-[#07101d] px-3 text-sm text-text-primary sm:min-h-10"
           value={page}
           onChange={event => { window.location.hash = event.target.value; }}
         >
           <option value="home">Home</option>
-          <optgroup label="LLM">
-            {DASHBOARD_PAGES.filter(item => item.section === 'llm').map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
-          </optgroup>
-          <optgroup label="Dictation">
-            {DASHBOARD_PAGES.filter(item => item.section === 'dictation').map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
-          </optgroup>
+          <option value="requests">Requests</option>
+          <option value="settings">API Settings</option>
+          {DASHBOARD_SECTIONS.map(section => (
+            <optgroup key={section} label={sectionLabel(section)}>
+              {DASHBOARD_PAGES.filter(item => item.section === section).map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+            </optgroup>
+          ))}
           <optgroup label="Planned">
             {DASHBOARD_PAGES.filter(item => item.preview).map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
           </optgroup>
@@ -288,7 +440,7 @@ const HealthNotices: React.FC = () => {
           aria-label="Dismiss configuration notices"
           title="Dismiss configuration notices"
           onClick={() => setDismissed(true)}
-          className="rounded p-1 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning-amber"
+          className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning-amber sm:min-h-0 sm:min-w-0 sm:p-1"
         >
           <XMarkIcon className="h-4 w-4" aria-hidden="true" />
         </button>
@@ -301,69 +453,23 @@ const NavLink: React.FC<{ id: PageId; label: string; page: PageId; nested?: bool
   <a
     href={`#${id}`}
     aria-current={page === id ? 'page' : undefined}
-    className={`rounded px-3 py-2 text-sm transition-colors ${nested ? 'pl-5' : ''} ${page === id
+    className={`relative rounded px-3 py-2 text-sm transition-colors ${nested ? 'pl-5' : ''} ${page === id
       ? 'bg-white/[0.07] font-medium text-text-primary'
       : 'text-text-secondary hover:bg-white/[0.04] hover:text-text-primary'}`}
   >
+    {page === id && <span className="absolute inset-y-1.5 left-0 w-0.5 rounded bg-queue-blue" />}
     {label}
   </a>
 );
 
 const ConnectionBanner: React.FC = () => {
-  const { connection, lastUpdatedAt } = useGateway();
-  const [token, setToken] = useState('');
-  const [authError, setAuthError] = useState('');
-  const [authenticating, setAuthenticating] = useState(false);
+  const { connection, lastUpdatedAt, refresh } = useGateway();
   if (connection === 'connected') return null;
-  const hostname = typeof window === 'undefined' ? '' : window.location.hostname;
-  const remote = hostname !== '' &&
-    hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1';
-  const tone = connection === 'offline' ? 'border-danger-rose/40 bg-danger-rose/10 text-danger-rose' : 'border-warning-amber/40 bg-warning-amber/10 text-warning-amber';
-  const message = connection === 'connecting'
-    ? 'Connecting to the gateway…'
-    : connection === 'reconnecting'
-      ? 'Event stream interrupted — reconnecting.'
-      : 'Gateway unreachable — retrying.';
-  const authenticate = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setAuthenticating(true);
-    setAuthError('');
-    try {
-      await authenticateDashboard(token);
-      window.location.reload();
-    } catch (error) {
-      setAuthError(error instanceof Error ? error.message : 'Dashboard authentication failed');
-      setAuthenticating(false);
-    }
-  };
-  return (
-    <div className={`border-b px-4 py-2 text-sm ${tone}`}>
-      <span>{remote ? 'Remote dashboard authentication required.' : message}</span>
-      {lastUpdatedAt && <span className="ml-2 opacity-80">Data last updated {timeAgo(lastUpdatedAt)}.</span>}
-      {remote && (
-        <form className="mt-2 flex max-w-xl flex-wrap items-center gap-2" onSubmit={authenticate}>
-          <label className="sr-only" htmlFor="dashboard-token">Dashboard access token</label>
-          <input
-            id="dashboard-token"
-            type="password"
-            autoComplete="current-password"
-            value={token}
-            onChange={event => setToken(event.target.value)}
-            placeholder="Dashboard access token"
-            className="min-h-10 min-w-0 flex-1 rounded border border-white/20 bg-deck-navy px-3 text-text-primary sm:min-w-64"
-          />
-          <button
-            type="submit"
-            disabled={authenticating || token.length === 0}
-            className="min-h-10 w-full rounded border border-current px-3 font-medium disabled:opacity-40 sm:w-auto"
-          >
-            {authenticating ? 'Connecting…' : 'Connect'}
-          </button>
-          {authError && <span className="w-full text-xs">{authError}</span>}
-        </form>
-      )}
-    </div>
-  );
+  return <div className="border-b border-white/20 px-4 py-3 text-sm sm:px-6" role="status">
+    <span>{connection === 'connecting' ? 'Connecting to InferDeck.' : 'Gateway unavailable. Reconnecting.'}</span>
+    {lastUpdatedAt && <span className="ml-2">Data last updated {timeAgo(lastUpdatedAt)}.</span>}
+    <button className="ml-3 min-h-11 underline" onClick={() => { void refresh(); }}>Retry connection</button>
+  </div>;
 };
 
 export default App;

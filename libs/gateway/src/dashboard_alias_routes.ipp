@@ -62,7 +62,8 @@
                 [&] {
                     if (previous) (void)deps.gw.coordinator.registry().set_alias(*previous);
                     else (void)deps.gw.coordinator.registry().remove_alias(name);
-                });
+                },
+                ConfigRepository::ReloadPolicy::Skip);
             if (!persisted) {
                 const int status = persisted.error().code == foundation::ErrorCode::AlreadyExists
                     ? 409 : persisted.error().code == foundation::ErrorCode::InvalidArgument ? 400 : 500;
@@ -108,7 +109,8 @@
                     snapshot.has_active ? snapshot.active : snapshot.base,
                     deps.gw.coordinator.registry().aliases());
             },
-            [&] { (void)deps.gw.coordinator.registry().set_alias(*previous); });
+            [&] { (void)deps.gw.coordinator.registry().set_alias(*previous); },
+            ConfigRepository::ReloadPolicy::Skip);
         if (!persisted) {
             const int status = persisted.error().code == foundation::ErrorCode::AlreadyExists
                 ? 409 : 500;

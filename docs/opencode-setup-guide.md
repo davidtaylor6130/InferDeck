@@ -22,41 +22,40 @@ cd C:\Users\david\Documents\GitHub\InferDeck
 opencode
 ```
 
-Before starting OpenCode, export the live model catalog. The exporter reads
-concrete models and stable aliases from InferDeck, replaces only the InferDeck
-provider catalog, and preserves unrelated OpenCode plugins, MCP servers, and
-settings:
+## Use InferDeck model aliases
 
-```powershell
-pnpm export:opencode -- --source-url http://127.0.0.1:11434 `
-  --base-url http://192.168.0.168:11434 `
-  --model Normal --small-model n8n-model --output opencode.json
+InferDeck publishes concrete models and stable aliases through `GET /v1/models`.
+The checked-in `opencode.json` defines one OpenAI-compatible provider and keeps
+the default selections stable:
+
+```json
+{
+  "model": "inferdeck/Normal",
+  "small_model": "inferdeck/qwen2.5-0.5b-instruct"
+}
 ```
 
-The resulting OpenAI-compatible model names include `Normal`, `Pro`, and
-`n8n-model` whenever the gateway advertises those aliases. Re-export after any
-model or alias change. When remote control authentication is enabled, set
-`INFERDECK_CONTROL_TOKEN`; the exporter sends it as a bearer header and never
-writes it into `opencode.json`.
+`Normal` is an InferDeck alias. Changing its target on the server does not
+require changing the OpenCode model name. The small model uses the configured
+CPU helper directly. The checked-in `opencode.json` contains only these two
+models.
 
 ## Provider
 
-The exported provider uses the requested gateway address and `/v1` data-plane
+The provider uses `provider.inferdeck.options.baseURL` as its `/v1` data-plane
 base.
 
 | Provider | Endpoint | Use Case |
 |---|---|---|
-| `inferdeck/Normal` | configured by `--base-url` | Stable normal-work alias |
-| `inferdeck/Pro` | configured by `--base-url` | Stable demanding-work alias |
-| `inferdeck/n8n-model` | configured by `--base-url` | Stable automation alias |
+| `inferdeck/Normal` | configured by `options.baseURL` | Stable normal-work alias |
+| `inferdeck/qwen2.5-0.5b-instruct` | configured by `options.baseURL` | CPU helper model |
 
 ## Context Limits
 
-The exporter derives each model or alias context limit from the live InferDeck
-catalog. It does not preserve a stale handwritten limit. The bundled Qwen3.8
-profile currently advertises a 100,000-token context and the exporter caps the
-OpenCode output limit at 16,384 tokens. Re-export after any runtime profile or
-alias change instead of editing these values by hand.
+`GET /v1/models` is authoritative for the server-side context and output
+limits. OpenCode also keeps model metadata in `opencode.json`, so those values
+must not exceed the alias target's advertised limits. Update the local metadata
+when a target's capabilities change; the alias name itself remains stable.
 
 For large repository tasks, keep discovery and implementation as separate
 turns when the complete working set would exceed the advertised context.
@@ -103,7 +102,7 @@ default-off OpenAI-derivative profile is enabled and its `/compat` base is used.
 |---|---|
 | `connect ECONNREFUSED` | Gateway not running — start InferDeck first |
 | `context length exceeded` | Reduce context or output limit |
-| `reasoning_content` missing | Use OpenAI Responses reasoning events, or explicitly enable and target the derivative compatibility profile |
+| `reasoning_content` missing | Check that the gateway build forwards Chat Completions reasoning and that the model's reasoning effort is not `none` |
 
 ## Reference
 

@@ -34,6 +34,15 @@ struct ChatTemplateMeta {
 
 using InferenceResult = inference::GenerationResult;
 
+struct RequestDemand {
+    int prompt_positions{0};
+    int output_tokens{0};
+    int required_context{0};
+    int required_sequences{1};
+    int aggregate_context{0};
+    int aggregate_sequences{0};
+};
+
 struct EmbeddingTextInput {
     std::string text;
 };
@@ -69,6 +78,41 @@ struct ImageGenerationRequest {
 struct ImageGenerationResult {
     std::vector<std::vector<std::byte>> png_images;
     float duration_ms{0.0f};
+};
+
+struct AudioGenerationRequest {
+    std::string prompt;
+    std::string lyrics;
+    float duration_seconds{30.0f};
+    std::int64_t seed{-1};
+    int steps{0};
+    float guidance_scale{0.0f};
+};
+
+struct AudioGenerationResult {
+    std::vector<std::byte> wav_bytes;
+    std::int64_t seed{-1};
+    float duration_ms{0.0f};
+    double output_audio_seconds{0.0};
+};
+
+struct VideoGenerationRequest {
+    std::string prompt;
+    std::string negative_prompt;
+    int width{512};
+    int height{320};
+    int frames{33};
+    int fps{24};
+    int steps{20};
+    std::int64_t seed{-1};
+    float guidance_scale{6.0f};
+};
+
+struct VideoGenerationResult {
+    std::vector<std::byte> video_bytes;
+    std::string content_type{"video/x-msvideo"};
+    float duration_ms{0.0f};
+    double output_video_seconds{0.0};
 };
 
 struct SpeechRequest {
@@ -119,6 +163,22 @@ public:
         const std::function<bool(int)>& progress = {}) = 0;
 };
 
+class IAudioGenerationBackend {
+public:
+    virtual ~IAudioGenerationBackend() = default;
+    virtual foundation::Result<AudioGenerationResult> generate_audio(
+        int slot_id, const AudioGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) = 0;
+};
+
+class IVideoBackend {
+public:
+    virtual ~IVideoBackend() = default;
+    virtual foundation::Result<VideoGenerationResult> generate_video(
+        int slot_id, const VideoGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) = 0;
+};
+
 class ISpeechBackend {
 public:
     virtual ~ISpeechBackend() = default;
@@ -149,6 +209,16 @@ class IModel : public IBackend {
 public:
     virtual ~IModel() = default;
 
+    virtual foundation::Result<RequestDemand> estimate_request_demand(
+        const InferenceRequest&) const {
+        return foundation::Ok(RequestDemand{});
+    }
+
+    virtual foundation::Result<void> ensure_request_capacity(
+        const RequestDemand&, const LifecycleControl&) {
+        return foundation::Ok();
+    }
+
     virtual const ChatTemplateMeta& chat_template_meta() const {
         static const ChatTemplateMeta meta{};
         return meta;
@@ -159,6 +229,15 @@ public:
 
     virtual foundation::Result<InferenceResult> predict(
         int slot_id, const InferenceRequest& req) = 0;
+
+    virtual foundation::Result<InferenceResult> predict_cancellable(
+        int slot_id, const InferenceRequest& req, const std::atomic<bool>* cancel) {
+        if (cancel && cancel->load()) {
+            return foundation::Err<InferenceResult>(foundation::ErrorCode::Cancelled,
+                                                    "request cancelled");
+        }
+        return predict(slot_id, req);
+    }
 
     // `cancel`, when non-null and set to true, requests that an in-flight
     // generation stop as soon as possible (checked between tokens / after

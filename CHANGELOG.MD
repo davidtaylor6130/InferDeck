@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-No unreleased changes.
+### Removed
+- The standalone OpenCode config exporter and its dedicated CI test. OpenCode
+  continues to use the stable model aliases published by InferDeck.
 
 ---
 

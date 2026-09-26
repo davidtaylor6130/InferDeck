@@ -105,13 +105,16 @@ function Invoke-RawStatus {
 function Invoke-RawResponse {
     param(
         [int]$TargetPort,
-        [string]$RequestText
+        [string]$RequestText,
+        [Net.Sockets.TcpClient]$Connection = $null,
+        [int]$ReceiveTimeoutMs = 10000
     )
-    $client = [Net.Sockets.TcpClient]::new()
+    $client = if ($null -ne $Connection) { $Connection } else { [Net.Sockets.TcpClient]::new() }
+    $reader = $null
     try {
-        $client.ReceiveTimeout = 10000
+        $client.ReceiveTimeout = $ReceiveTimeoutMs
         $client.SendTimeout = 10000
-        $client.Connect('127.0.0.1', $TargetPort)
+        if (-not $client.Connected) { $client.Connect('127.0.0.1', $TargetPort) }
         $stream = $client.GetStream()
         $bytes = [Text.Encoding]::ASCII.GetBytes($RequestText)
         $stream.Write($bytes, 0, $bytes.Length)
@@ -167,7 +170,8 @@ function Invoke-RawResponse {
             Body = $body
         }
     } finally {
-        $client.Dispose()
+        if ($null -ne $reader) { $reader.Dispose() }
+        if ($null -eq $Connection) { $client.Dispose() }
     }
 }
 
@@ -270,12 +274,67 @@ try {
             "GET /api/inferdeck/v1/config HTTP/1.1`r`nHost: admin.example`r`nForwarded: for=192.0.2.10`r`nConnection: close`r`n`r`n"
     }
 
+    if ($RemoteControl) {
+        $sessionUri = "$loopback/api/inferdeck/v1/dashboard/session"
+        $loginHeaders = @{ Origin = 'http://admin.example' }
+        $sessionLogin = Invoke-WebRequest -UseBasicParsing -Uri $sessionUri -Method POST `
+            -Headers $loginHeaders -ContentType 'application/json' `
+            -Body '{"token":"test-control-token-0123456789abcdef"}' -TimeoutSec 10
+        if ($sessionLogin.Headers['Set-Cookie'] -match 'Max-Age=') {
+            throw 'Default dashboard login must remain a browser session'
+        }
+        $rememberedLogin = Invoke-WebRequest -UseBasicParsing -Uri $sessionUri -Method POST `
+            -Headers $loginHeaders -ContentType 'application/json' `
+            -Body '{"token":"test-control-token-0123456789abcdef","remember":true}' -TimeoutSec 10
+        $rememberedCookie = [string]$rememberedLogin.Headers['Set-Cookie']
+        foreach ($attribute in @('HttpOnly', 'SameSite=Strict', 'Path=/api/inferdeck/v1', 'Max-Age=2592000')) {
+            if (-not $rememberedCookie.Contains($attribute)) { throw "Remembered login missing $attribute" }
+        }
+        if ($rememberedLogin.Headers['Cache-Control'] -ne 'no-store') { throw 'Login response must not be cached' }
+        $cookieHeader = @{ Cookie = $rememberedCookie.Split(';')[0] }
+        $cookieStatus = Invoke-RawStatus $Port `
+            "GET /api/inferdeck/v1/status HTTP/1.1`r`nHost: ${LanAddress}:$Port`r`nCookie: $($cookieHeader.Cookie)`r`nConnection: close`r`n`r`n"
+        if ($cookieStatus -ne 200) {
+            throw 'Remembered dashboard cookie did not authenticate on LAN'
+        }
+        if ((Invoke-Status $sessionUri -Method POST -Headers $loginHeaders -ContentType 'application/json' `
+                -Body '{"token":"test-control-token-0123456789abcdef","remember":"true"}') -ne 400) {
+            throw 'Dashboard remember flag must reject non-booleans'
+        }
+        if ((Invoke-Status $sessionUri -Method POST -Headers @{ Origin = 'https://evil.example' } `
+                -ContentType 'application/json' -Body '{"token":"test-control-token-0123456789abcdef","remember":true}') -ne 403) {
+            throw 'Cross-origin dashboard login must be rejected'
+        }
+        $logout = Invoke-WebRequest -UseBasicParsing -Uri $sessionUri -Method DELETE `
+            -Headers @{ Origin = 'http://admin.example'; Cookie = $cookieHeader.Cookie } `
+            -ContentType 'application/json' -Body '{}' -TimeoutSec 10
+        if ($logout.Headers['Set-Cookie'] -notmatch 'Max-Age=0' -or $logout.Headers['Cache-Control'] -ne 'no-store') {
+            throw 'Dashboard logout did not clear the browser cookie'
+        }
+        $persistentClient = [Net.Sockets.TcpClient]::new()
+        try {
+            $emptyLogout = Invoke-RawResponse -TargetPort $Port -Connection $persistentClient -ReceiveTimeoutMs 2000 -RequestText `
+                "DELETE /api/inferdeck/v1/dashboard/session HTTP/1.1`r`nHost: ${LanAddress}:$Port`r`nOrigin: http://admin.example`r`nCookie: $($cookieHeader.Cookie)`r`nContent-Type: application/json`r`nConnection: keep-alive`r`n`r`n"
+            if ($emptyLogout.Status -ne 200) { throw 'Unframed logout failed' }
+            $followupTimer = [Diagnostics.Stopwatch]::StartNew()
+            $afterLogout = Invoke-RawResponse -TargetPort $Port -Connection $persistentClient -ReceiveTimeoutMs 2000 -RequestText `
+                "GET /api/inferdeck/v1/status HTTP/1.1`r`nHost: ${LanAddress}:$Port`r`nX-Request-Id: client.after_logout`r`nConnection: close`r`n`r`n"
+            if ($afterLogout.Status -ne 401 -or $afterLogout.Headers['X-Request-Id'] -ne 'client.after_logout') {
+                throw 'Request after unframed logout was lost or incorrectly authenticated'
+            }
+            $results.logout_keep_alive_followup_ms = $followupTimer.ElapsedMilliseconds
+        } finally {
+            $persistentClient.Dispose()
+        }
+        $results.dashboard_remember_logout = 'passed'
+    }
+
     $echo = Invoke-WebRequest -UseBasicParsing -Uri "$loopback/api/inferdeck/v1/health" `
         -Headers @{'X-Request-Id' = 'client.probe_1'} -TimeoutSec 10
     $generated = Invoke-WebRequest -UseBasicParsing -Uri "$loopback/api/inferdeck/v1/health" `
         -Headers @{'X-Request-Id' = 'invalid request id'} -TimeoutSec 10
     $health = $echo.Content | ConvertFrom-Json
-    if ($health.version -notmatch '^\d+\.\d+\.\d+$' -or
+    if ($health.version -notmatch '^\d+\.\d+\.\d+(?:-alpha-[1-9]\d*)?$' -or
         $health.build_revision -notmatch '^[0-9a-f]{40}$' -or
         -not ($health.PSObject.Properties.Name -contains 'build_dirty')) {
         throw "Health response has no trustworthy build provenance: $($echo.Content)"

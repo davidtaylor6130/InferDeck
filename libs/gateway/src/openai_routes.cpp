@@ -64,14 +64,19 @@ std::string base64_floats(const std::vector<float>& values) {
 foundation::Result<int> acquire_for_request(
     const httplib::Request& req, const GatewayDeps& deps,
     const std::string& model_name, int priority) {
+    const auto model_info = deps.coordinator.registry().get_info_result(model_name);
+    const int request_queue_timeout_seconds = model_info
+        ? model_info->request_queue_timeout_seconds : 300;
     const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::minutes{5};
+        std::chrono::seconds{request_queue_timeout_seconds};
     const std::function<bool()> cancelled = [&req] {
         return req.is_connection_closed();
     };
     model::AcquireSlotOptions options;
-    options.timeout = std::chrono::minutes{5};
-    options.priority = std::clamp(priority, -100, 100);
+    options.timeout = std::chrono::seconds{request_queue_timeout_seconds};
+    options.priority = resolve_request_priority(
+        deps.api_keys.get(), header_value(req, "Authorization"), priority,
+        deps.public_data_plane_access);
     options.cancelled = cancelled;
     options.prepare = [&deps, &model_name, deadline, cancelled] {
         auto loaded = ensure_model_loaded(

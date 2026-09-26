@@ -1,3 +1,11 @@
+bool has_transcribed_text(const std::string& text) {
+    return std::any_of(text.begin(), text.end(), [](unsigned char character) {
+        return (character >= '0' && character <= '9') ||
+               (character >= 'A' && character <= 'Z') ||
+               (character >= 'a' && character <= 'z') || character >= 0x80;
+    });
+}
+
 void handle_audio_transcriptions(const httplib::Request& req, httplib::Response& resp,
                                  const GatewayDeps& deps) {
     const auto observation = observe_request(
@@ -194,10 +202,26 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
     const double input_audio_seconds =
         static_cast<double>(decoded->pcm.size()) /
         static_cast<double>(decoded->sample_rate);
+    const float peak = std::accumulate(
+        decoded->pcm.begin(), decoded->pcm.end(), 0.0f,
+        [](float maximum, float sample) {
+            return std::max(maximum, std::abs(sample));
+        });
+    if (peak < 0.0001f) {
+        foundation::LOG_WARN("transcription_no_audio",
+                             "model={} duration_seconds={} peak={}",
+                             model_name, input_audio_seconds, peak);
+        write_error(resp, 422, "no_speech_detected",
+                    "No audible speech detected. Check microphone input and try again.",
+                    "file");
+        record_media(deps, model_name, 0, 422, *slot,
+                     input_audio_seconds, 0, observation);
+        finish_job(job, "failed");
+        return;
+    }
     auto result = deps.coordinator.transcribe(runtime_model, *slot, *decoded,
         [&req, &deps, &model_name, job](int progress) {
-            update_job(job, progress);
-            if (deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "audio_transcription"}, {"progress", progress}}.dump());
+            if (update_job(job, progress) && deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "audio_transcription"}, {"progress", progress}}.dump());
             return !req.is_connection_closed() && !job->cancelled->load();
         });
     if (!result) {
@@ -208,6 +232,19 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         record_media(deps, model_name, 0, cancelled ? 499 : status, *slot,
                      input_audio_seconds, 0, observation);
         finish_job(job, cancelled ? "cancelled" : "failed");
+        return;
+    }
+    if (!has_transcribed_text(result->text)) {
+        foundation::LOG_WARN("transcription_no_words",
+                             "model={} duration_seconds={} peak={} output_bytes={}",
+                             model_name, input_audio_seconds, peak,
+                             result->text.size());
+        write_error(resp, 422, "no_speech_detected",
+                    "No intelligible speech detected. Check microphone input and try again.",
+                    "file");
+        record_media(deps, model_name, result->inference_ms, 422, *slot,
+                     input_audio_seconds, 0, observation);
+        finish_job(job, "failed");
         return;
     }
     if (format == "text") {

@@ -3,9 +3,11 @@
 #include "gateway/model_store.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <optional>
@@ -20,10 +22,16 @@ class FakeTransport : public gateway::IModelStoreTransport {
 public:
     foundation::Result<nlohmann::json> get_json(
         const std::string& url, const std::string&) override {
-        if (url.find("?search=") != std::string::npos) {
+        if (url.find("/api/models?") != std::string::npos) {
             return foundation::Ok(nlohmann::json::array({
-                {{"id", "owner/text-GGUF"}, {"pipeline_tag", "text-generation"}, {"downloads", 12}},
-                {{"id", "owner/image"}, {"pipeline_tag", "text-to-image"}, {"downloads", 4}}
+                {{"id", "owner/text-GGUF"}, {"pipeline_tag", "text-generation"},
+                 {"downloads", 12}, {"siblings", nlohmann::json::array({
+                     {{"rfilename", "model.gguf"}}
+                 })}},
+                {{"id", "owner/image"}, {"pipeline_tag", "text-to-image"},
+                 {"downloads", 4}, {"siblings", nlohmann::json::array({
+                     {{"rfilename", "model.safetensors"}}
+                 })}}
             }));
         }
         if (url.find("owner/tts") != std::string::npos) {
@@ -73,12 +81,147 @@ public:
     std::string last_url;
 };
 
+class LtxCatalogueTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string&) override {
+        last_url = url;
+if (url.find("/api/models/") != std::string::npos) {
+            const auto sha = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+            nlohmann::json files = nlohmann::json::array();
+            for (const auto& name : {"ltx-2.3-22b-dev-UD-Q4_K_M.gguf", "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors", "vae/ltx-2.3-22b-dev_video_vae.safetensors", "vae/ltx-2.3-22b-dev_audio_vae.safetensors", "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf"}) files.push_back({{"rfilename", name}, {"lfs", {{"size", 4}, {"sha256", sha}}}});
+            return foundation::Ok(nlohmann::json{{"sha", "revision"}, {"pipeline_tag", "text-to-video"}, {"siblings", files}});
+        }
+        const bool incomplete = url.find("incomplete") != std::string::npos;
+        nlohmann::json siblings = {
+            {{"rfilename", "ltx-2.3-22b-dev-UD-Q4_K_M.gguf"}},
+            {{"rfilename", "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors"}},
+            {{"rfilename", "vae/ltx-2.3-22b-dev_video_vae.safetensors"}},
+            {{"rfilename", "vae/ltx-2.3-22b-dev_audio_vae.safetensors"}},
+            {{"rfilename", "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf"}}
+        };
+        if (incomplete) siblings.erase(siblings.begin() + 1, siblings.end());
+        return foundation::Ok(nlohmann::json::array({
+            {{"id", incomplete ? "owner/LTX-2.3-incomplete" : "owner/LTX-2.3"},
+             {"pipeline_tag", "text-to-video"}, {"tags", nlohmann::json::array({"ltx-2.3"})}, {"siblings", siblings}}
+        }));
+    }
+    std::string last_url;
+};
+class CatalogueTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string&) override {
+        last_url = url;
+        return foundation::Ok(nlohmann::json::array({
+            {{"id", "owner/popular-GGUF"}, {"pipeline_tag", "text-generation"},
+             {"tags", nlohmann::json::array({"gguf", "license:apache-2.0"})},
+             {"downloads", 1000}, {"likes", 20}, {"trendingScore", 7},
+             {"lastModified", "2026-08-20T12:04:25.000Z"},
+             {"siblings", nlohmann::json::array({{{"rfilename", "popular-Q4_K_M.gguf"}}})}},
+            {{"id", "owner/trending-GGUF"}, {"pipeline_tag", "text-generation"},
+             {"tags", nlohmann::json::array({"gguf", "license:mit"})},
+             {"downloads", 500}, {"likes", 40}, {"trendingScore", 12},
+             {"lastModified", "2026-09-01T12:04:25.000Z"},
+             {"siblings", nlohmann::json::array({{{"rfilename", "trending-Q5_K_M.gguf"}}})}},
+            {{"id", "owner/gated-GGUF"}, {"pipeline_tag", "text-generation"},
+             {"tags", nlohmann::json::array({"gguf"})}, {"gated", true},
+             {"downloads", 5000}, {"likes", 80}, {"trendingScore", 30},
+             {"siblings", nlohmann::json::array({{{"rfilename", "gated-Q4_K_M.gguf"}}})}},
+            {{"id", "owner/python-only"}, {"pipeline_tag", "text-generation"},
+             {"downloads", 100000}, {"likes", 1000}, {"trendingScore", 100},
+             {"siblings", nlohmann::json::array({{{"rfilename", "pytorch_model.bin"}}})}},
+            {{"id", "owner/split-GGUF"}, {"pipeline_tag", "text-generation"},
+             {"tags", nlohmann::json::array({"gguf"})}, {"downloads", 2000},
+             {"siblings", nlohmann::json::array({
+                 {{"rfilename", "model-00001-of-00002.gguf"}},
+                 {{"rfilename", "model-00002-of-00002.gguf"}}
+             })}},
+            {{"id", "owner/image"}, {"pipeline_tag", "text-to-image"},
+             {"downloads", 3000}, {"trendingScore", 20},
+             {"siblings", nlohmann::json::array({{{"rfilename", "image.safetensors"}}})}},
+            {{"id", "owner/null-fields"}, {"pipeline_tag", nullptr},
+             {"downloads", nullptr}, {"likes", nullptr},
+             {"siblings", nullptr}}
+        }));
+    }
+
+    std::string last_url;
+};
+
+class ArtifactBoundaryTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string&) override {
+        const auto sibling = [](const std::string& name) {
+            return nlohmann::json{
+                {"rfilename", name},
+                {"lfs", {{"size", 4096}, {"sha256", std::string(64, 'a')}}},
+            };
+        };
+        if (url.find("owner/image") != std::string::npos) {
+            return foundation::Ok(nlohmann::json{
+                {"id", "owner/image"},
+                {"sha", "image-revision"},
+                {"pipeline_tag", "text-to-image"},
+                {"siblings", nlohmann::json::array({
+                    sibling("sd-v1-5.safetensors"),
+                    sibling("vae/model.safetensors"),
+                    sibling("text_encoder/model.safetensors"),
+                    sibling("unet/diffusion_pytorch_model.safetensors"),
+                    nlohmann::json{{"rfilename", nullptr}, {"lfs", nullptr}},
+                })},
+            });
+        }
+        if (url.find("owner/whisper") != std::string::npos) {
+            return foundation::Ok(nlohmann::json{
+                {"id", "owner/whisper"},
+                {"sha", "whisper-revision"},
+                {"pipeline_tag", "automatic-speech-recognition"},
+                {"siblings", nlohmann::json::array({
+                    sibling("ggml-base.en.bin"),
+                    sibling("whisper-base.gguf"),
+                    sibling("pytorch_model.bin"),
+                })},
+            });
+        }
+        return foundation::Ok(nlohmann::json{
+            {"id", "owner/text-GGUF"},
+            {"sha", "text-revision"},
+            {"pipeline_tag", "text-generation"},
+            {"siblings", nlohmann::json::array({
+                sibling("model-Q4_K_M.gguf"),
+                sibling("model-00001-of-00002.gguf"),
+                sibling("model-00002-of-00002.gguf"),
+                sibling("mmproj-model-f16.gguf"),
+                sibling("draft-mtp-Q4_K_M.gguf"),
+            })},
+        });
+    }
+};
+
 std::filesystem::path test_root() {
     static std::atomic<std::uint64_t> suffix{0};
     return std::filesystem::temp_directory_path() /
            ("inferdeck-store-test-" + std::to_string(
                std::chrono::steady_clock::now().time_since_epoch().count()) +
             "-" + std::to_string(suffix.fetch_add(1)));
+}
+
+std::optional<std::string> environment_value(const char* name) {
+#ifdef _WIN32
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || !value) {
+        return std::nullopt;
+    }
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value ? std::optional<std::string>(value) : std::nullopt;
+#endif
 }
 
 std::optional<gateway::StoreDownload> wait_for_terminal(
@@ -95,6 +238,122 @@ std::optional<gateway::StoreDownload> wait_for_terminal(
     }
     return std::nullopt;
 }
+
+std::optional<gateway::StoreQuantization> wait_for_quantization_terminal(
+    gateway::ModelStore& store, std::uint64_t id) {
+    for (int attempt = 0; attempt < 400; ++attempt) {
+        for (const auto& job : store.quantizations()) {
+            if (job.id != id) continue;
+            if (job.state == "failed" || job.state == "installed") {
+                return job;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return std::nullopt;
+}
+
+class RecordingQuantizer final : public gateway::IModelQuantizer {
+public:
+    foundation::Result<void> quantize(
+        const std::filesystem::path& source,
+        const std::filesystem::path& destination,
+        const std::string& quantization,
+        int threads) override {
+        {
+            std::lock_guard lock(mutex_);
+            source_ = source;
+            destination_ = destination;
+            quantization_ = quantization;
+            threads_ = threads;
+        }
+        std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+        output << "quantized";
+        return output
+            ? foundation::Ok()
+            : foundation::Err<void>(foundation::ErrorCode::IoError,
+                                    "fake quantizer could not write output");
+    }
+
+    [[nodiscard]] std::string quantization() const {
+        std::lock_guard lock(mutex_);
+        return quantization_;
+    }
+
+    [[nodiscard]] int threads() const {
+        std::lock_guard lock(mutex_);
+        return threads_;
+    }
+
+    [[nodiscard]] std::filesystem::path source() const {
+        std::lock_guard lock(mutex_);
+        return source_;
+    }
+
+    [[nodiscard]] std::filesystem::path destination() const {
+        std::lock_guard lock(mutex_);
+        return destination_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::filesystem::path source_;
+    std::filesystem::path destination_;
+    std::string quantization_;
+    int threads_{0};
+};
+
+class FailingQuantizer final : public gateway::IModelQuantizer {
+public:
+    foundation::Result<void> quantize(
+        const std::filesystem::path&, const std::filesystem::path&,
+        const std::string&, int) override {
+        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                     "source is not high precision");
+    }
+};
+
+class BlockingQuantizer final : public gateway::IModelQuantizer {
+public:
+    foundation::Result<void> quantize(
+        const std::filesystem::path&, const std::filesystem::path& destination,
+        const std::string&, int) override {
+        {
+            std::lock_guard lock(mutex_);
+            active_ = true;
+        }
+        changed_.notify_all();
+        std::unique_lock lock(mutex_);
+        changed_.wait(lock, [this] { return released_; });
+        lock.unlock();
+        std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+        output << "quantized";
+        return output
+            ? foundation::Ok()
+            : foundation::Err<void>(foundation::ErrorCode::IoError,
+                                    "fake quantizer could not write output");
+    }
+
+    [[nodiscard]] bool wait_for_active() {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(
+            lock, std::chrono::seconds(2), [this] { return active_; });
+    }
+
+    void release() {
+        {
+            std::lock_guard lock(mutex_);
+            released_ = true;
+        }
+        changed_.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool active_{false};
+    bool released_{false};
+};
 
 class ThrowingTransport final : public FakeTransport {
 public:
@@ -250,6 +509,23 @@ public:
     }
 };
 
+class LateCancelTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string& token) override {
+        return SuccessfulTransport{}.get_json(url, token);
+    }
+    foundation::Result<void> download(
+        const std::string& url, const std::string& token,
+        const std::filesystem::path& destination, std::uint64_t offset,
+        const std::function<bool(std::uint64_t)>& progress) override {
+        const auto result = FakeTransport::download(url, token, destination, offset, progress);
+        if (result && completed) completed();
+        return result;
+    }
+    std::function<void()> completed;
+};
+
 class SherpaBundleTransport : public FakeTransport {
 public:
     foundation::Result<nlohmann::json> get_json(
@@ -263,6 +539,48 @@ public:
                 {{"rfilename", "decoder.onnx"}, {"lfs", {{"size", 4}, {"sha256", checksum}}}},
                 {{"rfilename", "joiner.onnx"}, {"lfs", {{"size", 4}, {"sha256", checksum}}}},
                 {{"rfilename", "config/tokens.txt"}, {"lfs", {{"size", 4}, {"sha256", checksum}}}}
+            })}
+        });
+    }
+};
+
+class AceStepBundleTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string&) override {
+        if (url.find("/api/models?") != std::string::npos) {
+            return foundation::Ok(nlohmann::json::array({
+                {
+                    {"id", "Serveurperso/ACE-Step-1.5-GGUF"},
+                    {"pipeline_tag", "text-to-audio"},
+                    {"tags", nlohmann::json::array({"ace-step", "gguf"})},
+                    {"downloads", 100},
+                    {"siblings", nlohmann::json::array({
+                        {{"rfilename", "Qwen3-Embedding-0.6B-Q8_0.gguf"}},
+                        {{"rfilename", "acestep-v15-turbo-Q4_K_M.gguf"}},
+                        {{"rfilename", "vae-BF16.gguf"}}
+                    })},
+                },
+            }));
+        }
+        const std::string checksum = "9f86d081884c7d659a2feaa0c55ad015"
+                                     "a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        return foundation::Ok(nlohmann::json{
+            {"sha", "revision"}, {"pipeline_tag", "text-to-audio"},
+            {"tags", nlohmann::json::array({"ace-step", "gguf"})},
+            {"siblings", nlohmann::json::array({
+                {{"rfilename", "Qwen3-Embedding-0.6B-BF16.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "Qwen3-Embedding-0.6B-Q8_0.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "acestep-5Hz-lm-0.6B-Q8_0.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "acestep-v15-turbo-Q4_K_M.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "acestep-v15-turbo-Q8_0.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
+                {{"rfilename", "vae-BF16.gguf"},
+                 {"lfs", {{"size", 4}, {"sha256", checksum}}}},
             })}
         });
     }
@@ -369,6 +687,79 @@ TEST_CASE("Model store filters search results by runtime", "[model-store]") {
         REQUIRE(result->size() == 1);
         CHECK((*result)[0]["id"] == "owner/image");
         CHECK((*result)[0]["modality"] == "image");
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store discovers and installs a verified ACE-Step bundle",
+          "[model-store][ace-step]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<AceStepBundleTransport>());
+        const auto search = store.search(
+            "ACE-Step", "ace_step_cpp", "audio_generation");
+        REQUIRE(search);
+        REQUIRE(search->size() == 1);
+        CHECK((*search)[0]["runtime"] == "ace_step_cpp");
+        CHECK((*search)[0]["modality"] == "audio_generation");
+
+        const auto inspected =
+            store.inspect("Serveurperso/ACE-Step-1.5-GGUF");
+        REQUIRE(inspected);
+        const std::string selected_bundle =
+            "__inferdeck_ace_step_bundle__:acestep-v15-turbo-Q4_K_M.gguf";
+        const auto bundle = std::find_if(
+            inspected->at("files").begin(), inspected->at("files").end(),
+            [&selected_bundle](const auto& file) {
+                return file.value("name", "") == selected_bundle;
+            });
+        REQUIRE(bundle != inspected->at("files").end());
+        CHECK(bundle->value("compatible", false));
+        CHECK(bundle->value("artifactCount", 0) == 3);
+        CHECK(bundle->value("variant", "") ==
+              "acestep-v15-turbo-Q4_K_M.gguf");
+        CHECK(std::count_if(
+                  inspected->at("files").begin(),
+                  inspected->at("files").end(),
+                  [](const auto& file) {
+                      return file.value("format", "") == "bundle" &&
+                             file.value("runtime", "") == "ace_step_cpp";
+                  }) == 2);
+        CHECK_FALSE(store.install(
+            "Serveurperso/ACE-Step-1.5-GGUF",
+            "acestep-v15-turbo-Q4_K_M.gguf", "ace_step_cpp",
+            "audio_generation", "unsafe-single-file"));
+        CHECK_FALSE(store.install(
+            "Serveurperso/ACE-Step-1.5-GGUF",
+            "__inferdeck_ace_step_bundle__:acestep-v15-base-Q4_K_M.gguf",
+            "ace_step_cpp", "audio_generation", "missing-variant"));
+
+        const auto install = store.install(
+            "Serveurperso/ACE-Step-1.5-GGUF",
+            selected_bundle, "ace_step_cpp",
+            "audio_generation", "ace-step-bundle");
+        REQUIRE(install);
+        const auto job = wait_for_terminal(store, *install);
+        REQUIRE(job);
+        CHECK(job->state == "installed");
+        const auto info = registry.get_info_result("ace-step-bundle");
+        REQUIRE(info);
+        CHECK(info->runtime == "ace_step_cpp");
+        CHECK(info->modality == "audio_generation");
+        CHECK(info->artifacts.contains("text_encoder"));
+        CHECK(info->artifacts.contains("dit"));
+        CHECK(info->artifacts.contains("vae"));
+        CHECK(info->artifacts.size() == 3);
+        CHECK(std::filesystem::path(info->artifacts.at("text_encoder"))
+                  .filename().string() ==
+              "Qwen3-Embedding-0.6B-Q8_0.gguf");
+        CHECK(std::filesystem::path(info->artifacts.at("dit"))
+                  .filename().string() ==
+              "acestep-v15-turbo-Q4_K_M.gguf");
+        CHECK(info->vram_required_mb == 1);
     }
     std::filesystem::remove_all(root);
 }
@@ -487,10 +878,107 @@ TEST_CASE("Model store ranks Hugging Face discovery by downloads",
     auto* recording = transport.get();
     {
         gateway::ModelStore store(root, "", coordinator, std::move(transport));
-        auto result = store.search("model", "", "");
+        auto result = store.search(
+            "model", "", "", 20, "downloads", false);
         REQUIRE(result);
         CHECK(recording->last_url.find("sort=downloads") != std::string::npos);
         CHECK(recording->last_url.find("sort=lastModified") == std::string::npos);
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store browses a compatible trending catalogue without a query",
+          "[model-store][catalogue]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto transport = std::make_unique<CatalogueTransport>();
+    auto* catalogue = transport.get();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        const auto result = store.search(
+            "", "llama_cpp", "text", 50, "trending", false);
+        REQUIRE(result);
+        REQUIRE(result->size() == 2);
+        CHECK((*result)[0]["id"] == "owner/trending-GGUF");
+        CHECK((*result)[0]["trendingScore"] == 12);
+        CHECK((*result)[0]["license"] == "mit");
+        CHECK((*result)[0]["format"] == "GGUF");
+        CHECK((*result)[0]["compatibleArtifacts"] == 1);
+        CHECK(catalogue->last_url.find("search=") == std::string::npos);
+        CHECK(catalogue->last_url.find("filter=gguf") != std::string::npos);
+        CHECK(catalogue->last_url.find("sort=trendingScore") != std::string::npos);
+        CHECK(catalogue->last_url.find("gated=false") != std::string::npos);
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store honours catalogue sort and gated visibility",
+          "[model-store][catalogue]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto transport = std::make_unique<CatalogueTransport>();
+    auto* catalogue = transport.get();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        const auto result = store.search(
+            "Qwen", "llama_cpp", "text", 50, "downloads", true);
+        REQUIRE(result);
+        REQUIRE(result->size() == 3);
+        CHECK((*result)[0]["id"] == "owner/gated-GGUF");
+        CHECK((*result)[1]["id"] == "owner/popular-GGUF");
+        CHECK(catalogue->last_url.find("search=Qwen") != std::string::npos);
+        CHECK(catalogue->last_url.find("sort=downloads") != std::string::npos);
+        CHECK(catalogue->last_url.find("gated=false") == std::string::npos);
+        CHECK_FALSE(store.search("", "llama_cpp", "text", 50, "invalid", false));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store default Music catalogue targets verified ACE-Step bundles",
+          "[model-store][catalogue][ace-step]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto transport = std::make_unique<AceStepBundleTransport>();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        const auto result = store.search(
+            "", "ace_step_cpp", "audio_generation", 50, "trending", false);
+        REQUIRE(result);
+        REQUIRE(result->size() == 1);
+        CHECK((*result)[0]["id"] == "Serveurperso/ACE-Step-1.5-GGUF");
+        CHECK((*result)[0]["format"] == "bundle");
+        CHECK((*result)[0]["compatibleArtifacts"] == 3);
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store inspection exposes only standalone native artifacts",
+          "[model-store][catalogue][artifact-boundary]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(
+            root, "", coordinator,
+            std::make_unique<ArtifactBoundaryTransport>());
+        const auto text = store.inspect("owner/text-GGUF");
+        REQUIRE(text);
+        REQUIRE(text->at("files").size() == 1);
+        CHECK(text->at("files")[0]["name"] == "model-Q4_K_M.gguf");
+
+        const auto image = store.inspect("owner/image");
+        REQUIRE(image);
+        REQUIRE(image->at("files").size() == 1);
+        CHECK(image->at("files")[0]["name"] == "sd-v1-5.safetensors");
+
+        const auto whisper = store.inspect("owner/whisper");
+        REQUIRE(whisper);
+        REQUIRE(whisper->at("files").size() == 2);
+        CHECK(whisper->at("files")[0]["name"] == "ggml-base.en.bin");
+        CHECK(whisper->at("files")[1]["name"] == "whisper-base.gguf");
     }
     std::filesystem::remove_all(root);
 }
@@ -592,6 +1080,269 @@ TEST_CASE("Model store never registers a corrupt artifact", "[model-store]") {
     }
     std::filesystem::remove_all(root);
 }
+
+#ifdef _WIN32
+TEST_CASE("Model store honors cancellation after the last download callback",
+          "[model-store][cancellation]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        auto transport = std::make_unique<LateCancelTransport>();
+        auto* control = transport.get();
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        std::atomic<bool> accepted{false};
+        control->completed = [&store, &accepted] {
+            const auto jobs = store.downloads();
+            if (!jobs.empty()) accepted.store(static_cast<bool>(store.cancel(jobs.front().id)));
+        };
+        const auto install = store.install("owner/text-GGUF", "model.gguf",
+                                           "llama_cpp", "text", "late-cancel");
+        REQUIRE(install);
+        const auto cancelled = wait_for_terminal(store, *install);
+        REQUIRE(cancelled);
+        CHECK(accepted.load());
+        REQUIRE(cancelled->state == "cancelled");
+        CHECK_FALSE(registry.has("late-cancel"));
+        CHECK(store.installed().empty());
+        control->completed = {};
+        REQUIRE(store.resume(*install));
+        const auto installed = wait_for_terminal(store, *install);
+        REQUIRE(installed);
+        CHECK(installed->state == "installed");
+        CHECK_FALSE(store.cancel(*install));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store gives duplicate source installs independent files",
+          "[model-store][artifact-ownership]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<SuccessfulTransport>());
+        const auto first = store.install("owner/text-GGUF", "model.gguf",
+                                         "llama_cpp", "text", "first-copy");
+        const auto second = store.install("owner/text-GGUF", "model.gguf",
+                                          "llama_cpp", "text", "second-copy");
+        REQUIRE(first);
+        REQUIRE(second);
+        const auto first_job = wait_for_terminal(store, *first);
+        const auto second_job = wait_for_terminal(store, *second);
+        REQUIRE(first_job);
+        REQUIRE(second_job);
+        REQUIRE(first_job->state == "installed");
+        REQUIRE(second_job->state == "installed");
+        REQUIRE(first_job->installed_path != second_job->installed_path);
+        CHECK_FALSE(store.install("owner/text-GGUF", "model.gguf",
+                                  "llama_cpp", "text", "FIRST-COPY"));
+        REQUIRE(store.remove("first-copy"));
+        CHECK(std::filesystem::is_regular_file(second_job->installed_path));
+        CHECK(registry.has("second-copy"));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store protects legacy shared artifacts from retirement",
+          "[model-store][artifact-ownership]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    std::filesystem::create_directories(root);
+    const auto artifact = root / "shared.gguf";
+    std::ofstream(artifact, std::ios::binary) << "test";
+    nlohmann::json manifest = nlohmann::json::object();
+    for (const std::string name : {"first-copy", "second-copy"}) {
+        manifest[name] = {{"path", artifact.string()}, {"runtime", "llama_cpp"},
+                          {"modality", "text"}, {"size", 4}};
+    }
+    SECTION("legacy managed references") {}
+    SECTION("configured model shares the managed file") {
+        manifest.erase("second-copy");
+        model::ModelInfo other;
+        other.name = "second-copy";
+        other.gguf_path = artifact.string();
+        registry.register_model(other);
+    }
+    std::ofstream(root / "installed.json") << manifest.dump();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<SuccessfulTransport>());
+        CHECK_FALSE(store.remove("first-copy"));
+        CHECK_FALSE(store.archive("second-copy"));
+        CHECK(std::filesystem::is_regular_file(artifact));
+        CHECK(registry.has("first-copy"));
+        CHECK(registry.has("second-copy"));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Native quantizer produces a real GGUF artifact",
+          "[.][post-training][native-quantizer]") {
+    const auto source_value = environment_value("INFERDECK_QUANTIZATION_SOURCE");
+    const auto output_value = environment_value("INFERDECK_QUANTIZATION_OUTPUT");
+    if (!source_value || !output_value) {
+        SKIP("set INFERDECK_QUANTIZATION_SOURCE and INFERDECK_QUANTIZATION_OUTPUT");
+    }
+    const std::filesystem::path source(*source_value);
+    const std::filesystem::path output(*output_value);
+    REQUIRE(std::filesystem::is_regular_file(source));
+    REQUIRE_FALSE(std::filesystem::exists(output));
+
+    const auto quantizer = gateway::make_native_model_quantizer();
+    REQUIRE(quantizer);
+    const auto result = quantizer->quantize(source, output, "Q8_0", 1);
+    if (!result) INFO(result.error().message);
+    REQUIRE(result);
+    REQUIRE(std::filesystem::is_regular_file(output));
+    CHECK(std::filesystem::file_size(output) > 0);
+
+    std::ifstream input(output, std::ios::binary);
+    std::array<char, 4> signature{};
+    input.read(signature.data(), static_cast<std::streamsize>(signature.size()));
+    REQUIRE(input.gcount() == static_cast<std::streamsize>(signature.size()));
+    CHECK(std::string(signature.data(), signature.size()) == "GGUF");
+}
+
+TEST_CASE("Model store quantizes a managed GGUF without overwriting its source",
+          "[model-store][post-training]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto quantizer = std::make_unique<RecordingQuantizer>();
+    auto* recording = quantizer.get();
+    {
+        gateway::ModelStore store(
+            root, "", coordinator, std::make_unique<SuccessfulTransport>(),
+            std::move(quantizer));
+        const auto install = store.install(
+            "owner/source", "model.gguf", "llama_cpp", "text", "source-model");
+        REQUIRE(install);
+        const auto source_job = wait_for_terminal(store, *install);
+        REQUIRE(source_job);
+        REQUIRE(source_job->state == "installed");
+        const auto source_path = std::filesystem::path(source_job->installed_path);
+
+        const auto started = store.quantize(
+            "source-model", "source-model-q4", "Q4_K_M", 3);
+        REQUIRE(started);
+        const auto job = wait_for_quantization_terminal(store, *started);
+        REQUIRE(job);
+        INFO(job->error);
+        REQUIRE(job->state == "installed");
+        CHECK(job->quantization == "q4_k_m");
+        CHECK(job->output_size == 9);
+        CHECK(job->output_sha256.size() == 64);
+        CHECK(std::filesystem::exists(source_path));
+        CHECK(std::filesystem::exists(job->output_path));
+        CHECK_FALSE(std::filesystem::exists(job->output_path + ".partial"));
+        CHECK(registry.has("source-model"));
+        CHECK(registry.has("source-model-q4"));
+        CHECK(std::filesystem::canonical(recording->source()) ==
+              std::filesystem::canonical(source_path));
+        CHECK(recording->destination().extension() == ".partial");
+        CHECK(recording->quantization() == "q4_k_m");
+        CHECK(recording->threads() == 3);
+        const auto manifest = store.installed();
+        REQUIRE(manifest.contains("source-model-q4"));
+        CHECK(manifest["source-model-q4"]["sourceModel"] == "source-model");
+        CHECK(manifest["source-model-q4"]["quantization"] == "q4_k_m");
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store cleans failed quantizations and releases the output name",
+          "[model-store][post-training]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    std::atomic<gateway::ComputeResource> maintenance_resource{
+        gateway::ComputeResource::None};
+    {
+        gateway::ModelStore store(
+            root, "", coordinator, std::make_unique<SuccessfulTransport>(),
+            std::make_unique<FailingQuantizer>(), &maintenance_resource);
+        CHECK_FALSE(store.quantize("missing", "output", "Q4_K_M"));
+        const auto install = store.install(
+            "owner/source", "model.gguf", "llama_cpp", "text", "source-model");
+        REQUIRE(install);
+        const auto source_job = wait_for_terminal(store, *install);
+        REQUIRE(source_job);
+        REQUIRE(source_job->state == "installed");
+        CHECK_FALSE(store.quantize(
+            "source-model", "source-model", "Q4_K_M"));
+        CHECK_FALSE(store.quantize(
+            "source-model", "unsafe/name", "Q4_K_M"));
+        CHECK_FALSE(store.quantize(
+            "source-model", "output-model", "IQ1_M"));
+
+        const auto first = store.quantize(
+            "source-model", "output-model", "Q8_0");
+        REQUIRE(first);
+        const auto failed = wait_for_quantization_terminal(store, *first);
+        REQUIRE(failed);
+        CHECK(failed->state == "failed");
+        CHECK(failed->error == "source is not high precision");
+        CHECK(maintenance_resource.load() == gateway::ComputeResource::None);
+        CHECK_FALSE(registry.has("output-model"));
+        CHECK_FALSE(store.installed().contains("output-model"));
+        CHECK_FALSE(std::filesystem::exists(
+            root / "llama_cpp" / "quantized" / "output-model"));
+
+        const auto retry = store.quantize(
+            "source-model", "output-model", "Q8_0");
+        REQUIRE(retry);
+        REQUIRE(wait_for_quantization_terminal(store, *retry));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store owns CPU maintenance while quantization is active",
+          "[model-store][post-training][background-lease]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    std::atomic<gateway::ComputeResource> maintenance_resource{
+        gateway::ComputeResource::None};
+    auto quantizer = std::make_unique<BlockingQuantizer>();
+    auto* control = quantizer.get();
+    {
+        gateway::ModelStore store(
+            root, "", coordinator, std::make_unique<SuccessfulTransport>(),
+            std::move(quantizer), &maintenance_resource);
+        const auto install = store.install(
+            "owner/source", "model.gguf", "llama_cpp", "text", "source-model");
+        REQUIRE(install);
+        const auto source_job = wait_for_terminal(store, *install);
+        REQUIRE(source_job);
+        REQUIRE(source_job->state == "installed");
+
+        maintenance_resource.store(gateway::ComputeResource::Gpu);
+        const auto occupied = store.quantize(
+            "source-model", "blocked-output", "Q8_0");
+        REQUIRE_FALSE(occupied);
+        CHECK(occupied.error().code == foundation::ErrorCode::Unavailable);
+        CHECK(maintenance_resource.load() == gateway::ComputeResource::Gpu);
+        maintenance_resource.store(gateway::ComputeResource::None);
+
+        const auto started = store.quantize(
+            "source-model", "quantized-output", "Q8_0");
+        REQUIRE(started);
+        const bool became_active = control->wait_for_active();
+        CHECK(became_active);
+        CHECK(maintenance_resource.load() == gateway::ComputeResource::Cpu);
+        control->release();
+        const auto completed = wait_for_quantization_terminal(store, *started);
+        REQUIRE(completed);
+        INFO(completed->error);
+        CHECK(completed->state == "installed");
+        CHECK(maintenance_resource.load() == gateway::ComputeResource::None);
+    }
+    std::filesystem::remove_all(root);
+}
+#endif
 
 TEST_CASE("Model store contains unexpected worker exceptions",
           "[model-store]") {
@@ -728,7 +1479,7 @@ TEST_CASE("Model store aborts downloads exceeding validated size",
         CHECK_FALSE(control->progress_accepted.load());
         CHECK_FALSE(std::filesystem::exists(
             root / "llama_cpp" / "owner_text-GGUF" /
-            "model.gguf.partial"));
+            "oversized-model" / "model.gguf.partial"));
     }
     std::filesystem::remove_all(root);
 }
@@ -823,6 +1574,68 @@ TEST_CASE("Model store archives and permanently deletes managed artifacts",
         CHECK_FALSE(std::filesystem::exists(deleted_source));
         CHECK_FALSE(registry.has("deleted-model"));
         CHECK_FALSE(store.installed().contains("deleted-model"));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store discovers complete LTX video bundles only",
+          "[model-store][catalogue][ltx]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    auto transport = std::make_unique<LtxCatalogueTransport>();
+    auto* recording = transport.get();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        const auto result = store.search("", "ltx_video_cpp", "video", 10,
+                                         "downloads", false);
+        REQUIRE(result);
+        REQUIRE(result->size() == 1);
+        CHECK((*result)[0]["runtime"] == "ltx_video_cpp");
+        CHECK((*result)[0]["modality"] == "video");
+        CHECK((*result)[0]["format"] == "bundle");
+        CHECK((*result)[0]["compatibleArtifacts"] == 5);
+        CHECK(recording->last_url.find("search=LTX-2.3") != std::string::npos);
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store rejects incomplete LTX video bundles",
+          "[model-store][catalogue][ltx]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<LtxCatalogueTransport>());
+        const auto result = store.search("incomplete", "ltx_video_cpp", "video",
+                                         10, "downloads", false);
+        REQUIRE(result);
+        CHECK(result->empty());
+    }
+    std::filesystem::remove_all(root);
+}
+TEST_CASE("Model store installs complete LTX bundle artifacts",
+          "[model-store][ltx][install]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator,
+                                  std::make_unique<LtxCatalogueTransport>());
+        const auto installed = store.install("owner/LTX-2.3", "__inferdeck_ltx_bundle__",
+                                             "ltx_video_cpp", "video", "ltx-test");
+        REQUIRE(installed);
+        const auto job = wait_for_terminal(store, *installed);
+        REQUIRE(job);
+        REQUIRE(job->state == "installed");
+        const auto resolved = registry.resolve("ltx-test");
+        REQUIRE(resolved);
+        CHECK(job->artifacts.size() == 5);
+        CHECK(job->artifacts[0].name == "ltx-2.3-22b-dev-UD-Q4_K_M.gguf");
+        CHECK(job->artifacts[4].name == "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf");
+        CHECK_FALSE(store.install("owner/LTX-2.3", "ltx-2.3-22b-dev-UD-Q4_K_M.gguf",
+                                  "ltx_video_cpp", "video", "ltx-standalone"));
     }
     std::filesystem::remove_all(root);
 }

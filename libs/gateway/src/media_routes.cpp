@@ -1,6 +1,9 @@
 #include "gateway/media_routes.hpp"
 
+#include "gateway/auth.hpp"
 #include "audio_decoder.hpp"
+#include "foundation/json_utils.hpp"
+#include "foundation/logging.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9,13 +12,16 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
-#include <limits>
 #include <utility>
 
 namespace inferdeck::gateway {
@@ -28,21 +34,274 @@ void record_media(const GatewayDeps& deps, const std::string& model_name,
                   std::int64_t input_characters = 0,
                   RequestObservation observation = {});
 
+struct MediaOutputRecord {
+    std::string content_type;
+    std::string filename;
+    std::uint64_t bytes{0};
+    std::vector<std::byte> memory;
+};
+
 struct MediaJob {
     std::uint64_t id{0};
     std::string model;
     std::string modality;
+    std::string prompt;
+    nlohmann::json parameters{nlohmann::json::object()};
     int progress{0};
     std::string state{"running"};
+    std::string error;
+    std::int64_t created_at_unix_ms{0};
+    std::int64_t finished_at_unix_ms{0};
+    std::vector<MediaOutputRecord> outputs;
     std::shared_ptr<std::atomic<bool>> cancelled{std::make_shared<std::atomic<bool>>(false)};
 };
 
 std::mutex jobs_mutex;
-std::unordered_map<std::uint64_t, MediaJob> jobs;
+std::mutex history_persistence_mutex;
+std::unordered_map<std::uint64_t, std::shared_ptr<MediaJob>> jobs;
 std::atomic<std::uint64_t> next_job_id{1};
+std::filesystem::path media_history_root;
+std::vector<std::filesystem::path> retired_media_outputs;
+constexpr std::size_t max_media_history_jobs = 100;
+constexpr std::uint64_t max_media_history_bytes =
+    2ULL * 1024ULL * 1024ULL * 1024ULL;
 std::mutex decode_mutex;
 std::condition_variable decode_cv;
 bool decode_busy{false};
+
+std::int64_t current_unix_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+std::string prompt_summary(std::string text) {
+    std::replace(text.begin(), text.end(), '\r', ' ');
+    std::replace(text.begin(), text.end(), '\n', ' ');
+    if (text.size() > 512) {
+        text.resize(509);
+        text += "...";
+    }
+    return text;
+}
+
+nlohmann::json job_json(const MediaJob& job, bool include_urls) {
+    nlohmann::json outputs = nlohmann::json::array();
+    for (std::size_t index = 0; index < job.outputs.size(); ++index) {
+        const MediaOutputRecord& output = job.outputs[index];
+        nlohmann::json item{
+            {"content_type", output.content_type},
+            {"filename", output.filename},
+            {"bytes", output.bytes},
+        };
+        if (include_urls) {
+            item["url"] = "/api/inferdeck/v1/media/jobs/" +
+                std::to_string(job.id) + "/outputs/" +
+                std::to_string(index);
+        }
+        outputs.push_back(std::move(item));
+    }
+    return {
+        {"id", job.id},
+        {"model", job.model},
+        {"modality", job.modality},
+        {"prompt", job.prompt},
+        {"parameters", job.parameters},
+        {"progress", job.progress},
+        {"state", job.state},
+        {"error", job.error},
+        {"created_at_unix_ms", job.created_at_unix_ms},
+        {"finished_at_unix_ms", job.finished_at_unix_ms},
+        {"outputs", std::move(outputs)},
+    };
+}
+
+foundation::Result<void> persist_jobs_serialized() {
+    std::filesystem::path history_root;
+    std::vector<MediaJob> snapshot;
+    std::vector<std::filesystem::path> retired_outputs;
+    {
+        std::lock_guard lock(jobs_mutex);
+        history_root = media_history_root;
+        if (history_root.empty()) return foundation::Ok();
+        snapshot.reserve(jobs.size());
+        for (const auto& [_, job] : jobs) snapshot.push_back(*job);
+        retired_outputs.swap(retired_media_outputs);
+    }
+    std::sort(snapshot.begin(), snapshot.end(),
+        [](const MediaJob& left, const MediaJob& right) { return left.id < right.id; });
+    nlohmann::json records = nlohmann::json::array();
+    for (const MediaJob& job : snapshot) records.push_back(job_json(job, false));
+    const foundation::Result<void> saved = foundation::save_json_file(
+        history_root / "history.json",
+        nlohmann::json{{"version", 1}, {"jobs", std::move(records)}});
+    if (!saved) {
+        std::lock_guard lock(jobs_mutex);
+        retired_media_outputs.insert(retired_media_outputs.end(),
+                                     retired_outputs.begin(), retired_outputs.end());
+        return saved;
+    }
+    for (const std::filesystem::path& path : retired_outputs) {
+        const bool retained = std::any_of(snapshot.begin(), snapshot.end(),
+            [&history_root, &path](const MediaJob& job) {
+                return std::any_of(job.outputs.begin(), job.outputs.end(),
+                    [&history_root, &path](const MediaOutputRecord& output) {
+                        return history_root / output.filename == path;
+                    });
+            });
+        if (retained) continue;
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+    }
+    return foundation::Ok();
+}
+
+void persist_jobs_or_warn() {
+    std::lock_guard persistence_lock(history_persistence_mutex);
+    const foundation::Result<void> persisted = persist_jobs_serialized();
+    if (!persisted) {
+        foundation::LOG_WARN(
+            "media_history_persist_failed", "error={}", persisted.error().message);
+    }
+}
+
+std::uint64_t history_bytes_locked() {
+    std::uint64_t total = 0;
+    for (const auto& [_, job] : jobs) {
+        for (const MediaOutputRecord& output : job->outputs) {
+            if (std::numeric_limits<std::uint64_t>::max() - total <
+                output.bytes) {
+                return std::numeric_limits<std::uint64_t>::max();
+            }
+            total += output.bytes;
+        }
+    }
+    return total;
+}
+
+void remove_job_outputs_locked(const MediaJob& job) {
+    if (media_history_root.empty()) return;
+    for (const MediaOutputRecord& output : job.outputs) {
+        retired_media_outputs.push_back(media_history_root / output.filename);
+    }
+}
+
+void prune_jobs_locked() {
+    while (jobs.size() > max_media_history_jobs ||
+           history_bytes_locked() > max_media_history_bytes) {
+        auto oldest = jobs.end();
+        for (auto candidate = jobs.begin(); candidate != jobs.end();
+             ++candidate) {
+            if (candidate->second->state == "running") continue;
+            if (oldest == jobs.end() ||
+                candidate->first < oldest->first) {
+                oldest = candidate;
+            }
+        }
+        if (oldest == jobs.end()) return;
+        remove_job_outputs_locked(*oldest->second);
+        jobs.erase(oldest);
+    }
+}
+
+struct PendingMediaOutput {
+    std::string content_type;
+    std::string extension;
+    const std::vector<std::byte>* bytes{nullptr};
+};
+
+foundation::Result<void> store_job_outputs(
+    const std::shared_ptr<MediaJob>& job,
+    const std::vector<PendingMediaOutput>& pending) {
+    if (!job) {
+        return foundation::Err<void>(
+            foundation::ErrorCode::InvalidArgument,
+            "media job is unavailable");
+    }
+    std::filesystem::path history_root;
+    {
+        std::lock_guard lock(jobs_mutex);
+        if (!jobs.contains(job->id)) {
+            return foundation::Err<void>(
+                foundation::ErrorCode::NotFound,
+                "media job not found");
+        }
+        history_root = media_history_root;
+    }
+    std::vector<MediaOutputRecord> staged;
+    std::vector<std::filesystem::path> created_files;
+    staged.reserve(pending.size());
+    const auto fail =
+        [&created_files](std::string message) {
+        for (const std::filesystem::path& path : created_files) {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+        return foundation::Err<void>(
+            foundation::ErrorCode::IoError, std::move(message));
+    };
+    for (std::size_t index = 0; index < pending.size(); ++index) {
+        const PendingMediaOutput& input = pending[index];
+        if (!input.bytes || input.bytes->empty()) {
+            return fail("generated media output is empty");
+        }
+        const std::string stem =
+            job->modality == "image" ? "image-" : job->modality == "video_generation" ? "video-" : "music-";
+        const std::string filename = stem + std::to_string(job->id) +
+            "-" + std::to_string(index + 1) + input.extension;
+        MediaOutputRecord output{
+            input.content_type,
+            filename,
+            static_cast<std::uint64_t>(input.bytes->size()),
+            {},
+        };
+        if (history_root.empty()) {
+            output.memory = *input.bytes;
+        } else {
+            const std::filesystem::path destination =
+                history_root / filename;
+            std::filesystem::path temporary = destination;
+            temporary += ".tmp";
+            std::ofstream stream(
+                temporary, std::ios::binary | std::ios::trunc);
+            if (!stream.is_open()) {
+                return fail(
+                    "cannot open generated media output for writing");
+            }
+            stream.write(
+                reinterpret_cast<const char*>(input.bytes->data()),
+                static_cast<std::streamsize>(input.bytes->size()));
+            stream.close();
+            if (stream.fail()) {
+                std::error_code ignored;
+                std::filesystem::remove(temporary, ignored);
+                return fail("cannot write generated media output");
+            }
+            std::error_code error;
+            std::filesystem::rename(temporary, destination, error);
+            if (error) {
+                std::filesystem::remove(temporary, error);
+                return fail(
+                    "cannot finalize generated media output: " +
+                    error.message());
+            }
+            created_files.push_back(destination);
+        }
+        staged.push_back(std::move(output));
+    }
+    std::unique_lock lock(jobs_mutex);
+    if (!jobs.contains(job->id) ||
+        history_root != media_history_root) {
+        lock.unlock();
+        return fail("media history changed while saving output");
+    }
+    remove_job_outputs_locked(*job);
+    job->outputs = std::move(staged);
+    prune_jobs_locked();
+    lock.unlock();
+    persist_jobs_or_warn();
+    return foundation::Ok();
+}
 
 class DecodePermit {
 public:
@@ -93,32 +352,47 @@ foundation::Result<DecodePermit> acquire_decode_permit(
     return foundation::Ok(DecodePermit{});
 }
 
-std::shared_ptr<MediaJob> begin_job(const std::string& model, const std::string& modality) {
+std::shared_ptr<MediaJob> begin_job(
+    const std::string& model, const std::string& modality,
+    std::string prompt = {},
+    nlohmann::json parameters = nlohmann::json::object()) {
     auto job = std::make_shared<MediaJob>();
     job->id = next_job_id.fetch_add(1);
     job->model = model;
     job->modality = modality;
-    std::lock_guard lock(jobs_mutex);
-    jobs[job->id] = *job;
+    job->prompt = prompt_summary(std::move(prompt));
+    job->parameters = parameters.is_object()
+        ? std::move(parameters) : nlohmann::json::object();
+    job->created_at_unix_ms = current_unix_ms();
+    {
+        std::lock_guard lock(jobs_mutex);
+        jobs[job->id] = job;
+    }
+    persist_jobs_or_warn();
     return job;
 }
 
-void update_job(const std::shared_ptr<MediaJob>& job, int progress) {
-    job->progress = std::clamp(progress, 0, 100);
+bool update_job(const std::shared_ptr<MediaJob>& job, int progress) {
+    if (!job) return false;
+    const int bounded = std::clamp(progress, 0, 100);
     std::lock_guard lock(jobs_mutex);
-    jobs[job->id] = *job;
+    if (job->progress == bounded) return false;
+    job->progress = bounded;
+    return true;
 }
 
-void finish_job(const std::shared_ptr<MediaJob>& job, const std::string& state) {
+void finish_job(
+    const std::shared_ptr<MediaJob>& job, const std::string& state,
+    std::string error = {}) {
+    if (!job) return;
+    std::unique_lock lock(jobs_mutex);
     job->state = state;
+    job->error = std::move(error);
+    job->finished_at_unix_ms = current_unix_ms();
     if (state == "completed") job->progress = 100;
-    std::lock_guard lock(jobs_mutex);
-    jobs[job->id] = *job;
-    if (jobs.size() > 100) {
-        auto oldest = std::min_element(jobs.begin(), jobs.end(),
-            [](const auto& left, const auto& right) { return left.first < right.first; });
-        if (oldest != jobs.end()) jobs.erase(oldest);
-    }
+    prune_jobs_locked();
+    lock.unlock();
+    persist_jobs_or_warn();
 }
 
 struct SlotGuard {
@@ -132,7 +406,7 @@ struct SlotGuard {
 class VoiceSessionGuard {
 public:
     VoiceSessionGuard(const httplib::Request& req, const GatewayDeps& deps)
-        : coordinator_(&deps.coordinator), key_(request_client_key(req)),
+        : coordinator_(&deps.coordinator), key_(request_client_key(req, deps)),
           duration_(deps.voice_session_grace_ms) {
         if (key_.empty() || deps.default_model.empty() ||
             deps.voice_session_grace_ms <= 0) {
@@ -223,13 +497,18 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
                                             const GatewayDeps& deps,
                                             const std::string& model_name,
                                             const std::shared_ptr<MediaJob>& job) {
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::seconds{30};
+    constexpr auto video_load_timeout = std::chrono::minutes{5};
+    const auto deadline = std::chrono::steady_clock::now() + video_load_timeout;
     const std::function<bool()> cancelled = [&req, job] {
         return req.is_connection_closed() || job->cancelled->load();
     };
     model::AcquireSlotOptions options;
-    options.priority = 100;
+    options.priority = resolve_request_priority(
+        deps.api_keys.get(), header_value(req, "Authorization"), 100,
+        deps.public_data_plane_access &&
+            classify_route(req.method, req.path) ==
+                RoutePrincipal::OpenAIDataPlane);
+    options.timeout = video_load_timeout;
     options.cancelled = cancelled;
     options.prepare = [&deps, model_name, deadline, cancelled] {
         auto loaded = ensure_model_loaded(
@@ -261,6 +540,7 @@ void record_media(const GatewayDeps& deps, const std::string& model_name,
                   RequestObservation observation) {
     model::InferenceResult metrics;
     metrics.duration_ms = duration_ms;
+    metrics.generation_duration_ms = duration_ms;
     const auto resolved = deps.coordinator.registry().resolve(model_name);
     if (observation.modality.empty()) observation.modality = "media";
     record_request(deps, model_name, metrics, status, slot,
@@ -476,6 +756,145 @@ nlohmann::json verbose_transcription(const model::TranscriptionResult& result,
 
 }
 
+foundation::Result<void> configure_media_history(
+    const std::filesystem::path& directory) {
+    std::lock_guard persistence_lock(history_persistence_mutex);
+    std::unique_lock lock(jobs_mutex);
+    jobs.clear();
+    retired_media_outputs.clear();
+    next_job_id.store(1);
+    media_history_root = directory;
+    if (media_history_root.empty()) return foundation::Ok();
+
+    std::error_code error;
+    std::filesystem::create_directories(media_history_root, error);
+    if (error) {
+        media_history_root.clear();
+        return foundation::Err<void>(
+            foundation::ErrorCode::IoError,
+            "cannot create media history directory: " + error.message());
+    }
+    const std::filesystem::path history_path =
+        media_history_root / "history.json";
+    const bool history_exists =
+        std::filesystem::exists(history_path, error);
+    if (error) {
+        media_history_root.clear();
+        return foundation::Err<void>(
+            foundation::ErrorCode::IoError,
+            "cannot inspect media history: " + error.message());
+    }
+    if (!history_exists) {
+        return foundation::Ok();
+    }
+    const foundation::Result<nlohmann::json> loaded =
+        foundation::load_json_file(history_path);
+    if (!loaded) {
+        media_history_root.clear();
+        return foundation::Err<void>(
+            loaded.error().code, loaded.error().message);
+    }
+    if (!loaded->is_object() || loaded->value("version", 0) != 1 ||
+        !loaded->contains("jobs") || !(*loaded)["jobs"].is_array()) {
+        media_history_root.clear();
+        return foundation::Err<void>(
+            foundation::ErrorCode::ParseError,
+            "media history has an unsupported schema");
+    }
+
+    bool changed = false;
+    std::uint64_t maximum_id = 0;
+    try {
+        for (const nlohmann::json& item : (*loaded)["jobs"]) {
+            if (!item.is_object()) continue;
+            const std::uint64_t id = item.value("id", std::uint64_t{0});
+            if (id == 0) continue;
+            auto job = std::make_shared<MediaJob>();
+            job->id = id;
+            job->model = item.value("model", "");
+            job->modality = item.value("modality", "");
+            job->prompt = item.value("prompt", "");
+            job->progress = std::clamp(item.value("progress", 0), 0, 100);
+            job->state = item.value("state", "failed");
+            job->error = item.value("error", "");
+            job->created_at_unix_ms =
+                item.value("created_at_unix_ms", std::int64_t{0});
+            job->finished_at_unix_ms =
+                item.value("finished_at_unix_ms", std::int64_t{0});
+            if (item.contains("parameters") &&
+                item["parameters"].is_object()) {
+                job->parameters = item["parameters"];
+            }
+            if (item.contains("outputs") && item["outputs"].is_array()) {
+                for (const nlohmann::json& stored : item["outputs"]) {
+                    if (!stored.is_object()) continue;
+                    const std::string filename =
+                        stored.value("filename", "");
+                    const std::string content_type =
+                        stored.value("content_type", "");
+                    const std::filesystem::path relative(filename);
+                    if (filename.empty() ||
+                        relative.filename().string() != filename ||
+                        (content_type != "image/png" &&
+                         content_type != "audio/wav" && content_type != "video/x-msvideo" && content_type != "video/avi" && content_type != "video/mp4")) {
+                        changed = true;
+                        continue;
+                    }
+                    const std::filesystem::path output_path =
+                        media_history_root / relative;
+                    const std::filesystem::file_status status =
+                        std::filesystem::symlink_status(
+                            output_path, error);
+                    if (error ||
+                        !std::filesystem::is_regular_file(status)) {
+                        error.clear();
+                        changed = true;
+                        continue;
+                    }
+                    const std::uint64_t bytes =
+                        std::filesystem::file_size(output_path, error);
+                    if (error || bytes == 0) {
+                        error.clear();
+                        changed = true;
+                        continue;
+                    }
+                    job->outputs.push_back(MediaOutputRecord{
+                        content_type, filename, bytes, {}});
+                }
+            }
+            if (job->state == "running") {
+                job->state = "failed";
+                job->error =
+                    "InferDeck restarted before this job completed.";
+                job->finished_at_unix_ms = current_unix_ms();
+                changed = true;
+            }
+            jobs[id] = std::move(job);
+            maximum_id = std::max(maximum_id, id);
+        }
+    } catch (const std::exception& exception) {
+        jobs.clear();
+        media_history_root.clear();
+        return foundation::Err<void>(
+            foundation::ErrorCode::ParseError,
+            std::string("invalid media history: ") + exception.what());
+    }
+    if (maximum_id == std::numeric_limits<std::uint64_t>::max()) {
+        jobs.clear();
+        media_history_root.clear();
+        return foundation::Err<void>(
+            foundation::ErrorCode::ParseError,
+            "media history job identifier is out of range");
+    }
+    next_job_id.store(maximum_id + 1);
+    const std::size_t before = jobs.size();
+    prune_jobs_locked();
+    changed = changed || jobs.size() != before;
+    lock.unlock();
+    if (changed) return persist_jobs_serialized();
+    return foundation::Ok();
+}
+
 nlohmann::json media_jobs() {
     std::lock_guard lock(jobs_mutex);
     nlohmann::json result = nlohmann::json::array();
@@ -485,24 +904,377 @@ nlohmann::json media_jobs() {
     std::sort(ids.begin(), ids.end(), std::greater<>());
     for (const auto id : ids) {
         const auto& job = jobs.at(id);
-        result.push_back({{"id", job.id}, {"model", job.model}, {"modality", job.modality},
-                          {"progress", job.progress}, {"state", job.state}});
+        result.push_back(job_json(*job, true));
     }
     return result;
+}
+
+foundation::Result<MediaJobOutput> media_job_output(
+    std::uint64_t id, std::size_t index) {
+    MediaOutputRecord record;
+    std::filesystem::path history_root;
+    {
+        std::lock_guard lock(jobs_mutex);
+        const auto found = jobs.find(id);
+        if (found == jobs.end() ||
+            index >= found->second->outputs.size()) {
+            return foundation::Err<MediaJobOutput>(
+                foundation::ErrorCode::NotFound,
+                "media output not found");
+        }
+        record = found->second->outputs[index];
+        history_root = media_history_root;
+    }
+    MediaJobOutput output;
+    output.content_type = record.content_type;
+    output.filename = record.filename;
+    if (!record.memory.empty()) {
+        output.body.assign(
+            reinterpret_cast<const char*>(record.memory.data()),
+            record.memory.size());
+        return foundation::Ok(std::move(output));
+    }
+    if (history_root.empty()) {
+        return foundation::Err<MediaJobOutput>(
+            foundation::ErrorCode::NotFound,
+            "media output is unavailable");
+    }
+    std::ifstream stream(
+        history_root / record.filename, std::ios::binary);
+    if (!stream.is_open()) {
+        return foundation::Err<MediaJobOutput>(
+            foundation::ErrorCode::NotFound,
+            "media output file is unavailable");
+    }
+    output.body.assign(
+        std::istreambuf_iterator<char>{stream},
+        std::istreambuf_iterator<char>{});
+    if (output.body.empty()) {
+        return foundation::Err<MediaJobOutput>(
+            foundation::ErrorCode::IoError,
+            "media output file is empty");
+    }
+    return foundation::Ok(std::move(output));
 }
 
 foundation::Result<void> cancel_media_job(std::uint64_t id) {
     std::lock_guard lock(jobs_mutex);
     const auto job = jobs.find(id);
     if (job == jobs.end()) return foundation::Err<void>(foundation::ErrorCode::NotFound, "media job not found");
-    if (job->second.state != "running") {
+    if (job->second->state != "running") {
         return foundation::Err<void>(foundation::ErrorCode::InvalidArgument, "media job is not running");
     }
-    job->second.cancelled->store(true);
+    job->second->cancelled->store(true);
     return foundation::Ok();
 }
 
+void handle_video_generations(const httplib::Request& req,
+                              httplib::Response& resp,
+                              const GatewayDeps& deps) {
+    RequestObservation observation = observe_request(
+        req, resp, deps, "video_generation", false);
+    observation.protocol_profile = "inferdeck";
+    if (!require_json_media_type(req, resp)) return;
+
+    const nlohmann::json body =
+        nlohmann::json::parse(req.body, nullptr, false);
+    if (body.is_discarded() || !body.is_object()) {
+        write_error(resp, 400, "invalid_video_generation",
+                    "request body must be a JSON object");
+        return;
+    }
+
+    static constexpr std::array<std::string_view, 10> supported_fields{
+        "model", "prompt", "negative_prompt", "width", "height",
+        "frames", "fps", "steps", "seed", "guidance_scale",
+    };
+    for (const auto& field : body.items()) {
+        if (std::find(supported_fields.begin(), supported_fields.end(),
+                      field.key()) == supported_fields.end()) {
+            write_error(resp, 400, "unsupported_parameter",
+                        "unsupported video generation parameter: " +
+                            field.key(), field.key());
+            return;
+        }
+    }
+
+    const auto require_string = [&body, &resp](std::string_view name,
+                                                bool required) {
+        if (!body.contains(name) || body[name].is_null()) {
+            if (required) {
+                write_error(resp, 400, "invalid_video_generation",
+                            std::string(name) + " must be a string",
+                            std::string(name));
+                return false;
+            }
+            return true;
+        }
+        if (!body[name].is_string()) {
+            write_error(resp, 400, "invalid_video_generation",
+                        std::string(name) + " must be a string",
+                        std::string(name));
+            return false;
+        }
+        return true;
+    };
+    if (!require_string("prompt", true) ||
+        !require_string("model", false) ||
+        !require_string("negative_prompt", false)) {
+        return;
+    }
+
+    const auto require_integer = [&body, &resp](std::string_view name) {
+        if (body.contains(name) && !body[name].is_null() &&
+            !body[name].is_number_integer() && !body[name].is_number_unsigned()) {
+            write_error(resp, 400, "invalid_video_generation",
+                        std::string(name) + " must be an integer",
+                        std::string(name));
+            return false;
+        }
+        return true;
+    };
+    const auto require_number = [&body, &resp](std::string_view name) {
+        if (body.contains(name) && !body[name].is_null() &&
+            !body[name].is_number()) {
+            write_error(resp, 400, "invalid_video_generation",
+                        std::string(name) + " must be a number",
+                        std::string(name));
+            return false;
+        }
+        return true;
+    };
+    if (!require_integer("width") || !require_integer("height") ||
+        !require_integer("frames") || !require_integer("fps") ||
+        !require_integer("steps") || !require_integer("seed") ||
+        !require_number("guidance_scale")) {
+        return;
+    }
+    const auto integer_in_range = [&body, &resp](
+                                      std::string_view name,
+                                      std::int64_t minimum,
+                                      std::int64_t maximum) {
+        if (!body.contains(name) || body[name].is_null()) return true;
+        if (body[name].is_number_unsigned()) {
+            const auto value = body[name].get<std::uint64_t>();
+            if (value > static_cast<std::uint64_t>(maximum)) {
+                write_error(resp, 400, "invalid_video_generation",
+                            std::string(name) + " is out of range",
+                            std::string(name));
+                return false;
+            }
+            return true;
+        }
+        const auto value = body[name].get<std::int64_t>();
+        if (value < minimum || value > maximum) {
+            write_error(resp, 400, "invalid_video_generation",
+                        std::string(name) + " is out of range",
+                        std::string(name));
+            return false;
+        }
+        return true;
+    };
+    const auto number_in_range = [&body, &resp](
+                                     std::string_view name,
+                                     float minimum,
+                                     float maximum) {
+        if (!body.contains(name) || body[name].is_null()) return true;
+        const double value = body[name].get<double>();
+        if (!std::isfinite(value) || value < minimum || value > maximum) {
+            write_error(resp, 400, "invalid_video_generation",
+                        std::string(name) + " is out of range",
+                        std::string(name));
+            return false;
+        }
+        return true;
+    };
+    if (!integer_in_range("width", 32, 1280) ||
+        !integer_in_range("height", 32, 720) ||
+        !integer_in_range("frames", 9, 121) ||
+        !integer_in_range("fps", 1, 60) ||
+        !integer_in_range("steps", 1, 50) ||
+        !integer_in_range(
+            "seed", -1,
+            static_cast<std::int64_t>(
+                std::numeric_limits<std::uint32_t>::max())) ||
+        !number_in_range("guidance_scale", 0.0f, 20.0f)) {
+        return;
+    }
+
+    model::VideoGenerationRequest request;
+    std::string model_name;
+    try {
+        model_name = body.contains("model") && !body["model"].is_null()
+            ? body["model"].get<std::string>() : deps.default_model;
+        request.prompt = body["prompt"].get<std::string>();
+        request.negative_prompt = body.value("negative_prompt", "");
+        request.width = body.value("width", 512);
+        request.height = body.value("height", 320);
+        request.frames = body.value("frames", 33);
+        request.fps = body.value("fps", 24);
+        request.steps = body.value("steps", 20);
+        request.seed = body.value("seed", std::int64_t{-1});
+        request.guidance_scale = body.value("guidance_scale", 6.0f);
+    } catch (const std::exception&) {
+        write_error(resp, 400, "invalid_video_generation",
+                    "video generation parameters are out of range");
+        return;
+    }
+
+    constexpr int min_dimension = 64;
+    constexpr int max_width = 1280;
+    constexpr int max_height = 720;
+    constexpr int max_frames = 121;
+    constexpr int max_fps = 60;
+    constexpr int max_steps = 50;
+    if (model_name.empty() || model_name.size() > 256 ||
+        request.prompt.empty() || request.prompt.size() > 32000 ||
+        request.negative_prompt.size() > 32768 ||
+        request.width < min_dimension || request.width > max_width ||
+        request.height < min_dimension || request.height > max_height ||
+        request.width % 32 != 0 || request.height % 32 != 0 ||
+        static_cast<std::uint64_t>(request.width) *
+                static_cast<std::uint64_t>(request.height) >
+            1280ULL * 720ULL ||
+        request.frames < 9 || request.frames > max_frames ||
+        (request.frames - 1) % 8 != 0 ||
+        request.fps < 1 || request.fps > max_fps ||
+        request.steps < 1 || request.steps > max_steps ||
+        request.seed < -1 ||
+        request.seed > static_cast<std::int64_t>(
+            std::numeric_limits<std::uint32_t>::max()) ||
+        !std::isfinite(request.guidance_scale) ||
+        request.guidance_scale < 0.0f || request.guidance_scale > 20.0f) {
+        write_error(resp, 400, "invalid_video_generation",
+                    "model, prompt, resolution, frames, fps, steps, seed, or guidance_scale is invalid");
+        return;
+    }
+
+    const auto resolved_model = resolve_model_name(deps, model_name);
+    if (!resolved_model) {
+        write_error(resp, 404, "model_not_found",
+                    resolved_model.error().message);
+        return;
+    }
+    const auto info = deps.coordinator.registry().get_info_result(
+        resolved_model->resolved);
+    if (!info || !info->supports("video_generation")) {
+        write_error(resp, 400, "unsupported_video_model",
+                    "model does not support video generation", "model");
+        return;
+    }
+
+    const auto job = begin_job(
+        model_name, "video_generation", request.prompt,
+        nlohmann::json{
+            {"width", request.width},
+            {"height", request.height},
+            {"frames", request.frames},
+            {"fps", request.fps},
+            {"steps", request.steps},
+            {"seed", request.seed},
+            {"guidance_scale", request.guidance_scale},
+        });
+    resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
+
+    const std::string& runtime_model = resolved_model->resolved;
+    const auto slot = acquire_media_slot(req, deps, runtime_model, job);
+    if (!slot) {
+        const int status = status_for(slot.error().code);
+        const int internal_status = internal_status_for(slot.error().code);
+        write_error(resp, status, "video_generation_admission_failed",
+                    slot.error().message);
+        record_media(deps, model_name, 0.0f, internal_status, -1,
+                     0.0, 0, observation);
+        finish_job(job, internal_status == 499 ? "cancelled" : "failed",
+                   slot.error().message);
+        return;
+    }
+
+    SlotGuard guard{&deps.coordinator, runtime_model, *slot};
+    const auto result = deps.coordinator.generate_video(
+        runtime_model, *slot, request,
+        [&req, &deps, &model_name, job](int progress) {
+            if (update_job(job, progress) && deps.events) {
+                deps.events->publish(
+                    "progress",
+                    nlohmann::json{
+                        {"id", job->id},
+                        {"model", model_name},
+                        {"modality", "video_generation"},
+                        {"progress", progress},
+                    }.dump());
+            }
+            return !req.is_connection_closed() &&
+                !job->cancelled->load();
+        });
+    if (!result) {
+        const bool cancelled = job->cancelled->load() ||
+            result.error().code == foundation::ErrorCode::Cancelled;
+        const int status = cancelled ? 408 : status_for(result.error().code);
+        const int internal_status = cancelled ? 499 : status;
+        write_error(resp, status, "video_generation_failed",
+                    result.error().message);
+        record_media(deps, model_name, 0.0f, internal_status, *slot,
+                     0.0, utf8_character_count(request.prompt), observation);
+        finish_job(job, cancelled ? "cancelled" : "failed",
+                   result.error().message);
+        return;
+    }
+
+    if (req.is_connection_closed() || job->cancelled->load()) {
+        write_error(resp, 408, "video_generation_failed",
+                    "video generation was cancelled");
+        record_media(deps, model_name, 0.0f, 499, *slot,
+                     0.0, utf8_character_count(request.prompt), observation);
+        finish_job(job, "cancelled", "video generation was cancelled");
+        return;
+    }
+    if (result->video_bytes.size() > 25ULL * 1024ULL * 1024ULL) {
+        write_error(resp, 413, "video_generation_failed",
+                    "generated video exceeds the 25 MiB limit");
+        record_media(deps, model_name, result->duration_ms, 413, *slot,
+                     0.0, utf8_character_count(request.prompt), observation);
+        finish_job(job, "failed", "generated video exceeds the 25 MiB limit");
+        return;
+    }
+    if (result->video_bytes.empty() ||
+        (result->content_type != "video/x-msvideo" && result->content_type != "video/avi" && result->content_type != "video/mp4")) {
+        constexpr std::string_view message =
+            "video backend returned an unsupported or empty video container";
+        write_error(resp, 500, "video_generation_failed",
+                    std::string(message));
+        record_media(deps, model_name, result->duration_ms, 500, *slot,
+                     0.0, utf8_character_count(request.prompt), observation);
+        finish_job(job, "failed", std::string(message));
+        return;
+    }
+
+    const bool is_mp4 = result->content_type == "video/mp4";
+    const std::vector<PendingMediaOutput> history_outputs{
+        PendingMediaOutput{
+            result->content_type, is_mp4 ? ".mp4" : ".avi", &result->video_bytes},
+    };
+    const auto stored = store_job_outputs(job, history_outputs);
+    if (!stored) {
+        foundation::LOG_WARN(
+            "media_output_store_failed", "job_id={} error={}",
+            job->id, stored.error().message);
+    }
+    resp.set_header("X-InferDeck-Video-Duration-Seconds",
+                    std::to_string(result->output_video_seconds));
+    resp.set_content(
+        std::string(
+            reinterpret_cast<const char*>(result->video_bytes.data()),
+            result->video_bytes.size()),
+        result->content_type);
+    resp.status = 200;
+    record_media(deps, model_name, result->duration_ms, 200, *slot,
+                 0.0, utf8_character_count(request.prompt), observation);
+    finish_job(job, "completed");
+}
 #include "image_routes.ipp"
+
+#include "audio_generation_routes.ipp"
 
 #include "speech_routes.ipp"
 

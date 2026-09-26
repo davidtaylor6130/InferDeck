@@ -96,10 +96,17 @@ struct ModelInfo {
     std::string mmproj_path{};
     int n_slots{2};
     int min_slots{1};
+    int continuation_grace_ms{0};
+    int request_queue_timeout_seconds{300};
     int vram_required_mb{0};
     int vram_fixed_mb{0};
     int vram_per_slot_mb{0};
     int context_size{65536};
+    int default_max_output_tokens{0};
+    bool kv_unified{false};
+    int context_pool_size{0};
+    bool context_pool_auto{false};
+    bool concurrency_auto{false};
     std::optional<int> n_batch{};
     std::optional<int> n_ubatch{};
     std::string cache_type_k{};

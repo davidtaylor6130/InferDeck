@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Build only — skip publishing the GitHub Release'
+        description: 'Build only - skip publishing the GitHub Release'
         type: boolean
         default: true
 
@@ -21,7 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          submodules: recursive
+          submodules: true
 
       - name: Resolve product version
         shell: pwsh
@@ -84,7 +84,6 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm --filter dashboard test
           pnpm test:openai-contract
-          pnpm test:opencode-export
           python -m pip install --disable-pip-version-check -r Testing/requirements-openai-contract.txt
           python -m unittest -v Testing.openai_sdk_contract_test
           pnpm --filter dashboard build
@@ -115,6 +114,8 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DINFERDECK_BUILD_TESTS=ON `
+            -DINFERDECK_REQUIRE_STABLE_DIFFUSION_CPP=ON `
+            -DINFERDECK_REQUIRE_ACESTEP_CPP=ON `
             -DINFERDECK_REQUIRE_WHISPER_CPP=ON `
             -DINFERDECK_SHERPA_ONNX_ROOT="$env:INFERDECK_SHERPA_ONNX_ROOT" `
             -DINFERDECK_REQUIRE_SHERPA_ONNX=ON
@@ -145,7 +146,7 @@ jobs:
             Where-Object Name -NotIn @('fmtd.dll', 'spdlogd.dll') |
             Copy-Item -Destination dist\
 
-          # vcpkg runtime DLLs (x64-windows is a dynamic triplet) — already
+          # vcpkg runtime DLLs (x64-windows is a dynamic triplet) - already
           # included above since vcpkg copies them to bin\Release\ on Windows,
           # but copy from vcpkg_installed as a fallback in case any are missing.
           $vcpkgBin = "build\vcpkg_installed\x64-windows\bin"
@@ -181,6 +182,13 @@ jobs:
             throw "Unexpected packaged executable version output: $output"
           }
 
+      - name: Verify packaged HTTP and dashboard
+        shell: pwsh
+        run: .\Testing\Test-PackagedGateway.ps1 -Gateway dist\inferdeck-gateway.exe
+
+      - name: Collect third-party notices
+        shell: pwsh
+        run: .\scripts\Collect-ThirdPartyNotices.ps1 -OutputDir dist -VcpkgInstalledDir build\vcpkg_installed -SherpaRoot $env:INFERDECK_SHERPA_ONNX_ROOT
       - name: Generate package metadata
         shell: pwsh
         run: .\scripts\New-ReleaseMetadata.ps1 -DistDir dist -OutputDir dist -VcpkgInstalledDir build\vcpkg_installed

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <string>
 #include <unordered_map>
@@ -79,6 +80,11 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
             (!root["auth"]["token"] || root["auth"]["token"].as<std::string>().empty())) {
             return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                          "auth.token is required when authentication is enabled");
+        }
+        if (root["auth"] && root["auth"]["api_keys_db"] &&
+            root["auth"]["api_keys_db"].as<std::string>().empty()) {
+            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                         "auth.api_keys_db cannot be empty");
         }
         if (root["control"]) {
             const auto& control = root["control"];
@@ -176,6 +182,13 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                  gateway["voice_session_grace_ms"].as<int>() > 120000)) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                              "gateway.voice_session_grace_ms must be between 1000 and 120000");
+            }
+            if (gateway["background_idle_after_seconds"] &&
+                (gateway["background_idle_after_seconds"].as<int>() < 60 ||
+                 gateway["background_idle_after_seconds"].as<int>() > 86400)) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "gateway.background_idle_after_seconds must be between 60 and 86400");
             }
             if (gateway["n_batch"] && gateway["n_ubatch"] &&
                 gateway["n_ubatch"].as<int>() > gateway["n_batch"].as<int>()) {
@@ -276,6 +289,18 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "invalid slot bounds for model: " + name);
                 }
+                if (entry["continuation_grace_ms"] &&
+                    (entry["continuation_grace_ms"].as<int>() < 0 ||
+                     entry["continuation_grace_ms"].as<int>() > 2000)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "continuation_grace_ms must be between 0 and 2000: " + name);
+                }
+                if (entry["request_queue_timeout_seconds"] &&
+                    (entry["request_queue_timeout_seconds"].as<int>() < 1 ||
+                     entry["request_queue_timeout_seconds"].as<int>() > 1800)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "request_queue_timeout_seconds must be between 1 and 1800: " + name);
+                }
                 const std::array resource_keys{
                     "role", "compute", "residency", "admission_pool",
                     "concurrency_limit", "memory_required_mb",
@@ -351,6 +376,42 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "model context_size must be positive: " + name);
                 }
+                if (entry["default_max_output_tokens"] &&
+                    (entry["default_max_output_tokens"].as<int>() < 1 ||
+                     entry["default_max_output_tokens"].as<int>() > 65536)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "model default_max_output_tokens must be between 1 and 65536: " + name);
+                }
+                if (entry["concurrency_auto"] && entry["concurrency_auto"].as<bool>() &&
+                    (!(entry["context_pool_auto"] && entry["context_pool_auto"].as<bool>()) ||
+                     (entry["runtime"] && entry["runtime"].as<std::string>() != "llama_cpp"))) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "concurrency_auto requires the automatic llama_cpp context pool: " + name);
+                }
+                if (entry["kv_unified"]) (void)entry["kv_unified"].as<bool>();
+                if (entry["context_pool_auto"] && entry["context_pool_auto"].as<bool>() &&
+                    (!(entry["kv_unified"] && entry["kv_unified"].as<bool>()) ||
+                     (entry["context_pool_size"] && entry["context_pool_size"].as<int>() != 0))) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "context_pool_auto requires unified KV and no fixed pool size: " + name);
+                }
+                if (entry["context_pool_size"]) {
+                    const int pool_size = entry["context_pool_size"].as<int>();
+                    const int context_size = entry["context_size"]
+                        ? entry["context_size"].as<int>() : 65536;
+                    const bool unified = entry["kv_unified"] && entry["kv_unified"].as<bool>();
+                    const YAML::Node speculative = entry["speculative"];
+                    const bool mtp = speculative && speculative.IsMap() && speculative["type"] &&
+                        speculative["type"].as<std::string>() == "mtp";
+                    const int draft_margin = mtp
+                        ? (speculative["draft_tokens"] ? speculative["draft_tokens"].as<int>() : 2) : 0;
+                    if (pool_size < 0 || (pool_size > 0 &&
+                        (!unified || static_cast<std::int64_t>(pool_size) <
+                            static_cast<std::int64_t>(std::max(512, context_size)) + draft_margin))) {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                            "context_pool_size requires unified KV and capacity for one full request plus MTP draft tokens: " + name);
+                    }
+                }
                 const int model_batch = entry["n_batch"]
                     ? entry["n_batch"].as<int>()
                     : (root["gateway"] && root["gateway"]["n_batch"]
@@ -397,13 +458,30 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "native model requires artifacts: " + name);
                 }
+                std::map<std::string, std::string> runtime_artifacts;
+                if (entry["artifacts"] && entry["artifacts"].IsMap())
+                {
+                    for (const YAML::detail::iterator_value& artifact : entry["artifacts"])
+                    {
+                        runtime_artifacts.emplace(artifact.first.as<std::string>(),
+                                                  artifact.second.as<std::string>());
+                    }
+                }
+                const std::optional<std::string> profile_error =
+                    model::validate_runtime_artifacts(runtime, runtime_artifacts);
+                if (profile_error)
+                {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 *profile_error + ": " + name);
+                }
                 if (entry["has_vision"] && entry["has_vision"].as<bool>() &&
                     (!runtime_contract->vision ||
-                     !entry["mmproj_path"] || entry["mmproj_path"].IsNull() ||
-                     entry["mmproj_path"].as<std::string>().empty())) {
+                     (runtime == "llama_cpp" &&
+                      (!entry["mmproj_path"] || entry["mmproj_path"].IsNull() ||
+                       entry["mmproj_path"].as<std::string>().empty())))) {
                     return foundation::Err<void>(
                         foundation::ErrorCode::InvalidArgument,
-                        "vision model requires llama_cpp and mmproj_path: " + name);
+                        "vision model requires a vision-capable runtime; llama_cpp also requires mmproj_path: " + name);
                 }
                 if (entry["reasoning"]) {
                     const auto reasoning = entry["reasoning"];
@@ -444,7 +522,9 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     }
                     const auto default_effort = reasoning["default"]
                         ? reasoning["default"].as<std::string>() : std::string{};
-                    if (supported && !efforts.contains(default_effort)) {
+                    if (supported && !efforts.contains(default_effort) &&
+                        !(default_effort == "none" && reasoning["none_disables"] &&
+                          reasoning["none_disables"].as<bool>())) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
                             "reasoning default must be a supported effort: " + name);
@@ -592,6 +672,8 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     else if (modality == "image") target_capabilities.insert("image_generation");
                     else if (modality == "audio_speech") target_capabilities.insert("audio_speech");
                     else if (modality == "audio_transcription") target_capabilities.insert("audio_transcription");
+                    else if (modality == "audio_generation") target_capabilities.insert("audio_generation");
+                    else if (modality == "video") target_capabilities.insert("video_generation");
                     else target_capabilities = {"chat_completions", "responses"};
                 }
                 if (alias["required_capabilities"]) {

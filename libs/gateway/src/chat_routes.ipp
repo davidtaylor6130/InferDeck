@@ -6,6 +6,7 @@ struct AcquiredChatSlot {
     std::optional<std::uint64_t> voice_session_token;
     double queue_duration_ms{};
     double swap_load_duration_ms{};
+    std::shared_ptr<observability::LiveRequest> live;
 };
 
 static constexpr std::array<std::string_view, 19>
@@ -142,31 +143,58 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     const httplib::Request& req, httplib::Response& resp,
     const GatewayDeps& deps, int priority,
     const std::string& requested_model, const std::string& model_name,
+    const model::InferenceRequest& inference_request,
     std::string reservation_key) {
     AcquiredChatSlot acquired;
+    acquired.live = std::make_shared<observability::LiveRequest>();
+    const RequestObservation identity = observe_request(req, resp, deps, "text", false);
+    acquired.live->request_id = identity.request_id;
+    acquired.live->api_key_id = identity.api_key_id;
+    acquired.live->api_key_name = identity.api_key_name;
+    acquired.live->model = model_name;
+    acquired.live->requested_model = requested_model;
+    acquired.live->endpoint = req.path;
+    acquired.live->started_unix_ms = now_ms();
+    acquired.live->progress = std::make_shared<inference::RequestProgress>();
+
     const auto acquisition_started = std::chrono::steady_clock::now();
-    const auto voice_key = request_client_key(req);
+    const auto voice_key = request_client_key(req, deps);
     acquired.reservation_key = reservation_key.empty()
         ? voice_key : std::move(reservation_key);
     if (!voice_key.empty() && acquired.reservation_key == voice_key) {
         acquired.voice_session_token = deps.coordinator.hold_priority_session(
             voice_key, model_name);
     }
+    const auto model_info = deps.coordinator.registry().get_info_result(model_name);
+    const int request_queue_timeout_seconds = model_info
+        ? model_info->request_queue_timeout_seconds : 300;
     const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::minutes{5};
+        std::chrono::seconds{request_queue_timeout_seconds};
     const std::function<bool()> cancelled = [&req] {
         return req.is_connection_closed();
     };
     model::AcquireSlotOptions opts;
-    opts.timeout = std::chrono::minutes{5};
+    opts.timeout = std::chrono::seconds{request_queue_timeout_seconds};
     opts.block = true;
-    opts.priority = std::clamp(priority, -100, 100);
+    opts.priority = resolve_request_priority(
+        deps.api_keys.get(), header_value(req, "Authorization"), priority,
+        deps.public_data_plane_access);
     opts.reservation_key = acquired.reservation_key;
     if (acquired.voice_session_token) opts.priority = 100;
     opts.cancelled = cancelled;
-    opts.prepare = [&deps, &model_name, deadline, cancelled, &acquired] {
+    opts.demand = [&deps, model_name, inference_request] {
+        return deps.coordinator.estimate_request_demand(model_name, inference_request);
+    };
+    opts.prepare_capacity = [&deps, model_name](const model::RequestDemand& demand, const model::LifecycleControl& control) {
+        return deps.coordinator.prepare_request_capacity(model_name, demand, control);
+    };
+    acquired.live->priority = opts.priority;
+    if (deps.metrics) deps.metrics->track_request(acquired.live);
+    opts.prepare = [&deps, &model_name, requested_model, deadline, cancelled, &acquired] {
         const auto started = std::chrono::steady_clock::now();
-        auto loaded = ensure_model_loaded(deps, model_name, deadline, cancelled);
+        acquired.live->progress->phase.store(1);
+        auto loaded = ensure_model_loaded(deps, model_name, deadline, cancelled, SwapAttribution{requested_model, acquired.live->request_id, acquired.live->api_key_id, acquired.live->api_key_name});
+        acquired.live->progress->phase.store(0);
         acquired.swap_load_duration_ms += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();
         if (loaded.ok) return foundation::Ok();
@@ -175,6 +203,8 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
     auto slot = deps.coordinator.acquire_slot(model_name, opts);
     if (slot) {
         acquired.slot_id = *slot;
+        acquired.live->progress->slot.store(*slot);
+        acquired.live->progress->phase.store(2);
         const auto total = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - acquisition_started).count();
         acquired.queue_duration_ms = std::max(
@@ -192,6 +222,7 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
         code = "slot_timeout";
     } else if (slot.error().code == foundation::ErrorCode::Cancelled) {
         code = "cancelled";
+        if (req.is_connection_closed()) status = 499;
     } else if (slot.error().code == foundation::ErrorCode::NotFound) {
         status = 404;
         code = "model_not_loaded";
@@ -202,18 +233,32 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
         slot.error().code == foundation::ErrorCode::NotLoaded
             ? deps.default_swap_timeout_s : "1");
     model::InferenceResult failed;
-    record_request(deps, requested_model, failed, status, -1, 0.0, 0, model_name);
+    failed.duration_ms = static_cast<float>(std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - acquisition_started).count());
+    const nlohmann::json body = nlohmann::json::parse(req.body, nullptr, false);
+    const bool stream = body.is_object() && body.contains("stream") &&
+        body["stream"].is_boolean() && body["stream"].get<bool>();
+    RequestObservation observation = observe_request(req, resp, deps, "text", stream);
+    observation.request_id = acquired.live->request_id;
+    observation.api_key_id = acquired.live->api_key_id;
+    observation.api_key_name = acquired.live->api_key_name;
+    observation.error_code = code;
+    observation.swap_load_duration_ms = acquired.swap_load_duration_ms;
+    observation.queue_duration_ms = std::max(
+        0.0, static_cast<double>(failed.duration_ms) - acquired.swap_load_duration_ms);
+    record_request(deps, requested_model, failed, status, -1, 0.0, 0, model_name,
+                   observation);
     write_error(resp, status, code, slot.error().message);
     return std::nullopt;
 }
 
 void handle_non_stream_chat(
-    httplib::Response& resp, const GatewayDeps& deps,
+    const httplib::Request& req, httplib::Response& resp,
     const std::string& requested_model, const std::string& model_name,
     const std::string& id, GenerationSession& session,
     const model::InferenceRequest& inference_request,
     const std::string& service_tier) {
-    auto predicted = session.run(inference_request);
+    auto predicted = session.run(inference_request, [&req] { return req.is_connection_closed(); });
     if (!predicted) {
         const auto error = map_openai_error(predicted.error().code);
         LOG_ERROR("inference_failed",
@@ -229,8 +274,7 @@ void handle_non_stream_chat(
         {"role", "assistant"},
         {"content", result.text},
     };
-    if (deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative &&
-        !result.reasoning_text.empty()) {
+    if (!result.reasoning_text.empty()) {
         message["reasoning_content"] = result.reasoning_text;
     }
     if (!result.tool_calls.empty()) {
@@ -275,10 +319,11 @@ std::optional<AcquiredGenerationSlot> acquire_generation_slot(
     const httplib::Request& req, httplib::Response& resp,
     const GatewayDeps& deps, int priority,
     const std::string& requested_model, const std::string& resolved_model,
+    const model::InferenceRequest& inference_request,
     std::string reservation_key) {
     auto acquired = acquire_chat_slot(req, resp, deps, priority,
                                       requested_model, resolved_model,
-                                      std::move(reservation_key));
+                                      inference_request, std::move(reservation_key));
     if (!acquired) return std::nullopt;
     return AcquiredGenerationSlot{
         acquired->slot_id,
@@ -286,6 +331,7 @@ std::optional<AcquiredGenerationSlot> acquire_generation_slot(
         std::move(acquired->voice_session_token),
         acquired->queue_duration_ms,
         acquired->swap_load_duration_ms,
+        std::move(acquired->live),
     };
 }
 
@@ -328,16 +374,6 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                 field.key(),
                             field.key());
                 return;
-            }
-        }
-        if (body.contains("messages") && body["messages"].is_array()) {
-            for (const auto& message : body["messages"]) {
-                if (message.is_object() && message.contains("reasoning_content")) {
-                    write_error(resp, 400, "unsupported_parameter",
-                                "unsupported Chat Completions message parameter: reasoning_content",
-                                "messages");
-                    return;
-                }
             }
         }
     }
@@ -425,7 +461,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     const std::string& model_name = resolved_model->resolved;
     if (maintenance_blocks_model(deps, model_name)) {
         write_error(resp, 503, "maintenance_mode",
-                    "measured model optimization is using the same compute resource");
+                    "maintenance work is using the same compute resource");
         return;
     }
     const auto model_info = deps.coordinator.registry().get_info_result(model_name);
@@ -554,7 +590,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     }
     auto acquired = acquire_generation_slot(
         req, resp, deps, priority, requested_model, model_name,
-        std::move(prompt_cache_key));
+        *inference_request, std::move(prompt_cache_key));
     if (!acquired) return;
     const int slot_id = acquired->slot_id;
     const auto& reservation_key = acquired->reservation_key;
@@ -567,6 +603,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         body.contains("service_tier") ? "default" : "";
 
     auto observation = observe_request(req, resp, deps, "text", stream);
+    observation.live = acquired->live;
     observation.queue_duration_ms = acquired->queue_duration_ms;
     observation.swap_load_duration_ms = acquired->swap_load_duration_ms;
     auto state = std::make_shared<GenerationSession>(
@@ -576,7 +613,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         std::move(observation));
 
     if (!stream) {
-        handle_non_stream_chat(resp, deps, requested_model, model_name,
+        handle_non_stream_chat(req, resp, requested_model, model_name,
                                id, *state, *inference_request,
                                response_service_tier);
         return;
@@ -589,7 +626,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     resp.set_chunked_content_provider(
         "text/event-stream",
         [id, stream_model, stream_created, state, include_stream_usage,
-         include_stream_obfuscation, derivative, response_service_tier](
+         include_stream_obfuscation, response_service_tier](
             std::size_t, httplib::DataSink& sink) mutable {
             try {
             std::unique_lock<std::mutex> lk(state->mtx);
@@ -633,11 +670,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 }
 
                 for (const auto& delta : deltas) {
-                    auto json_delta = delta_json(state->utf8.on_delta(delta), derivative);
+                    auto json_delta = delta_json(state->utf8.on_delta(delta));
                     if (json_delta.empty()) continue;
                     std::string out = serialize_chat_stream_delta(
                         id, stream_model, stream_created, json_delta,
-                        include_stream_usage, derivative,
+                        include_stream_usage,
                         response_service_tier, include_stream_obfuscation);
                     if (!sink.write(out.data(), out.size())) {
                         LOG_WARN("stream_abort", "model={} slot_id={} reason=chunk_write_failed",
@@ -655,11 +692,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             const auto final_result = state->final_result;
             lk.unlock();
 
-            auto trailing_delta = delta_json(state->utf8.finish(), derivative);
+            auto trailing_delta = delta_json(state->utf8.finish());
             if (!trailing_delta.empty()) {
                 std::string out = serialize_chat_stream_delta(
                     id, stream_model, stream_created, trailing_delta,
-                    include_stream_usage, derivative,
+                    include_stream_usage,
                     response_service_tier, include_stream_obfuscation);
                 if (!sink.write(out.data(), out.size())) {
                     LOG_WARN("stream_abort", "model={} slot_id={} reason=trailing_chunk_write_failed",

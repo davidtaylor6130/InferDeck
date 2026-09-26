@@ -11,12 +11,27 @@ import { API_BASE } from './utils';
 
 const CONTROL_API_BASE = '/api/inferdeck/v1';
 
-export async function authenticateDashboard(token: string): Promise<void> {
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+export function isAuthenticationError(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403);
+}
+
+export async function logoutDashboard(): Promise<void> {
+  await deleteJson(`${CONTROL_API_BASE}/dashboard/session`);
+}
+
+export async function authenticateDashboard(token: string, remember = true): Promise<void> {
   const response = await fetch(`${API_BASE}${CONTROL_API_BASE}/dashboard/session`, {
     method: 'POST',
     signal: AbortSignal.timeout(15_000),
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ token, remember }),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as {
@@ -26,49 +41,48 @@ export async function authenticateDashboard(token: string): Promise<void> {
   }
 }
 
-async function getJson<T>(path: string, timeoutMs = 15_000): Promise<T> {
+async function getJson<T>(path: string, timeoutMs = 15_000, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     headers: { Accept: 'application/json' },
   });
-  if (!response.ok) throw new Error(`${path} responded ${response.status}`);
+  if (!response.ok) throw new ApiError(response.status, `${path} responded ${response.status}`);
   return (await response.json()) as T;
 }
 
 async function postJson<T>(path: string, body?: unknown, timeoutMs = 30_000): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    signal: AbortSignal.timeout(timeoutMs),
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: body == null ? undefined : JSON.stringify(body),
-  });
-  const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
-  if (!response.ok && response.status !== 202) {
-    throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
-  }
-  return payload;
+  return writeJson('POST', path, body, timeoutMs);
 }
 
 async function putJson<T>(path: string, body: unknown, timeoutMs = 30_000): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: 'PUT',
-    signal: AbortSignal.timeout(timeoutMs),
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
-  if (!response.ok) throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
-  return payload;
+  return writeJson('PUT', path, body, timeoutMs);
+}
+
+async function patchJson<T>(path: string, body: unknown, timeoutMs = 30_000): Promise<T> {
+  return writeJson('PATCH', path, body, timeoutMs);
 }
 
 async function deleteJson<T>(path: string, timeoutMs = 30_000, headers?: Record<string, string>): Promise<T> {
+  return writeJson('DELETE', path, undefined, timeoutMs, headers);
+}
+
+async function writeJson<T>(
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  path: string,
+  body: unknown,
+  timeoutMs: number,
+  headers?: Record<string, string>,
+): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    method: 'DELETE',
+    method,
     signal: AbortSignal.timeout(timeoutMs),
     headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...headers },
+    body: method === 'DELETE' || (method === 'POST' && body == null) ? undefined : JSON.stringify(body),
   });
   const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
-  if (!response.ok) throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
+  if (!response.ok && !(method === 'POST' && response.status === 202)) {
+    throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
+  }
   return payload;
 }
 
@@ -91,6 +105,33 @@ export interface ConfigApplyResult {
   hasActiveProfile: boolean;
   restartRequired: boolean;
   applyScheduled: boolean;
+}
+
+export interface ApiSettingsDocument {
+  allowPublicTraffic: boolean;
+  runningAllowPublicTraffic: boolean;
+  publicPriority: number;
+  activeRevision: string;
+  restartRequired: boolean;
+}
+
+export interface ApiSettingsApplyResult extends ApiSettingsDocument {
+  ok: boolean;
+  applyScheduled: boolean;
+}
+
+export interface ApiKeyRecord {
+  id: string;
+  name: string;
+  prefix: string;
+  priority: number;
+  createdAtUnixMs: number;
+  updatedAtUnixMs: number;
+  revokedAtUnixMs: number | null;
+}
+
+export interface CreatedApiKey extends ApiKeyRecord {
+  key: string;
 }
 
 export interface ProfileOptimizationInput {
@@ -203,6 +244,10 @@ export interface StoreModel {
   lastModified?: string;
   hasVision?: boolean;
   recommended?: boolean;
+  trendingScore?: number;
+  license?: string;
+  format?: string;
+  compatibleArtifacts?: number;
 }
 
 export interface StoreFile {
@@ -220,6 +265,7 @@ export interface StoreFile {
   estimatedRamMb: number;
   estimatedVramMb: number;
   artifactCount?: number;
+  variant?: string;
 }
 
 export interface StoreDownload {
@@ -261,6 +307,72 @@ export interface MediaJob {
   modality: string;
   progress: number;
   state: string;
+  prompt: string;
+  parameters: Record<string, string | number | boolean>;
+  error: string;
+  created_at_unix_ms: number;
+  finished_at_unix_ms: number;
+  outputs: MediaJobOutput[];
+}
+
+export interface MediaJobOutput {
+  content_type: 'image/png' | 'audio/wav' | 'video/avi' | 'video/x-msvideo' | 'video/mp4';
+  filename: string;
+  bytes: number;
+  url: string;
+}
+
+export interface VideoGenerationInput {
+  model: string;
+  prompt: string;
+  negative_prompt: string;
+  width: number;
+  height: number;
+  frames: number;
+  fps: number;
+  steps: number;
+  seed: number;
+  /** Public UI spelling; converted to the gateway snake_case field. */
+  guidanceScale?: number;
+  /** Backward-compatible wire spelling accepted from existing callers. */
+  guidance_scale?: number;
+}
+
+export interface VideoGenerationResult {
+  video: Blob;
+  filename: string;
+  jobId: number | null;
+}
+
+export interface ImageGenerationInput {
+  model: string;
+  prompt: string;
+  size: string;
+  n: number;
+}
+
+export interface ImageGenerationResult {
+  created: number;
+  output_format: 'png';
+  data: Array<{ b64_json: string }>;
+  jobId: number | null;
+}
+
+export interface MusicGenerationInput {
+  model: string;
+  prompt: string;
+  lyrics: string;
+  duration: number;
+  seed: number;
+  steps: number;
+  guidance_scale: number;
+}
+
+export interface MusicGenerationResult {
+  audio: Blob;
+  jobId: number | null;
+  seed: number | null;
+  durationSeconds: number | null;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -315,6 +427,8 @@ function normalizeModel(value: unknown): ModelInfo | null {
     context_size: asNumber(entry.context_size) ?? 0,
     vram_required_mb: asNumber(entry.vram_required_mb) ?? asNumber(resources.vram_required_mb) ?? 0,
     n_slots: loaded && actualSlots !== undefined ? actualSlots : configuredSlots,
+    concurrency_auto: asBoolean(entry.concurrency_auto) ?? asBoolean(residency.concurrency_auto),
+    context_pool_capacity: asNumber(entry.context_pool_capacity) ?? asNumber(residency.context_pool_capacity),
     has_vision: asBoolean(entry.has_vision) ?? false,
     loaded,
     primary: asBoolean(residency.primary) ?? asBoolean(entry.primary),
@@ -349,27 +463,27 @@ function normalizeModel(value: unknown): ModelInfo | null {
   return normalized;
 }
 
-export function getStatus(): Promise<StatusPayload> {
-  return getJson<StatusPayload>(`${CONTROL_API_BASE}/status`);
+export function getStatus(signal?: AbortSignal): Promise<StatusPayload> {
+  return getJson<StatusPayload>(`${CONTROL_API_BASE}/status`, 15_000, signal);
 }
 
-export function getDailyUsage(): Promise<{
+export function getDailyUsage(signal?: AbortSignal): Promise<{
   dailyTokenUsage: MonthlyUsageRow[];
   dailyTokenUsageAllTime: boolean;
 }> {
-  return getJson(`${CONTROL_API_BASE}/usage/daily`);
+  return getJson(`${CONTROL_API_BASE}/usage/daily`, 15_000, signal);
 }
 
-export async function getModels(): Promise<ModelInfo[]> {
-  const body = await getJson<{ models?: unknown }>(`${CONTROL_API_BASE}/models`);
+export async function getModels(signal?: AbortSignal): Promise<ModelInfo[]> {
+  const body = await getJson<{ models?: unknown }>(`${CONTROL_API_BASE}/models`, 15_000, signal);
   if (!Array.isArray(body.models)) return [];
   return body.models
     .map(normalizeModel)
     .filter((model): model is ModelInfo => model !== null);
 }
 
-export async function getJobs(limit = 100): Promise<JobRecord[]> {
-  const body = await getJson<{ jobs: JobRecord[] }>(`${CONTROL_API_BASE}/jobs?limit=${limit}`);
+export async function getJobs(limit = 100, signal?: AbortSignal): Promise<JobRecord[]> {
+  const body = await getJson<{ jobs: JobRecord[] }>(`${CONTROL_API_BASE}/jobs?limit=${limit}`, 15_000, signal);
   return Array.isArray(body.jobs) ? body.jobs : [];
 }
 
@@ -419,6 +533,54 @@ export function deleteModelAlias(name: string, revision: string): Promise<{ ok: 
 
 export function getConfig(): Promise<ConfigDocument> {
   return getJson<ConfigDocument>(`${CONTROL_API_BASE}/config`);
+}
+
+export function getApiSettings(): Promise<ApiSettingsDocument> {
+  return getJson<ApiSettingsDocument>(CONTROL_API_BASE + '/api-settings');
+}
+
+export function saveApiSettings(
+  allowPublicTraffic: boolean,
+  revision: string,
+): Promise<ApiSettingsApplyResult> {
+  return putJson<ApiSettingsApplyResult>(CONTROL_API_BASE + '/api-settings', {
+    allowPublicTraffic,
+    revision,
+  });
+}
+
+export async function getApiKeys(): Promise<ApiKeyRecord[]> {
+  const body = await getJson<{ apiKeys?: ApiKeyRecord[] }>(
+    CONTROL_API_BASE + '/api-keys',
+  );
+  return Array.isArray(body.apiKeys) ? body.apiKeys : [];
+}
+
+export function createApiKey(
+  name: string,
+  priority: number,
+): Promise<CreatedApiKey> {
+  return postJson<CreatedApiKey>(CONTROL_API_BASE + '/api-keys', {
+    name,
+    priority,
+  });
+}
+
+export function updateApiKey(
+  id: string,
+  name: string,
+  priority: number,
+): Promise<ApiKeyRecord> {
+  return patchJson<ApiKeyRecord>(
+    CONTROL_API_BASE + '/api-keys/' + encodeURIComponent(id),
+    { name, priority },
+  );
+}
+
+export function revokeApiKey(id: string): Promise<Record<string, never>> {
+  return deleteJson<Record<string, never>>(
+    CONTROL_API_BASE + '/api-keys/' + encodeURIComponent(id),
+  );
 }
 
 export function saveConfig(yaml: string, revision: string): Promise<ConfigDocument & { ok: boolean }> {
@@ -526,10 +688,19 @@ export function waitForStableConfig(
   );
 }
 
-export async function searchStore(query: string, runtime = '', modality = '', limit = 50): Promise<StoreModel[]> {
+export async function searchStore(
+  query: string,
+  runtime = '',
+  modality = '',
+  limit = 50,
+  sort: 'trending' | 'downloads' | 'likes' | 'recent' = 'trending',
+  includeGated = false,
+): Promise<StoreModel[]> {
   const params = new URLSearchParams({ q: query, limit: String(limit) });
   if (runtime) params.set('runtime', runtime);
   if (modality) params.set('modality', modality);
+  params.set('sort', sort);
+  params.set('includeGated', String(includeGated));
   const body = await getJson<{ models: StoreModel[] }>(`${CONTROL_API_BASE}/model-store/search?${params}`);
   return body.models;
 }
@@ -545,12 +716,12 @@ export function installStoreModel(file: StoreFile, modelName: string): Promise<{
   });
 }
 
-export async function getStoreActivity(): Promise<{
+export async function getStoreActivity(signal?: AbortSignal): Promise<{
   downloads: StoreDownload[];
   installed: Record<string, InstalledStoreModel>;
   library: InstalledStoreModel[];
 }> {
-  return getJson(`${CONTROL_API_BASE}/model-store/downloads`);
+  return getJson(`${CONTROL_API_BASE}/model-store/downloads`, 15_000, signal);
 }
 
 export function controlStoreDownload(id: number, action: 'cancel' | 'resume'): Promise<{ ok: boolean }> {
@@ -573,13 +744,128 @@ export async function unregisterConfiguredModel(model: string): Promise<{
   });
 }
 
-export async function getMediaJobs(): Promise<MediaJob[]> {
-  const body = await getJson<{ jobs: MediaJob[] }>(`${CONTROL_API_BASE}/media/jobs`);
-  return body.jobs;
+export async function getMediaJobs(signal?: AbortSignal): Promise<MediaJob[]> {
+  const body = await getJson<{ jobs: MediaJob[] }>(`${CONTROL_API_BASE}/media/jobs`, 15_000, signal);
+  return Array.isArray(body.jobs) ? body.jobs : [];
 }
 
 export function cancelMediaJob(id: number): Promise<{ ok: boolean }> {
   return postJson<{ ok: boolean }>(`${CONTROL_API_BASE}/media/jobs/${id}/cancel`);
+}
+
+function mediaSignal(signal?: AbortSignal): AbortSignal {
+  return signal ?? AbortSignal.timeout(30 * 60 * 1000);
+}
+
+function responseInteger(value: string | null): number | null {
+  if (value == null || value.trim() === '') return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function responseNumber(value: string | null): number | null {
+  if (value == null || value.trim() === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export async function generateImages(
+  input: ImageGenerationInput,
+  signal?: AbortSignal,
+): Promise<ImageGenerationResult> {
+  const path = `${CONTROL_API_BASE}/media/images/generations`;
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    signal: mediaSignal(signal),
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const payload = (await response.json().catch(() => ({}))) as
+    Omit<ImageGenerationResult, 'jobId'> & {
+      error?: { message?: string };
+    };
+  if (!response.ok) {
+    throw new Error(payload.error?.message || `${path} responded ${response.status}`);
+  }
+  if (!Array.isArray(payload.data) || payload.output_format !== 'png') {
+    throw new Error('InferDeck returned an invalid image generation response');
+  }
+  return {
+    ...payload,
+    jobId: responseInteger(response.headers.get('X-InferDeck-Job-Id')),
+  };
+}
+
+export async function generateMusic(
+  input: MusicGenerationInput,
+  signal?: AbortSignal,
+): Promise<MusicGenerationResult> {
+  const path = `${CONTROL_API_BASE}/media/audio/generations`;
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    signal: mediaSignal(signal),
+    headers: { Accept: 'audio/wav, application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    throw new Error(payload.error?.message || `${path} responded ${response.status}`);
+  }
+  const audio = await response.blob();
+  if (audio.size === 0 || !audio.type.startsWith('audio/')) {
+    throw new Error('InferDeck returned an invalid music generation response');
+  }
+  return {
+    audio,
+    jobId: responseInteger(response.headers.get('X-InferDeck-Job-Id')),
+    seed: responseInteger(response.headers.get('X-InferDeck-Seed')),
+    durationSeconds: responseNumber(
+      response.headers.get('X-InferDeck-Audio-Duration-Seconds'),
+    ),
+  };
+}
+
+export async function generateVideo(
+  input: VideoGenerationInput,
+  signal?: AbortSignal,
+): Promise<VideoGenerationResult> {
+  const path = `${CONTROL_API_BASE}/media/video/generations`;
+  const payload = {
+    model: input.model,
+    prompt: input.prompt,
+    negative_prompt: input.negative_prompt,
+    width: input.width,
+    height: input.height,
+    frames: input.frames,
+    fps: input.fps,
+    steps: input.steps,
+    seed: input.seed,
+    guidance_scale: input.guidance_scale ?? input.guidanceScale,
+  };
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    signal: mediaSignal(signal),
+    headers: { Accept: 'video/mp4, video/x-msvideo, video/avi, application/octet-stream, application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { error?: { message?: string } };
+    throw new Error(payload.error?.message || `${path} responded ${response.status}`);
+  }
+  const video = await response.blob();
+  if (video.size === 0 || (video.type && video.type !== 'video/mp4' && video.type !== 'video/x-msvideo' && video.type !== 'video/avi' && video.type !== 'application/octet-stream')) {
+    throw new Error('InferDeck returned an invalid video generation response');
+  }
+  return {
+    video,
+    filename: response.headers.get('Content-Disposition')?.match(/filename="?([^";]+)"?/)?.[1] ?? 'inferdeck-video.mp4',
+    jobId: responseInteger(response.headers.get('X-InferDeck-Job-Id')),
+  };
+}
+export function mediaOutputUrl(output: MediaJobOutput): string {
+  return `${API_BASE}${output.url}`;
 }
 
 export function swapTo(model: string): Promise<{ status: string }> {

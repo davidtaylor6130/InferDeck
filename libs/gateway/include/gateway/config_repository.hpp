@@ -29,6 +29,10 @@ public:
     using ActiveTransform = std::function<foundation::Result<std::string>(
         const ConfigSnapshot&)>;
     using Rollback = std::function<void()>;
+    enum class ReloadPolicy {
+        AfterCommit,
+        Skip,
+    };
 
     ConfigRepository(std::filesystem::path base_path,
                      std::filesystem::path active_path,
@@ -43,7 +47,8 @@ public:
         const std::string& expected_revision);
     foundation::Result<ConfigCommit> transact_active(
         const std::string& expected_revision, ActiveTransform transform,
-        Rollback rollback);
+        Rollback rollback,
+        ReloadPolicy reload_policy = ReloadPolicy::AfterCommit);
 
     static std::string revision(const std::string& text);
 

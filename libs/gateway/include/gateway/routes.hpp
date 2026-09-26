@@ -4,6 +4,8 @@
 #include <nlohmann/json.hpp>
 
 #include "foundation/event_bus.hpp"
+#include "gateway/api_key_store.hpp"
+#include "gateway/compute_resource.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
@@ -14,16 +16,11 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 
 namespace inferdeck::gateway {
-
-enum class ComputeResource : std::uint8_t {
-    None,
-    Cpu,
-    Gpu,
-};
 
 using CompatibilityProfile = inference::CompatibilityProfile;
 
@@ -40,11 +37,17 @@ struct GatewayDeps {
     std::atomic<ComputeResource>* maintenance_resource{nullptr};
     CompatibilityProfile compatibility_profile{CompatibilityProfile::StrictOpenAI};
     std::chrono::milliseconds swap_timeout{std::chrono::minutes{5}};
+    std::shared_ptr<ApiKeyStore> api_keys;
+    int background_idle_after_seconds{900};
+    bool public_data_plane_access{false};
 };
 
 struct RequestObservation {
     std::string request_id;
     std::string principal_class;
+    std::string api_key_id;
+    std::string api_key_name;
+    std::shared_ptr<observability::LiveRequest> live;
     std::string endpoint;
     std::string protocol_profile;
     std::string modality{"text"};
@@ -111,7 +114,6 @@ std::string serialize_chat_stream_delta(const std::string& id,
                                         std::int64_t created,
                                         const nlohmann::json& delta,
                                         bool include_usage,
-                                        bool include_reasoning_content = false,
                                         const std::string& service_tier = {},
                                         bool include_obfuscation = true);
 std::string serialize_chat_stream_terminal(const std::string& id,
@@ -124,6 +126,8 @@ std::string serialize_chat_stream_terminal(const std::string& id,
                                            bool include_obfuscation = true);
 std::string header_value(const httplib::Request& req, const std::string& name);
 std::string request_client_key(const httplib::Request& req);
+std::string request_client_key(const httplib::Request& req,
+                               const GatewayDeps& deps);
 bool require_json_media_type(const httplib::Request& req,
                              httplib::Response& resp);
 
@@ -133,12 +137,14 @@ struct AcquiredGenerationSlot {
     std::optional<std::uint64_t> voice_session_token;
     double queue_duration_ms{};
     double swap_load_duration_ms{};
+    std::shared_ptr<observability::LiveRequest> live;
 };
 
 std::optional<AcquiredGenerationSlot> acquire_generation_slot(
     const httplib::Request& req, httplib::Response& resp,
     const GatewayDeps& deps, int priority,
     const std::string& requested_model, const std::string& resolved_model,
+    const model::InferenceRequest& inference_request,
     std::string reservation_key = {});
 
 struct SwapStartResult {
@@ -146,8 +152,16 @@ struct SwapStartResult {
     nlohmann::json body;
 };
 
+struct SwapAttribution {
+    std::string requested_model;
+    std::string request_id;
+    std::string api_key_id;
+    std::string api_key_name;
+};
+
 SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name,
-                                 bool defer_resource_busy = false);
+                                 bool defer_resource_busy = false,
+                                 SwapAttribution attribution = {});
 
 struct EnsureLoadedResult {
     bool ok{false};
@@ -165,7 +179,8 @@ EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
 EnsureLoadedResult ensure_model_loaded(
     const GatewayDeps& deps, const std::string& model_name,
     std::chrono::steady_clock::time_point deadline,
-    const std::function<bool()>& cancelled);
+    const std::function<bool()>& cancelled,
+    SwapAttribution attribution = {});
 
 void handle_models(const httplib::Request& req, httplib::Response& resp,
                    const GatewayDeps& deps);

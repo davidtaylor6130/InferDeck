@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <future>
 #include <mutex>
 #include <thread>
@@ -29,18 +30,28 @@ class IModelMock : public IModel {
 public:
     ModelInfo model_info{};
     std::atomic<bool> load_should_fail{false};
+    std::atomic<ErrorCode> load_failure_code{ErrorCode::Internal};
     std::atomic<bool> unload_should_fail{false};
     std::atomic<int> load_delay_ms{0};
     std::atomic<bool> load_started{false};
     std::function<void()> load_gate{};
     std::atomic<bool> loaded{false};
+    std::atomic<bool> healthy{true};
     std::atomic<int> vram_mb{4096};
+    std::atomic<int> additional_vram_mb{0};
+    std::atomic<int> reclaimable_mb{0};
+    std::atomic<bool> reclaim_throws{false};
+    std::function<void()> reclaim_gate{};
+    mutable std::atomic<int> guarded_query_count{0};
+    std::atomic<bool> reclaim_in_progress{false};
+    std::atomic<bool> live_vram_accounting{true};
     std::atomic<int> max_slots{2};
     std::vector<int> busy_slots;
     std::vector<std::pair<int, InferenceRequest>> predictions;
     std::atomic<int> next_slot_to_assign{0};
     std::vector<CallRecord> calls;
     std::string text_to_return{"hello world"};
+    std::function<bool()> execution_gate{};
     std::mutex calls_mtx;
     ChatTemplateMeta chat_meta_{};
 
@@ -60,7 +71,7 @@ public:
         record("load");
         load_started.store(true);
         if (load_should_fail.load()) {
-            return Err<void>(ErrorCode::Internal, "mock load failure");
+            return Err<void>(load_failure_code.load(), "mock load failure");
         }
         if (load_gate) load_gate();
         int delay = load_delay_ms.load();
@@ -82,7 +93,29 @@ public:
     }
 
     bool is_loaded() const override { return loaded.load(); }
+    bool execution_healthy() const override {
+        if (reclaim_in_progress.load()) ++guarded_query_count;
+        return healthy.load();
+    }
     int vram_usage_mb() const override { return estimate_vram_mb(max_slots.load()); }
+    bool can_reclaim_idle_context() const override {
+        return reclaimable_mb.load() > 0;
+    }
+    Result<bool> reclaim_idle_context(int reserve_mb, const LifecycleControl& control) override {
+        if (control.is_cancelled()) return Err<bool>(ErrorCode::Cancelled, "cancelled");
+        record("reclaim_context", std::to_string(reserve_mb));
+        if (reclaim_gate) reclaim_gate();
+        if (reclaim_throws.load()) throw std::runtime_error("injected reclaim failure");
+        const int freed = reclaimable_mb.exchange(0);
+        vram_mb.fetch_sub(freed);
+        return freed > 0;
+    }
+    int additional_vram_reserve_mb() const override {
+        return additional_vram_mb.load();
+    }
+    bool live_vram_accounting_complete() const override {
+        return live_vram_accounting.load();
+    }
     int n_slots() const override { return max_slots.load(); }
     int min_slots() const override { return model_info.min_slots; }
     bool can_resize_slots() const override {
@@ -108,6 +141,7 @@ public:
     }
 
     int n_free_slots() const override {
+        if (reclaim_in_progress.load()) ++guarded_query_count;
         int busy = 0;
         for (int b : busy_slots) if (b) ++busy;
         return max_slots.load() - busy;
@@ -140,6 +174,10 @@ public:
 
     Result<InferenceResult> predict(int slot_id, const InferenceRequest& req) override {
         record("predict:" + std::to_string(slot_id));
+        if (execution_gate && !execution_gate()) {
+            return Err<InferenceResult>(ErrorCode::Timeout,
+                                        "execution rendezvous timed out");
+        }
         std::lock_guard<std::mutex> lock(calls_mtx);
         predictions.emplace_back(slot_id, req);
         InferenceResult r;
@@ -194,6 +232,47 @@ public:
         EmbeddingResult result;
         result.embeddings.resize(request.inputs.size(), std::vector<float>{1.0f, 2.0f});
         result.prompt_tokens = static_cast<int>(request.inputs.size());
+        return Ok(std::move(result));
+    }
+};
+
+class ImageBackendMock : public IBackendMock, public IImageBackend {
+public:
+    explicit ImageBackendMock(ModelInfo info) : IBackendMock(std::move(info)) {}
+
+    std::function<bool()> execution_gate{};
+
+    Result<ImageGenerationResult> generate_images(
+        int, const ImageGenerationRequest&,
+        const std::function<bool(int)>& = {}) override {
+        if (execution_gate && !execution_gate()) {
+            return Err<ImageGenerationResult>(ErrorCode::Timeout,
+                                              "execution rendezvous timed out");
+        }
+        ImageGenerationResult result;
+        result.png_images.push_back({std::byte{0x89}});
+        return Ok(std::move(result));
+    }
+};
+
+class VideoBackendMock : public IBackendMock, public IVideoBackend {
+public:
+    explicit VideoBackendMock(ModelInfo info) : IBackendMock(std::move(info)) {}
+
+    int last_slot{-1};
+    VideoGenerationRequest last_request{};
+
+    Result<VideoGenerationResult> generate_video(
+        int slot_id, const VideoGenerationRequest& request,
+        const std::function<bool(int)>& progress = {}) override {
+        last_slot = slot_id;
+        last_request = request;
+        if (progress) progress(100);
+        VideoGenerationResult result;
+        result.video_bytes.push_back(std::byte{0x01});
+        result.content_type = "video/x-msvideo";
+        result.output_video_seconds = static_cast<double>(request.frames) /
+            static_cast<double>(request.fps);
         return Ok(std::move(result));
     }
 };
@@ -296,6 +375,26 @@ TEST_CASE("ModelRegistry: reports missing runtime", "[model][registry]") {
     auto result = reg.create_result(info.name);
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().code == ErrorCode::Unavailable);
+}
+
+TEST_CASE("Unavailable Radiance runtime never falls back to llama",
+          "[model][registry][radiance]")
+{
+    ModelRegistry registry;
+    bool llama_called = false;
+    registry.register_factory("llama_cpp", [&](const ModelInfo& info)
+    {
+        llama_called = true;
+        return std::make_unique<IModelMock>(info);
+    });
+    ModelInfo info = make_info("qwen-candidate");
+    info.runtime = "vllm_radiance";
+    registry.register_model(info);
+    const auto result = registry.create_result(info.name);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::Unavailable);
+    CHECK(result.error().message == "runtime not registered: vllm_radiance");
+    CHECK_FALSE(llama_called);
 }
 
 TEST_CASE("ModelRegistry: register rejects empty name", "[model][registry]") {
@@ -521,6 +620,248 @@ TEST_CASE("BackendCoordinator: concurrent swaps serialize model loads", "[model]
     t2.join();
 
     REQUIRE(max_active_loads.load() == 1);
+}
+
+TEST_CASE("BackendCoordinator: load completion preserves an admitted slot",
+          "[model][coordinator][load-admission]")
+{
+    std::promise<void> published;
+    std::promise<void> resume_load;
+    std::future<void> ready = published.get_future();
+    std::future<void> resume = resume_load.get_future();
+
+    class PublishingLoadMock : public IModelMock
+    {
+    public:
+        PublishingLoadMock(ModelInfo info, std::promise<void>& published,
+                           std::future<void>& resume)
+            : IModelMock(std::move(info)), m_published(published), m_resume(resume)
+        {
+        }
+
+        Result<void> load() override
+        {
+            Result<void> result = IModelMock::load();
+            m_published.set_value();
+            m_resume.wait();
+            return result;
+        }
+
+        Result<void> reset_all_slots() override
+        {
+            busy_slots.assign(max_slots.load(), 0);
+            return Ok();
+        }
+
+        Result<InferenceResult> predict(
+            int slot_id, const InferenceRequest& request) override
+        {
+            if (!slot_busy(slot_id))
+            {
+                return Err<InferenceResult>(ErrorCode::InvalidArgument,
+                                            "slot not acquired");
+            }
+            return IModelMock::predict(slot_id, request);
+        }
+
+    private:
+        std::promise<void>& m_published;
+        std::future<void>& m_resume;
+    };
+
+    ModelRegistry registry;
+    registry.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IModel>
+    {
+        return std::make_unique<PublishingLoadMock>(info, published, resume);
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    Result<void> loaded = Err<void>(ErrorCode::Internal, "load not completed");
+    std::thread loader([&] { loaded = coordinator.load("a"); });
+    ready.wait();
+    AcquireSlotOptions options;
+    options.block = false;
+    Result<int> slot = coordinator.acquire_slot("a", options);
+    resume_load.set_value();
+    loader.join();
+
+    REQUIRE(loaded);
+    REQUIRE(slot);
+    CHECK(coordinator.active_request_count() == 1);
+    Result<InferenceResult> predicted = coordinator.predict("a", *slot, {});
+    REQUIRE(predicted);
+    CHECK(predicted->text == "hello world");
+    REQUIRE(coordinator.release_slot("a", *slot));
+    CHECK(coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("BackendCoordinator: failed resident recovery drains leases and preserves peers",
+          "[model][coordinator][failed-recovery]")
+{
+    std::atomic<int> created{0};
+    std::atomic<int> destroyed{0};
+    bool fail_replacement = false;
+    class RecoveringMock : public IModelMock
+    {
+    public:
+        RecoveringMock(ModelInfo info, std::atomic<int>& destroyed)
+            : IModelMock(std::move(info)), m_destroyed(destroyed)
+        {
+        }
+        ~RecoveringMock() override { ++m_destroyed; }
+    private:
+        std::atomic<int>& m_destroyed;
+    };
+    ModelRegistry registry;
+    registry.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IModel>
+    {
+        std::unique_ptr<IModelMock> backend;
+        if (info.name == "failed")
+        {
+            backend = std::make_unique<RecoveringMock>(info, destroyed);
+            backend->load_should_fail.store(++created > 1 && fail_replacement);
+        }
+        else
+        {
+            backend = std::make_unique<IModelMock>(info);
+        }
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(info.n_slots);
+        backend->busy_slots.assign(info.n_slots, 0);
+        return backend;
+    });
+    ModelInfo failed_info = make_info("failed");
+    failed_info.n_slots = 3;
+    failed_info.vram_required_mb = 4000;
+    ModelInfo peer_info = make_info("peer");
+    peer_info.vram_required_mb = 3000;
+    registry.register_model(failed_info);
+    registry.register_model(peer_info);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(8000, 0);
+    REQUIRE(coordinator.swap_to("failed"));
+    REQUIRE(coordinator.swap_to("peer"));
+    const IBackend* peer = coordinator.get_backend("peer");
+    const Result<int> first = coordinator.acquire_slot("failed");
+    const Result<int> second = coordinator.acquire_slot("failed");
+    const Result<int> peer_slot = coordinator.acquire_slot("peer");
+    REQUIRE(first);
+    REQUIRE(second);
+    REQUIRE(peer_slot);
+    IModelMock* failed = as_mock(const_cast<IModel*>(coordinator.get_model("failed")));
+    failed->healthy.store(false);
+    CHECK(coordinator.is_loaded("failed"));
+    CHECK_FALSE(coordinator.is_ready("failed"));
+    CHECK(coordinator.get_loaded_models() == std::vector<std::string>{"failed", "peer"});
+    CHECK(coordinator.get_vram_usage() == 7000);
+    AcquireSlotOptions immediate;
+    immediate.block = false;
+    const Result<int> rejected = coordinator.acquire_slot("failed", immediate);
+    CHECK_FALSE(rejected);
+    if (rejected) REQUIRE(coordinator.release_slot("failed", *rejected));
+
+    std::atomic<bool> cancel{false};
+    std::atomic<int> cancellation_checks{0};
+    std::atomic<bool> signalled{false};
+    std::promise<bool> drain_entered;
+    std::future<bool> draining = drain_entered.get_future();
+    std::future<Result<void>> recovery = std::async(std::launch::async, [&]
+    {
+        Result<void> result = coordinator.load_with_lock_deadline(
+            "failed", std::chrono::steady_clock::now() + std::chrono::seconds{5}, [&]
+            {
+                if (++cancellation_checks >= 2 && !signalled.exchange(true))
+                    drain_entered.set_value(true);
+                return cancel.load();
+            });
+        if (!signalled.exchange(true)) drain_entered.set_value(false);
+        return result;
+    });
+    CHECK(draining.get());
+    CHECK(destroyed.load() == 0);
+    CHECK(coordinator.active_request_count("failed") == 2);
+    CHECK(coordinator.get_vram_usage() == 7000);
+    CHECK(coordinator.get_backend("peer") == peer);
+    cancel.store(true);
+    const Result<void> cancelled = recovery.get();
+    CHECK_FALSE(cancelled);
+    if (!cancelled) CHECK(cancelled.error().code == ErrorCode::Cancelled);
+    CHECK(destroyed.load() == 0);
+    CHECK(coordinator.is_loaded("failed"));
+    REQUIRE(coordinator.release_slot("failed", *first));
+    REQUIRE(coordinator.release_slot("failed", *second));
+
+    SECTION("replacement succeeds") {}
+    SECTION("replacement load fails once") { fail_replacement = true; }
+    int preparations = 0;
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::seconds{5};
+    options.prepare = [&]
+    {
+        ++preparations;
+        return coordinator.swap_to_cancellable("failed", std::chrono::seconds{5});
+    };
+    const Result<int> replacement = coordinator.acquire_slot("failed", options);
+    CHECK(preparations == 1);
+    CHECK(created.load() == 2);
+    CHECK(destroyed.load() == 1);
+    CHECK(coordinator.get_backend("peer") == peer);
+    CHECK(coordinator.is_ready("peer"));
+    CHECK(coordinator.predict("peer", *peer_slot, {}));
+    if (fail_replacement)
+    {
+        CHECK_FALSE(replacement);
+        CHECK_FALSE(coordinator.is_loaded("failed"));
+        CHECK(coordinator.get_vram_usage() == 3000);
+    }
+    else
+    {
+        CHECK(replacement);
+        CHECK(coordinator.is_ready("failed"));
+        CHECK(coordinator.get_vram_usage() == 7000);
+        if (replacement) CHECK(coordinator.predict("failed", *replacement, {}));
+    }
+    if (replacement) REQUIRE(coordinator.release_slot("failed", *replacement));
+    REQUIRE(coordinator.release_slot("peer", *peer_slot));
+    CHECK(coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("BackendCoordinator: failed recovery preserves reduced slot capacity",
+          "[model][coordinator][failed-recovery-capacity]")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel>
+    {
+        std::unique_ptr<IModelMock> backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        return backend;
+    });
+    ModelInfo failed_info = make_info("failed");
+    failed_info.vram_fixed_mb = 3000;
+    failed_info.vram_per_slot_mb = 1000;
+    failed_info.vram_required_mb = 5000;
+    ModelInfo peer_info = make_info("peer");
+    peer_info.vram_required_mb = 5000;
+    registry.register_model(failed_info);
+    registry.register_model(peer_info);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.swap_to("failed"));
+    REQUIRE(coordinator.swap_to("peer"));
+    REQUIRE(coordinator.get_backend("failed")->n_slots() == 1);
+    REQUIRE(coordinator.get_vram_usage() == 9000);
+    const IBackend* peer = coordinator.get_backend("peer");
+    const Result<int> peer_slot = coordinator.acquire_slot("peer");
+    REQUIRE(peer_slot);
+    as_mock(const_cast<IModel*>(coordinator.get_model("failed")))->healthy.store(false);
+
+    REQUIRE(coordinator.swap_to("failed"));
+    CHECK(coordinator.is_ready("failed"));
+    CHECK(coordinator.get_backend("failed")->n_slots() == 1);
+    CHECK(coordinator.get_vram_usage() == 9000);
+    CHECK(coordinator.get_backend("peer") == peer);
+    CHECK(coordinator.predict("peer", *peer_slot, {}));
+    REQUIRE(coordinator.release_slot("peer", *peer_slot));
 }
 
 TEST_CASE("BackendCoordinator: acquire_slot returns slot id", "[model][coordinator]") {
@@ -966,6 +1307,309 @@ TEST_CASE("BackendCoordinator: keeps two models resident when budget fits", "[mo
     REQUIRE(coordinator.vram_available_mb() == 0);
 }
 
+TEST_CASE("BackendCoordinator: live headroom preserves an overestimated resident model",
+          "[model][coordinator][residency][concurrency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 26000;
+    auto music = make_info("music");
+    music.role = ModelRole::Media;
+    music.modality = "audio_generation";
+    music.capabilities = {"audio_generation"};
+    music.n_slots = 1;
+    music.min_slots = 1;
+    music.vram_required_mb = 8000;
+    registry.register_model(chat);
+    registry.register_model(music);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+
+    REQUIRE(coordinator.swap_to("chat"));
+    coordinator.update_vram_observation(21000, 32000);
+    CHECK(coordinator.vram_available_mb() == 10000);
+    REQUIRE(coordinator.swap_to("music"));
+
+    CHECK(coordinator.is_loaded("chat"));
+    CHECK(coordinator.is_loaded("music"));
+    CHECK(coordinator.get_loaded_model() == "chat");
+    CHECK(coordinator.last_resource_decision() ==
+          "music fits live GPU headroom");
+}
+
+TEST_CASE("BackendCoordinator: invalid live VRAM falls back to declared capacity",
+          "[model][coordinator][residency][concurrency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 26000;
+    auto music = make_info("music");
+    music.role = ModelRole::Media;
+    music.modality = "audio_generation";
+    music.capabilities = {"audio_generation"};
+    music.n_slots = 1;
+    music.min_slots = 1;
+    music.vram_required_mb = 8000;
+    registry.register_model(chat);
+    registry.register_model(music);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+
+    REQUIRE(coordinator.swap_to("chat"));
+    coordinator.update_vram_observation(21000, 32000);
+    CHECK(coordinator.vram_available_mb() == 10000);
+    coordinator.update_vram_observation(-1, 32000);
+    CHECK(coordinator.vram_available_mb() == 5000);
+    REQUIRE(coordinator.swap_to("music"));
+
+    CHECK_FALSE(coordinator.is_loaded("chat"));
+    CHECK(coordinator.is_loaded("music"));
+}
+
+TEST_CASE("BackendCoordinator: incomplete live accounting uses declared capacity",
+          "[model][coordinator][residency][concurrency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        if (info.name == "image") {
+            backend->live_vram_accounting.store(false);
+        }
+        return backend;
+    });
+    auto image = make_info("image");
+    image.role = ModelRole::Media;
+    image.modality = "image";
+    image.capabilities = {"image_generation"};
+    image.n_slots = 1;
+    image.min_slots = 1;
+    image.vram_required_mb = 4000;
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 28000;
+    registry.register_model(image);
+    registry.register_model(chat);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+
+    REQUIRE(coordinator.swap_to("image"));
+    coordinator.update_vram_observation(2000, 32000);
+    CHECK(coordinator.vram_available_mb() == 25000);
+    REQUIRE(coordinator.swap_to("chat"));
+
+    CHECK_FALSE(coordinator.is_loaded("image"));
+    CHECK(coordinator.is_loaded("chat"));
+}
+
+TEST_CASE("BackendCoordinator: live headroom reserves lazy resident allocations",
+          "[model][coordinator][residency][concurrency]") {
+    ModelRegistry registry;
+    IModelMock* music_backend = nullptr;
+    registry.set_factory([&music_backend](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        if (info.name == "music") {
+            backend->additional_vram_mb.store(8000);
+            music_backend = backend.get();
+        }
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 21000;
+    auto music = make_info("music");
+    music.role = ModelRole::Media;
+    music.modality = "audio_generation";
+    music.capabilities = {"audio_generation"};
+    music.n_slots = 1;
+    music.min_slots = 1;
+    music.vram_required_mb = 8000;
+    registry.register_model(chat);
+    registry.register_model(music);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+
+    REQUIRE(coordinator.swap_to("chat"));
+    coordinator.update_vram_observation(21000, 32000);
+    REQUIRE(coordinator.swap_to("music"));
+    REQUIRE(music_backend != nullptr);
+    coordinator.update_vram_observation(21000, 32000);
+
+    CHECK(coordinator.vram_available_mb() == 2000);
+}
+
+TEST_CASE("BackendCoordinator: live pressure prevents unsafe co-residency",
+          "[model][coordinator][residency][concurrency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 4000;
+    auto image = make_info("image");
+    image.role = ModelRole::Media;
+    image.modality = "image";
+    image.capabilities = {"image_generation"};
+    image.n_slots = 1;
+    image.min_slots = 1;
+    image.vram_required_mb = 4000;
+    registry.register_model(chat);
+    registry.register_model(image);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+
+    REQUIRE(coordinator.swap_to("chat"));
+    coordinator.update_vram_observation(29000, 32000);
+    REQUIRE(coordinator.swap_to("image"));
+
+    CHECK_FALSE(coordinator.is_loaded("chat"));
+    CHECK(coordinator.is_loaded("image"));
+}
+
+TEST_CASE("BackendCoordinator: co-resident GPU models use independent admission pools",
+          "[model][coordinator][queue][residency][concurrency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 20000;
+    auto image = make_info("image");
+    image.role = ModelRole::Media;
+    image.modality = "image";
+    image.capabilities = {"image_generation"};
+    image.n_slots = 1;
+    image.min_slots = 1;
+    image.vram_required_mb = 4000;
+    registry.register_model(chat);
+    registry.register_model(image);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+    REQUIRE(coordinator.swap_to("chat"));
+    REQUIRE(coordinator.swap_to("image"));
+
+    const auto chat_slot = coordinator.acquire_slot("chat");
+    REQUIRE(chat_slot);
+    AcquireSlotOptions immediate;
+    immediate.block = false;
+    const auto image_slot = coordinator.acquire_slot("image", immediate);
+    REQUIRE(image_slot);
+    CHECK(coordinator.active_request_count() == 2);
+    CHECK(coordinator.active_request_count("chat") == 1);
+    CHECK(coordinator.active_request_count("image") == 1);
+    REQUIRE(coordinator.release_slot("image", *image_slot));
+    REQUIRE(coordinator.release_slot("chat", *chat_slot));
+}
+
+TEST_CASE("BackendCoordinator: co-resident model execution overlaps",
+          "[model][coordinator][execution][residency][concurrency]") {
+    ModelRegistry registry;
+    IModelMock* chat_backend = nullptr;
+    ImageBackendMock* image_backend = nullptr;
+    registry.set_factory(
+        [&chat_backend, &image_backend](const ModelInfo& info)
+            -> std::unique_ptr<IBackend> {
+            if (info.supports("image_generation")) {
+                auto backend = std::make_unique<ImageBackendMock>(info);
+                image_backend = backend.get();
+                return backend;
+            }
+            auto backend = std::make_unique<IModelMock>(info);
+            backend->vram_mb.store(info.vram_required_mb);
+            backend->max_slots.store(1);
+            backend->busy_slots.assign(1, 0);
+            chat_backend = backend.get();
+            return backend;
+        });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 20000;
+    auto image = make_info("image");
+    image.role = ModelRole::Media;
+    image.modality = "image";
+    image.capabilities = {"image_generation"};
+    image.n_slots = 1;
+    image.min_slots = 1;
+    image.vram_required_mb = 4000;
+    registry.register_model(chat);
+    registry.register_model(image);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(32000, 1000);
+    REQUIRE(coordinator.swap_to("chat"));
+    REQUIRE(coordinator.swap_to("image"));
+    REQUIRE(chat_backend != nullptr);
+    REQUIRE(image_backend != nullptr);
+
+    std::mutex rendezvous_mutex;
+    std::condition_variable rendezvous_cv;
+    int arrivals = 0;
+    const auto rendezvous = [&] {
+        std::unique_lock<std::mutex> lock(rendezvous_mutex);
+        ++arrivals;
+        rendezvous_cv.notify_all();
+        return rendezvous_cv.wait_for(
+            lock, std::chrono::seconds{1}, [&] { return arrivals == 2; });
+    };
+    chat_backend->execution_gate = rendezvous;
+    image_backend->execution_gate = rendezvous;
+
+    const auto chat_slot = coordinator.acquire_slot("chat");
+    const auto image_slot = coordinator.acquire_slot("image");
+    REQUIRE(chat_slot);
+    REQUIRE(image_slot);
+    auto chat_execution = std::async(std::launch::async, [&] {
+        return coordinator.predict("chat", *chat_slot, InferenceRequest{});
+    });
+    auto image_execution = std::async(std::launch::async, [&] {
+        return coordinator.generate_images(
+            "image", *image_slot, ImageGenerationRequest{}, {});
+    });
+
+    REQUIRE(chat_execution.wait_for(std::chrono::seconds{2}) ==
+            std::future_status::ready);
+    REQUIRE(image_execution.wait_for(std::chrono::seconds{2}) ==
+            std::future_status::ready);
+    CHECK(chat_execution.get());
+    CHECK(image_execution.get());
+    REQUIRE(coordinator.release_slot("image", *image_slot));
+    REQUIRE(coordinator.release_slot("chat", *chat_slot));
+}
+
 TEST_CASE("BackendCoordinator: shrinks idle capacity before loading", "[model][coordinator][residency]") {
     ModelRegistry reg;
     reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
@@ -1090,6 +1734,117 @@ TEST_CASE("BackendCoordinator: capacity-blocked request stays queued until activ
     CHECK_FALSE(coordinator.is_loaded("gemma"));
     CHECK(coordinator.is_loaded("qwen"));
     REQUIRE(coordinator.release_slot("qwen", *result).has_value());
+}
+
+TEST_CASE("BackendCoordinator: blocked high priority residency waiter prevents lower priority slot admission",
+          "[model][coordinator][queue][residency][priority]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        if (info.name == "qwen3.8-27b") {
+            backend->max_slots.store(4);
+            backend->busy_slots.assign(4, 0);
+        } else {
+            backend->max_slots.store(1);
+            backend->busy_slots.assign(1, 0);
+        }
+        return backend;
+    });
+
+    auto active = make_info("qwen3.8-27b");
+    active.vram_fixed_mb = 2000;
+    active.vram_per_slot_mb = 1500;
+    active.vram_required_mb = 8000;
+    active.n_slots = 4;
+    active.min_slots = 1;
+    active.concurrency_limit = 4;
+    active.admission_pool = "qwen3.8-27b";
+    auto urgent = make_info("qwen3.5-4b");
+    urgent.vram_required_mb = 4000;
+    urgent.n_slots = 1;
+    urgent.min_slots = 1;
+    urgent.concurrency_limit = 1;
+    urgent.admission_pool = "qwen3.5-4b";
+    auto sidecar = make_info("whisper-cpu");
+    sidecar.role = ModelRole::Media;
+    sidecar.compute = ModelCompute::Cpu;
+    sidecar.vram_required_mb = 0;
+    sidecar.n_slots = 1;
+    sidecar.min_slots = 1;
+    sidecar.admission_pool = "whisper-cpu";
+    sidecar.resource_metadata_explicit = true;
+    reg.register_model(active);
+    reg.register_model(urgent);
+    reg.register_model(sidecar);
+
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.swap_to(active.name));
+    REQUIRE(coordinator.load(sidecar.name));
+    const auto active_lease = coordinator.acquire_slot(active.name);
+    REQUIRE(active_lease);
+
+    Result<int> urgent_result = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread urgent_waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        options.priority = 100;
+        options.prepare = [&] { return coordinator.swap_to(urgent.name); };
+        urgent_result = coordinator.acquire_slot(urgent.name, options);
+    });
+    for (int attempt = 0; attempt < 500 &&
+         coordinator.last_resource_decision().find("waiting for active residency") ==
+             std::string::npos;
+         ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+    REQUIRE(coordinator.last_resource_decision().find("waiting for active residency") !=
+            std::string::npos);
+    coordinator.update_vram_observation(8000, 9000);
+
+    std::atomic<bool> lower_acquired{false};
+    Result<int> lower_result = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread lower_waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        options.priority = 0;
+        lower_result = coordinator.acquire_slot(active.name, options);
+        lower_acquired.store(lower_result.has_value());
+    });
+    for (int attempt = 0; attempt < 100 && coordinator.queued_request_count() < 2; ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    REQUIRE(coordinator.queued_request_count() == 2);
+    CHECK(coordinator.queue().front().model == urgent.name);
+    std::atomic<bool> sidecar_acquired{false};
+    Result<int> sidecar_result = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread sidecar_waiter([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{2};
+        sidecar_result = coordinator.acquire_slot(sidecar.name, options);
+        sidecar_acquired.store(sidecar_result.has_value());
+    });
+    for (int attempt = 0; attempt < 100 && !sidecar_acquired.load(); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    sidecar_waiter.join();
+    REQUIRE(sidecar_result.has_value());
+    REQUIRE(coordinator.release_slot(sidecar.name, *sidecar_result));
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    CHECK_FALSE(lower_acquired.load());
+
+    if (lower_acquired.load()) {
+        REQUIRE(coordinator.release_slot(active.name, *lower_result));
+    }
+    REQUIRE(coordinator.release_slot(active.name, *active_lease));
+    urgent_waiter.join();
+    REQUIRE(urgent_result.has_value());
+    REQUIRE(coordinator.is_loaded(urgent.name));
+    REQUIRE(coordinator.get_backend(active.name)->n_slots() == 2);
+    REQUIRE(coordinator.release_slot(urgent.name, *urgent_result));
+
+    lower_waiter.join();
+    REQUIRE(lower_result.has_value());
+    REQUIRE(coordinator.release_slot(active.name, *lower_result));
 }
 
 TEST_CASE("BackendCoordinator: VRAM pressure preserves zero-VRAM voice residency",
@@ -1782,6 +2537,99 @@ TEST_CASE("BackendCoordinator: zero-budget swap restores failed replacement",
             std::string::npos);
 }
 
+TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model", "[model][coordinator][runtime-preflight]") {
+    int resident_creations = 0;
+    ModelRegistry reg;
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        if (i.name == "resident") ++resident_creations;
+        return std::make_unique<IModelMock>(i);
+    });
+    reg.register_model(make_info("resident"));
+    auto broken = make_info("broken-runtime");
+    broken.runtime = "never_registered";
+    reg.register_model(broken);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.swap_to("resident").has_value());
+
+    const auto result = coordinator.swap_to("broken-runtime");
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::Unavailable);
+    CHECK(coordinator.is_loaded("resident"));
+    CHECK(coordinator.get_loaded_model().value_or("") == "resident");
+    CHECK_FALSE(coordinator.is_loaded("broken-runtime"));
+    CHECK(resident_creations == 1);
+    int unloads = 0;
+    auto* resident_mock = as_mock(const_cast<IModel*>(coordinator.get_model("resident")));
+    REQUIRE(resident_mock != nullptr);
+    for (const auto& call : resident_mock->calls) {
+        unloads += call.method == "unload";
+    }
+    CHECK(unloads == 0);
+}
+
+TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model even over budget", "[model][coordinator][runtime-preflight]") {
+    int resident_creations = 0;
+    ModelRegistry reg;
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        if (i.name == "resident") ++resident_creations;
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        return backend;
+    });
+    auto resident = make_info("resident");
+    resident.vram_required_mb = 9000;
+    auto broken = make_info("broken-runtime");
+    broken.runtime = "never_registered";
+    broken.vram_required_mb = 9000;
+    reg.register_model(resident);
+    reg.register_model(broken);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(10000, 0);
+    REQUIRE(coordinator.swap_to("resident").has_value());
+
+    const auto result = coordinator.swap_to("broken-runtime");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(coordinator.is_loaded("resident"));
+    CHECK(coordinator.get_loaded_model().value_or("") == "resident");
+    CHECK(resident_creations == 1);
+}
+
+TEST_CASE("BackendCoordinator: missing runtime does not drain active resident work",
+          "[model][coordinator][runtime-preflight]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel> {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto resident = make_info("resident");
+    resident.vram_required_mb = 9000;
+    reg.register_model(resident);
+    auto broken = make_info("broken-runtime");
+    broken.runtime = "never_registered";
+    broken.vram_required_mb = 9000;
+    reg.register_model(broken);
+    BackendCoordinator coordinator(reg);
+    SECTION("single resident") {}
+    SECTION("memory budget") {
+        coordinator.set_vram_budget(10000, 0);
+    }
+    REQUIRE(coordinator.swap_to("resident"));
+    const auto slot = coordinator.acquire_slot("resident");
+    REQUIRE(slot);
+
+    const auto result = coordinator.swap_to_cancellable(
+        "broken-runtime", std::chrono::milliseconds{100});
+    CHECK_FALSE(result);
+    if (!result) CHECK(result.error().code == ErrorCode::Unavailable);
+    CHECK(coordinator.active_request_count("resident") == 1);
+    CHECK_FALSE(coordinator.swap_in_progress());
+    InferenceRequest request;
+    request.prompt = "continue resident work";
+    CHECK(coordinator.predict("resident", *slot, request));
+    REQUIRE(coordinator.release_slot("resident", *slot));
+    CHECK(coordinator.active_request_count() == 0);
+    CHECK(coordinator.is_ready("resident"));
+}
+
 TEST_CASE("BackendCoordinator: unregister refuses loaded model", "[model][coordinator]") {
     ModelRegistry reg;
     reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
@@ -1950,4 +2798,722 @@ TEST_CASE("BackendCoordinator: admission pool limits span models",
     const auto second = coordinator.acquire_slot("helper-b", immediate);
     REQUIRE(second);
     REQUIRE(coordinator.release_slot("helper-b", *second));
+}
+
+TEST_CASE("BackendCoordinator: reclaims idle context without unloading weights",
+          "[model][coordinator][context-reclaim]") {
+    ModelRegistry reg;
+    IModelMock* resident = nullptr;
+    reg.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        if (info.name == "resident") {
+            resident = backend.get();
+            backend->reclaimable_mb.store(1000);
+        }
+        return backend;
+    });
+    auto a = make_info("resident");
+    auto b = make_info("incoming");
+    a.vram_required_mb = b.vram_required_mb = 5000;
+    reg.register_model(a);
+    reg.register_model(b);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.swap_to(a.name));
+    REQUIRE(resident);
+
+    SECTION("idle pool shrinks before any model is evicted") {
+        REQUIRE(coordinator.swap_to(b.name));
+        REQUIRE(coordinator.is_loaded(a.name));
+        CHECK(coordinator.is_loaded(b.name));
+        CHECK(resident->n_slots() == 2);
+        CHECK(coordinator.get_vram_usage() == 9000);
+        int loads = 0;
+        int unloads = 0;
+        int reclaims = 0;
+        for (const CallRecord& call : resident->calls) {
+            loads += call.method == "load";
+            unloads += call.method == "unload";
+            if (call.method == "reclaim_context") {
+                ++reclaims;
+                CHECK(call.detail == "5000");
+            }
+        }
+        CHECK(loads == 1);
+        CHECK(unloads == 0);
+        CHECK(reclaims == 1);
+    }
+    SECTION("always-resident weights allow idle context reclamation") {
+        resident->model_info.residency = ResidencyPolicy::Always;
+        resident->model_info.eviction_eligible = false;
+        REQUIRE(coordinator.swap_to(b.name));
+        REQUIRE(coordinator.is_loaded(a.name));
+        CHECK(resident->reclaimable_mb == 0);
+        CHECK(coordinator.is_ready(a.name));
+    }
+    SECTION("active work is not reclaimed or evicted") {
+        const auto slot = coordinator.acquire_slot(a.name);
+        REQUIRE(slot);
+        const auto loaded = coordinator.swap_to(b.name);
+        CHECK_FALSE(loaded);
+        CHECK(coordinator.is_loaded(a.name));
+        CHECK(resident->reclaimable_mb == 1000);
+        REQUIRE(coordinator.release_slot(a.name, *slot));
+    }
+    SECTION("rebuild barrier avoids backend locks while status and queues remain usable") {
+        std::promise<void> started;
+        std::promise<void> release;
+        const std::shared_future<void> released = release.get_future().share();
+        resident->reclaim_gate = [&] {
+            resident->reclaim_in_progress.store(true);
+            started.set_value();
+            released.wait();
+            resident->reclaim_in_progress.store(false);
+        };
+        auto loading = std::async(std::launch::async, [&] {
+            return coordinator.swap_to(b.name);
+        });
+        const bool entered = started.get_future().wait_for(std::chrono::seconds{2}) ==
+            std::future_status::ready;
+        if (!entered) {
+            release.set_value();
+            loading.wait();
+            FAIL("reclamation did not enter its barrier");
+        }
+        CHECK_FALSE(coordinator.is_ready(a.name));
+        const auto states = coordinator.residency();
+        CHECK(states.size() == 1);
+        if (!states.empty()) {
+            CHECK(states[0].resizing);
+            CHECK(states[0].free_slots == 0);
+        }
+        AcquireSlotOptions immediate;
+        immediate.block = false;
+        CHECK_FALSE(coordinator.acquire_slot(a.name, immediate));
+        AcquireSlotOptions bounded;
+        bounded.timeout = std::chrono::milliseconds{30};
+        CHECK_FALSE(coordinator.acquire_slot(a.name, bounded));
+        const int guarded_queries = resident->guarded_query_count.load();
+        release.set_value();
+        REQUIRE(loading.get());
+        CHECK(guarded_queries == 0);
+        CHECK(coordinator.is_ready(a.name));
+    }
+    SECTION("reclamation waits for the next hardware publication before eviction") {
+        coordinator.update_vram_observation(5000, 9000);
+        std::promise<void> reclaimed;
+        resident->reclaim_gate = [&] {
+            resident->vram_mb.fetch_add(1000);
+            reclaimed.set_value();
+        };
+        auto publishing = std::async(std::launch::async, [&] {
+            reclaimed.get_future().wait();
+            std::this_thread::sleep_for(std::chrono::milliseconds{750});
+            coordinator.update_vram_observation(4000, 9000);
+        });
+        const auto loaded = coordinator.swap_to(b.name);
+        publishing.get();
+        REQUIRE(loaded);
+        REQUIRE(coordinator.is_loaded(a.name));
+        CHECK(coordinator.is_loaded(b.name));
+    }
+    SECTION("backend exception clears admission barrier") {
+        resident->reclaim_throws.store(true);
+        CHECK_FALSE(coordinator.swap_to(b.name));
+        const auto states = coordinator.residency();
+        REQUIRE(states.size() == 1);
+        CHECK_FALSE(states[0].resizing);
+        AcquireSlotOptions options;
+        options.block = false;
+        const auto slot = coordinator.acquire_slot(a.name, options);
+        REQUIRE(slot);
+        REQUIRE(coordinator.release_slot(a.name, *slot));
+    }
+}
+
+TEST_CASE("Automatic concurrency admits to backend capacity rather than the role cap",
+          "[model][coordinator][resources][automatic]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots.store(3);
+        backend->busy_slots.assign(3, 0);
+        return backend;
+    });
+    ModelInfo info = make_info("automatic");
+    info.n_slots = 1;
+    info.concurrency_limit = 1;
+    info.concurrency_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::milliseconds(100);
+    options.prepare = [&] { return coordinator.load(info.name); };
+    std::vector<int> leases;
+    for (int i = 0; i < 3; ++i) {
+        const auto lease = coordinator.acquire_slot(info.name, options);
+        REQUIRE(lease);
+        leases.push_back(*lease);
+    }
+    CHECK(coordinator.active_request_count() == 3);
+    CHECK(coordinator.residency().front().concurrency_limit == 3);
+    for (int lease : leases) REQUIRE(coordinator.release_slot(info.name, lease));
+}
+
+TEST_CASE("BackendCoordinator: demand reservations include active leases")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto info = make_info("demand");
+    info.n_slots = 2;
+    info.concurrency_auto = true;
+    info.context_pool_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+
+    std::mutex values_mutex;
+    std::vector<int> aggregate_values;
+    AcquireSlotOptions options;
+    options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+    options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl&) {
+        std::lock_guard lock(values_mutex);
+        aggregate_values.push_back(demand.aggregate_context);
+        return Ok();
+    };
+    const auto first = coordinator.acquire_slot(info.name, options);
+    REQUIRE(first);
+    const auto second = coordinator.acquire_slot(info.name, options);
+    REQUIRE(second);
+    REQUIRE(coordinator.release_slot(info.name, *second));
+    REQUIRE(coordinator.release_slot(info.name, *first));
+    REQUIRE(aggregate_values.size() == 2);
+    CHECK(aggregate_values[0] == 500);
+    CHECK(aggregate_values[1] == 1000);
+}
+TEST_CASE("BackendCoordinator: busy demand waits and cancellation cleans waiter")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto info = make_info("demand-busy");
+    info.n_slots = 2;
+    info.concurrency_auto = true;
+    info.context_pool_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+
+    AcquireSlotOptions first_options;
+    first_options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+    first_options.prepare_capacity = [](const RequestDemand&, const LifecycleControl&) { return Ok(); };
+    const auto first = coordinator.acquire_slot(info.name, first_options);
+    REQUIRE(first);
+
+    std::atomic<bool> cancelled{false};
+    std::atomic<int> attempts{0};
+    std::promise<Result<int>> queued_result;
+    auto queued_future = queued_result.get_future();
+    std::thread queued_worker([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds(5);
+        options.cancelled = [&] { return cancelled.load(); };
+        options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+        options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl&) {
+            CHECK(demand.aggregate_context >= 1000);
+            CHECK(demand.aggregate_sequences >= 2);
+            ++attempts;
+            if (coordinator.active_request_count(info.name) > 0)
+                return Err<void>(ErrorCode::ResourceBusy, "active peer");
+            return Ok();
+        };
+        queued_result.set_value(coordinator.acquire_slot(info.name, options));
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(attempts.load() == 1);
+    CHECK(coordinator.queued_request_count() == 1);
+    REQUIRE(coordinator.release_slot(info.name, *first));
+    REQUIRE(queued_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto second = queued_future.get();
+    REQUIRE(second);
+    REQUIRE(coordinator.release_slot(info.name, *second));
+    queued_worker.join();
+    CHECK(attempts.load() == 2);
+    CHECK(coordinator.queued_request_count() == 0);
+    CHECK(coordinator.active_request_count(info.name) == 0);
+
+    cancelled.store(false);
+    const auto held = coordinator.acquire_slot(info.name, first_options);
+    REQUIRE(held);
+    std::promise<Result<int>> cancelled_result;
+    auto cancelled_future = cancelled_result.get_future();
+    std::thread cancelled_thread([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds(5);
+        options.cancelled = [&] { return cancelled.load(); };
+        options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+        options.prepare_capacity = [](const RequestDemand&, const LifecycleControl&) {
+            return Err<void>(ErrorCode::ResourceBusy, "active peer");
+        };
+        cancelled_result.set_value(coordinator.acquire_slot(info.name, options));
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    cancelled.store(true);
+    REQUIRE(cancelled_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto cancelled_slot = cancelled_future.get();
+    CHECK_FALSE(cancelled_slot);
+    CHECK(cancelled_slot.error().code == ErrorCode::Cancelled);
+    cancelled_thread.join();
+    REQUIRE(coordinator.release_slot(info.name, *held));
+    CHECK(coordinator.queued_request_count() == 0);
+    CHECK(coordinator.active_request_count(info.name) == 0);
+}
+TEST_CASE("BackendCoordinator: demand preflight runs with full current pool")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) { return std::make_unique<IModelMock>(info); });
+    auto info = make_info("full-pool-demand");
+    info.n_slots = 1;
+    info.concurrency_auto = true;
+    info.context_pool_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions first_options;
+    first_options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+    first_options.prepare_capacity = [](const RequestDemand&, const LifecycleControl&) { return Ok(); };
+    const auto first = coordinator.acquire_slot(info.name, first_options);
+    REQUIRE(first);
+    std::atomic<int> attempts{0};
+    std::atomic<int> max_context{0};
+    std::atomic<int> max_sequences{0};
+    std::promise<Result<int>> result_promise;
+    auto result_future = result_promise.get_future();
+    std::thread worker([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds(5);
+        options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+        options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl&) {
+            max_context.store(demand.aggregate_context);
+            max_sequences.store(demand.aggregate_sequences);
+            const int call = ++attempts;
+            if (call == 1) return Err<void>(ErrorCode::ResourceBusy, "active");
+            return Ok();
+        };
+        result_promise.set_value(coordinator.acquire_slot(info.name, options));
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(attempts.load() == 1);
+    CHECK(max_context.load() == 1000);
+    CHECK(max_sequences.load() == 2);
+    CHECK(coordinator.queued_request_count() == 1);
+    REQUIRE(coordinator.release_slot(info.name, *first));
+    REQUIRE(result_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto second = result_future.get();
+    REQUIRE(second);
+    REQUIRE(coordinator.release_slot(info.name, *second));
+    worker.join();
+    CHECK(attempts.load() == 2);
+    CHECK(coordinator.queued_request_count() == 0);
+}
+TEST_CASE("BackendCoordinator: retained demand survives paused capacity callback")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) { return std::make_unique<IModelMock>(info); });
+    auto info = make_info("paused-demand");
+    info.n_slots = 1;
+    info.concurrency_auto = true;
+    info.context_pool_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+
+    AcquireSlotOptions first_options;
+    first_options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+    first_options.prepare_capacity = [](const RequestDemand&, const LifecycleControl&) { return Ok(); };
+    const auto first = coordinator.acquire_slot(info.name, first_options);
+    REQUIRE(first);
+
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool entered = false;
+    bool resume = false;
+    std::atomic<int> calls{0};
+    std::promise<Result<int>> result_promise;
+    auto result_future = result_promise.get_future();
+    std::thread worker([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds(5);
+        options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+        options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl&) {
+            CHECK(demand.aggregate_context == 1000);
+            CHECK(demand.aggregate_sequences == 2);
+            const int call = ++calls;
+            if (call == 1) {
+                std::unique_lock lock(gate_mutex);
+                entered = true;
+                gate_cv.notify_all();
+                gate_cv.wait(lock, [&] { return resume; });
+                return Err<void>(ErrorCode::ResourceBusy, "active peer");
+            }
+            return Ok();
+        };
+        result_promise.set_value(coordinator.acquire_slot(info.name, options));
+    });
+    {
+        std::unique_lock lock(gate_mutex);
+        REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
+    }
+    CHECK(coordinator.active_request_count(info.name) == 1);
+    REQUIRE(coordinator.release_slot(info.name, *first));
+    {
+        std::lock_guard lock(gate_mutex);
+        resume = true;
+    }
+    gate_cv.notify_all();
+    REQUIRE(result_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto second = result_future.get();
+    REQUIRE(second);
+    REQUIRE(coordinator.release_slot(info.name, *second));
+    worker.join();
+    CHECK(calls.load() == 2);
+    CHECK(coordinator.active_request_count(info.name) == 0);
+}
+TEST_CASE("BackendCoordinator: native OOM reclaims idle context before one retry",
+          "[model][coordinator][context-reclaim]") {
+    ModelRegistry registry;
+    IModelMock* resident = nullptr;
+    IModelMock* incoming = nullptr;
+    bool memory_reclaimed = false;
+    int incoming_instances = 0;
+    registry.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        if (info.name == "oom-resident") {
+            resident = backend.get();
+            backend->reclaimable_mb.store(1000);
+            backend->reclaim_gate = [&] {
+                memory_reclaimed = true;
+            };
+        } else {
+            incoming = backend.get();
+            ++incoming_instances;
+            backend->load_should_fail.store(!memory_reclaimed);
+            backend->load_failure_code.store(ErrorCode::OutOfMemory);
+        }
+        return backend;
+    });
+    auto first = make_info("oom-resident");
+    auto second = make_info("oom-incoming");
+    first.vram_required_mb = second.vram_required_mb = 5000;
+    registry.register_model(first);
+    registry.register_model(second);
+    BackendCoordinator coordinator(registry);
+    coordinator.set_vram_budget(20000, 0);
+    REQUIRE(coordinator.swap_to(first.name));
+    REQUIRE(resident != nullptr);
+    REQUIRE(coordinator.swap_to(second.name));
+    CHECK(coordinator.is_loaded(first.name));
+    CHECK(coordinator.is_loaded(second.name));
+    int reclaims = 0;
+    int unloads = 0;
+    int attempts = 0;
+    for (const auto& call : resident->calls) {
+        reclaims += call.method == "reclaim_context";
+        unloads += call.method == "unload";
+    }
+    for (const auto& call : incoming->calls) attempts += call.method == "load";
+    CHECK(reclaims == 1);
+    CHECK(unloads == 0);
+    CHECK(attempts == 1);
+    CHECK(incoming_instances == 2);
+}
+
+TEST_CASE("BackendCoordinator: rechecks capacity after another waiter acquires") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto info = make_info("stale-demand");
+    info.concurrency_auto = info.context_pool_auto = true;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    std::promise<void> entered;
+    std::promise<void> resume;
+    auto resumed = resume.get_future().share();
+    auto started = entered.get_future();
+    std::atomic<int> calls{0};
+    std::atomic<bool> observed_peer{false};
+    AcquireSlotOptions first_options;
+    first_options.timeout = std::chrono::seconds(3);
+    first_options.demand = [] { return Ok(RequestDemand{0, 500, 500, 1, 0}); };
+    first_options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl&) {
+        if (++calls == 1) {
+            entered.set_value();
+            resumed.wait_for(std::chrono::seconds(2));
+            return Ok();
+        }
+        if (demand.aggregate_context == 1000 && demand.aggregate_sequences == 2)
+            observed_peer.store(true);
+        if (coordinator.active_request_count() > 0)
+            return Err<void>(ErrorCode::ResourceBusy, "peer active");
+        return Ok();
+    };
+    auto first = std::async(std::launch::async, [&] {
+        return coordinator.acquire_slot(info.name, first_options);
+    });
+    REQUIRE(started.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    AcquireSlotOptions second_options;
+    second_options.timeout = std::chrono::seconds(1);
+    second_options.demand = first_options.demand;
+    second_options.prepare_capacity = [](const RequestDemand&, const LifecycleControl&) { return Ok(); };
+    const auto second = coordinator.acquire_slot(info.name, second_options);
+    resume.set_value();
+    REQUIRE(second);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!observed_peer.load() && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(observed_peer.load());
+    REQUIRE(coordinator.release_slot(info.name, *second));
+    const auto first_lease = first.get();
+    REQUIRE(first_lease);
+    REQUIRE(coordinator.release_slot(info.name, *first_lease));
+}
+
+TEST_CASE("BackendCoordinator dispatches video generation through its lease",
+          "[model][coordinator][video]") {
+    ModelRegistry registry;
+    VideoBackendMock* backend = nullptr;
+    registry.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto created = std::make_unique<VideoBackendMock>(info);
+        backend = created.get();
+        return created;
+    });
+
+    auto info = make_info("video");
+    info.modality = "video";
+    info.capabilities = {"video_generation"};
+    info.role = ModelRole::Media;
+    info.n_slots = 1;
+    info.min_slots = 1;
+    registry.register_model(info);
+
+    const auto registered = registry.get_info(info.name);
+    CHECK(registered.role == ModelRole::Media);
+    CHECK(registered.supports("video_generation"));
+
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    const auto lease = coordinator.acquire_slot(info.name);
+    REQUIRE(lease);
+
+    VideoGenerationRequest request;
+    request.prompt = "a cat walking";
+    request.frames = 33;
+    request.fps = 24;
+    const auto result = coordinator.generate_video(
+        info.name, *lease, request, [](int percent) { return percent == 100; });
+    REQUIRE(result);
+    REQUIRE(backend != nullptr);
+    CHECK(backend->last_slot == 0);
+    CHECK(backend->last_request.prompt == request.prompt);
+    CHECK(result->video_bytes.size() == 1);
+    CHECK(result->content_type == "video/x-msvideo");
+    CHECK(result->output_video_seconds == 33.0 / 24.0);
+    REQUIRE(coordinator.release_slot(info.name, *lease));
+}
+
+TEST_CASE("BackendCoordinator: opt-in continuation admission is bounded", "[model][continuation]") {
+    ModelRegistry registry;
+    const auto factory = [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots = 1;
+        return backend;
+    };
+    registry.register_factory("vllm_radiance", factory);
+    registry.set_factory(factory);
+    ModelInfo info = make_info("continuation-test");
+    info.runtime = "vllm_radiance";
+    info.n_slots = info.min_slots = 1;
+    info.continuation_grace_ms = 300;
+    SECTION("native opt-in") {}
+    SECTION("default off") { info.continuation_grace_ms = 0; }
+    SECTION("Vulkan ignores opt-in") { info.runtime = "llama_cpp"; }
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions owner;
+    owner.reservation_key = "openai-cache:owner";
+    owner.timeout = std::chrono::seconds(2);
+    const auto seed = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(seed);
+    REQUIRE(coordinator.release_slot(info.name, *seed));
+    AcquireSlotOptions peer;
+    peer.block = false;
+    peer.reservation_key = "openai-cache:peer";
+    const auto admitted = coordinator.acquire_slot(info.name, peer);
+    if (info.runtime == "llama_cpp" || info.continuation_grace_ms == 0) {
+        REQUIRE(admitted);
+        CHECK(coordinator.release_slot(info.name, *admitted));
+    } else {
+        REQUIRE_FALSE(admitted);
+    }
+}
+
+TEST_CASE("BackendCoordinator: one cached continuation yields to a queued peer", "[model][continuation]") {
+    ModelRegistry registry;
+    const auto factory = [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots = 1;
+        return backend;
+    };
+    registry.register_factory("vllm_radiance", factory);
+    registry.set_factory(factory);
+    ModelInfo info = make_info("continuation-fairness");
+    info.runtime = "vllm_radiance";
+    info.n_slots = info.min_slots = 1;
+    info.continuation_grace_ms = 1500;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions owner;
+    owner.reservation_key = "openai-cache:owner";
+    owner.timeout = std::chrono::seconds(2);
+    AcquireSlotOptions peer = owner;
+    peer.reservation_key = "openai-cache:peer";
+    SECTION("basic admission") {}
+    SECTION("real capacity preparation preserves continuation") {
+        owner.demand = [] { return Ok(RequestDemand{0, 200, 200, 1, 0}); };
+        owner.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl& control) {
+            if (demand.aggregate_sequences > 1)
+                return Err<void>(ErrorCode::ResourceBusy, "one native sequence is active");
+            return coordinator.prepare_request_capacity(info.name, demand, control);
+        };
+        peer.demand = owner.demand;
+        peer.prepare_capacity = owner.prepare_capacity;
+    }
+    const auto seed = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(seed);
+    auto waiting = std::async(std::launch::async, [&] { return coordinator.acquire_slot(info.name, peer); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (coordinator.queued_request_count() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    REQUIRE(coordinator.queued_request_count() == 1);
+    REQUIRE(coordinator.release_slot(info.name, *seed));
+    CHECK(waiting.wait_for(std::chrono::milliseconds(1100)) == std::future_status::timeout);
+    const auto continuation = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(continuation);
+    REQUIRE(coordinator.release_slot(info.name, *continuation));
+    REQUIRE(waiting.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    const auto peer_lease = waiting.get();
+    REQUIRE(peer_lease);
+    CHECK(coordinator.release_slot(info.name, *peer_lease));
+}
+
+TEST_CASE("BackendCoordinator: continuation hold respects interruption and expiry", "[model][continuation]") {
+    ModelRegistry registry;
+    const auto factory = [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots = 1;
+        return backend;
+    };
+    registry.register_factory("vllm_radiance", factory);
+    registry.set_factory(factory);
+    ModelInfo info = make_info("continuation-limits");
+    info.runtime = "vllm_radiance";
+    info.n_slots = info.min_slots = 1;
+    info.continuation_grace_ms = 100;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions owner;
+    owner.reservation_key = "openai-cache:owner";
+    const auto seed = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(seed);
+    REQUIRE(coordinator.release_slot(info.name, *seed));
+    AcquireSlotOptions peer;
+    peer.reservation_key = "openai-cache:peer";
+    peer.timeout = std::chrono::seconds(1);
+    SECTION("higher priority bypasses hold") { peer.priority = 1; peer.block = false; }
+    SECTION("expiry releases peer") {}
+    SECTION("cancelled waiter does not consume hold") {
+        AcquireSlotOptions cancelled = peer;
+        cancelled.reservation_key = owner.reservation_key;
+        cancelled.cancelled = [] { return true; };
+        CHECK_FALSE(coordinator.acquire_slot(info.name, cancelled));
+        CHECK(coordinator.queued_request_count() == 0);
+        peer.block = false;
+    }
+    SECTION("unload clears admission generation") {
+        REQUIRE(coordinator.unload(info.name));
+        REQUIRE(coordinator.load(info.name));
+        peer.block = false;
+    }
+    const auto lease = coordinator.acquire_slot(info.name, peer);
+    REQUIRE(lease);
+    CHECK(coordinator.release_slot(info.name, *lease));
+}
+
+TEST_CASE("ModelRegistry: rejects invalid Radiance prefill before admission", "[model][registry][radiance]")
+{
+    ModelRegistry registry;
+    ModelInfo info = make_info("prefill-candidate");
+    info.runtime = "vllm_radiance";
+    registry.register_model(info);
+    for (const std::string& selection : {std::string("r4d"), std::string("upstream")})
+    {
+        info.artifacts["prefill_attention"] = selection;
+        registry.register_model(info);
+        CHECK(registry.get_info(info.name).artifacts.at("prefill_attention") == selection);
+    }
+    info.artifacts["prefill_attention"] = "automatic";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    CHECK(registry.get_info(info.name).artifacts.at("prefill_attention") == "upstream");
+
+    info.artifacts["prefill_attention"] = "r4d_int4";
+    info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
+    info.artifacts["prefill_overlay"] = "C:/runtime/r4d_int4_prefill_overlay.py";
+    info.artifacts["prefill_dll"] = "C:/runtime/r4d_int4_tiled.dll";
+    info.artifacts["prefill_dll_sha256"] = std::string(64, 'a');
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+
+    info.artifacts["decode_dll"] = "C:/runtime/r4d_int4_decode.dll";
+    info.artifacts["decode_dll_sha256"] = std::string(64, 'b');
+    registry.register_model(info);
+    CHECK(registry.get_info(info.name).artifacts.at("prefill_attention") == "r4d_int4");
+    CHECK(registry.get_info(info.name).artifacts.at("decode_dll") == "C:/runtime/r4d_int4_decode.dll");
+    info.artifacts.erase("decode_dll_sha256");
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["decode_dll_sha256"] = std::string(64, 'b');
+    info.artifacts["decode_dll_sha256"][0] = 'z';
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["decode_dll_sha256"] = std::string(64, 'b');
+    info.artifacts["prefill_attention"] = "r4d";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_attention"] = "r4d_int4";
+    info.artifacts.erase("decode_dll");
+    info.artifacts.erase("decode_dll_sha256");
+
+    info.artifacts.erase("prefill_dll_sha256");
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_dll_sha256"] = "not-a-digest";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_dll_sha256"] = std::string(64, 'a');
+    info.artifacts["kv_cache_dtype"] = "auto";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+
+    info.artifacts["prefill_attention"] = "r4d";
+    info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_attention"] = "upstream";
+    info.artifacts["kv_cache_dtype"] = "int8";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts.erase("prefill_attention");
+    info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
 }

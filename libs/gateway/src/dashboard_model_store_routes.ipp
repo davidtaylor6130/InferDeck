@@ -7,6 +7,17 @@
         const std::string query = req.has_param("q") ? req.get_param_value("q") : "";
         const std::string runtime = req.has_param("runtime") ? req.get_param_value("runtime") : "";
         const std::string modality = req.has_param("modality") ? req.get_param_value("modality") : "";
+        const std::string sort = req.has_param("sort") ? req.get_param_value("sort") : "trending";
+        bool include_gated = false;
+        if (req.has_param("includeGated")) {
+            const std::string value = req.get_param_value("includeGated");
+            if (value != "true" && value != "false") {
+                write_error(resp, 400, "invalid_model_search",
+                            "includeGated must be true or false");
+                return;
+            }
+            include_gated = value == "true";
+        }
         int limit = 20;
         if (req.has_param("limit")) {
             try {
@@ -16,7 +27,8 @@
                 return;
             }
         }
-        auto result = deps.model_store->search(query, runtime, modality, limit);
+        auto result = deps.model_store->search(
+            query, runtime, modality, limit, sort, include_gated);
         if (!result) {
             write_error(resp, result.error().code == foundation::ErrorCode::InvalidArgument ? 400 : 502,
                         "model_search_failed", result.error().message);

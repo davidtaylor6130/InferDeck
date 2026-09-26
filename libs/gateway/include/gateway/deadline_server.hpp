@@ -31,7 +31,13 @@ protected:
                     std::chrono::steady_clock::now());
                 return process_request(
                     stream, remote_address, remote_port, local_address, local_port,
-                    close_connection, connection_closed, nullptr, &websocket_upgraded);
+                    close_connection, connection_closed,
+                    [](httplib::Request& request) {
+                        if (!request.has_header("Content-Length") &&
+                            !request.has_header("Transfer-Encoding")) {
+                            request.set_header("Content-Length", "0");
+                        }
+                    }, &websocket_upgraded);
             });
         drain_and_close(socket);
         return result;

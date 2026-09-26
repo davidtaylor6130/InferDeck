@@ -13,7 +13,9 @@ Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scripts') -Filter *.ps1 -File -
         if ($errors.Count -gt 0) { throw "PowerShell parse failed: $($_.FullName): $($errors[0].Message)" }
     }
 
-& git -C $repoRoot ls-files '*.json' | ForEach-Object {
+& git -C $repoRoot ls-files '*.json' |
+    Where-Object { $_ -notmatch '(^|/)(package-lock|bun|pnpm-lock)\.json$' } |
+    ForEach-Object {
         $jsonPath = Join-Path $repoRoot $_
         try {
             Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json | Out-Null

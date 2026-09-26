@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { deleteModelAlias, getModelAliases, getModels, saveModelAlias, type ModelAliasRecord } from '../api';
 import { Badge, Button, EmptyState, Panel, SectionTitle } from '../components/ui';
-import { type DashboardSection } from '../dashboardSections';
+import { modelBelongsToSection, type DashboardSection } from '../dashboardSections';
 
 export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ section }) => {
   const [aliases, setAliases] = useState<ModelAliasRecord[]>([]);
@@ -11,11 +11,10 @@ export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ secti
   const [target, setTarget] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const concrete = useMemo(() => models.filter(model => !model.alias && (
-    section === 'dictation'
-      ? model.modality === 'audio_transcription' || model.modality === 'audio_speech'
-      : model.modality !== 'audio_transcription' && model.modality !== 'audio_speech'
-  )), [models, section]);
+  const concrete = useMemo(
+    () => models.filter(model => !model.alias && modelBelongsToSection(model, section)),
+    [models, section],
+  );
 
   const refresh = async () => {
     const [aliasDocument, nextModels] = await Promise.all([getModelAliases(), getModels()]);
@@ -83,7 +82,7 @@ export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ secti
                 </select>
                 <span className="mt-1 flex flex-wrap gap-1">{alias.requiredCapabilities.map(capability => <Badge key={capability} label={capability} tone="idle" />)}</span>
               </div>
-              <Button tone="danger" disabled={busy} onClick={() => { void remove(alias.name); }}>Delete alias</Button>
+              <Button tone="danger" className="w-full md:w-auto" disabled={busy} onClick={() => { void remove(alias.name); }}>Delete alias</Button>
             </div>
           ))}
         </div>
