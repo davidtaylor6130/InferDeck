@@ -29,6 +29,17 @@ _REQUIRED=("model","python_root","python_site","vllm_source","radiance_source","
 _PREFILL_ATTENTION_DEFAULT = "r4d"
 _PREFILL_ATTENTION_OPTIONS = frozenset(("r4d", "r4d_int4", "upstream"))
 _KV_CACHE_DTYPE_OPTIONS = frozenset(("auto", "int4_per_token_head"))
+_RADIANCE_ENV_PREFIX = "RADIANCE_"
+_RADIANCE_ENV_DEFAULTS = {
+    "RADIANCE_MXFP4_W4A8": "1",
+    "RADIANCE_MXFP4": "1",
+    "RADIANCE_MXFP4_WPERM": "1",
+    "RADIANCE_MXFP4_A_TILED_MIN_M": "513",
+    "RADIANCE_MXFP4_W4A8_MIN_M": "0",
+    "RADIANCE_MXFP4_DECODE_MAX_M": "8",
+    "RADIANCE_MXFP4_R4D_DECODE_MAX_M": "0",
+    "RADIANCE_FUSE_RMS_QUANT": "1",
+}
 
 def _gpu_memory_utilization(prefill_attention:str)->float:
     return 0.925 if prefill_attention == "r4d" else 0.90
@@ -36,10 +47,17 @@ def _gpu_memory_utilization(prefill_attention:str)->float:
 def _is_r4d_prefill(prefill_attention:str)->bool:
     return prefill_attention in ("r4d", "r4d_int4")
 
-def _compilation_config(kv_cache_dtype:str, prefill_attention:str)->dict[str,Any]:
+def _compilation_config(kv_cache_dtype:str, prefill_attention:str, capture_sizes:Any=None)->dict[str,Any]:
     if kv_cache_dtype == "int4_per_token_head" and prefill_attention == "upstream":
         return {"mode":0,"cudagraph_mode":"NONE"}
-    return {"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}
+    sizes=[1]
+    if isinstance(capture_sizes,str) and capture_sizes.strip():
+        try: sizes=[int(part) for part in capture_sizes.split(",") if part.strip()]
+        except ValueError: raise RuntimeError("cudagraph_capture_sizes must be comma-separated integers")
+    elif isinstance(capture_sizes,list) and capture_sizes:
+        sizes=[int(part) for part in capture_sizes]
+    if not sizes or any(size<1 for size in sizes): raise RuntimeError("cudagraph_capture_sizes must be positive integers")
+    return {"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":sorted(set(sizes))}
 
 def _kv_cache_token_capacity(kv_cache_config:Any)->int:
     num_blocks = int(kv_cache_config.num_blocks)
@@ -85,6 +103,31 @@ def _need(c:dict[str,Any],k:str)->str:
     v=c.get(k)
     if not isinstance(v,str) or not v or not Path(v).exists(): raise RuntimeError(f"required vllm_radiance artifact is unavailable: {k}")
     return v
+def _truthy(v:Any)->bool:
+    if isinstance(v,bool):return v
+    if isinstance(v,str):return v.strip().lower() in ("1","true","yes","on")
+    if isinstance(v,int):return v!=0
+    return False
+def _radiance_env(c:dict[str,Any])->dict[str,str]:
+    merged=dict(_RADIANCE_ENV_DEFAULTS)
+    raw=c.get("radiance_env")
+    if raw is None or raw=="":
+        return merged
+    if not isinstance(raw,str):
+        raise RuntimeError("radiance_env must be a JSON object string")
+    try:
+        parsed=json.loads(raw)
+    except ValueError as error:
+        raise RuntimeError(f"radiance_env is not valid JSON: {error}") from None
+    if not isinstance(parsed,dict):
+        raise RuntimeError("radiance_env must be a JSON object")
+    for key,value in parsed.items():
+        if not isinstance(key,str) or not key.startswith(_RADIANCE_ENV_PREFIX):
+            raise RuntimeError(f"radiance_env key is not a {_RADIANCE_ENV_PREFIX} variable: {key!r}")
+        if isinstance(value,bool) or not isinstance(value,(str,int)):
+            raise RuntimeError(f"radiance_env value must be a string or int: {key!r}")
+        merged[key]=str(value)
+    return merged
 def _load(n:str,p:str)->Any:
     spec=importlib.util.spec_from_file_location(n,p)
     if spec is None or spec.loader is None: raise RuntimeError(f"cannot load {p}")
@@ -96,6 +139,7 @@ def validate_config(c:dict[str,Any])->None:
     min_slots = int(c.get("min_slots", 0))
     if context_size != 106496:
         raise RuntimeError("requires 106496 context")
+    _radiance_env(c)
     prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
     if not isinstance(prefill_attention, str) or prefill_attention not in _PREFILL_ATTENTION_OPTIONS:
         raise RuntimeError("prefill_attention must be one of: r4d, r4d_int4, upstream")
@@ -214,7 +258,7 @@ def _create(c:dict[str,Any])->dict[str,Any]:
     prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
     for path in reversed([_need(c,key) for key in ("python_site","vllm_source","radiance_source","radiance_extension")]):
         if path not in sys.path:sys.path.insert(0,path)
-    os.environ.update({"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1","TOKENIZERS_PARALLELISM":"false","VLLM_TARGET_DEVICE":"rocm","VLLM_ENABLE_V1_MULTIPROCESSING":"0","VLLM_NO_USAGE_STATS":"1","VLLM_USE_RUST_FRONTEND":"0","ROCM_PATH":_need(c,"rocm"),"HIP_PATH":_need(c,"rocm"),"RADIANCE_MXFP4_W4A8":"1","RADIANCE_MXFP4":"1","RADIANCE_MXFP4_WPERM":"1","RADIANCE_MXFP4_A_TILED_MIN_M":"513","RADIANCE_MXFP4_W4A8_MIN_M":"0","RADIANCE_MXFP4_DECODE_MAX_M":"8","RADIANCE_MXFP4_R4D_DECODE_MAX_M":"0","RADIANCE_FUSE_RMS_QUANT":"1"})
+    os.environ.update({"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1","TOKENIZERS_PARALLELISM":"false","VLLM_TARGET_DEVICE":"rocm","VLLM_ENABLE_V1_MULTIPROCESSING":"0","VLLM_NO_USAGE_STATS":"1","VLLM_USE_RUST_FRONTEND":"0","ROCM_PATH":_need(c,"rocm"),"HIP_PATH":_need(c,"rocm"),**_radiance_env(c)})
     dll_paths = [Path(c["python_root"]), Path(c["python_root"]) / "DLLs", Path(c["python_site"]),
                  Path(c["rocm"]), Path(c["radiance_extension"])]
     if not _DLL_HANDLES:
@@ -252,11 +296,11 @@ def _create(c:dict[str,Any])->dict[str,Any]:
             prefill.__enter__()
             contexts.insert(0, prefill)
         model=_need(c,"model");tokenizer_revision=register_tokenizer(model)
-        scheduler_options = {"async_scheduling": False} if _is_r4d_prefill(prefill_attention) else {}
+        scheduler_options = {"async_scheduling": _truthy(c.get("async_scheduling"))} if _is_r4d_prefill(prefill_attention) else {}
         if prefill_attention == "r4d_int4":
             scheduler_options["long_prefill_token_threshold"] = 2048
         kv_cache_dtype = c.get("kv_cache_dtype", "auto")
-        compilation_config = _compilation_config(kv_cache_dtype, prefill_attention)
+        compilation_config = _compilation_config(kv_cache_dtype, prefill_attention, c.get("cudagraph_capture_sizes"))
         memory_utilization = _gpu_memory_utilization(prefill_attention)
         n_slots = int(c["n_slots"])
         engine_args=EngineArgs(model=model,logits_processors=[InferDeckPenaltiesProcessor],tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",kv_cache_dtype=kv_cache_dtype,max_model_len=106496,max_num_batched_tokens=4096,max_num_seqs=n_slots,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=memory_utilization,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config=compilation_config,**scheduler_options)
@@ -274,7 +318,8 @@ def _create(c:dict[str,Any])->dict[str,Any]:
             expected_memory_utilization = memory_utilization
             minimum_blocks = 185 if prefill_attention == "r4d" else 0
             capacity_valid = kv_max_concurrency >= n_slots if prefill_attention == "r4d_int4" else actual["blocks"] >= minimum_blocks
-            if actual["async"] or actual["long_prefill_token_threshold"] != scheduler_options.get("long_prefill_token_threshold", 0) or actual["retention"] != 0 or actual["context"] != 106496 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < 1073741824:
+            async_requested = bool(scheduler_options.get("async_scheduling", False))
+            if (actual["async"] and not async_requested) or actual["long_prefill_token_threshold"] != scheduler_options.get("long_prefill_token_threshold", 0) or actual["retention"] != 0 or actual["context"] != 106496 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < 1073741824:
                 raise RuntimeError("R4D cache profile or free-memory guard failed")
         tokenizer=cached_tokenizer_from_config(engine.vllm_config.model_config)
         if engine.vllm_config.model_config.enable_prompt_embeds:raise RuntimeError("native pooled tokenizer does not support prompt embeds")
@@ -283,8 +328,8 @@ def _create(c:dict[str,Any])->dict[str,Any]:
         if prefill_attention == "upstream":
             _verify_upstream_prefill_attention()
         decode_kernel_enabled = prefill_attention == "r4d_int4" and "decode_dll" in c
-        print(f"vllm_radiance prefill_attention={prefill_attention} kv_cache_dtype={kv_cache_dtype} gpu_memory_utilization={memory_utilization} int4_decode_kernel={str(decode_kernel_enabled).lower()}", file=sys.stderr, flush=True)
-        return {"engine":engine,"engine_lock":threading.RLock(),"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention,"int4_decode_kernel":decode_kernel_enabled}
+        print(f"vllm_radiance prefill_attention={prefill_attention} kv_cache_dtype={kv_cache_dtype} gpu_memory_utilization={memory_utilization} int4_decode_kernel={str(decode_kernel_enabled).lower()} async_req={c.get('async_scheduling')!r} radiance_env={json.dumps(_radiance_env(c), sort_keys=True)}", file=sys.stderr, flush=True)
+        return {"engine":engine,"engine_lock":threading.RLock(),"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention,"int4_decode_kernel":decode_kernel_enabled,"radiance_env":_radiance_env(c)}
     except Exception as load_error:
         try:
             shutdown({"engine": engine, "active": set(), "requests": {},
@@ -425,6 +470,9 @@ def step(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
 def _step_locked(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
     state=s["requests"].get(rid)
     if state is None:raise RuntimeError("unknown vllm_radiance request")
+    # Only advance the engine when this request has nothing queued. One step
+    # yields an output for every active request, so stepping per thread ran the
+    # engine once per concurrent request and did len(active) times the work.
     for output in s["engine"].step():
         output_state = s["requests"].get(output.request_id)
         if output_state is not None:
@@ -456,6 +504,7 @@ def _step_locked(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
                     "prompt_tokens": len(output.prompt_token_ids or []),
                     "cached_tokens": int(output.num_cached_tokens or 0),
                     "completion_tokens": state["completion_tokens"],
+                    "radiance_env": s.get("radiance_env"),
                 }), file=sys.stderr, flush=True)
         if done:s["active"].discard(rid);s["requests"].pop(rid,None)
     return result

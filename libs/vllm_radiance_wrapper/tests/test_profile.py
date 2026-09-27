@@ -680,6 +680,39 @@ class ProfileTests(unittest.TestCase):
         self.assertIsNone(state["engine"])
         self.assertEqual(calls, ["shutdown", "overlay_exit", "overlay_exit", "sync", "empty"])
 
+    def test_radiance_env_defaults_when_absent(self):
+        self.assertEqual(profile._radiance_env({}), profile._RADIANCE_ENV_DEFAULTS)
+
+    def test_radiance_env_overrides_only_named_knobs(self):
+        merged = profile._radiance_env({"radiance_env": json.dumps({
+            "RADIANCE_MXFP4_DECODE_MAX_M": "64",
+            "RADIANCE_MXFP4_A_TILED_MIN_M": 1,
+        })})
+        self.assertEqual(merged["RADIANCE_MXFP4_DECODE_MAX_M"], "64")
+        self.assertEqual(merged["RADIANCE_MXFP4_A_TILED_MIN_M"], "1")
+        self.assertEqual(merged["RADIANCE_MXFP4_R4D_DECODE_MAX_M"], "0")
+        self.assertEqual(merged["RADIANCE_FUSE_RMS_QUANT"], "1")
+
+    def test_radiance_env_rejects_non_radiance_keys(self):
+        with self.assertRaisesRegex(RuntimeError, "is not a RADIANCE_ variable"):
+            profile._radiance_env({"radiance_env": json.dumps({"PATH": "C:/evil"})})
+
+    def test_radiance_env_rejects_malformed_payloads(self):
+        for payload in ("not json", json.dumps([1, 2]), json.dumps({"RADIANCE_X": True}),
+                        json.dumps({"RADIANCE_X": [1]}), json.dumps({1: "x"})):
+            with self.subTest(payload=payload):
+                with self.assertRaises(RuntimeError):
+                    profile._radiance_env({"radiance_env": payload})
+
+    def test_radiance_env_rejects_non_string_payload(self):
+        with self.assertRaisesRegex(RuntimeError, "must be a JSON object string"):
+            profile._radiance_env({"radiance_env": {"RADIANCE_MXFP4": "1"}})
+
+    def test_validate_config_rejects_bad_radiance_env(self):
+        with self.assertRaisesRegex(RuntimeError, "is not a RADIANCE_ variable"):
+            profile.validate_config({"runtime": "vllm_radiance", "context_size": 106496,
+                "n_slots": 1, "min_slots": 1, "radiance_env": json.dumps({"LD_PRELOAD": "/x"})})
+
 
 if __name__ == "__main__":
     unittest.main()
