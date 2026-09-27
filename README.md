@@ -604,13 +604,12 @@ Suggestions and issues are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Acknowledgements
 
-InferDeck stands on [llama.cpp](https://github.com/ggml-org/llama.cpp) by
-Georgi Gerganov and contributors, and
-[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) by Lee Jet
-and contributors, and
-[acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) by its
-contributors. The parity gate exists precisely because matching upstream
-quality is the bar.
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) by Georgi Gerganov and contributors - In-process LLM inference engine (llama.cpp/Vulkan runtime), MIT license
+- [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) by Lee Jet and contributors - Image generation backend, MIT license
+- [acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) - STT/TTS backend, MIT license
+- [vllm-radiance](https://github.com/magiccodingman/vllm-radiance) - vLLM fork tuned for the Radeon AI PRO R9700 (gfx1201), used as the R4D/vllm_radiance runtime
+
+The parity gate exists precisely because matching upstream quality is the bar.
 
 ## License
 
