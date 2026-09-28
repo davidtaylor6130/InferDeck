@@ -28,7 +28,7 @@ export const SlotStrip: React.FC<{ model: ModelInfo; requests: LiveRequest[]; wi
         {Array.from({ length: count }, (_, index) => {
           const request = requests.find(entry => entry.slotId === index);
           if (!request) {
-            return <div key={index} className={`${labelled ? (wide ? 'h-11' : 'h-9 max-w-[112px]') : 'h-5'} min-w-0 flex-1 rounded-sm bg-elevated-slate`} title={`Slot ${index}: idle`} />;
+            return <div key={`idle-${index}`} className={`transition-colors duration-300 ${labelled ? (wide ? 'h-11' : 'h-9 max-w-[112px]') : 'h-5'} min-w-0 flex-1 rounded-sm bg-elevated-slate`} title={`Slot ${index}: idle`} />;
           }
           const prefill = request.phase === 'prefill' && request.promptTokens > 0;
           const percent = prefill ? Math.min(100, request.processedTokens / request.promptTokens * 100) : 100;
@@ -39,7 +39,7 @@ export const SlotStrip: React.FC<{ model: ModelInfo; requests: LiveRequest[]; wi
           ].filter(Boolean).join(' · ');
           const title = `Slot ${index}: ${clientName(request)}, ${PHASE_LABEL[request.phase].toLowerCase()}${request.phase === 'generating' ? `, ${formatTokenCount(request.completionTokens)} tokens written` : ''}${prefill ? `, ${Math.round(percent)}% of prompt read` : ''}, ${formatDuration(request.elapsedMs)}`;
           return (
-            <div key={index} title={title} className={`relative ${labelled ? (wide ? 'h-11' : 'h-9 max-w-[112px]') : 'h-5'} min-w-0 flex-1 overflow-hidden rounded-sm border-l-2 border-queue-blue bg-queue-blue/10`}>
+            <div key={request.id} title={title} className={`relative animate-fade-in ${labelled ? (wide ? 'h-11' : 'h-9 max-w-[112px]') : 'h-5'} min-w-0 flex-1 overflow-hidden rounded-sm border-l-2 border-queue-blue bg-queue-blue/10`}>
               <div className="absolute inset-y-0 left-0 bg-queue-blue/15 transition-[width] duration-700 ease-out" style={{ width: `${percent}%` }} />
               {labelled && (
                 <div className="relative flex h-full flex-col justify-center px-2 leading-tight">

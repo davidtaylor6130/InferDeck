@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   BeakerIcon,
   ChartBarIcon,
@@ -17,6 +18,7 @@ import { FeedbackProvider, useFeedback } from './components/Feedback';
 import { ThemeSwitch } from './components/ThemeSwitch';
 import { SectionSwitch } from './components/SectionSwitch';
 import { Dot } from './components/ui';
+import { SlidingIndicator, useSlidingIndicator } from './components/motion';
 import { COST_STORAGE_KEY } from './cost';
 import { sectionLabel } from './dashboardSections';
 import { GatewayProvider, useGateway } from './gateway';
@@ -32,7 +34,7 @@ import { RequestsPage } from './pages/RequestsPage';
 import { SystemPage } from './pages/SystemPage';
 import { UsagePage } from './pages/UsagePage';
 import { VideoPage } from './pages/VideoPage';
-import { NAV_ITEMS, navIdForRoute, parseRoute, routeTitle, type NavId, type Route } from './routes';
+import { NAV_ITEMS, navIdForRoute, parseRoute, routeDepth, routeTitle, type NavId, type Route } from './routes';
 import { compactModel, timeAgo } from './utils';
 import { INFERDECK_VERSION } from './version';
 import logoUrl from '../../../Assets/Logo.png';
@@ -48,6 +50,8 @@ const NAV_ICONS: Record<NavId, React.ComponentType<React.SVGProps<SVGSVGElement>
   'post-training': BeakerIcon,
 };
 
+const supportsViewTransitions = typeof document !== 'undefined' && 'startViewTransition' in document;
+
 const currentRoute = (): Route => (typeof window === 'undefined' ? { page: 'home' } : parseRoute(window.location.hash));
 
 const App: React.FC = () => (
@@ -60,8 +64,20 @@ const Shell: React.FC = () => {
   const [route, setRoute] = useState<Route>(currentRoute);
   const routeKey = JSON.stringify(route);
 
+  const routeRef = useRef(route);
+  routeRef.current = route;
+
   useEffect(() => {
-    const onHashChange = () => setRoute(currentRoute());
+    const onHashChange = () => {
+      const next = currentRoute();
+      const previous = routeRef.current;
+      const doc = document as Document & { startViewTransition?: (update: () => void) => unknown };
+      const depthChange = routeDepth(next) - routeDepth(previous);
+      const sameArea = navIdForRoute(next) === navIdForRoute(previous);
+      document.documentElement.dataset.nav = depthChange > 0 ? 'forward' : depthChange < 0 ? 'back' : sameArea ? 'lateral' : 'switch';
+      if (doc.startViewTransition) doc.startViewTransition(() => flushSync(() => setRoute(next)));
+      else setRoute(next);
+    };
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
@@ -71,21 +87,23 @@ const Shell: React.FC = () => {
   }, [routeKey]);
 
   const active = navIdForRoute(route);
+  const sidebar = useSlidingIndicator<HTMLElement>(active);
 
   return (
     <div className="app-shell flex h-dvh overflow-hidden bg-void-black">
-      <aside className="hidden w-56 shrink-0 flex-col border-r border-border-slate bg-deck-navy md:flex">
+      <aside className="chrome-sidebar hidden w-56 shrink-0 flex-col border-r border-border-slate bg-deck-navy md:flex">
         <div className="flex h-14 items-center gap-2.5 px-4">
           <img src={logoUrl} alt="" className="h-7 w-7 rounded-md object-cover" />
           <span className="text-base font-semibold text-text-primary">InferDeck</span>
         </div>
-        <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2.5 py-2" aria-label="Dashboard">
+        <nav ref={sidebar.container} className="relative flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2.5 py-2" aria-label="Dashboard">
+          <SlidingIndicator box={sidebar.box} animated={sidebar.animated} />
           {NAV_ITEMS.map(item => (
-            <NavLink key={item.id} id={item.id} href={item.href} label={item.label} active={active} />
+            <NavLink key={item.id} id={item.id} href={item.href} label={item.label} active={active} glide={sidebar.ready} />
           ))}
           <div className="mt-auto flex flex-col gap-0.5 border-t border-border-slate pt-2">
-            <NavLink id="settings" href="#settings" label="API settings" active={active} />
-            <NavLink id="post-training" href="#post-training" label="Post training" active={active} trailing={<span className="text-2xs text-text-muted">Planned</span>} />
+            <NavLink id="settings" href="#settings" label="API settings" active={active} glide={sidebar.ready} />
+            <NavLink id="post-training" href="#post-training" label="Post training" active={active} glide={sidebar.ready} trailing={<span className="text-2xs text-text-muted">Planned</span>} />
           </div>
         </nav>
         <SidebarAccount />
@@ -96,7 +114,7 @@ const Shell: React.FC = () => {
         <ConnectionBanner />
         <main id="main-scroll" className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain">
           <HealthNotices />
-          <div key={routeKey} className="mx-auto max-w-[1200px] animate-page-in px-4 pb-28 pt-6 sm:px-6 md:pb-16 lg:px-8">
+          <div key={routeKey} className={`page-surface mx-auto max-w-[1200px] px-4 pb-28 pt-6 sm:px-6 md:pb-16 lg:px-8 ${supportsViewTransitions ? '' : 'animate-page-in'}`}>
             <RouteView route={route} />
           </div>
         </main>
@@ -136,7 +154,7 @@ const RouteView: React.FC<{ route: Route }> = ({ route }) => {
 const TAB_ITEMS: NavId[] = ['home', 'models', 'generate', 'usage', 'health'];
 
 const TabBar: React.FC<{ active: NavId }> = ({ active }) => (
-  <nav aria-label="Sections" className="fixed inset-x-0 bottom-0 z-30 border-t border-border-slate bg-deck-navy/95 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur md:hidden">
+  <nav aria-label="Sections" className="chrome-tabbar fixed inset-x-0 bottom-0 z-30 border-t border-border-slate bg-deck-navy/95 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur md:hidden">
     <div className="mx-auto grid max-w-lg grid-cols-5">
       {TAB_ITEMS.map(id => {
         const item = NAV_ITEMS.find(entry => entry.id === id)!;
@@ -144,7 +162,7 @@ const TabBar: React.FC<{ active: NavId }> = ({ active }) => (
         const current = active === id;
         return (
           <a key={id} href={item.href} aria-current={current ? 'page' : undefined} className={`flex min-h-[52px] flex-col items-center justify-center gap-0.5 text-2xs font-medium ${current ? 'text-queue-blue' : 'text-text-muted'}`}>
-            <Icon className="h-6 w-6" aria-hidden="true" />
+            <Icon className={`h-6 w-6 transition-transform duration-300 ease-[cubic-bezier(0.3,1.4,0.4,1)] ${current ? 'scale-110' : 'scale-100'}`} aria-hidden="true" />
             {item.label}
           </a>
         );
@@ -225,7 +243,7 @@ const TopBar: React.FC<{ route: Route }> = ({ route }) => {
   }
 
   return (
-    <header className="sticky top-0 z-20 border-b border-border-slate bg-void-black/90 px-4 pt-[env(safe-area-inset-top,0px)] backdrop-blur sm:px-6 lg:px-8">
+    <header className="chrome-header sticky top-0 z-20 border-b border-border-slate bg-void-black/90 px-4 pt-[env(safe-area-inset-top,0px)] backdrop-blur sm:px-6 lg:px-8">
       <div className="flex min-h-14 min-w-0 items-center justify-between gap-3">
         <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-2 text-sm">
           <img src={logoUrl} alt="" className="h-6 w-6 rounded object-cover md:hidden" />
@@ -337,18 +355,20 @@ const NavLink: React.FC<{
   label: string;
   active: NavId;
   trailing?: React.ReactNode;
-}> = ({ id, href, label, active, trailing }) => {
+  glide?: boolean;
+}> = ({ id, href, label, active, trailing, glide }) => {
   const current = active === id;
   const Icon = NAV_ICONS[id];
   return (
     <a
       href={href}
       aria-current={current ? 'page' : undefined}
-      className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-sm font-medium ${current
-        ? 'bg-panel-slate text-text-primary shadow-card'
+      data-active={current}
+      className={`relative flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-sm font-medium ${current
+        ? `text-text-primary ${glide ? '' : 'bg-panel-slate shadow-card'}`
         : 'text-text-secondary hover:bg-panel-slate/60 hover:text-text-primary'}`}
     >
-      <Icon className={`h-[18px] w-[18px] shrink-0 ${current ? 'text-queue-blue' : 'text-text-muted'}`} aria-hidden="true" />
+      <Icon className={`h-[18px] w-[18px] shrink-0 transition-colors duration-300 ${current ? 'text-queue-blue' : 'text-text-muted'}`} aria-hidden="true" />
       <span className="flex-1 truncate">{label}</span>
       {trailing}
     </a>

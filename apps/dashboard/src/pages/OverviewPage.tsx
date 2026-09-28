@@ -6,6 +6,7 @@ import { clientName, SlotStrip, SlotTable } from '../components/SlotGrid';
 import { Badge, Button, Dot, EmptyState, Meter, ProgressBar, Readout, SectionTitle, Sparkline, StatTile } from '../components/ui';
 import { modalityLabel } from '../dashboardSections';
 import { modelHref } from '../routes';
+import { stagger } from '../components/motion';
 import {
   ALL_MODELS,
   DEFAULT_COST_CONFIG,
@@ -226,7 +227,7 @@ export const OverviewPage: React.FC = () => {
       <section className="grid items-end gap-6 lg:grid-cols-[minmax(0,1fr)_320px]" aria-label="Runtime now">
         <div className="min-w-0">
           <p className="flex items-center gap-2 text-sm text-text-muted"><Dot tone={runtimeTone} /> {runtimeLabel}</p>
-          <h1 className="mt-2 text-2xl font-semibold text-text-primary sm:text-[28px] sm:leading-9">{headline}</h1>
+          <h1 key={headline} className="mt-2 animate-item-in text-2xl font-semibold text-text-primary sm:text-[28px] sm:leading-9">{headline}</h1>
           <p className="mt-1 truncate text-sm text-text-muted">{subline}</p>
           {swap.swapping && (
             <div className="mt-3 flex max-w-md items-center gap-3">
@@ -255,10 +256,10 @@ export const OverviewPage: React.FC = () => {
           </div>
         ) : (
           <div className="mt-2 divide-y divide-border-slate rounded-lg border border-border-slate bg-panel-slate shadow-card">
-            {residentModels.map(model => {
+            {residentModels.map((model, index) => {
               const slotted = live.filter(request => request.model === model.id && request.slotId >= 0);
               return (
-                <div key={model.id} className="px-3 py-3">
+                <div key={model.id} style={stagger(index)} className="animate-item-in px-3 py-3">
                   <div className="flex flex-wrap items-center gap-x-6 gap-y-3 md:flex-nowrap">
                     <div className="min-w-0 flex-1">
                       <div className="flex min-w-0 items-center gap-2">
@@ -319,8 +320,8 @@ export const OverviewPage: React.FC = () => {
           {jobsError && <p role="status" className="pb-2 text-xs text-warning-amber">{jobsError}</p>}
           {recent.length > 0 && (
             <div className="divide-y divide-border-slate rounded-lg border border-border-slate bg-panel-slate px-3 shadow-card">
-              {recent.map(item => (
-                <div key={item.key} className="flex items-center gap-3 py-2">
+              {recent.map((item, index) => (
+                <div key={item.key} style={stagger(index, 40)} className="animate-item-in flex items-center gap-3 py-2">
                   <Dot tone={item.tone} />
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm text-text-primary">{item.headline}</p>

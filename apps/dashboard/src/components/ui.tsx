@@ -1,6 +1,7 @@
 import React from 'react';
 import type { Tone } from '../types';
 import { clamp, toneBg, toneHex, toneLabel, toneText } from '../utils';
+import { SlidingIndicator, useSlidingIndicator } from './motion';
 
 type Children = { children?: React.ReactNode };
 
@@ -180,30 +181,35 @@ export const Segmented: React.FC<{
   onChange: (id: string) => void;
   'aria-label': string;
   className?: string;
-}> = ({ items, value, onChange, className = '', ...rest }) => (
-  <div className={`max-w-full overflow-x-auto ${className}`}>
-    <div role="tablist" aria-label={rest['aria-label']} className="inline-flex gap-0.5 rounded-lg bg-elevated-slate p-0.5">
-      {items.map(item => {
-        const active = item.id === value;
-        return (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            onClick={() => onChange(item.id)}
-            className={`flex min-h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm font-medium sm:min-h-7 ${
-              active ? 'bg-panel-slate text-text-primary shadow-card' : 'text-text-secondary hover:text-text-primary'
-            }`}
-          >
-            {item.label}
-            {item.count != null && <span className="tabular text-xs text-text-muted">{item.count}</span>}
-          </button>
-        );
-      })}
+}> = ({ items, value, onChange, className = '', ...rest }) => {
+  const { container, box, animated, ready } = useSlidingIndicator<HTMLDivElement>(value);
+  return (
+    <div className={`max-w-full overflow-x-auto ${className}`}>
+      <div ref={container} role="tablist" aria-label={rest['aria-label']} className="relative inline-flex gap-0.5 rounded-lg bg-elevated-slate p-0.5">
+        <SlidingIndicator box={box} animated={animated} />
+        {items.map(item => {
+          const active = item.id === value;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              data-active={active}
+              onClick={() => onChange(item.id)}
+              className={`relative flex min-h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm font-medium sm:min-h-7 ${
+                active ? `text-text-primary ${ready ? '' : 'bg-panel-slate shadow-card'}` : 'text-text-secondary hover:text-text-primary'
+              }`}
+            >
+              {item.label}
+              {item.count != null && <span className="tabular text-xs text-text-muted">{item.count}</span>}
+            </button>
+          );
+        })}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 export const GroupHeader: React.FC<{ title: string; aside?: React.ReactNode }> = ({ title, aside }) => (
   <div className="flex items-end justify-between gap-3 pb-2 pt-6 first:pt-0">
@@ -312,7 +318,7 @@ export const Sparkline: React.FC<{
       </div>
       <p className="tabular mt-1 truncate text-xl font-semibold text-text-primary">{display}</p>
       {sub && <p className="truncate text-xs text-text-muted">{sub}</p>}
-      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="mt-2 h-10 w-full" role="img" aria-label={`${label} sparkline`}>
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="chart-reveal mt-2 h-10 w-full" role="img" aria-label={`${label} sparkline`}>
         <path d={area} style={{ fill: color, fillOpacity: 0.1 }} />
         <path d={path} style={{ fill: 'none', stroke: color }} strokeWidth="1.5" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
       </svg>

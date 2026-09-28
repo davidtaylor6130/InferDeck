@@ -14,6 +14,7 @@ interface Toast {
   message: string;
   detail?: string;
   tone: Tone;
+  leaving?: boolean;
 }
 
 interface FeedbackValue {
@@ -42,10 +43,13 @@ const ICON_TONE: Partial<Record<Tone, string>> = {
 
 export const FeedbackProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [pending, setPending] = useState<(ConfirmOptions & { resolve: (value: boolean) => void }) | null>(null);
+  const [pending, setPending] = useState<(ConfirmOptions & { resolve: (value: boolean) => void; closing?: boolean }) | null>(null);
   const nextId = useRef(1);
 
-  const dismiss = useCallback((id: number) => setToasts(current => current.filter(item => item.id !== id)), []);
+  const dismiss = useCallback((id: number) => {
+    setToasts(current => current.map(item => (item.id === id ? { ...item, leaving: true } : item)));
+    window.setTimeout(() => setToasts(current => current.filter(item => item.id !== id)), 200);
+  }, []);
 
   const toast = useCallback<FeedbackValue['toast']>((message, options = {}) => {
     const id = nextId.current++;
@@ -58,8 +62,10 @@ export const FeedbackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }), []);
 
   const settle = (value: boolean) => {
-    pending?.resolve(value);
-    setPending(null);
+    if (!pending || pending.closing) return;
+    pending.resolve(value);
+    setPending({ ...pending, closing: true });
+    window.setTimeout(() => setPending(null), 180);
   };
 
   const value = useMemo(() => ({ toast, confirm }), [toast, confirm]);
@@ -71,7 +77,7 @@ export const FeedbackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         {toasts.map(item => {
           const Icon = ICONS[item.tone] ?? InformationCircleIcon;
           return (
-            <div key={item.id} className="pointer-events-auto flex w-full max-w-sm animate-toast-in items-start gap-2.5 rounded-lg border border-border-slate bg-panel-slate px-3.5 py-3 shadow-deck">
+            <div key={item.id} className={`pointer-events-auto flex w-full max-w-sm ${item.leaving ? 'animate-toast-out' : 'animate-toast-in'} items-start gap-2.5 rounded-lg border border-border-slate bg-panel-slate px-3.5 py-3 shadow-deck`}>
               <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${ICON_TONE[item.tone] ?? 'text-queue-blue'}`} aria-hidden="true" />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-text-primary">{item.message}</p>
@@ -84,12 +90,12 @@ export const FeedbackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           );
         })}
       </div>
-      {pending && <ConfirmSheet options={pending} onSettle={settle} />}
+      {pending && <ConfirmSheet options={pending} closing={Boolean(pending.closing)} onSettle={settle} />}
     </FeedbackContext.Provider>
   );
 };
 
-const ConfirmSheet: React.FC<{ options: ConfirmOptions; onSettle: (value: boolean) => void }> = ({ options, onSettle }) => {
+const ConfirmSheet: React.FC<{ options: ConfirmOptions; closing: boolean; onSettle: (value: boolean) => void }> = ({ options, closing, onSettle }) => {
   const confirmRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
 
@@ -102,10 +108,10 @@ const ConfirmSheet: React.FC<{ options: ConfirmOptions; onSettle: (value: boolea
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex animate-fade-in items-end justify-center bg-black/40 p-3 sm:items-center"
+      className={`fixed inset-0 z-[70] flex ${closing ? 'animate-fade-out' : 'animate-fade-in'} items-end justify-center bg-black/40 p-3 sm:items-center`}
       onMouseDown={event => { if (event.target === event.currentTarget) onSettle(false); }}
     >
-      <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby={options.detail ? 'confirm-detail' : undefined} className="w-full max-w-sm animate-sheet-up rounded-lg bg-panel-slate p-5 shadow-deck">
+      <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby={options.detail ? 'confirm-detail' : undefined} className={`w-full max-w-sm ${closing ? 'animate-sheet-down' : 'animate-sheet-up'} rounded-lg bg-panel-slate p-5 shadow-deck`}>
         <h2 id="confirm-title" className="text-base font-semibold text-text-primary">{options.title}</h2>
         {options.detail && <p id="confirm-detail" className="mt-1.5 text-sm text-text-secondary">{options.detail}</p>}
         <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">

@@ -20,7 +20,8 @@ import {
   type DashboardSection,
 } from '../dashboardSections';
 import { useGateway } from '../gateway';
-import { modelHref, type ModelTab } from '../routes';
+import { modelHref, morphName, type ModelTab } from '../routes';
+import { stagger } from '../components/motion';
 import type { ModelInfo } from '../types';
 import { formatDuration, formatMb, formatTokenCount } from '../utils';
 import { MediaJobsPanel } from './MediaJobsPanel';
@@ -129,9 +130,10 @@ export const OperatePage: React.FC<{ section: DashboardSection }> = ({ section }
             <section key={group.title}>
               <GroupHeader title={group.title} aside={`${group.rows.length}`} />
               <div className="divide-y divide-border-slate rounded-lg border border-border-slate bg-panel-slate shadow-card">
-                {group.rows.map(model => (
+                {group.rows.map((model, index) => (
                   <ModelRow
                     key={model.id}
+                    index={index}
                     model={model}
                     section={section}
                     requests={usage.find(row => row.model === model.id)?.requests ?? 0}
@@ -798,7 +800,8 @@ const ModelRow: React.FC<{
   pending: string;
   onLoad: () => void;
   onUnload: () => void;
-}> = ({ model, section, requests, loading, busy, pending, onLoad, onUnload }) => {
+  index: number;
+}> = ({ model, section, requests, loading, busy, pending, onLoad, onUnload, index }) => {
   const active = model.active_requests ?? (model.free_slots != null ? model.n_slots - model.free_slots : 0);
   const facts = [
     modalityLabel(model.modality),
@@ -808,11 +811,11 @@ const ModelRow: React.FC<{
     requests ? `${requests.toLocaleString()} request${requests === 1 ? '' : 's'}` : 'Not used yet',
   ].filter(Boolean);
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-3 transition-colors hover:bg-elevated-slate/60 sm:flex-nowrap">
+    <div style={stagger(index)} className="animate-item-in flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-3 transition-colors hover:bg-elevated-slate/60 sm:flex-nowrap">
       <span className={`h-2 w-2 shrink-0 rounded-full ${model.runtime_available === false ? 'bg-danger-rose' : model.loaded ? 'bg-success-green' : loading ? 'bg-queue-blue' : 'bg-line-strong'}`} aria-hidden="true" />
       <a href={modelHref(model.id)} className="group min-w-0 flex-1">
         <span className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="truncate font-mono text-sm text-text-primary group-hover:underline">{model.id}</span>
+          <span className="truncate font-mono text-sm text-text-primary group-hover:underline" style={{ viewTransitionName: morphName('model', model.id) }}>{model.id}</span>
           {model.primary && <Badge label="Primary" tone="info" />}
           {model.runtime_available === false && <Badge label="Unavailable" tone="critical" />}
           {loading && <Badge label="Loading" tone="info" />}

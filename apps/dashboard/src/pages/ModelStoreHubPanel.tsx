@@ -17,7 +17,8 @@ import {
 import { Badge, Button, EmptyState, Notice, PageHeader, Segmented, Switch } from '../components/ui';
 import { modelBelongsToSection, sectionLabel, type DashboardSection } from '../dashboardSections';
 import { useGateway } from '../gateway';
-import { storeHref } from '../routes';
+import { morphName, storeHref } from '../routes';
+import { stagger } from '../components/motion';
 import type { Tone } from '../types';
 import { usePolling } from '../usePolling';
 import { formatBytes, formatTokenCount, timeAgo } from '../utils';
@@ -345,7 +346,7 @@ export const ModelStoreHubPanel: React.FC<{ section: DashboardSection; repo?: st
                 </div>
                 <span className="text-xs text-text-muted">{searchBusy ? 'Searching...' : `${(shelf ? SHELVES[shelf].pick(catalogue) : catalogue).length} models`}</span>
               </div>
-              <CardGrid models={shelf ? SHELVES[shelf].pick(catalogue) : catalogue} busy={searchBusy} {...cardProps} empty={submittedQuery ? 'Try a model family, creator or task.' : 'Nothing here yet.'} />
+              <CardGrid models={shelf ? SHELVES[shelf].pick(catalogue) : catalogue} busy={searchBusy} morph {...cardProps} empty={submittedQuery ? 'Try a model family, creator or task.' : 'Nothing here yet.'} />
             </section>
           ) : (
             <div className="space-y-10" aria-live="polite">
@@ -368,6 +369,7 @@ export const ModelStoreHubPanel: React.FC<{ section: DashboardSection; repo?: st
                       models={picked.slice(0, limit)}
                       busy={searchBusy}
                       skeletons={limit}
+                      morph={index === 0}
                       {...cardProps}
                       empty={results.length ? 'No model here fits this GPU. Turn off “Only models that fit this GPU” to see them all.' : 'No compatible models found.'}
                     />
@@ -399,24 +401,24 @@ export const ModelStoreHubPanel: React.FC<{ section: DashboardSection; repo?: st
 
 type CardProps = { section: DashboardSection; vramTotalMb: number; installedRepos: Set<string> };
 
-const CardGrid: React.FC<CardProps & { models: StoreModel[]; busy: boolean; empty: string; skeletons?: number }> = ({ models, busy, empty, skeletons = 8, ...cardProps }) => {
+const CardGrid: React.FC<CardProps & { models: StoreModel[]; busy: boolean; empty: string; skeletons?: number; morph?: boolean }> = ({ models, busy, empty, skeletons = 8, morph, ...cardProps }) => {
   if (busy && !models.length) {
     return (
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" role="status">
         <span className="sr-only">Loading models...</span>
-        {Array.from({ length: skeletons }, (_, index) => <div key={index} className="h-[148px] rounded-md border border-border-slate bg-panel-slate" />)}
+        {Array.from({ length: skeletons }, (_, index) => <div key={index} className="skeleton h-[148px] rounded-lg" />)}
       </div>
     );
   }
   if (!models.length) return <EmptyState title="No models to show" detail={empty} />;
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      {models.map(model => <StoreCard key={model.id} model={model} {...cardProps} />)}
+      {models.map((model, index) => <StoreCard key={model.id} model={model} morph={morph} index={index} {...cardProps} />)}
     </div>
   );
 };
 
-const StoreCard: React.FC<CardProps & { model: StoreModel }> = ({ model, section, vramTotalMb, installedRepos }) => {
+const StoreCard: React.FC<CardProps & { model: StoreModel; morph?: boolean; index: number }> = ({ model, section, vramTotalMb, installedRepos, morph, index }) => {
   const estimate = estimateRepositoryVramMb(model.id);
   const fit = section === 'llm' ? fitFor(estimate, vramTotalMb) : null;
   const params = parameterLabel(model.id);
@@ -430,10 +432,11 @@ const StoreCard: React.FC<CardProps & { model: StoreModel }> = ({ model, section
   return (
     <a
       href={storeHref(section, model.id)}
-      className="group flex min-h-[148px] flex-col rounded-lg border border-border-slate bg-panel-slate p-3.5 shadow-card hover:border-line-strong hover:shadow-deck"
+      style={stagger(index)}
+      className="group flex min-h-[148px] animate-item-in flex-col rounded-lg border border-border-slate bg-panel-slate p-3.5 shadow-card hover:border-line-strong hover:shadow-deck"
     >
       <div className="flex items-start justify-between gap-2">
-        <p className="line-clamp-2 break-all font-mono text-sm font-medium leading-5 text-text-primary" title={model.id}>{repoName(model.id)}</p>
+        <p className="line-clamp-2 break-all font-mono text-sm font-medium leading-5 text-text-primary" title={model.id} style={morph ? { viewTransitionName: morphName('repo', model.id) } : undefined}>{repoName(model.id)}</p>
         {model.gated && <LockClosedIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning-amber" aria-label="Gated" />}
       </div>
       <p className="mt-0.5 truncate text-xs text-text-muted">{repoOwner(model.id)}</p>
@@ -539,7 +542,7 @@ const StoreProduct: React.FC<{
       <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="min-w-0 space-y-8">
           <header>
-            <h1 className="break-all font-mono text-2xl font-medium text-text-primary">{repoName(repo)}</h1>
+            <h1 className="break-all font-mono text-2xl font-medium text-text-primary" style={{ viewTransitionName: morphName('repo', repo) }}>{repoName(repo)}</h1>
             <p className="mt-1 text-sm text-text-muted">by {repoOwner(repo)}</p>
             <p className="mt-4 max-w-[65ch] text-base text-text-secondary">{summary}</p>
             <div className="mt-4 flex flex-wrap gap-1.5">
@@ -562,7 +565,7 @@ const StoreProduct: React.FC<{
             {busy ? (
               <div className="mt-3 space-y-1" role="status">
                 <span className="sr-only">Checking repository files...</span>
-                {[0, 1, 2, 3].map(index => <div key={index} className="h-11 rounded bg-panel-slate" />)}
+                {[0, 1, 2, 3].map(index => <div key={index} className="skeleton h-11 rounded-md" />)}
               </div>
             ) : reviewFiles.length === 0 ? (
               <p className="mt-3 text-sm text-text-muted">This repository has no complete file that {storeScope[section].runtimeLabel} can run.</p>

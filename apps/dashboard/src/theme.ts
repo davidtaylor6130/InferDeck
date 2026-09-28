@@ -17,10 +17,18 @@ export function resolveTheme(preference: ThemePreference, systemDark: boolean): 
   return preference === 'system' ? (systemDark ? 'dark' : 'light') : preference;
 }
 
+let crossfadeTimer: ReturnType<typeof setTimeout> | undefined;
+
 function apply(preference: ThemePreference) {
   const dark = window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
   const theme = resolveTheme(preference, dark);
-  document.documentElement.dataset.theme = theme;
+  const root = document.documentElement;
+  if (root.dataset.theme && root.dataset.theme !== theme) {
+    root.classList.add('theme-changing');
+    clearTimeout(crossfadeTimer);
+    crossfadeTimer = setTimeout(() => root.classList.remove('theme-changing'), 360);
+  }
+  root.dataset.theme = theme;
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', THEME_COLOR[theme]);
 }
 

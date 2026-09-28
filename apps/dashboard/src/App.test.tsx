@@ -32,7 +32,7 @@ describe('dashboard shell', () => {
   it('keeps health reachable and mobile controls inside the phone viewport', () => {
     const html = renderToStaticMarkup(<App />);
     expect(html).toContain('Open Health and alerts');
-    expect(html).toContain('<header class="sticky top-0 z-20');
+    expect(html).toContain('sticky top-0 z-20');
     expect(html).toContain('min-h-11 min-w-11');
     expect(html).toContain('aria-label="API settings"');
   });

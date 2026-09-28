@@ -137,18 +137,142 @@ summary::-webkit-details-marker {
   display: none;
 }
 
-/* Tactile press feedback on anything clickable, like a native control. */
+/* Motion. Every state change animates; reduced-motion keeps the fades but drops travel. */
+:root {
+  --motion-distance: 1;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.3, 1.25, 0.4, 1);
+  interpolate-size: allow-keywords;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-distance: 0;
+  }
+}
+
 button:not(:disabled), a[href], summary, [role="button"], [role="radio"] {
-  transition-property: background-color, border-color, color, opacity, transform, box-shadow;
-  transition-duration: 120ms;
+  transition-property: background-color, border-color, color, opacity, box-shadow, transform;
+  transition-duration: 160ms;
+  transition-timing-function: var(--ease-out);
 }
 
 button:not(:disabled):active, a[href]:active, [role="button"]:active, [role="radio"]:not([aria-disabled="true"]):active {
-  transform: scale(0.98);
+  transform: scale(calc(1 - 0.03 * var(--motion-distance)));
 }
 
-tr[role="radio"]:active {
+tr[role="radio"]:active, tr:active {
   transform: none;
+}
+
+/* Collapsible sections open and close smoothly instead of snapping. */
+details:not(.popover)::details-content {
+  block-size: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: block-size 260ms var(--ease-out), opacity 200ms ease, content-visibility 260ms allow-discrete;
+}
+
+details:not(.popover)[open]::details-content {
+  block-size: auto;
+  opacity: 1;
+}
+
+summary [aria-hidden="true"], summary svg {
+  transition: transform 200ms var(--ease-out);
+}
+
+/* Page navigation behaves like a stack: deeper pages slide in from the right,
+   going back slides them away, and switching areas crossfades. The chrome stays put. */
+.page-surface {
+  view-transition-name: page;
+}
+
+.chrome-sidebar { view-transition-name: chrome-sidebar; }
+.chrome-header { view-transition-name: chrome-header; }
+.chrome-tabbar { view-transition-name: chrome-tabbar; }
+
+::view-transition-group(chrome-sidebar),
+::view-transition-group(chrome-header),
+::view-transition-group(chrome-tabbar) {
+  z-index: 10;
+  animation: none;
+}
+
+::view-transition-old(chrome-sidebar), ::view-transition-old(chrome-header), ::view-transition-old(chrome-tabbar) {
+  display: none;
+}
+
+::view-transition-new(chrome-sidebar), ::view-transition-new(chrome-header), ::view-transition-new(chrome-tabbar) {
+  animation: none;
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+}
+
+::view-transition-group(*) {
+  animation-duration: 340ms;
+  animation-timing-function: var(--ease-spring);
+}
+
+::view-transition-old(page) {
+  animation: vt-fade-out 160ms ease-in both;
+}
+
+::view-transition-new(page) {
+  animation: vt-rise-in 280ms var(--ease-out) both;
+}
+
+html[data-nav="forward"]::view-transition-old(page) {
+  animation: vt-push-out 340ms var(--ease-out) both;
+}
+
+html[data-nav="forward"]::view-transition-new(page) {
+  animation: vt-push-in 340ms var(--ease-out) both;
+}
+
+html[data-nav="back"]::view-transition-old(page) {
+  animation: vt-pop-out 300ms var(--ease-out) both;
+}
+
+html[data-nav="back"]::view-transition-new(page) {
+  animation: vt-pop-in 300ms var(--ease-out) both;
+}
+
+@keyframes vt-fade-out { to { opacity: 0; } }
+@keyframes vt-rise-in { from { opacity: 0; transform: translateY(calc(var(--motion-distance) * 10px)); } }
+@keyframes vt-push-out { to { opacity: 0; transform: translateX(calc(var(--motion-distance) * -30%)); } }
+@keyframes vt-push-in { from { opacity: 0; transform: translateX(calc(var(--motion-distance) * 40%)); } }
+@keyframes vt-pop-out { to { opacity: 0; transform: translateX(calc(var(--motion-distance) * 40%)); } }
+@keyframes vt-pop-in { from { opacity: 0; transform: translateX(calc(var(--motion-distance) * -30%)); } }
+
+/* Theme changes crossfade the whole interface. */
+.theme-changing, .theme-changing *, .theme-changing *::before, .theme-changing *::after {
+  transition: background-color 320ms ease, border-color 320ms ease, color 320ms ease, fill 320ms ease, stroke 320ms ease, box-shadow 320ms ease !important;
+}
+
+/* Charts draw in from left to right on first render. */
+.chart-reveal {
+  animation: chart-reveal 800ms var(--ease-out) backwards;
+}
+
+@keyframes chart-reveal {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+
+/* Loading placeholders shimmer. */
+.skeleton {
+  background: linear-gradient(90deg, rgb(var(--fill)) 0%, rgb(var(--fill-strong)) 50%, rgb(var(--fill)) 100%);
+  background-size: 200% 100%;
+  animation: skeleton 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
 }
 
 .tabular {
@@ -186,10 +310,16 @@ tr[role="radio"]:active {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    scroll-behavior: auto !important;
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
+  .skeleton {
+    animation: none;
   }
+
+  .chart-reveal {
+    animation-name: fade-only;
+  }
+}
+
+@keyframes fade-only {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }

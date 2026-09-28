@@ -82,6 +82,18 @@ export function routeHref(route: Route): string {
 export const storeHref = (section: DashboardSection, repo?: string) => routeHref({ page: 'store', section, repo });
 export const modelHref = (id: string, tab?: ModelTab) => routeHref({ page: 'model', id, tab });
 
+/** How deep a page sits, so navigation can push forward or slide back like a native stack. */
+export function routeDepth(route: Route): number {
+  if (route.page === 'model') return 1;
+  if (route.page === 'store' && route.repo) return 2;
+  if (route.page === 'store') return 1;
+  return 0;
+}
+
+/** A CSS-safe view-transition-name so a list item can morph into its detail page title. */
+export const morphName = (kind: 'model' | 'repo', id: string) =>
+  `${kind}-${id.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
+
 export function navIdForRoute(route: Route): NavId {
   if (route.page === 'store' || route.page === 'model') return 'models';
   return route.page;

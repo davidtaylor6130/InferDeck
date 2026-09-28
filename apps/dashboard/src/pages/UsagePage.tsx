@@ -372,7 +372,7 @@ const LineGraph: React.FC<{ labels: string[]; lines: GraphLine[]; format: (value
               ref={svgRef}
               viewBox="0 0 680 150"
               preserveAspectRatio="none"
-              className="h-[150px] w-full touch-pan-y overflow-visible"
+              className="chart-reveal h-[150px] w-full touch-pan-y overflow-visible"
               role="img"
               aria-label={`${ariaLabel}. A data table follows the chart.`}
               onPointerDown={handlePointerMove}

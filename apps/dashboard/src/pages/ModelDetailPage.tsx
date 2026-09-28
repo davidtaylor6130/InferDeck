@@ -6,7 +6,7 @@ import { SlotStrip, SlotTable } from '../components/SlotGrid';
 import { Badge, Button, EmptyState, Notice } from '../components/ui';
 import { modalityLabel, sectionForModality, sectionLabel } from '../dashboardSections';
 import { useGateway } from '../gateway';
-import { modelHref, type ModelTab } from '../routes';
+import { modelHref, morphName, type ModelTab } from '../routes';
 import type { LiveRequest, StatusPayload } from '../types';
 import { usePolling } from '../usePolling';
 import { formatMb, formatTokenCount, timeAgo } from '../utils';
@@ -76,7 +76,7 @@ export const ModelDetailPage: React.FC<{ id: string; tab?: ModelTab }> = ({ id, 
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="break-all font-mono text-xl font-medium text-text-primary">{model.id}</h1>
+            <h1 className="break-all font-mono text-xl font-medium text-text-primary" style={{ viewTransitionName: morphName('model', model.id) }}>{model.id}</h1>
             {model.primary && <Badge label="Primary" tone="info" />}
             {model.optimization?.status === 'measured' && <Badge label="Measured optimized" tone="good" />}
           </div>

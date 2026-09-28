@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { TOKEN_RANGE_LABELS, type TokenRange } from '../cost';
 import { clamp } from '../utils';
 import { linePath, pickTickIndices } from './ui';
+import { SlidingIndicator, useSlidingIndicator } from './motion';
 
 export interface UsageChartSeries {
   label: string;
@@ -12,25 +13,31 @@ export interface UsageChartSeries {
 export const UsageRangeTabs: React.FC<{
   value: TokenRange;
   onChange: (range: TokenRange) => void;
-}> = ({ value, onChange }) => (
-  <div className="inline-flex max-w-full gap-0.5 overflow-x-auto rounded-lg bg-elevated-slate p-0.5" role="group" aria-label="Usage time range">
-    {(Object.keys(TOKEN_RANGE_LABELS) as TokenRange[]).map(range => (
-      <button
-        key={range}
-        type="button"
-        aria-pressed={value === range}
-        className={`min-h-8 shrink-0 whitespace-nowrap rounded-md px-2.5 text-xs font-medium sm:min-h-6 ${
-          value === range
-            ? 'bg-panel-slate text-text-primary shadow-card'
-            : 'text-text-secondary hover:text-text-primary'
-        }`}
-        onClick={() => onChange(range)}
-      >
-        {TOKEN_RANGE_LABELS[range]}
-      </button>
-    ))}
-  </div>
-);
+}> = ({ value, onChange }) => {
+  const { container, box, animated, ready } = useSlidingIndicator<HTMLDivElement>(value);
+  return (
+    <div ref={container} className="relative inline-flex max-w-full gap-0.5 overflow-x-auto rounded-lg bg-elevated-slate p-0.5" role="group" aria-label="Usage time range">
+      <SlidingIndicator box={box} animated={animated} />
+      {(Object.keys(TOKEN_RANGE_LABELS) as TokenRange[]).map(range => {
+        const active = value === range;
+        return (
+          <button
+            key={range}
+            type="button"
+            aria-pressed={active}
+            data-active={active}
+            className={`relative min-h-8 shrink-0 whitespace-nowrap rounded-md px-2.5 text-xs font-medium sm:min-h-6 ${
+              active ? `text-text-primary ${ready ? '' : 'bg-panel-slate shadow-card'}` : 'text-text-secondary hover:text-text-primary'
+            }`}
+            onClick={() => onChange(range)}
+          >
+            {TOKEN_RANGE_LABELS[range]}
+          </button>
+        );
+      })}
+    </div>
+  );
+};
 
 export const UsageHeader: React.FC<{
   label: string;
@@ -44,7 +51,7 @@ export const UsageHeader: React.FC<{
       <p className="text-sm text-text-muted">{label}</p>
       <UsageRangeTabs value={range} onChange={onRange} />
     </div>
-    <h1 className="mt-2 text-2xl font-semibold text-text-primary sm:text-[28px] sm:leading-9">{headline}</h1>
+    <h1 key={typeof headline === 'string' ? headline : undefined} className="mt-2 animate-item-in text-2xl font-semibold text-text-primary sm:text-[28px] sm:leading-9">{headline}</h1>
     <p className="mt-1 max-w-[70ch] text-sm text-text-secondary">{detail}</p>
   </header>
 );
@@ -99,7 +106,7 @@ export const UsageLineChart: React.FC<{
               ref={svgRef}
               viewBox={`0 0 ${width} ${height}`}
               preserveAspectRatio="none"
-              className="w-full touch-pan-y overflow-visible"
+              className="chart-reveal w-full touch-pan-y overflow-visible"
               style={{ height }}
               role="img"
               aria-label={ariaLabel}
