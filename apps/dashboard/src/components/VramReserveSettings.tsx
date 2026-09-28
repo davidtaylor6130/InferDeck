@@ -6,7 +6,7 @@ import {
   waitForActiveConfig,
   type ConfigDocument,
 } from '../api';
-import { Button, Panel, SectionTitle } from './ui';
+import { Button, GroupHeader, GroupList } from './ui';
 
 const DEFAULT_RESERVE_MIB = 1024;
 const MAX_CONFIG_INTEGER = 2_147_483_647;
@@ -113,37 +113,42 @@ export const VramReserveSettings: React.FC = () => {
   };
 
   return (
-    <Panel>
-      <SectionTitle title="VRAM reserve" />
-      <p className="mt-2 max-w-3xl text-sm text-text-secondary">
+    <section aria-label="VRAM reserve">
+      <GroupHeader title="VRAM reserve" />
+      <GroupList>
+        <label className="flex min-h-11 flex-wrap items-center justify-between gap-x-4 gap-y-2 px-3 py-2">
+          <span>
+            <span className="block text-base">Safety margin (MiB)</span>
+            <span className="block text-xs text-text-muted">Kept free for model loading and automatic context pools</span>
+          </span>
+          <span className="flex items-center gap-2">
+            <input
+              aria-label="VRAM safety margin in MiB"
+              type="number"
+              min="0"
+              max={MAX_CONFIG_INTEGER}
+              step="1"
+              value={reserve}
+              disabled={busy}
+              onChange={event => setReserve(event.target.value)}
+              className="tabular h-8 w-32 px-2.5 text-right text-sm"
+            />
+            <Button tone="blue" disabled={busy || !config || !valid} onClick={() => { void save(); }}>
+              {busy ? 'Loading...' : 'Save reserve'}
+            </Button>
+          </span>
+        </label>
+      </GroupList>
+      <p className="mt-1.5 text-xs text-text-muted">
         VRAM kept free for model loading and automatic context pools. Set 0 for no additional reserve. Changes apply after configuration reload.
       </p>
-      <div className="mt-3 flex max-w-xl flex-wrap items-end gap-3">
-        <label className="min-w-48 flex-1 text-xs text-text-muted">
-          Safety margin (MiB)
-          <input
-            aria-label="VRAM safety margin in MiB"
-            type="number"
-            min="0"
-            max={MAX_CONFIG_INTEGER}
-            step="1"
-            value={reserve}
-            disabled={busy}
-            onChange={event => setReserve(event.target.value)}
-            className="mt-1 min-h-11 w-full rounded border border-white/10 bg-[#07101d] px-3 text-sm text-text-primary sm:min-h-10"
-          />
-        </label>
-        <Button tone="blue" disabled={busy || !config || !valid} onClick={() => { void save(); }}>
-          {busy ? 'Loading...' : 'Save reserve'}
-        </Button>
-      </div>
       {!valid && (
-        <p className="mt-2 text-xs text-danger-rose" role="alert">
+        <p className="mt-1 text-xs text-danger-rose" role="alert">
           Enter a whole number from 0 to {MAX_CONFIG_INTEGER.toLocaleString()} MiB.
         </p>
       )}
-      {message && <p className="mt-2 text-xs text-success-green" role="status">{message}</p>}
-      {error && <p className="mt-2 text-xs text-danger-rose" role="alert">{error}</p>}
-    </Panel>
+      {message && <p className="mt-1 text-xs text-success-green" role="status">{message}</p>}
+      {error && <p className="mt-1 text-xs text-danger-rose" role="alert">{error}</p>}
+    </section>
   );
 };

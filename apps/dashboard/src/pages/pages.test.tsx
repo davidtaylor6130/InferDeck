@@ -5,7 +5,9 @@ import { parseDocument } from 'yaml';
 import { GatewayContext, type GatewayValue } from '../gateway';
 import { OverviewPage, overviewStatus } from './OverviewPage';
 import { ModelsPage } from './ModelsPage';
-import { defaultStoreModelName } from './ModelStoreHubPanel';
+import { defaultStoreModelName, recommendFile } from './ModelStoreHubPanel';
+import { ModelDetailPage } from './ModelDetailPage';
+import type { StoreFile } from '../api';
 import { OperatePage, stageProfileOptimization } from './OperatePage';
 import type { ProfileOptimizationCandidate } from '../api';
 import { UsagePage } from './UsagePage';
@@ -138,7 +140,7 @@ describe('pages', () => {
   it('Home leads with the current runtime, then combined health, usage, and activity', () => {
     const html = renderWith(<OverviewPage />);
     expect(html).toContain('Runtime now');
-    expect(html).toContain('Resident models');
+    expect(html).toContain('Loaded models');
     expect(html).toContain('qwen3.6-35b-a3b');
     expect(html).toContain('Processing');
     expect(html).toContain('GPU utilization');
@@ -173,23 +175,21 @@ describe('pages', () => {
     const dictation = renderWith(<OperatePage section="dictation" />);
     const image = renderWith(<OperatePage section="image" />);
     const music = renderWith(<OperatePage section="music" />);
-    expect(llm).toContain('LLM Model Settings');
+    expect(llm).toContain('LLM models');
     expect(llm).toContain('qwen3.6-35b-a3b');
-    expect(dictation).toContain('Dictation Model Settings');
+    expect(dictation).toContain('Dictation models');
     expect(dictation).toContain('parakeet-tdt-0.6b-v3');
     expect(dictation).toContain('Recording and playback stay in clients');
     expect(dictation).not.toContain('microphone');
-    expect(image).toContain('Image Model Settings');
+    expect(image).toContain('Image models');
     expect(image).toContain('stable-diffusion-v1-5-fp16');
     expect(image).not.toContain('ace-step-v1.5-turbo-q4');
     expect(image).toContain('Image generation jobs');
-    expect(music).toContain('Music Model Settings');
+    expect(music).toContain('Music models');
     expect(music).toContain('ace-step-v1.5-turbo-q4');
     expect(music).not.toContain('stable-diffusion-v1-5-fp16');
     expect(music).toContain('Music generation jobs');
     expect(llm).toContain('Model settings for qwen3.6-35b-a3b');
-    expect(llm).toContain('Auto-optimize');
-    expect(llm).not.toContain('Auto-optimize with benchmark');
     expect(llm).toContain('text-success-green');
     expect(llm).toContain('Measured optimized');
     expect(llm).toContain('Stable API aliases');
@@ -245,7 +245,7 @@ describe('pages', () => {
     const dictation = renderWith(<ModelsPage section="dictation" />);
     const image = renderWith(<ModelsPage section="image" />);
     const music = renderWith(<ModelsPage section="music" />);
-    expect(llm).toContain('LLM Model Store');
+    expect(llm).toContain('Get LLM models');
     expect(llm).toContain('Discover');
     expect(llm).toContain('Downloads');
     expect(llm).toContain('Installed');
@@ -253,18 +253,19 @@ describe('pages', () => {
     expect(llm).toContain('Compatibility');
     expect(llm).toContain('Local runtime only');
     expect(llm).toContain('Include gated');
-    expect(llm).toContain('Choose a verified variant');
+    expect(renderWith(<ModelsPage section="llm" repo="unsloth/Qwen3-30B-GGUF" />)).toContain('Choose a verified variant');
+    expect(renderWith(<ModelsPage section="llm" repo="unsloth/Qwen3-30B-GGUF" />)).toContain('A 30B parameter language model from unsloth.');
     expect(llm).not.toContain('1. Find a model');
     expect(llm).not.toContain('Start with');
     expect(llm).not.toContain('aria-label="AI type"');
-    expect(dictation).toContain('Dictation Model Store');
+    expect(dictation).toContain('Get Dictation models');
     expect(dictation).toContain('Speech to text');
     expect(dictation).toContain('Text to speech');
-    expect(image).toContain('Image Model Store');
+    expect(image).toContain('Get Image models');
     expect(image).toContain('Stable Diffusion');
     expect(image).toContain('stable-diffusion.cpp');
     expect(image).toContain('Search image generation models');
-    expect(music).toContain('Music Model Store');
+    expect(music).toContain('Get Music models');
     expect(music).toContain('ACE-Step');
     expect(music).toContain('ACE-Step C++');
     expect(music).toContain('Search music generation models');
@@ -328,7 +329,7 @@ describe('pages', () => {
     expect(llm).not.toContain('Portfolio break-even $');
     expect(dictation).toContain('Dictation usage');
     expect(dictation).toContain('persisted SQL ledger');
-    expect(dictation).toContain('Audio transcribed');
+    expect(dictation).toContain('of audio transcribed');
     expect(dictation).toContain('Estimated API cost');
     expect(dictation).toContain('OpenAI whisper-1');
     expect(dictation).not.toContain('ROI remaining');
@@ -394,6 +395,39 @@ describe('pages', () => {
     expect(music).toContain('ace-step-v1.5-turbo-q4');
     expect(music).toContain('Music generation health');
     expect(music).not.toContain('stable-diffusion-v1-5-fp16');
+  });
+
+  it('gives each model its own page with status, slots and settings', () => {
+    const html = renderWith(<ModelDetailPage id="qwen3.6-35b-a3b" />);
+    expect(html).toContain('qwen3.6-35b-a3b');
+    expect(html).toContain('Loaded and idle, ready on 2 slots.');
+    expect(html).toContain('12 requests so far');
+    expect(html).toContain('Slot 1');
+    expect(html).toContain('Unload');
+    expect(html).toContain('Auto-optimize');
+    expect(html).not.toContain('Auto-optimize with benchmark');
+    expect(renderWith(<ModelDetailPage id="missing-model" />)).toContain('No model named missing-model');
+  });
+
+  it('shows who is using each slot on Home', () => {
+    const request = { id: 'r1', model: 'qwen3.6-35b-a3b', requestedModel: 'qwen3.6-35b-a3b', apiKeyId: 'k', apiKeyName: 'OpenCode', endpoint: '/v1/chat/completions', priority: 5, slotId: 1, startedUnixMs: 1, elapsedMs: 4000, phase: 'generating' as const, promptTokens: 10, processedTokens: 10, cachedTokens: 0, completionTokens: 320, promptTokensPerSecond: 900, tokensPerSecond: 35.5 };
+    const fixture = { ...value, status: { ...status, queue: { ...status.queue, liveRequests: [request] } } };
+    const html = renderToStaticMarkup(<GatewayContext.Provider value={fixture}><OverviewPage /></GatewayContext.Provider>);
+    expect(html).toContain('Serving 1 request');
+    expect(html).toContain('OpenCode');
+    expect(html).toContain('Writing');
+    expect(html).toContain('320 tokens written');
+    expect(html).toContain('Slot 0: idle');
+  });
+
+  it('recommends the largest verified file that leaves VRAM headroom', () => {
+    const file = (name: string, estimatedVramMb: number, compatible = true) => ({
+      repo: 'org/model', name, variant: name, quantization: 'q4', size: estimatedVramMb, compatible, estimatedVramMb, runtime: 'llama_cpp', format: 'gguf',
+    }) as unknown as StoreFile;
+    const files = [file('small', 8_000), file('big', 20_000), file('huge', 30_000), file('broken', 12_000, false)];
+    expect(recommendFile(files, 'llm', 32_000)?.name).toBe('big');
+    expect(recommendFile(files, 'llm', 4_000)?.name).toBe('small');
+    expect(recommendFile([file('bad', 1, false)], 'llm', 32_000)).toBeUndefined();
   });
 
   it('classifies structured and legacy gateway alerts without guessing from presentation', () => {

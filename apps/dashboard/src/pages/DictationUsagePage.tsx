@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getJobs, getPricing } from '../api';
-import { UsageLineChart, UsageRangeTabs } from '../components/UsageCharts';
-import { Badge, DetailItem, EmptyState, Panel, SectionTitle, Stat } from '../components/ui';
+import { USAGE_RANGE_PHRASE, UsageHeader, UsageLineChart } from '../components/UsageCharts';
+import { Badge, DetailItem, EmptyState, Panel, SectionTitle } from '../components/ui';
 import {
   ALL_MODELS,
   DEFAULT_COST_CONFIG,
@@ -130,28 +130,20 @@ export const DictationUsagePage: React.FC = () => {
   };
 
   return (
-    <div className="space-y-4">
-      <Panel>
-        <SectionTitle title="Dictation usage" aside={TOKEN_RANGE_LABELS[range]} />
-        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">
-          <Stat label="Requests" value={totalRequests.toLocaleString()} />
-          <Stat label="Successful" value={successful.toLocaleString()} tone={successful ? 'good' : 'idle'} />
-          <Stat label="Failed" value={failed.toLocaleString()} tone={failed ? 'critical' : 'idle'} />
-          <Stat label="Audio transcribed" value={formatAudio(audioSeconds)} />
-          <Stat label="Text synthesized" value={formatCharacters(characters)} />
-          <Stat label="Estimated API cost" value={formatCurrency(estimatedCost)} tone="good" />
-        </div>
-        <div className="mt-4"><UsageRangeTabs value={range} onChange={setRange} /></div>
-        <p className="mt-3 text-xs text-text-muted">
-          Requests, input audio duration, and synthesized characters come from the persisted SQL ledger. Cost is the comparable hosted API value, not a measured charge.
-        </p>
-      </Panel>
+    <div className="space-y-8">
+      <UsageHeader
+        label="Dictation usage"
+        range={range}
+        onRange={setRange}
+        headline={`${totalRequests.toLocaleString()} speech request${totalRequests === 1 ? '' : 's'} ${USAGE_RANGE_PHRASE[range]}`}
+        detail={<>{formatAudio(audioSeconds)} of audio transcribed and {formatCharacters(characters)} spoken, worth about <span className="font-medium text-text-primary">{formatCurrency(estimatedCost)}</span> at hosted API prices. Totals come from the persisted SQL ledger.</>}
+      />
 
       <Panel>
         <SectionTitle title="Request volume" aside={TOKEN_RANGE_LABELS[range]} />
         <UsageLineChart
           labels={rangeSeries.months}
-          series={[{ label: 'Dictation', color: '#A78BFA', values: rangeSeries.requests }]}
+          series={[{ label: 'Dictation', color: 'rgb(var(--series-1))', values: rangeSeries.requests }]}
           ariaLabel={`Dictation requests for ${TOKEN_RANGE_LABELS[range]}`}
         />
 
@@ -160,17 +152,17 @@ export const DictationUsagePage: React.FC = () => {
           <div className="mt-3 grid gap-3 sm:grid-cols-3">
             <label className="text-xs text-text-muted">
               Model
-              <select className="mt-1 h-9 w-full bg-[#07101d] px-2 text-sm text-text-primary" value={effectiveSelectedModel} onChange={event => setSelectedModel(event.target.value)}>
+              <select className="mt-1 h-9 w-full bg-elevated-slate px-2 text-sm text-text-primary" value={effectiveSelectedModel} onChange={event => setSelectedModel(event.target.value)}>
                 {modelNames.map(name => <option key={name} value={name}>{name}</option>)}
               </select>
             </label>
             <label className="text-xs text-text-muted">
               Comparable hosted model
-              <input className="mt-1 h-9 w-full bg-[#07101d] px-2 text-sm text-text-primary" value={selectedCost.equivalentModel} onChange={event => persistConfig(effectiveSelectedModel, { ...selectedCost, equivalentModel: event.target.value })} />
+              <input className="mt-1 h-9 w-full bg-elevated-slate px-2 text-sm text-text-primary" value={selectedCost.equivalentModel} onChange={event => persistConfig(effectiveSelectedModel, { ...selectedCost, equivalentModel: event.target.value })} />
             </label>
             <label className="text-xs text-text-muted">
               {selectedCost.billingUnit === 'million_characters' ? 'USD / 1M characters' : 'USD / audio minute'}
-              <input className="mt-1 h-9 w-full bg-[#07101d] px-2 text-sm text-text-primary" type="number" min="0" step="0.001" value={selectedCost.pricePerUnit ?? 0} onChange={event => persistConfig(effectiveSelectedModel, { ...selectedCost, pricePerUnit: Number(event.target.value) || 0 })} />
+              <input className="mt-1 h-9 w-full bg-elevated-slate px-2 text-sm text-text-primary" type="number" min="0" step="0.001" value={selectedCost.pricePerUnit ?? 0} onChange={event => persistConfig(effectiveSelectedModel, { ...selectedCost, pricePerUnit: Number(event.target.value) || 0 })} />
             </label>
           </div>
           <p className="mt-2 text-xs text-text-muted">
@@ -187,10 +179,10 @@ export const DictationUsagePage: React.FC = () => {
           <div className="mt-3"><EmptyState title="No persisted dictation usage" /></div>
         ) : (
           <>
-          <div className="mt-3 divide-y divide-white/10 md:hidden" aria-label="Per-model dictation usage cards">
+          <div className="mt-3 divide-y divide-border-slate md:hidden" aria-label="Per-model dictation usage cards">
             {usageDetails.map(({ row, cost, avoided, billable }) => (
               <article key={row.model} className="py-4 first:pt-0 last:pb-0">
-                <h3 className="break-words font-mono text-sm text-text-primary">{compactModel(row.model)}</h3>
+                <h3 className="break-words text-sm font-semibold text-text-primary">{compactModel(row.model)}</h3>
                 <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
                   <DetailItem label="Requests">{row.requests.toLocaleString()}</DetailItem>
                   <DetailItem label="Success">{row.requests ? `${(row.successfulRequests / row.requests * 100).toFixed(1)}%` : '—'}</DetailItem>
@@ -205,7 +197,7 @@ export const DictationUsagePage: React.FC = () => {
           <div className="mt-3 hidden overflow-x-auto md:block" role="region" aria-label="Per-model dictation usage" tabIndex={0}>
             <table className="w-full min-w-[860px] text-left text-sm">
               <thead>
-                <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
+                <tr className="border-b border-border-slate text-xs text-text-muted">
                   <th className="py-2 pr-4 font-medium">Model</th>
                   <th className="py-2 pr-4 font-medium">Requests</th>
                   <th className="py-2 pr-4 font-medium">Success</th>
@@ -215,7 +207,7 @@ export const DictationUsagePage: React.FC = () => {
                   <th className="py-2 font-medium">Last used</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5">
+              <tbody className="divide-y divide-border-slate">
                 {usageDetails.map(({ row, cost, avoided, billable }) => (
                     <tr key={row.model}>
                       <td className="py-2.5 pr-4 font-mono text-text-primary">{compactModel(row.model)}</td>
@@ -239,7 +231,7 @@ export const DictationUsagePage: React.FC = () => {
         {speechJobs.length === 0 ? (
           <div className="mt-3"><EmptyState title="No recent dictation requests" /></div>
         ) : (
-          <div className="mt-3 divide-y divide-white/5">
+          <div className="mt-3 divide-y divide-border-slate">
             {speechJobs.slice(0, 25).map(job => (
               <div key={job.id} className="grid gap-2 py-2.5 text-sm sm:grid-cols-[1fr_auto_auto_auto] sm:items-center">
                 <span className="min-w-0 truncate font-mono text-text-primary">{compactModel(job.model)}</span>

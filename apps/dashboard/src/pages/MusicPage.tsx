@@ -1,12 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { generateMusic } from '../api';
-import { Badge, Button, Panel, SectionTitle } from '../components/ui';
+import { Badge, Button, GroupList, Notice, PageHeader } from '../components/ui';
 import { useGateway } from '../gateway';
 import type { ModelInfo } from '../types';
 import { MediaJobsPanel } from './MediaJobsPanel';
 
-const controlClass =
-  'mt-1 min-h-11 w-full border border-white/15 bg-[#07101d] px-3 py-2 text-sm text-text-primary focus:border-queue-blue focus:outline-none sm:min-h-10';
 
 function musicModels(models: ModelInfo[]): ModelInfo[] {
   return models.filter(model =>
@@ -126,54 +124,50 @@ export const MusicPage: React.FC = () => {
     }
   };
 
+  const fieldClass = 'tabular h-8 w-36 px-2.5 text-right text-sm';
+
   return (
-    <div className="space-y-5">
-      <Panel className="border-t-0 pt-0">
-        <SectionTitle
-          title="Generate music"
-          aside={generators.length ? `${generators.length} model${generators.length === 1 ? '' : 's'}` : 'not configured'}
-          action={<Badge label={state.label} tone={state.tone} />}
-        />
-        {generators.length === 0 ? (
-          <p className="mt-4 border-l-2 border-danger-rose pl-3 text-sm text-danger-rose" role="alert">
-            No music generation model is configured in the active profile.
-          </p>
-        ) : (
-          <form className="mt-4 space-y-5" onSubmit={submit}>
-            <div className="grid gap-5 lg:grid-cols-2">
-              <label className="block text-xs font-medium text-text-secondary" htmlFor="music-prompt">
+    <div className="space-y-8">
+      <PageHeader
+        title="Generate music"
+        subtitle={generators.length ? `${generators.length} model${generators.length === 1 ? '' : 's'} available. Saved WAV files remain in media history after a restart.` : 'No music model is configured.'}
+        actions={<Badge label={state.label} tone={state.tone} />}
+      />
+      {generators.length === 0 ? (
+        <Notice tone="critical" role="alert">No music generation model is configured in the active profile.</Notice>
+      ) : (
+        <form className="space-y-4" onSubmit={submit}>
+          <div>
+            <div className="grid gap-4 lg:grid-cols-2">
+              <label className="block text-xs font-medium text-text-muted" htmlFor="music-prompt">
                 Prompt
                 <textarea
                   id="music-prompt"
                   value={prompt}
                   onChange={event => setPrompt(event.target.value)}
                   maxLength={4096}
-                  rows={5}
+                  rows={6}
                   placeholder="Describe the sound, mood, instruments, and tempo"
-                  className={controlClass + ' resize-y'}
+                  className="mt-1.5 w-full resize-y p-3 text-base leading-relaxed text-text-primary"
                 />
               </label>
-              <label className="block text-xs font-medium text-text-secondary" htmlFor="music-lyrics">
-                Lyrics <span className="font-normal text-text-muted">(optional)</span>
+              <label className="block text-xs font-medium text-text-muted" htmlFor="music-lyrics">
+                Lyrics <span className="font-normal">(optional)</span>
                 <textarea
                   id="music-lyrics"
                   value={lyrics}
                   onChange={event => setLyrics(event.target.value)}
                   maxLength={32_768}
-                  rows={5}
+                  rows={6}
                   placeholder="Leave blank for instrumental music"
-                  className={controlClass + ' resize-y'}
+                  className="mt-1.5 w-full resize-y p-3 text-base leading-relaxed text-text-primary"
                 />
               </label>
             </div>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <label className="block text-xs font-medium text-text-secondary">
+            <div className="mt-4 grid items-end gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_auto]">
+              <label className="block text-xs font-medium text-text-muted">
                 Model
-                <select
-                  value={model}
-                  onChange={event => setModel(event.target.value)}
-                  className={controlClass}
-                >
+                <select value={model} onChange={event => setModel(event.target.value)} className="mt-1.5 h-10 w-full px-3 text-sm text-text-primary">
                   {generators.map(entry => (
                     <option key={entry.id} value={entry.id}>
                       {entry.id}{entry.runtime_available === false ? ' (runtime unavailable)' : ''}
@@ -181,94 +175,59 @@ export const MusicPage: React.FC = () => {
                   ))}
                 </select>
               </label>
-              <label className="block text-xs font-medium text-text-secondary">
-                Duration (seconds)
+              <label className="block text-xs font-medium text-text-muted">
+                <span className="flex justify-between">Duration (seconds)<span className="tabular font-semibold text-text-primary">{duration}s</span></span>
                 <input
-                  type="number"
+                  type="range"
                   min={10}
                   max={600}
-                  step={1}
+                  step={5}
                   value={duration}
                   onChange={event => setDuration(Number(event.target.value))}
-                  className={controlClass}
+                  className="mt-3 h-1.5 w-full cursor-pointer"
                 />
               </label>
-              <label className="block text-xs font-medium text-text-secondary">
-                Seed
-                <input
-                  type="number"
-                  min={-1}
-                  max={4_294_967_295}
-                  step={1}
-                  value={seed}
-                  onChange={event => setSeed(Number(event.target.value))}
-                  className={controlClass}
-                />
-                <span className="mt-1 block font-normal text-text-muted">-1 chooses a random seed</span>
+              <button
+                type="submit"
+                disabled={!canGenerate}
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-queue-blue px-5 text-sm font-semibold text-on-accent hover:bg-queue-blue/90 disabled:opacity-40"
+              >
+                {running && <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-on-accent border-t-transparent" aria-hidden="true" />}
+                {running ? 'Generating music…' : 'Generate music'}
+              </button>
+            </div>
+          </div>
+
+          <details className="group">
+            <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 text-sm text-text-secondary hover:text-text-primary">
+              <span className="text-text-muted transition-transform group-open:rotate-90" aria-hidden="true">&#8250;</span>
+              Advanced generation settings
+            </summary>
+            <GroupList className="mt-2">
+              <label className="flex min-h-11 items-center justify-between gap-4 px-3 py-2">
+                <span><span className="block text-base">Seed</span><span className="block text-xs text-text-muted">-1 chooses a random seed</span></span>
+                <input type="number" min={-1} max={4_294_967_295} step={1} value={seed} onChange={event => setSeed(Number(event.target.value))} className={fieldClass} />
               </label>
-              <div className="flex items-end">
-                <Button type="submit" tone="blue" disabled={!canGenerate} className="w-full">
-                  {running ? 'Generating music…' : 'Generate music'}
-                </Button>
-              </div>
-            </div>
-            <details className="border-t border-white/10 pt-3">
-              <summary className="min-h-11 cursor-pointer py-3 text-xs font-medium text-text-secondary sm:min-h-10">
-                Advanced generation settings
-              </summary>
-              <div className="grid gap-4 pb-2 sm:grid-cols-2">
-                <label className="block text-xs font-medium text-text-secondary">
-                  Steps
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={1}
-                    value={steps}
-                    onChange={event => setSteps(Number(event.target.value))}
-                    className={controlClass}
-                  />
-                  <span className="mt-1 block font-normal text-text-muted">0 uses the runtime default</span>
-                </label>
-                <label className="block text-xs font-medium text-text-secondary">
-                  Guidance scale
-                  <input
-                    type="number"
-                    min={0}
-                    max={50}
-                    step={0.1}
-                    value={guidanceScale}
-                    onChange={event => setGuidanceScale(Number(event.target.value))}
-                    className={controlClass}
-                  />
-                  <span className="mt-1 block font-normal text-text-muted">0 uses the runtime default</span>
-                </label>
-              </div>
-            </details>
-            <div>
-              <p className="mb-3 text-xs text-text-muted">
-                InferDeck loads the selected GPU model before generation. Saved WAV files remain in media history after a restart.
-              </p>
-              {running && (
-                <Button
-                  tone="danger"
-                  className="w-full sm:w-auto"
-                  onClick={() => controller.current?.abort()}
-                >
-                  Cancel request
-                </Button>
-              )}
-              {connection !== 'connected' && (
-                <p className="mt-3 text-sm text-warning-amber" role="status">
-                  The gateway must be connected before generation can start.
-                </p>
-              )}
-              {error && <p className="mt-3 text-sm text-danger-rose" role="alert">{error}</p>}
-              {result && <p className="mt-3 text-sm text-success-green" role="status">{result}</p>}
-            </div>
-          </form>
-        )}
-      </Panel>
+              <label className="flex min-h-11 items-center justify-between gap-4 px-3 py-2">
+                <span><span className="block text-base">Steps</span><span className="block text-xs text-text-muted">0 uses the runtime default</span></span>
+                <input type="number" min={0} max={100} step={1} value={steps} onChange={event => setSteps(Number(event.target.value))} className={fieldClass} />
+              </label>
+              <label className="flex min-h-11 items-center justify-between gap-4 px-3 py-2">
+                <span><span className="block text-base">Guidance scale</span><span className="block text-xs text-text-muted">0 uses the runtime default</span></span>
+                <input type="number" min={0} max={50} step={0.1} value={guidanceScale} onChange={event => setGuidanceScale(Number(event.target.value))} className={fieldClass} />
+              </label>
+            </GroupList>
+          </details>
+
+          <div className="space-y-2">
+            <p className="text-xs text-text-muted">InferDeck loads the selected GPU model before generation.</p>
+            {running && <Button tone="danger" onClick={() => controller.current?.abort()}>Cancel request</Button>}
+            {connection !== 'connected' && <Notice tone="warn" role="status">The gateway must be connected before generation can start.</Notice>}
+            {error && <Notice tone="critical" role="alert">{error}</Notice>}
+            {result && <Notice tone="good" role="status">{result}</Notice>}
+          </div>
+        </form>
+      )}
       <MediaJobsPanel
         modalities={['audio_generation']}
         title="Music history"

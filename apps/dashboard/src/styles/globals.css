@@ -1,46 +1,83 @@
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* Colour tokens are space-separated RGB channels so Tailwind opacity modifiers keep working. */
 :root {
+  color-scheme: light;
+  font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 20px;
+
+  --canvas: 242 242 245;
+  --sidebar: 234 234 239;
+  --surface: 255 255 255;
+  --fill: 232 232 237;
+  --fill-strong: 222 222 228;
+  --separator: 222 222 228;
+  --line: 199 199 206;
+  --ink: 28 28 30;
+  --ink-2: 60 60 67;
+  --ink-3: 104 104 112;
+  --accent: 10 106 214;
+  --on-accent: 255 255 255;
+  --violet: 108 76 196;
+  --good: 30 130 62;
+  --warn: 176 96 0;
+  --bad: 205 38 38;
+  --series-1: 42 120 214;
+  --series-2: 194 65 122;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.05);
+  --shadow-overlay: 0 12px 40px rgb(0 0 0 / 0.16), 0 2px 6px rgb(0 0 0 / 0.08);
+}
+
+:root[data-theme="dark"] {
   color-scheme: dark;
-  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  --void-black: #000;
-  --deck-navy: #000;
-  --panel-slate: #151e29;
-  --elevated-slate: #1b2633;
-  --card-highlight: #202d3c;
-  --border-slate: #2b3949;
-  --text-primary: #fff;
-  --text-secondary: #b0bcc8;
-  --text-muted: #7f8d9d;
-  --infer-violet: #6e8fb5;
-  --ion-cyan: #6e9ec9;
-  --queue-blue: #72a7d8;
-  --success-green: #52b788;
-  --gpu-mint: #52b788;
-  --warning-amber: #d9a441;
-  --gaming-orange: #d68a45;
-  --danger-rose: #df6b72;
+  --canvas: 28 28 31;
+  --sidebar: 23 23 26;
+  --surface: 38 38 42;
+  --fill: 50 50 55;
+  --fill-strong: 60 60 66;
+  --separator: 54 54 60;
+  --line: 72 72 78;
+  --ink: 236 236 240;
+  --ink-2: 184 184 192;
+  --ink-3: 142 142 150;
+  --accent: 74 150 255;
+  --on-accent: 255 255 255;
+  --violet: 170 150 240;
+  --good: 76 190 120;
+  --warn: 240 170 60;
+  --bad: 255 105 97;
+  --series-1: 57 135 229;
+  --series-2: 213 81 129;
+  --shadow-card: none;
+  --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.5);
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
 }
 
 body {
   margin: 0;
   min-width: 320px;
-  overflow-x: hidden;
-  background: var(--void-black);
-  color: var(--text-primary);
-}
-
-@supports (overflow: clip) {
-  body {
-    overflow-x: clip;
-  }
+  background: rgb(var(--canvas));
+  color: rgb(var(--ink));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
 }
 
 #root {
+  position: relative;
   width: 100%;
 }
 
@@ -48,29 +85,74 @@ body {
   box-sizing: border-box;
 }
 
+h1, h2, h3 {
+  text-wrap: balance;
+}
+
 button, input, select, textarea {
   font: inherit;
 }
 
-button, input, select, textarea, a {
-  outline-color: var(--queue-blue);
+::selection {
+  background: rgb(var(--accent) / 0.25);
 }
 
-select, input, textarea {
-  border: 1px solid var(--border-slate);
-  border-radius: 4px;
-  background: #0f1720;
-  color: var(--text-primary);
+select, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea {
+  border: 1px solid rgb(var(--line));
+  border-radius: 8px;
+  background: rgb(var(--surface));
+  color: rgb(var(--ink));
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
-select:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
-  outline: 2px solid var(--queue-blue);
+select:focus-visible, input:focus-visible, textarea:focus-visible {
+  border-color: rgb(var(--accent));
+  box-shadow: 0 0 0 3px rgb(var(--accent) / 0.2);
+}
+
+input::placeholder, textarea::placeholder {
+  color: rgb(var(--ink-3));
+}
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 1.75rem !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%238a8a93' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+}
+
+input[type="checkbox"], input[type="radio"], input[type="range"] {
+  accent-color: rgb(var(--accent));
+}
+
+a:focus-visible, button:focus-visible, summary:focus-visible, [role="button"]:focus-visible, [role="radio"]:focus-visible, tr:focus-visible {
+  outline: 2px solid rgb(var(--accent));
   outline-offset: 2px;
 }
 
-summary:focus-visible {
-  outline: 2px solid var(--queue-blue);
-  outline-offset: 4px;
+summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Tactile press feedback on anything clickable, like a native control. */
+button:not(:disabled), a[href], summary, [role="button"], [role="radio"] {
+  transition-property: background-color, border-color, color, opacity, transform, box-shadow;
+  transition-duration: 120ms;
+}
+
+button:not(:disabled):active, a[href]:active, [role="button"]:active, [role="radio"]:not([aria-disabled="true"]):active {
+  transform: scale(0.98);
+}
+
+tr[role="radio"]:active {
+  transform: none;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
 }
 
 ::-webkit-scrollbar {
@@ -79,219 +161,27 @@ summary:focus-visible {
 }
 
 ::-webkit-scrollbar-track {
-  background: #0B1220;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #27344D;
+  background: rgb(var(--line));
+  border: 3px solid rgb(var(--canvas));
   border-radius: 999px;
-}
-
-.truncate-cell {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.app-shell {
-  background: var(--void-black);
 }
 
 .task-view {
   max-width: 880px;
 }
 
-.task-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  padding-bottom: 24px;
-}
-
-.task-header h2 {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: 1.5rem;
-  line-height: 1.25;
-  font-weight: 650;
-}
-
-.task-header p {
-  margin: 6px 0 0;
-  max-width: 62ch;
-  color: var(--text-secondary);
-  font-size: 0.875rem;
-}
-
-.task-section {
-  border-top: 1px solid var(--border-slate);
-  padding: 24px 0;
-}
-
-.task-section h3 {
-  margin: 0 0 16px;
-  color: var(--text-primary);
-  font-size: 1rem;
-  font-weight: 600;
-}
-
-.section-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.section-heading span {
-  color: var(--text-muted);
-  font-size: 0.75rem;
-}
-
-.field-row {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.7fr);
-  gap: 16px;
-  max-width: 640px;
-}
-
-.field-row label {
-  color: var(--text-secondary);
-  font-size: 0.75rem;
-}
-
-.field-row select, .field-row input {
-  display: block;
-  width: 100%;
-  min-height: 40px;
-  margin-top: 6px;
-  padding: 0 10px;
-}
-
-.action-row, .recording-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-top: 20px;
-}
-
-.recording-row {
-  min-height: 48px;
-  border-left: 3px solid var(--danger-rose);
-  padding-left: 14px;
-}
-
-.recording-row strong {
-  min-width: 110px;
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-  font-size: 0.875rem;
-}
-
-.file-action {
-  display: inline-flex;
-  min-height: 36px;
-  cursor: pointer;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border-slate);
-  border-radius: 4px;
-  padding: 6px 12px;
-  color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.04);
-  font-size: 0.75rem;
-  font-weight: 500;
-}
-
-.file-action:focus-within {
-  outline: 2px solid var(--queue-blue);
-  outline-offset: 2px;
-}
-
-.file-action:focus-visible {
-  outline: 2px solid var(--queue-blue);
-  outline-offset: 2px;
-}
-
-.file-action input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-}
-
-.file-action.is-disabled {
-  cursor: not-allowed;
-  opacity: 0.4;
-}
-
-.control-note, .state-message {
-  color: var(--text-muted);
-  font-size: 0.75rem;
-}
-
-.inline-error {
-  max-width: 720px;
-  margin-top: 16px;
-  border-left: 3px solid var(--danger-rose);
-  padding: 8px 12px;
-  color: #f2b6ba;
-  background: rgba(223, 107, 114, 0.08);
-  font-size: 0.8125rem;
-}
-
-.success-message {
-  color: var(--success-green);
-  font-size: 0.75rem;
-}
-
-.transcript-editor {
-  display: block;
-  width: 100%;
-  min-height: 240px;
-  resize: vertical;
-  padding: 14px;
-  color: var(--text-primary);
-  line-height: 1.6;
-}
-
-.speech-result {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  margin-top: 20px;
-}
-
-.speech-result audio {
-  width: min(100%, 520px);
-}
-
-@media (max-width: 640px) {
-  button, select, summary, .file-action,
-  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]) {
-    min-height: 44px;
+@media (max-width: 767px) {
+  button, select, summary,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]) {
+    min-height: 40px;
   }
 
   .chart-ticks > span:nth-child(even):not(:last-child) {
     display: none;
-  }
-
-  .field-row {
-    grid-template-columns: 1fr;
-  }
-
-  .task-header {
-    flex-direction: column;
-    gap: 12px;
-    padding-bottom: 18px;
-  }
-
-  .task-section {
-    padding: 20px 0;
   }
 }
 
@@ -303,37 +193,3 @@ summary:focus-visible {
     animation-iteration-count: 1 !important;
   }
 }
-
-.mock-home .mock-telemetry > div {
-  border-left: 0;
-  padding-left: 0;
-}
-.mock-home .mock-telemetry svg {
-  height: 3.5rem;
-  margin-top: .5rem;
-}
-.mock-home .mock-telemetry > div:nth-child(n + 3) {
-  border-top: 1px solid var(--border-slate);
-  padding-top: 1rem;
-}
-
-.mock-home .mock-telemetry > div {
-  display: flex;
-  flex-direction: column;
-}
-.mock-home .mock-telemetry svg {
-  margin-top: auto;
-  flex-shrink: 0;
-}
-
-body {
-  height: 100dvh;
-  overflow: hidden;
-}
-#root {
-  height: 100%;
-  overflow: hidden;
-}
-
-html { height: 100%; overflow: hidden; }
-#root { position: relative; }

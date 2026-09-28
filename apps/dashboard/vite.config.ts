@@ -16,8 +16,8 @@ export default defineConfig({
   server: {
     allowedHosts: ['ai.homelab.com'],
     proxy: {
-      '/api': 'http://127.0.0.1:11434',
-      '/v1': 'http://127.0.0.1:11434',
+      '/api': process.env.INFERDECK_PROXY_TARGET || 'http://127.0.0.1:11434',
+      '/v1': process.env.INFERDECK_PROXY_TARGET || 'http://127.0.0.1:11434',
     },
     port: 3000,
     strictPort: true,

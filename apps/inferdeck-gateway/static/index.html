@@ -2,11 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#f2f2f5" />
   <link rel="icon" type="image/png" href="/assets/Logo-DGytU0aj.png" />
   <title>InferDeck</title>
-  <script type="module" crossorigin src="/assets/index-CIgczAUN.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-BLckNCXO.css">
+  <script>
+    (function () {
+      var preference = 'light';
+      try { preference = localStorage.getItem('inferdeck:theme') || 'light'; } catch (error) {}
+      var dark = preference === 'dark' || (preference === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    })();
+  </script>
+  <script type="module" crossorigin src="/assets/index-DBCt4K9D.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-BMv2PxD-.css">
 </head>
 <body>
   <div id="root"></div>

@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useFeedback } from '../components/Feedback';
 import { deleteModelAlias, getModelAliases, getModels, saveModelAlias, type ModelAliasRecord } from '../api';
-import { Badge, Button, EmptyState, Panel, SectionTitle } from '../components/ui';
+import { Button, GroupHeader, GroupList } from '../components/ui';
 import { modelBelongsToSection, type DashboardSection } from '../dashboardSections';
 
 export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ section }) => {
+  const { confirm, toast } = useFeedback();
   const [aliases, setAliases] = useState<ModelAliasRecord[]>([]);
   const [revision, setRevision] = useState('');
   const [models, setModels] = useState<Awaited<ReturnType<typeof getModels>>>([]);
@@ -35,6 +37,7 @@ export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ secti
       await saveModelAlias(aliasName, aliasTarget, revision);
       setName('');
       await refresh();
+      toast(`Alias ${aliasName} now points to ${aliasTarget}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -43,12 +46,13 @@ export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ secti
   };
 
   const remove = async (aliasName: string) => {
-    if (!window.confirm(`Delete model alias ${aliasName}? Concrete models and active requests are unaffected.`)) return;
+    if (!(await confirm({ title: `Delete alias ${aliasName}?`, detail: "Clients using this name stop resolving. The models it pointed to are not affected.", confirmLabel: "Delete alias", destructive: true }))) return;
     setBusy(true);
     setError('');
     try {
       await deleteModelAlias(aliasName, revision);
       await refresh();
+      toast(`Alias ${aliasName} deleted`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -58,35 +62,35 @@ export const ModelAliasPanel: React.FC<{ section: DashboardSection }> = ({ secti
 
   const scopedAliases = aliases.filter(alias => concrete.some(model => model.id === alias.target));
   return (
-    <Panel>
-      <SectionTitle title="Stable API aliases" aside={`${scopedAliases.length} configured`} />
-      <p className="mt-2 max-w-3xl text-sm text-text-secondary">
+    <section aria-label="Stable API aliases">
+      <GroupHeader title="Stable API aliases" aside={`${scopedAliases.length} configured`} />
+      <GroupList>
+        {scopedAliases.map(alias => (
+          <div key={alias.name} className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2">
+            <div className="min-w-0 flex-1 basis-40">
+              <p className="truncate font-mono text-sm text-text-primary">{alias.name}</p>
+              <p className="tabular text-xs text-text-muted">Requires {alias.requiredContextSize.toLocaleString()} context{alias.requiredCapabilities.length ? `, ${alias.requiredCapabilities.join(', ')}` : ''}</p>
+            </div>
+            <span className="text-sm text-text-muted" aria-hidden="true">→</span>
+            <select aria-label={`Target for ${alias.name}`} className="h-8 min-w-0 flex-1 basis-52 px-2.5 font-mono text-sm" value={alias.target} onChange={event => { void save(alias.name, event.target.value); }} disabled={busy}>
+              {concrete.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}
+            </select>
+            <Button tone="danger" disabled={busy} onClick={() => { void remove(alias.name); }} title={`Delete alias ${alias.name}`}>Delete</Button>
+          </div>
+        ))}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 bg-panel-slate px-3 py-2">
+          <input aria-label="New alias name" className="h-8 min-w-0 flex-1 basis-32 px-2.5 font-mono text-sm" value={name} onChange={event => setName(event.target.value)} placeholder="New alias, e.g. production-chat" />
+          <select aria-label="Alias target" className="h-8 min-w-0 flex-1 basis-52 px-2.5 font-mono text-sm" value={target} onChange={event => setTarget(event.target.value)}>
+            {concrete.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}
+          </select>
+          <Button tone="blue" disabled={busy || !name.trim() || !target} onClick={() => { void save(name.trim(), target); }}>Create alias</Button>
+        </div>
+      </GroupList>
+      {scopedAliases.length === 0 && <p className="mt-1.5 text-xs text-text-muted">No stable aliases for this service.</p>}
+      {error && <p className="mt-1.5 text-xs text-danger-rose" role="alert">{error}</p>}
+      <p className="mt-1.5 text-xs text-text-muted">
         Give clients a durable model ID. Retargeting is refused unless the replacement preserves the alias context and capability contract.
       </p>
-      <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(160px,1fr)_minmax(220px,2fr)_auto]">
-        <input aria-label="New alias name" className="h-9 rounded border border-white/10 bg-[#07101d] px-2 text-sm text-text-primary" value={name} onChange={event => setName(event.target.value)} placeholder="production-chat" />
-        <select aria-label="Alias target" className="h-9 rounded border border-white/10 bg-[#07101d] px-2 text-sm text-text-primary" value={target} onChange={event => setTarget(event.target.value)}>
-          {concrete.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}
-        </select>
-        <Button tone="blue" disabled={busy || !name.trim() || !target} onClick={() => { void save(name.trim(), target); }}>Create alias</Button>
-      </div>
-      {error && <p className="mt-2 text-xs text-danger-rose" role="alert">{error}</p>}
-      {scopedAliases.length === 0 ? <div className="mt-3"><EmptyState title="No stable aliases for this service" /></div> : (
-        <div className="mt-3 divide-y divide-white/5">
-          {scopedAliases.map(alias => (
-            <div key={alias.name} className="grid gap-2 py-3 text-sm md:grid-cols-[1fr_2fr_auto] md:items-center">
-              <div><p className="font-mono text-text-primary">{alias.name}</p><p className="text-xs text-text-muted">contract: {alias.requiredContextSize.toLocaleString()} context</p></div>
-              <div>
-                <select aria-label={`Target for ${alias.name}`} className="h-9 w-full rounded border border-white/10 bg-[#07101d] px-2 text-sm text-text-primary" value={alias.target} onChange={event => { void save(alias.name, event.target.value); }} disabled={busy}>
-                  {concrete.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}
-                </select>
-                <span className="mt-1 flex flex-wrap gap-1">{alias.requiredCapabilities.map(capability => <Badge key={capability} label={capability} tone="idle" />)}</span>
-              </div>
-              <Button tone="danger" className="w-full md:w-auto" disabled={busy} onClick={() => { void remove(alias.name); }}>Delete alias</Button>
-            </div>
-          ))}
-        </div>
-      )}
-    </Panel>
+    </section>
   );
 };

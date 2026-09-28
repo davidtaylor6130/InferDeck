@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getJobs, getPricing } from '../api';
 import { UsageRangeTabs } from '../components/UsageCharts';
-import { Button, DetailItem, Panel, SectionTitle, Stat, linePath, pickTickIndices } from '../components/ui';
+import { Button, DetailItem, EmptyState, SectionTitle, linePath, pickTickIndices } from '../components/ui';
+import { modelHref } from '../routes';
 import {
   ALL_MODELS,
   DEFAULT_COST_CONFIG,
@@ -11,7 +12,7 @@ import {
   getCostConfigForModel,
   tokenUsageFromSeries,
 } from '../cost';
-import type { CostDefaults, ModelCostConfig, TokenRange, TokenSeries } from '../cost';
+import type { CostDefaults, ModelCostConfig, TokenRange } from '../cost';
 import {
   bucketUsageForSection,
   isDictationModel,
@@ -32,6 +33,14 @@ export const UsagePage: React.FC<{ section?: DashboardSection }> = ({ section = 
     return <MediaGenerationUsagePage section={section} />;
   }
   return <LlmUsagePage />;
+};
+
+const RANGE_PHRASE: Record<TokenRange, string> = {
+  day: 'in the last 24 hours',
+  week: 'in the last week',
+  month: 'in the last month',
+  year: 'in the last year',
+  all: 'in total',
 };
 
 type UsageSortKey = 'model' | 'requests' | 'promptTokens' | 'completionTokens' | 'avgTokensPerSecond' | 'avgPromptTokensPerSecond' | 'peakTokensPerSecond' | 'cost';
@@ -159,95 +168,128 @@ const LlmUsagePage: React.FC = () => {
       : { key, direction: key === 'model' ? 'asc' : 'desc' });
   };
 
+  const sortLabels: Record<UsageSortKey, string> = {
+    model: 'Model',
+    requests: 'Requests',
+    promptTokens: 'Prompt',
+    completionTokens: 'Output',
+    avgTokensPerSecond: 'TPS',
+    avgPromptTokensPerSecond: 'Prompt processing',
+    peakTokensPerSecond: 'Peak TPS',
+    cost: 'Cost',
+  };
+  const maxTokens = Math.max(1, ...periodUsage.map(row => row.totalTokens));
+  const busiest = periodUsage.reduce<(typeof periodUsage)[number] | undefined>(
+    (top, row) => (!top || row.totalTokens > top.totalTokens ? row : top), undefined);
+
   return (
-    <div className="space-y-4">
-      <Panel>
-        <SectionTitle title="LLM usage" aside={TOKEN_RANGE_LABELS[range]} />
-        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <Stat label="Total tokens" value={formatTokenCount(seriesUsage.total)} />
-          <Stat label="Prompt" value={formatTokenCount(seriesUsage.prompt)} />
-          <Stat label="Output" value={formatTokenCount(seriesUsage.output)} />
-          <Stat label="Estimated API cost" value={formatCurrency(rangeCost)} tone="good" />
+    <div className="space-y-8">
+      <header aria-label={`Summary for ${TOKEN_RANGE_LABELS[range]}`}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-text-muted">LLM usage</p>
+          <UsageRangeTabs value={range} onChange={setRange} />
         </div>
-
-        <label className="mt-4 block max-w-sm text-xs text-text-secondary">
-          <span className="mb-1 block text-text-muted">Usage model</span>
-          <select
-            className="h-9 w-full rounded-md border border-white/10 bg-[#0b1626] px-2 text-sm text-text-primary"
-            value={selectedModel}
-            onChange={event => setSelectedModel(event.target.value)}
-          >
-            {modelNames.map(model => <option key={model} value={model}>{model}</option>)}
-          </select>
-        </label>
-        <div className="mt-3"><UsageRangeTabs value={range} onChange={setRange} /></div>
-
-        {series.total.some(value => value > 0)
-          ? <TokenUsageGraph series={series} />
-          : <p className="border-y border-dashed border-border-slate py-8 text-center text-sm text-text-muted">No usage recorded for this range.</p>}
-
-        <p className="mt-4 border-t border-border-slate pt-3 text-xs text-text-muted">
-          Cost uses the server-side prices configured for each model in Model Settings. Legacy ranges may use a server-provided cache estimate where early versions did not record cache hits. Models without prices contribute no estimated cost.
+        <h1 className="mt-2 text-2xl font-semibold text-text-primary sm:text-[28px] sm:leading-9">
+          {formatTokenCount(seriesUsage.total)} tokens {RANGE_PHRASE[range]}
+        </h1>
+        <p className="mt-1 max-w-[70ch] text-sm text-text-secondary">
+          Worth about <span className="font-medium text-text-primary">{formatCurrency(rangeCost)}</span> at hosted API prices.
+          {' '}{formatTokenCount(seriesUsage.prompt)} read, {formatTokenCount(seriesUsage.output)} written.
+          {busiest ? <> Busiest model: <a href={modelHref(busiest.model)} className="font-mono text-text-primary hover:underline">{compactModel(busiest.model)}</a> ({Math.round(busiest.totalTokens / Math.max(1, seriesUsage.total) * 100)}%).</> : null}
         </p>
-      </Panel>
+      </header>
 
-      <SubscriptionSavingsPanel apiCostsCents={equivalentApiCostCents} />
-
-      <Panel>
-        <SectionTitle title="Per-model usage" aside={TOKEN_RANGE_LABELS[range]} />
-        <p className="mt-2 text-xs text-text-muted">
-          TPS is average generation speed. Prompt processing is uncached input processing speed. Peak TPS is the fastest comparable generation request.
-        </p>
-        {periodUsage.length === 0 ? (
-          <p className="mt-3 text-sm text-text-muted">No usage recorded for this range.</p>
-        ) : (
-          <>
-          <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 md:hidden">
-            <label className="min-w-0 text-xs text-text-muted">
-              Sort by
+      <section>
+        <SectionTitle
+          title="Tokens over time"
+          action={(
+            <label className="flex items-center gap-2 text-xs text-text-muted">
+              <span className="sr-only">Usage model</span>
               <select
-                aria-label="Sort mobile LLM usage"
-                className="mt-1 min-h-11 w-full bg-[#07101d] px-2 text-sm text-text-primary"
-                value={sort.key}
-                onChange={event => toggleSort(event.target.value as UsageSortKey)}
+                aria-label="Usage model"
+                className="h-8 max-w-[240px] px-2.5 font-mono text-xs"
+                value={selectedModel}
+                onChange={event => setSelectedModel(event.target.value)}
               >
-                <option value="model">Model</option>
-                <option value="requests">Requests</option>
-                <option value="promptTokens">Prompt</option>
-                <option value="completionTokens">Output</option>
-                <option value="avgTokensPerSecond">TPS</option>
-                <option value="avgPromptTokensPerSecond">Prompt processing</option>
-                <option value="peakTokensPerSecond">Peak TPS</option>
-                <option value="cost">Cost</option>
+                {modelNames.map(model => <option key={model} value={model}>{model}</option>)}
               </select>
             </label>
+          )}
+        />
+        {series.total.some(value => value > 0) ? (
+          <div className="grid gap-8 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+            <LineGraph
+              labels={series.months}
+              ariaLabel="Prompt and output tokens over time"
+              format={formatTokenCount}
+              lines={[
+                { label: 'Prompt tokens', color: 'rgb(var(--series-1))', values: series.prompt },
+                { label: 'Output tokens', color: 'rgb(var(--series-2))', values: series.output },
+              ]}
+            />
+            <div>
+              <h3 className="mt-4 text-xs text-text-muted">Estimated API cost (USD)</h3>
+              <LineGraph
+                labels={series.months}
+                ariaLabel="Estimated API cost over time"
+                format={formatCurrency}
+                maxTicks={2}
+                lines={[{ label: 'Estimated API cost', color: 'rgb(var(--series-1))', values: series.cost }]}
+              />
+            </div>
+          </div>
+        ) : <div className="mt-4"><EmptyState title="No usage recorded for this range." /></div>}
+        <p className="mt-4 max-w-[80ch] text-xs text-text-muted">
+          Cost uses the server-side prices configured for each model in Model Settings. Legacy ranges may use a server-provided cache estimate where early versions did not record cache hits. Models without prices contribute no estimated cost.
+        </p>
+      </section>
+
+      <section>
+        <div className="flex flex-wrap items-end justify-between gap-3 pb-2">
+          <h2 className="text-sm font-semibold">Per-model usage <span className="font-normal text-text-muted">{TOKEN_RANGE_LABELS[range]}</span></h2>
+          <div className="flex items-center gap-2 md:hidden">
+            <select
+              aria-label="Sort mobile LLM usage"
+              className="h-9 px-2.5 text-sm"
+              value={sort.key}
+              onChange={event => toggleSort(event.target.value as UsageSortKey)}
+            >
+              {(Object.keys(sortLabels) as UsageSortKey[]).map(key => <option key={key} value={key}>{sortLabels[key]}</option>)}
+            </select>
             <Button onClick={() => setSort(current => ({ ...current, direction: current.direction === 'asc' ? 'desc' : 'asc' }))}>
               {sort.direction === 'asc' ? 'Ascending' : 'Descending'}
             </Button>
           </div>
-          <div className="divide-y divide-white/10 md:hidden" aria-label="Per-model LLM usage cards">
+        </div>
+        {periodUsage.length === 0 ? (
+          <EmptyState title="No usage recorded for this range." />
+        ) : (
+          <>
+          <div className="divide-y divide-border-slate rounded-lg border border-border-slate bg-panel-slate shadow-card md:hidden" aria-label="Per-model LLM usage cards">
             {periodUsage.map(row => (
-              <article key={row.model} className="py-4 first:pt-3 last:pb-0">
-                <h3 className="break-words font-mono text-sm text-text-primary">{compactModel(row.model)}</h3>
-                <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
+              <article key={row.model} className="px-3 py-3">
+                <div className="flex items-center gap-3">
+                  <h3 className="min-w-0 flex-1 truncate font-mono text-sm text-text-primary">{compactModel(row.model)}</h3>
+                  <span className="tabular text-sm font-medium text-text-primary">{formatCurrency(row.cost)}</span>
+                </div>
+                <dl className="mt-3 grid grid-cols-3 gap-x-4 gap-y-3">
                   <DetailItem label="Requests">
                     {row.requests.toLocaleString()} <span className="text-xs text-text-muted">({row.successfulRequests.toLocaleString()} ok)</span>
                   </DetailItem>
-                  <DetailItem label="Cost"><span className="text-success-green">{formatCurrency(row.cost)}</span></DetailItem>
                   <DetailItem label="Prompt">{formatTokenCount(row.promptTokens)}</DetailItem>
                   <DetailItem label="Output">{formatTokenCount(row.completionTokens)}</DetailItem>
-                  <DetailItem label="TPS">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</DetailItem>
-                  <DetailItem label="Prompt processing">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</DetailItem>
-                  <DetailItem label="Peak TPS">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</DetailItem>
+                  <DetailItem label="TPS">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : '—'}</DetailItem>
+                  <DetailItem label="Prompt processing">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : '—'}</DetailItem>
+                  <DetailItem label="Peak TPS">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : '—'}</DetailItem>
                 </dl>
               </article>
             ))}
           </div>
-          <div className="mt-3 hidden overflow-x-auto md:block" role="region" aria-label="Per-model LLM usage" tabIndex={0}>
+          <div className="hidden overflow-x-auto rounded-lg border border-border-slate bg-panel-slate shadow-card md:block" role="region" aria-label="Per-model LLM usage" tabIndex={0}>
             <table className="w-full min-w-[880px] text-left text-sm">
               <thead>
-                <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
-                  <SortableHeader label="Model" sortKey="model" active={sort} onSort={toggleSort} />
+                <tr className="text-xs text-text-muted">
+                  <SortableHeader label="Model" sortKey="model" active={sort} onSort={toggleSort} first />
                   <SortableHeader label="Requests" sortKey="requests" active={sort} onSort={toggleSort} />
                   <SortableHeader label="Prompt" sortKey="promptTokens" active={sort} onSort={toggleSort} />
                   <SortableHeader label="Output" sortKey="completionTokens" active={sort} onSort={toggleSort} />
@@ -257,55 +299,73 @@ const LlmUsagePage: React.FC = () => {
                   <SortableHeader label="Cost" sortKey="cost" active={sort} onSort={toggleSort} last />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5">
-                {periodUsage.map(row => {
-                  return (
-                    <tr key={row.model}>
-                      <td className="py-2 pr-4 font-mono text-text-primary">{compactModel(row.model)}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.requests} <span className="text-text-muted">({row.successfulRequests} ok)</span></td>
-                      <td className="py-2 pr-4 text-text-secondary">{formatTokenCount(row.promptTokens)}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{formatTokenCount(row.completionTokens)}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : 'Ã¢â‚¬â€'}</td>
-                      <td className="py-2 text-success-green">{formatCurrency(row.cost)}</td>
-                    </tr>
-                  );
-                })}
+              <tbody className="tabular">
+                {periodUsage.map(row => (
+                  <tr key={row.model} className="border-t border-border-slate hover:bg-elevated-slate/60">
+                    <td className="py-2 pl-3 pr-4">
+                      <p className="truncate font-mono text-text-primary" title={row.model}>{compactModel(row.model)}</p>
+                      <div className="mt-1 h-1 w-28 overflow-hidden rounded-sm bg-border-slate"><div className="h-full bg-series-1" style={{ width: `${row.totalTokens / maxTokens * 100}%` }} /></div>
+                    </td>
+                    <td className="py-2 pr-4 text-right text-text-secondary">{row.requests.toLocaleString()} <span className="text-text-muted">({row.successfulRequests} ok)</span></td>
+                    <td className="py-2 pr-4 text-right text-text-secondary">{formatTokenCount(row.promptTokens)}</td>
+                    <td className="py-2 pr-4 text-right text-text-secondary">{formatTokenCount(row.completionTokens)}</td>
+                    <td className="py-2 pr-4 text-right text-text-primary">{row.avgTokensPerSecond ? row.avgTokensPerSecond.toFixed(1) : '—'}</td>
+                    <td className="py-2 pr-4 text-right text-text-secondary">{row.avgPromptTokensPerSecond ? row.avgPromptTokensPerSecond.toFixed(1) : '—'}</td>
+                    <td className="py-2 pr-4 text-right text-text-secondary">{row.peakTokensPerSecond ? row.peakTokensPerSecond.toFixed(1) : '—'}</td>
+                    <td className="py-2 pr-3 text-right font-medium text-text-primary">{formatCurrency(row.cost)}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
           </>
         )}
-      </Panel>
+        <p className="mt-2 text-xs text-text-muted">
+          TPS is average generation speed. Prompt processing is uncached input processing speed. Peak TPS is the fastest comparable generation request.
+        </p>
+      </section>
+
+      <SubscriptionSavingsPanel apiCostsCents={equivalentApiCostCents} />
     </div>
   );
 };
 
-const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
-  const tokenMax = Math.max(1, ...series.total, ...series.prompt, ...series.output);
-  const costMax = Math.max(1, ...series.cost);
-  const lastIndex = series.months.length - 1;
+
+type GraphLine = { label: string; color: string; values: number[] };
+
+const LineGraph: React.FC<{ labels: string[]; lines: GraphLine[]; format: (value: number) => string; ariaLabel: string; maxTicks?: number }> = ({ labels, lines, format, ariaLabel, maxTicks = 4 }) => {
+  const max = Math.max(1, ...lines.flatMap(line => line.values));
+  const lastIndex = labels.length - 1;
   const monthX = (index: number) => lastIndex <= 0 ? 340 : (680 / lastIndex) * index;
-  const pointY = (value: number, max: number) => 150 - (clamp(value, 0, max) / max) * 150;
-  const tickIndices = pickTickIndices(series.months.length);
+  const pointY = (value: number) => 150 - (clamp(value, 0, max) / max) * 150;
+  const tickIndices = pickTickIndices(labels.length, maxTicks);
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
   const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
     const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect || series.months.length === 0) return;
+    if (!rect || labels.length === 0) return;
     const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
     setHoverIndex(lastIndex <= 0 ? 0 : Math.round(ratio * lastIndex));
   };
-  const handlePointerLeave = () => setHoverIndex(null);
   // -50% centers the label/tooltip on the point; edges anchor inward so they don't overflow the chart.
   const edgeTranslateX = (index: number) => index === 0 ? '0%' : index === lastIndex ? '-100%' : '-50%';
+  const topValue = hoverIndex === null ? 0 : Math.max(...lines.map(line => line.values[hoverIndex] ?? 0));
 
   return (
-    <div className="mt-5">
-      <div className="grid grid-cols-[34px_1fr_42px] gap-2 text-xs text-text-muted">
-        <div className="flex flex-col justify-between py-2"><span>{formatTokenCount(tokenMax)}</span><span>{formatTokenCount(tokenMax / 2)}</span><span>0</span></div>
+    <div className="mt-4">
+      {lines.length > 1 && (
+        <div className="mb-3 flex flex-wrap gap-x-5 gap-y-2 text-xs text-text-secondary">
+          {lines.map(line => (
+            <span key={line.label} className="inline-flex items-center gap-2">
+              <span className="h-0.5 w-4" style={{ background: line.color }} />
+              {line.label}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="grid grid-cols-[44px_1fr] gap-2 text-xs text-text-muted">
+        <div className="tabular flex flex-col justify-between text-right"><span>{format(max)}</span><span>{format(max / 2)}</span><span>0</span></div>
         <div>
           <div className="relative">
             <svg
@@ -314,49 +374,49 @@ const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
               preserveAspectRatio="none"
               className="h-[150px] w-full touch-pan-y overflow-visible"
               role="img"
-              aria-label="Token usage over time. A data table follows the chart."
+              aria-label={`${ariaLabel}. A data table follows the chart.`}
               onPointerDown={handlePointerMove}
               onPointerMove={handlePointerMove}
-              onPointerLeave={handlePointerLeave}
+              onPointerLeave={() => setHoverIndex(null)}
             >
-              <g stroke="rgba(148,163,184,0.14)" strokeDasharray="4 5" vectorEffect="non-scaling-stroke">
+              <g style={{ stroke: 'rgb(var(--separator))' }}>
                 {[0, 75, 150].map(y => <line key={y} x1="0" y1={y} x2="680" y2={y} vectorEffect="non-scaling-stroke" />)}
-                {series.months.map((_, index) => <line key={index} x1={monthX(index)} y1="0" x2={monthX(index)} y2="150" vectorEffect="non-scaling-stroke" />)}
               </g>
-              <path d={linePath(series.total, 680, 150, tokenMax)} fill="none" stroke="#60A5FA" strokeWidth="3" vectorEffect="non-scaling-stroke" />
-              <path d={linePath(series.prompt, 680, 150, tokenMax)} fill="none" stroke="#34D399" strokeWidth="3" vectorEffect="non-scaling-stroke" />
-              <path d={linePath(series.output, 680, 150, tokenMax)} fill="none" stroke="#A78BFA" strokeWidth="3" vectorEffect="non-scaling-stroke" />
-              <path d={linePath(series.cost, 680, 150, costMax)} fill="none" stroke="#22C55E" strokeWidth="3" strokeDasharray="8 6" vectorEffect="non-scaling-stroke" />
+              {lines.map(line => (
+                <path key={line.label} d={linePath(line.values, 680, 150, max)} fill="none" style={{ stroke: line.color }} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+              ))}
               {hoverIndex !== null && (
-                <g pointerEvents="none">
-                  <line x1={monthX(hoverIndex)} y1="0" x2={monthX(hoverIndex)} y2="150" stroke="rgba(226,232,240,0.35)" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-                  <circle cx={monthX(hoverIndex)} cy={pointY(series.total[hoverIndex], tokenMax)} r="3.5" fill="#60A5FA" />
-                  <circle cx={monthX(hoverIndex)} cy={pointY(series.prompt[hoverIndex], tokenMax)} r="3.5" fill="#34D399" />
-                  <circle cx={monthX(hoverIndex)} cy={pointY(series.output[hoverIndex], tokenMax)} r="3.5" fill="#A78BFA" />
-                </g>
+                <line x1={monthX(hoverIndex)} y1="0" x2={monthX(hoverIndex)} y2="150" style={{ stroke: 'rgb(var(--line))' }} strokeWidth="1" vectorEffect="non-scaling-stroke" pointerEvents="none" />
               )}
             </svg>
+            {hoverIndex !== null && lines.map(line => (
+              <span
+                key={line.label}
+                className="pointer-events-none absolute h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full ring-2 ring-black"
+                style={{ left: `${(monthX(hoverIndex) / 680) * 100}%`, top: `${(pointY(line.values[hoverIndex] ?? 0) / 150) * 100}%`, background: line.color }}
+              />
+            ))}
             {hoverIndex !== null && (
               <div
-                className="pointer-events-none absolute z-10 max-w-[min(18rem,calc(100vw-2rem))] rounded-md border border-white/10 bg-[#0b1626] px-2.5 py-1.5 text-xs shadow-deck"
+                className="pointer-events-none absolute z-10 max-w-[min(18rem,calc(100vw-2rem))] rounded-md border border-line-strong bg-panel-slate px-2.5 py-1.5 text-xs shadow-deck"
                 style={{
                   left: `${(monthX(hoverIndex) / 680) * 100}%`,
-                  top: `${(pointY(series.total[hoverIndex], tokenMax) / 150) * 100}%`,
+                  top: `${(pointY(topValue) / 150) * 100}%`,
                   transform: `translate(${edgeTranslateX(hoverIndex)}, calc(-100% - 10px))`,
                 }}
               >
-                <div className="font-medium text-text-primary">{series.months[hoverIndex] || 'Bucket'}</div>
-                <div className="mt-1 space-y-0.5 text-text-secondary">
-                  <div>Total: <span className="text-text-primary">{formatTokenCount(series.total[hoverIndex])}</span></div>
-                  <div>Prompt: <span className="text-text-primary">{formatTokenCount(series.prompt[hoverIndex])}</span></div>
-                  <div>Output: <span className="text-text-primary">{formatTokenCount(series.output[hoverIndex])}</span></div>
-                  <div>Cost: <span className="text-success-green">{formatCurrency(series.cost[hoverIndex])}</span></div>
-                </div>
+                <div className="font-medium text-text-primary">{labels[hoverIndex] || 'Bucket'}</div>
+                {lines.map(line => (
+                  <div key={line.label} className="mt-0.5 flex items-center gap-1.5 text-text-secondary">
+                    <span className="h-2 w-2 rounded-full" style={{ background: line.color }} />
+                    {line.label}: <span className="tabular text-text-primary">{format(line.values[hoverIndex] ?? 0)}</span>
+                  </div>
+                ))}
               </div>
             )}
           </div>
           <div className="chart-ticks relative mt-1 h-4 text-xs text-text-muted">
-            {series.months.map((month, index) => tickIndices.includes(index) && (
+            {labels.map((month, index) => tickIndices.includes(index) && (
               <span
                 key={index}
                 className="absolute whitespace-nowrap"
@@ -367,25 +427,15 @@ const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
             ))}
           </div>
         </div>
-        <div className="flex flex-col justify-between py-2 text-right"><span>{formatCurrency(costMax)}</span><span>{formatCurrency(costMax / 2)}</span><span>$0</span></div>
-      </div>
-      <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-text-secondary">
-        <Legend color="#60A5FA" label="Total Tokens" />
-        <Legend color="#34D399" label="Prompt Tokens" />
-        <Legend color="#A78BFA" label="Output Tokens" />
-        <Legend color="#22C55E" label="Estimated API cost (USD)" dashed />
       </div>
       <table className="sr-only">
-        <caption>Token usage chart values</caption>
-        <thead><tr><th>Period</th><th>Total tokens</th><th>Prompt tokens</th><th>Output tokens</th><th>Estimated API cost</th></tr></thead>
+        <caption>{ariaLabel}</caption>
+        <thead><tr><th>Period</th>{lines.map(line => <th key={line.label}>{line.label}</th>)}</tr></thead>
         <tbody>
-          {series.months.map((month, index) => (
+          {labels.map((month, index) => (
             <tr key={month}>
               <th>{month}</th>
-              <td>{series.total[index]}</td>
-              <td>{series.prompt[index]}</td>
-              <td>{series.output[index]}</td>
-              <td>{series.cost[index]}</td>
+              {lines.map(line => <td key={line.label}>{line.values[index]}</td>)}
             </tr>
           ))}
         </tbody>
@@ -394,13 +444,6 @@ const TokenUsageGraph: React.FC<{ series: TokenSeries }> = ({ series }) => {
   );
 };
 
-const Legend: React.FC<{ color: string; label: string; dashed?: boolean }> = ({ color, label, dashed }) => (
-  <span className="inline-flex items-center gap-2">
-    <span className={`w-6 ${dashed ? 'border-t-2 border-dashed' : 'h-0.5'}`} style={dashed ? { borderColor: color } : { background: color }} />
-    {label}
-  </span>
-);
-
 const SortableHeader: React.FC<{
   label: string;
   sortKey: UsageSortKey;
@@ -408,18 +451,19 @@ const SortableHeader: React.FC<{
   onSort: (key: UsageSortKey) => void;
   title?: string;
   last?: boolean;
-}> = ({ label, sortKey, active, onSort, title, last }) => {
+  first?: boolean;
+}> = ({ label, sortKey, active, onSort, title, last, first }) => {
   const selected = active.key === sortKey;
   const ariaSort = selected ? (active.direction === 'asc' ? 'ascending' : 'descending') : 'none';
   return (
-    <th className={`py-2 font-medium ${last ? '' : 'pr-4'}`} aria-sort={ariaSort}>
+    <th className={`py-2 font-medium ${first ? 'pl-3 pr-4 text-left' : last ? 'pr-3 text-right' : 'pr-4 text-right'}`} aria-sort={ariaSort}>
       <button
         type="button"
         title={title}
         onClick={() => onSort(sortKey)}
-        className="rounded text-left hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-queue-blue"
+        className={`inline-flex items-center gap-1 rounded text-left transition-colors hover:text-text-primary ${selected ? 'text-text-primary' : ''}`}
       >
-        {label}{selected ? (active.direction === 'asc' ? ' Ã¢â€ â€˜' : ' Ã¢â€ â€œ') : ''}
+        {label}{selected ? <span className="text-queue-blue">{active.direction === 'asc' ? '↑' : '↓'}</span> : ''}
       </button>
     </th>
   );
