@@ -563,7 +563,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     if (type == "mtp" && !runtime_contract->speculative) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP requires a llama_cpp text model: " + name);
+                            "MTP requires a runtime with speculative support: " + name);
                     }
                     const int draft_tokens = speculative["draft_tokens"]
                         ? speculative["draft_tokens"].as<int>() : 2;

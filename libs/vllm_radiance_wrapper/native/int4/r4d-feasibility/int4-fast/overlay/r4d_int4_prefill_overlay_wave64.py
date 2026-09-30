@@ -49,6 +49,7 @@ class R4DInt4TiledArgs(ctypes.Structure):
         ("k_scale_head_stride", ctypes.c_int64),
         ("v_scale_head_stride", ctypes.c_int64),
         ("softmax_scale", ctypes.c_float),
+        ("cu_seqlens_q", ctypes.c_void_p),
     ]
 
 
@@ -86,25 +87,28 @@ def _ptr(tensor: torch.Tensor) -> int:
 
 
 def _check_scalar_tensor(tensor: Any, name: str) -> int:
+    # Shape-only: the value lives in device memory and the kernel reads it there.
     if not isinstance(tensor, torch.Tensor) or tensor.numel() != 1:
         raise RuntimeError(f"INT4 prefill requires one {name} value")
-    return int(tensor.reshape(-1)[0].item())
+    return int(tensor.numel())
 
 
 def _virtualize_table(table: torch.Tensor, context: int, physical_page: int, subpages: int) -> torch.Tensor:
-    if table.dtype != torch.int32 or table.ndim != 2 or table.shape[0] != 1:
-        raise RuntimeError("INT4 prefill requires one int32 block-table row")
+    if table.dtype != torch.int32 or table.ndim != 2 or table.shape[0] < 1:
+        raise RuntimeError("INT4 prefill requires int32 block-table rows")
     if not table.is_cuda or not table.is_contiguous():
         raise RuntimeError("INT4 prefill requires a contiguous CUDA block table")
     physical_count = (context + physical_page - 1) // physical_page
     if table.shape[1] < physical_count:
         raise RuntimeError("INT4 prefill block table is shorter than the KV context")
-    physical = table[:, :physical_count]
-    if bool((physical < 0).any().item()):
-        raise RuntimeError("INT4 prefill block table contains a negative page")
+    # clamp_min, not a host-side `any()` read: a negative page would otherwise
+    # index before the cache. The kernel only dereferences entries below the
+    # device-side seq_lens value, so the padded tail is never touched.
+    physical = table[:, :physical_count].clamp_min(0)
     logical_count = (context + VIRTUAL_PAGE - 1) // VIRTUAL_PAGE
+    rows = table.shape[0]
     subpage_ids = torch.arange(subpages, dtype=torch.int32, device=table.device).view(1, 1, -1)
-    expanded = (physical.reshape(1, -1, 1) * subpages + subpage_ids).reshape(1, -1)
+    expanded = (physical.reshape(rows, -1, 1) * subpages + subpage_ids).reshape(rows, -1)
     return expanded[:, :logical_count].contiguous()
 
 
@@ -116,7 +120,10 @@ def _validate_and_build(kwargs: dict[str, Any]) -> tuple[torch.Tensor, torch.Ten
         raise RuntimeError("INT4 R4D prefill requires contiguous q[Q,24,256]")
     if not isinstance(out, torch.Tensor) or out.dtype != q.dtype or out.shape != q.shape or not out.is_contiguous():
         raise RuntimeError("INT4 R4D prefill requires contiguous BF16 output matching q")
-    if int(kwargs.get("max_seqlen_q", 0)) != q.shape[0] or q.shape[0] <= 1:
+    # A one-row batch is a decode step and belongs to the split-K kernel. A
+    # multi-sequence batch with one row each is routed to decode by shape in
+    # _run_batched_sequences, so anything reaching here has multi-row sequences.
+    if q.shape[0] <= 1:
         raise RuntimeError("INT4 R4D kernel serves prefill only")
     if kwargs.get("causal") is not True:
         raise RuntimeError("INT4 R4D prefill requires causal=True")
@@ -176,37 +183,50 @@ def _validate_and_build(kwargs: dict[str, Any]) -> tuple[torch.Tensor, torch.Ten
             raise RuntimeError("INT4 R4D prefill requires inline FP32 scales matching the packed cache strides")
 
     cu = kwargs.get("cu_seqlens_q")
-    if not isinstance(cu, torch.Tensor) or cu.dtype != torch.int32 or cu.numel() != 2 or not cu.is_contiguous():
-        raise RuntimeError("INT4 R4D prefill requires one contiguous int32 query sequence")
-    if _check_scalar_tensor(cu.reshape(-1)[0], "cu_seqlens_q[0]") != 0 or _check_scalar_tensor(cu.reshape(-1)[1], "cu_seqlens_q[1]") != q.shape[0]:
-        raise RuntimeError("INT4 R4D prefill query offsets do not describe q")
+    if not isinstance(cu, torch.Tensor) or cu.dtype != torch.int32 or cu.ndim != 1 or cu.numel() < 2 or not cu.is_contiguous():
+        raise RuntimeError("INT4 R4D prefill requires a contiguous int32 cu_seqlens_q")
+    _check_scalar_tensor(cu.reshape(-1)[0], "cu_seqlens_q[0]")
+    _check_scalar_tensor(cu.reshape(-1)[1], "cu_seqlens_q[1]")
     seq_lens = kwargs.get("seqused_k")
-    if not isinstance(seq_lens, torch.Tensor) or seq_lens.dtype != torch.int32 or seq_lens.numel() != 1 or not seq_lens.is_contiguous():
-        raise RuntimeError("INT4 R4D prefill requires one contiguous int32 KV sequence length")
+    if not isinstance(seq_lens, torch.Tensor) or seq_lens.dtype != torch.int32 or seq_lens.ndim != 1 or seq_lens.numel() < 1 or not seq_lens.is_contiguous():
+        raise RuntimeError("INT4 R4D prefill requires a contiguous int32 KV sequence length")
     context = int(kwargs.get("max_seqlen_k", 0))
-    if _check_scalar_tensor(seq_lens, "seqused_k") != context or context < q.shape[0] or context <= 0:
-        raise RuntimeError("INT4 R4D prefill KV length does not match max_seqlen_k")
-    if torch.cuda.is_current_stream_capturing():
-        raise RuntimeError("INT4 R4D prefill is disabled during CUDA graph capture")
+    # Every bound below becomes a launch dimension or an address width, so it has
+    # to be host-known before replay. max_seqlen_k/q are the batch-wide upper
+    # bounds vLLM has already committed to for the captured shape, and the kernel
+    # re-reads the true seqused_k and cu_seqlens from device memory per block, so
+    # a padded bound costs addressing slack and nothing else. Calling .item() on
+    # either tensor here is what failed capture with hipErrorStreamCaptureUnsupported.
+    if context <= 0:
+        raise RuntimeError("INT4 R4D prefill requires a positive max_seqlen_k")
 
     block_table = kwargs.get("block_table")
     if not isinstance(block_table, torch.Tensor):
         raise RuntimeError("INT4 R4D prefill requires a block table")
     virtual_table = _virtualize_table(block_table, context, physical_page, subpages)
-    if int(virtual_table.max().item()) // subpages >= key.shape[0]:
-        raise RuntimeError("INT4 block table references a page outside the K/V cache")
 
+    # max_seqlen_q is the per-sequence query bound, not the packed total, so it
+    # only has to size grid.x. Comparing it against q.shape[0] would reject any
+    # batch with more than one sequence; the true split comes from cu_seqlens_q
+    # on the device.
+    q_rows_bound = int(kwargs.get("max_seqlen_q", 0))
+    if q_rows_bound <= 0:
+        raise RuntimeError("INT4 R4D prefill requires a positive max_seqlen_q")
+    sequences = int(cu.numel()) - 1
+    if seq_lens.numel() != sequences or block_table.shape[0] != sequences:
+        raise RuntimeError("INT4 R4D prefill sequence counts must match cu_seqlens_q")
     q_rht = _single_rht(q.float()).to(q.dtype)
     args = R4DInt4TiledArgs(
         _ptr(q_rht), _ptr(key), _ptr(value), _ptr(k_scale), _ptr(v_scale),
         _ptr(virtual_table), _ptr(seq_lens), _ptr(out),
-        1, q.shape[0], Q_HEADS, KV_HEADS, HEAD_DIM, VIRTUAL_PAGE,
+        sequences, q_rows_bound, Q_HEADS, KV_HEADS, HEAD_DIM, VIRTUAL_PAGE,
         subpages, virtual_table.shape[1], physical_page,
         int(key.stride(0)), int(value.stride(0)), int(key.stride(1)), int(value.stride(1)),
         int(key.stride(2)), int(value.stride(2)),
         int(k_scale.stride(0)), int(v_scale.stride(0)), int(k_scale.stride(1)), int(v_scale.stride(1)),
         int(k_scale.stride(2)), int(v_scale.stride(2)),
         float(scale) / HEAD_DIM,
+        _ptr(cu),
     )
     return q_rht, virtual_table, args, context
 
@@ -336,7 +356,14 @@ def _run_batched_sequences(
     prefill: Any,
     decode: Any,
 ) -> list[dict[str, Any]]:
-    """Route packed vLLM query rows to the native kernel one sequence at a time."""
+    """Route a packed vLLM batch to the native kernels without reading the host.
+
+    Every branch here keys off tensor shapes only. The per-sequence query split
+    and KV lengths live in cu_seqlens_q and seqused_k, which stay on the device:
+    the prefill kernel reads its own row range, and the decode loop only needs
+    tensor views. Reading either with .item() is what made this path fail CUDA
+    graph capture with hipErrorStreamCaptureUnsupported.
+    """
     q, out = kwargs.get("q"), kwargs.get("out")
     cu = kwargs.get("cu_seqlens_q")
     seq_lens = kwargs.get("seqused_k")
@@ -347,39 +374,38 @@ def _run_batched_sequences(
         raise RuntimeError("INT4 R4D batched routing requires contiguous int32 cu_seqlens_q for multiple sequences")
     if not isinstance(seq_lens, torch.Tensor) or seq_lens.dtype != torch.int32 or seq_lens.ndim != 1 or not seq_lens.is_contiguous():
         raise RuntimeError("INT4 R4D batched routing requires contiguous int32 seqused_k")
-    i_seq_count = cu.numel() - 1
-    if seq_lens.numel() != i_seq_count or not isinstance(block_table, torch.Tensor) or block_table.ndim != 2 or block_table.shape[0] != i_seq_count:
+    sequences = cu.numel() - 1
+    if seq_lens.numel() != sequences or not isinstance(block_table, torch.Tensor) or block_table.ndim != 2 or block_table.shape[0] != sequences:
         raise RuntimeError("INT4 R4D query offsets, KV lengths, and block-table rows must have matching sequence counts")
-    offsets = [int(cu[i].item()) for i in range(cu.numel())]
-    kv_lengths = [int(seq_lens[i].item()) for i in range(i_seq_count)]
-    if offsets[0] != 0 or offsets[-1] != q.shape[0] or any(b <= a for a, b in zip(offsets, offsets[1:])):
-        raise RuntimeError("INT4 R4D query offsets must partition all packed query rows into nonempty sequences")
-    q_lengths = [b - a for a, b in zip(offsets, offsets[1:])]
-    if any(length <= 0 for length in kv_lengths):
-        raise RuntimeError("INT4 R4D batched routing requires positive per-sequence KV lengths")
-    if int(kwargs.get("max_seqlen_q", 0)) != max(q_lengths):
-        raise RuntimeError("INT4 R4D max_seqlen_q must equal the longest packed query sequence")
-    if int(kwargs.get("max_seqlen_k", 0)) != max(kv_lengths):
-        raise RuntimeError("INT4 R4D max_seqlen_k must equal the longest KV sequence")
+    if q.shape[0] < sequences:
+        raise RuntimeError("INT4 R4D batched routing requires at least one query row per sequence")
+    # One packed row per sequence means every sequence is a decode step, which is
+    # the shape a captured uniform-decode batch has. A shape test rather than a
+    # cu_seqlens read is what keeps this branch capture-safe.
+    if q.shape[0] == sequences:
+        if decode is None:
+            raise RuntimeError("INT4 R4D batched decode requires the native decode kernel")
+        return [_decode_sequence(kwargs, decode, index) for index in range(sequences)]
+    # Mixed or multi-row batch: the prefill kernel walks cu_seqlens_q itself, so
+    # one launch covers a ragged split that used to need a host loop.
+    return [prefill(kwargs)]
 
-    results: list[dict[str, Any]] = []
-    for i_seq, (i_start, i_end, i_kv_len) in enumerate(zip(offsets, offsets[1:], kv_lengths)):
-        i_q_len = i_end - i_start
-        sequence_kwargs = dict(kwargs)
-        sequence_kwargs["q"] = q[i_start:i_end]
-        sequence_kwargs["out"] = out[i_start:i_end]
-        sequence_kwargs["cu_seqlens_q"] = torch.tensor([0, i_q_len], dtype=torch.int32, device=cu.device)
-        sequence_kwargs["seqused_k"] = seq_lens[i_seq:i_seq + 1]
-        sequence_kwargs["block_table"] = block_table[i_seq:i_seq + 1]
-        sequence_kwargs["max_seqlen_q"] = i_q_len
-        sequence_kwargs["max_seqlen_k"] = i_kv_len
-        if i_q_len == 1:
-            if decode is None:
-                raise RuntimeError("INT4 R4D batched decode requires the native wave32 decode kernel")
-            results.append(decode(sequence_kwargs))
-        else:
-            results.append(prefill(sequence_kwargs))
-    return results
+
+def _decode_sequence(kwargs: dict[str, Any], decode: Any, index: int) -> dict[str, Any]:
+    """Decode one row of a packed batch using device-side views only."""
+    q, out = kwargs["q"], kwargs["out"]
+    cu, seq_lens, block_table = kwargs["cu_seqlens_q"], kwargs["seqused_k"], kwargs["block_table"]
+    sequence_kwargs = dict(kwargs)
+    sequence_kwargs["q"] = q[index:index + 1]
+    sequence_kwargs["out"] = out[index:index + 1]
+    sequence_kwargs["cu_seqlens_q"] = cu[index:index + 2]
+    sequence_kwargs["seqused_k"] = seq_lens[index:index + 1]
+    sequence_kwargs["block_table"] = block_table[index:index + 1]
+    sequence_kwargs["max_seqlen_q"] = 1
+    # The decode kernel takes its true length from seqused_k on the device, so
+    # the batch-wide bound is a correct and capture-stable stand-in here.
+    sequence_kwargs["max_seqlen_k"] = int(kwargs.get("max_seqlen_k", 0))
+    return decode(sequence_kwargs)
 
 
 @contextmanager
@@ -396,7 +422,7 @@ def install_int4_prefill_overlay(
     actual_hash = sha256_file(dll_path)
     if actual_hash.lower() != expected_dll_sha256.lower():
         raise RuntimeError(f"R4D INT4 DLL hash mismatch: expected {expected_dll_sha256}, got {actual_hash}")
-    if ctypes.sizeof(R4DInt4TiledArgs) != 208 or R4DInt4TiledArgs.softmax_scale.offset != 200:
+    if ctypes.sizeof(R4DInt4TiledArgs) != 216 or R4DInt4TiledArgs.softmax_scale.offset != 200:
         raise RuntimeError("R4D INT4 ctypes declaration does not match the header ABI")
     library = ctypes.CDLL(str(dll_path))
     fn = library.r4d_int4_tiled_prefill_h256_gqa6

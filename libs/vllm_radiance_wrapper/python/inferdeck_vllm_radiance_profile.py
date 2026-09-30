@@ -41,23 +41,37 @@ _RADIANCE_ENV_DEFAULTS = {
     "RADIANCE_FUSE_RMS_QUANT": "1",
 }
 
-def _gpu_memory_utilization(prefill_attention:str)->float:
+def _gpu_memory_utilization(prefill_attention:str, speculative:bool=False)->float:
+    # Retained MTP3, batch-2048, 100k profile uses 0.991 memory utilization.
+    if speculative: return 0.991
     return 0.925 if prefill_attention == "r4d" else 0.90
 
 def _is_r4d_prefill(prefill_attention:str)->bool:
     return prefill_attention in ("r4d", "r4d_int4")
 
-def _compilation_config(kv_cache_dtype:str, prefill_attention:str, capture_sizes:Any=None)->dict[str,Any]:
+def _compilation_config(kv_cache_dtype:str, prefill_attention:str, capture_sizes:Any=None, draft_tokens:int=0)->dict[str,Any]:
     if kv_cache_dtype == "int4_per_token_head" and prefill_attention == "upstream":
         return {"mode":0,"cudagraph_mode":"NONE"}
-    sizes=[1]
     if isinstance(capture_sizes,str) and capture_sizes.strip():
         try: sizes=[int(part) for part in capture_sizes.split(",") if part.strip()]
         except ValueError: raise RuntimeError("cudagraph_capture_sizes must be comma-separated integers")
     elif isinstance(capture_sizes,list) and capture_sizes:
         sizes=[int(part) for part in capture_sizes]
+    else:
+        sizes=[1]
     if not sizes or any(size<1 for size in sizes): raise RuntimeError("cudagraph_capture_sizes must be positive integers")
-    return {"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":sorted(set(sizes))}
+    sizes=sorted(set(sizes))
+    if draft_tokens:
+        # Under spec decode vLLM rounds every capture size up to a multiple of
+        # draft_tokens+1 and fails closed if none survive, so a size of 1 is a
+        # load-time error, not a silently eager profile. The INT4 prefill path
+        # is capture-safe (no host readback, one launch per packed batch), which
+        # is what previously made this combination impossible.
+        step=draft_tokens+1
+        rounded=sorted({-(-size//step)*step for size in sizes})
+        if not rounded or -(-min(sizes)//step)*step>max(rounded): raise RuntimeError("cudagraph_capture_sizes must admit a multiple of draft_tokens+1")
+        sizes=rounded
+    return {"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":sizes}
 
 def _kv_cache_token_capacity(kv_cache_config:Any)->int:
     num_blocks = int(kv_cache_config.num_blocks)
@@ -181,10 +195,61 @@ def _configure_native_compiler(python_site: str)->str:
     if not cc.is_file(): raise RuntimeError(f"pinned native compiler is unavailable: {cc}")
     os.environ["CC"]=str(cc)
     return str(cc)
+def _speculative_config(c:dict[str,Any])->dict[str,Any]|None:
+    # ponytail: MTP only honours draft_tokens here; the llama.cpp-only p_min and
+    # max_active_requests knobs are not forwarded, so speculative decode runs on
+    # every slot. Revisit only if draft acceptance needs a floor.
+    if c.get("speculative") != "mtp":
+        return None
+    # The drafter's own graph replay is not HIP capture-safe on this build
+    # (hipErrorStreamCaptureUnsupported) and the target's FULL_DECODE_ONLY graph
+    # is where the decode win is, so only the draft runs eager.
+    return {"method": "mtp", "num_speculative_tokens": int(c.get("speculative_draft_tokens", 2)),
+            "enforce_eager": True}
+
+def _quantization_config(config:Any)->dict[str,Any]|None:
+    value = config.get("quantization_config") if isinstance(config,dict) else getattr(config,"quantization_config",None)
+    return value if isinstance(value,dict) else None
+
+def mtp_bf16_modules(config:Any)->tuple[str,...]:
+    # Module level, not a closure: vLLM rebinds this through
+    # functools.partial so the draft ModelConfig stays picklable.
+    quantization_config = _quantization_config(config)
+    if quantization_config is None:
+        raise RuntimeError("MTP quantization override requires a dictionary quantization_config")
+    modules = sorted(entry[:-len(".weight")]
+                     for entry in (quantization_config.get("exclude") or [])
+                     if isinstance(entry,str) and entry.startswith("mtp.") and entry.endswith(".weight"))
+    if not modules:
+        raise RuntimeError("MTP quantization override found no existing BF16 mtp.*.weight exclusions")
+    return tuple(modules)
+
+def apply_mtp_bf16_exclusions(config:Any)->Any:
+    """Carry only the artifact's existing BF16 MTP exclusions into the draft config."""
+    cloned = copy.deepcopy(config)
+    quantization_config = _quantization_config(cloned)
+    if quantization_config is None:
+        # vLLM's config parser calls this override with a synthetic dummy config
+        # to read model_type before the real artifact is parsed.
+        if str(getattr(cloned, "model_type", "")).startswith("dummy_"):
+            return cloned
+        raise RuntimeError("MTP quantization override requires a dictionary quantization_config")
+    excludes = set(quantization_config.get("exclude") or [])
+    excludes.update(mtp_bf16_modules(config))
+    quantization_config["exclude"] = sorted(excludes)
+    return cloned
+
 def _register_qwen35_model_class()->type:
     from vllm.model_executor.models import ModelRegistry
     from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
     ModelRegistry.register_model("Qwen3_5ForConditionalGeneration", Qwen3_5ForConditionalGeneration)
+    # vLLM inspects any architecture it has not already registered by running a
+    # subprocess, and that subprocess cannot import vLLM from the embedded
+    # interpreter. Pre-registering the MTP draft heads keeps inspection in-process,
+    # exactly as the target model class above already does.
+    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP, Qwen3_5MoeMTP
+    ModelRegistry.register_model("Qwen3_5MTP", Qwen3_5MTP)
+    ModelRegistry.register_model("Qwen3_5MoeMTP", Qwen3_5MoeMTP)
     return Qwen3_5ForConditionalGeneration
 def _verify_upstream_prefill_attention()->Any:
     """Return the active vLLM Triton attention binding after identity validation."""
@@ -247,6 +312,66 @@ def _capture_next_request(r:dict[str,Any], ids:list[Any])->None:
         print("vllm_radiance request capture failed", file=sys.stderr, flush=True)
 
 
+def _draft_acceptance_logger_factory(base:Any)->Any:
+    """Build a stat logger that accumulates per-position draft acceptance.
+
+    vLLM computes num_accepted_tokens_per_pos but only reports it in its
+    10-second logging window, which cannot answer whether a given draft depth
+    leaves acceptance on the table for one measured run. The base class is a
+    parameter so this stays unit-testable without importing vLLM.
+    """
+    class DraftAcceptanceLogger(base):
+        def __init__(self,vllm_config:Any,engine_index:int=0)->None:
+            super().__init__(vllm_config,engine_index)
+            self.drafts=0
+            self.draft_tokens=0
+            self.accepted_tokens=0
+            self.accepted_per_pos:list[int]=[]
+            self.drafted_per_pos:list[int]=[]
+        def record(self,scheduler_stats:Any=None,iteration_stats:Any=None,
+                   mm_cache_stats:Any=None,engine_idx:int=0)->None:
+            stats=getattr(scheduler_stats,"spec_decoding_stats",None)
+            if stats is None: return
+            self.drafts+=int(stats.num_drafts)
+            self.draft_tokens+=int(stats.num_draft_tokens)
+            self.accepted_tokens+=int(stats.num_accepted_tokens)
+            for i,value in enumerate(stats.num_accepted_tokens_per_pos):
+                while len(self.accepted_per_pos)<=i: self.accepted_per_pos.append(0)
+                self.accepted_per_pos[i]+=int(value)
+            for i,value in enumerate(stats.num_draft_tokens_per_pos):
+                while len(self.drafted_per_pos)<=i: self.drafted_per_pos.append(0)
+                self.drafted_per_pos[i]+=int(value)
+        def log_engine_initialized(self)->None:
+            return None
+        def log(self)->None:
+            if not self.drafts: return
+            print("event=draft_acceptance " + json.dumps(self.snapshot()),file=sys.stderr,flush=True)
+        def snapshot(self)->dict[str,Any]:
+            # Per-position acceptance is the draft-depth signal: a depth-d run
+            # should show a falling rate as position i grows, and a low final
+            # position is exactly the acceptance that deeper drafts would waste.
+            return {
+                "drafts":self.drafts,
+                "drafted":self.draft_tokens,
+                "accepted":self.accepted_tokens,
+                "acceptance_pct":round(100*self.accepted_tokens/self.draft_tokens,2) if self.draft_tokens else None,
+                "mean_acceptance_length":round(1+self.accepted_tokens/self.drafts,3) if self.drafts else None,
+                "acceptance_per_position":[round(a/self.drafts,4) for a in self.accepted_per_pos] if self.drafts else [],
+                "drafted_per_position":list(self.drafted_per_pos),
+            }
+    return DraftAcceptanceLogger
+
+def _install_draft_acceptance_logger()->Any:
+    from vllm.v1.metrics.loggers import StatLoggerBase
+    return _draft_acceptance_logger_factory(StatLoggerBase)
+
+_DRAFT_ACCEPTANCE:Any=None
+
+def draft_acceptance_snapshot()->dict[str,Any]:
+    """Cumulative per-position draft acceptance, or an empty report when MTP is off."""
+    if _DRAFT_ACCEPTANCE is None: return {"drafts":0}
+    return _DRAFT_ACCEPTANCE.snapshot()
+
 def create(c:dict[str,Any])->dict[str,Any]:
     return _create(c)
 
@@ -300,12 +425,26 @@ def _create(c:dict[str,Any])->dict[str,Any]:
         if prefill_attention == "r4d_int4":
             scheduler_options["long_prefill_token_threshold"] = 2048
         kv_cache_dtype = c.get("kv_cache_dtype", "auto")
-        compilation_config = _compilation_config(kv_cache_dtype, prefill_attention, c.get("cudagraph_capture_sizes"))
-        memory_utilization = _gpu_memory_utilization(prefill_attention)
+        speculative_config = _speculative_config(c)
+        # vLLM refuses custom logits processors when speculative decoding is on.
+        # The penalty processor is only meaningful for non-default penalties, which
+        # _penalties_supported rejects at admission rather than silently dropping.
+        logits_processors = [] if speculative_config else [InferDeckPenaltiesProcessor]
         n_slots = int(c["n_slots"])
-        engine_args=EngineArgs(model=model,logits_processors=[InferDeckPenaltiesProcessor],tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",kv_cache_dtype=kv_cache_dtype,max_model_len=106496,max_num_batched_tokens=4096,max_num_seqs=n_slots,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=memory_utilization,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config=compilation_config,**scheduler_options)
+        draft_tokens = speculative_config["num_speculative_tokens"] if speculative_config else 0
+        compilation_config = _compilation_config(kv_cache_dtype, prefill_attention, c.get("cudagraph_capture_sizes"), draft_tokens)
+        memory_utilization = _gpu_memory_utilization(prefill_attention, speculative_config is not None)
+        # The Quark target config must not be applied to the BF16 drafter; without
+        # this the draft load dies on a column-parallel shape assert.
+        hf_overrides = apply_mtp_bf16_exclusions if speculative_config else None
+        engine_args=EngineArgs(model=model,logits_processors=logits_processors,tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",kv_cache_dtype=kv_cache_dtype,max_model_len=100000,max_num_batched_tokens=2048,max_num_seqs=n_slots,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=memory_utilization,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config=compilation_config,speculative_config=speculative_config,hf_overrides=hf_overrides,**scheduler_options)
         with _r4d_cache_retention(prefill_attention):
-            engine=LLMEngine.from_engine_args(engine_args,enable_multiprocessing=False)
+            global _DRAFT_ACCEPTANCE
+            stat_loggers=[]
+            if speculative_config:
+                _DRAFT_ACCEPTANCE=_install_draft_acceptance_logger()
+                stat_loggers.append(_DRAFT_ACCEPTANCE)
+            engine=LLMEngine.from_engine_args(engine_args,enable_multiprocessing=False,stat_loggers=stat_loggers or None)
         if engine.vllm_config.cache_config.cache_dtype != kv_cache_dtype:
             raise RuntimeError("effective KV cache dtype differs from requested profile")
         if _is_r4d_prefill(prefill_attention):
@@ -313,23 +452,25 @@ def _create(c:dict[str,Any])->dict[str,Any]:
             free_bytes,total_bytes=torch.cuda.mem_get_info()
             kv_token_capacity = _kv_cache_token_capacity(cache_manager.kv_cache_config)
             kv_max_concurrency = _kv_cache_max_concurrency(cache_manager.kv_cache_config, engine.vllm_config)
-            actual={"async":engine.vllm_config.scheduler_config.async_scheduling,"long_prefill_token_threshold":engine.vllm_config.scheduler_config.long_prefill_token_threshold,"retention":cache_manager.coordinator.retention_interval,"blocks":cache_manager.kv_cache_config.num_blocks,"kv_token_capacity":kv_token_capacity,"kv_max_concurrency":kv_max_concurrency,"context":engine.vllm_config.model_config.max_model_len,"memory_utilization":engine.vllm_config.cache_config.gpu_memory_utilization,"free_bytes":free_bytes,"total_bytes":total_bytes}
+            spec_config = engine.vllm_config.speculative_config
+            actual={"async":engine.vllm_config.scheduler_config.async_scheduling,"spec":spec_config.method if spec_config else "none","spec_tokens":spec_config.num_speculative_tokens if spec_config else 0,"long_prefill_token_threshold":engine.vllm_config.scheduler_config.long_prefill_token_threshold,"retention":cache_manager.coordinator.retention_interval,"blocks":cache_manager.kv_cache_config.num_blocks,"kv_token_capacity":kv_token_capacity,"kv_max_concurrency":kv_max_concurrency,"context":engine.vllm_config.model_config.max_model_len,"memory_utilization":engine.vllm_config.cache_config.gpu_memory_utilization,"free_bytes":free_bytes,"total_bytes":total_bytes}
             print("event=isolated_cache_profile "+json.dumps(actual),file=sys.stderr,flush=True)
             expected_memory_utilization = memory_utilization
             minimum_blocks = 185 if prefill_attention == "r4d" else 0
             capacity_valid = kv_max_concurrency >= n_slots if prefill_attention == "r4d_int4" else actual["blocks"] >= minimum_blocks
             async_requested = bool(scheduler_options.get("async_scheduling", False))
-            if (actual["async"] and not async_requested) or actual["long_prefill_token_threshold"] != scheduler_options.get("long_prefill_token_threshold", 0) or actual["retention"] != 0 or actual["context"] != 106496 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < 1073741824:
+            spec_requested = speculative_config["method"] if speculative_config else "none"
+            if (actual["async"] and not async_requested) or actual["spec"] != spec_requested or actual["long_prefill_token_threshold"] != scheduler_options.get("long_prefill_token_threshold", 0) or actual["retention"] != 0 or actual["context"] != 100000 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < 1073741824:
                 raise RuntimeError("R4D cache profile or free-memory guard failed")
         tokenizer=cached_tokenizer_from_config(engine.vllm_config.model_config)
         if engine.vllm_config.model_config.enable_prompt_embeds:raise RuntimeError("native pooled tokenizer does not support prompt embeds")
         if not isinstance(engine.engine_core,InprocClient):raise RuntimeError("V1 InprocClient was not constructed")
-        if engine.vllm_config.model_config.enforce_eager or engine.vllm_config.scheduler_config.max_num_batched_tokens!=4096 or engine.vllm_config.scheduler_config.max_num_seqs!=n_slots:raise RuntimeError("effective engine differs from configured profile")
+        if engine.vllm_config.model_config.enforce_eager or engine.vllm_config.scheduler_config.max_num_batched_tokens!=2048 or engine.vllm_config.scheduler_config.max_num_seqs!=n_slots:raise RuntimeError("effective engine differs from configured profile")
         if prefill_attention == "upstream":
             _verify_upstream_prefill_attention()
         decode_kernel_enabled = prefill_attention == "r4d_int4" and "decode_dll" in c
-        print(f"vllm_radiance prefill_attention={prefill_attention} kv_cache_dtype={kv_cache_dtype} gpu_memory_utilization={memory_utilization} int4_decode_kernel={str(decode_kernel_enabled).lower()} async_req={c.get('async_scheduling')!r} radiance_env={json.dumps(_radiance_env(c), sort_keys=True)}", file=sys.stderr, flush=True)
-        return {"engine":engine,"engine_lock":threading.RLock(),"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention,"int4_decode_kernel":decode_kernel_enabled,"radiance_env":_radiance_env(c)}
+        print(f"vllm_radiance prefill_attention={prefill_attention} kv_cache_dtype={kv_cache_dtype} gpu_memory_utilization={memory_utilization} int4_decode_kernel={str(decode_kernel_enabled).lower()} async_req={c.get('async_scheduling')!r} spec={json.dumps(speculative_config, sort_keys=True)} radiance_env={json.dumps(_radiance_env(c), sort_keys=True)}", file=sys.stderr, flush=True)
+        return {"engine":engine,"engine_lock":threading.RLock(),"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention,"int4_decode_kernel":decode_kernel_enabled,"speculative":speculative_config is not None,"radiance_env":_radiance_env(c)}
     except Exception as load_error:
         try:
             shutdown({"engine": engine, "active": set(), "requests": {},
@@ -442,6 +583,11 @@ def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
         "presence_penalty": float(r["sampling"].get("presence_penalty", 0.0)),
     }
     sampling.extra_args = {**(getattr(sampling, "extra_args", None) or {}), "inferdeck_penalties": penalties}
+    if s.get("speculative") and (penalties["repetition_penalty"] != 1.0 or
+                                 penalties["frequency_penalty"] != 0.0 or
+                                 penalties["presence_penalty"] != 0.0 or
+                                 penalties["repeat_last_n"] == 0):
+        raise RuntimeError("sampling penalties are unsupported while MTP speculative decoding is enabled")
     sampling.repetition_penalty = 1.0
     sampling.frequency_penalty = 0.0
     sampling.presence_penalty = 0.0

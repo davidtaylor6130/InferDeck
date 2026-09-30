@@ -22,6 +22,8 @@
 namespace inferdeck::vllm_radiance_wrapper {
 namespace {
 
+std::mutex g_python_interpreter_mutex;
+
 foundation::Result<void> fail(const std::string& message) {
     return foundation::Err<void>(foundation::ErrorCode::Unavailable, message);
 }
@@ -197,6 +199,39 @@ PyObject* text_dict(const model::InferenceRequest& request,
 }
 } // namespace
 
+foundation::Result<void> initialize_python_runtime(const std::string& python_root_text)
+{
+    if (python_root_text.empty()) return fail("python_root artifact is required");
+    const std::filesystem::path python_root =
+        std::filesystem::weakly_canonical(python_root_text);
+    const std::filesystem::path executable = python_root / "python.exe";
+    if (!std::filesystem::is_regular_file(executable))
+        return fail("python_root does not contain python.exe");
+
+    std::lock_guard interpreter_lock(g_python_interpreter_mutex);
+    if (Py_IsInitialized()) {
+        if (std::filesystem::weakly_canonical(Py_GetPrefix()) != python_root)
+            return fail("A different CPython root is already active; restart is required to change dependencies");
+        return foundation::Ok();
+    }
+
+    PyConfig config;
+    PyConfig_InitIsolatedConfig(&config);
+    config.site_import = 1;
+    PyStatus status = PyConfig_SetString(&config, &config.home, python_root.c_str());
+    if (!PyStatus_Exception(status))
+        status = PyConfig_SetString(&config, &config.executable, executable.c_str());
+    if (!PyStatus_Exception(status)) status = Py_InitializeFromConfig(&config);
+    const std::string error = PyStatus_Exception(status) && status.err_msg
+        ? status.err_msg : "";
+    PyConfig_Clear(&config);
+    if (PyStatus_Exception(status))
+        return fail("CPython initialization failed: " + error);
+
+    PyEval_SaveThread();
+    return foundation::Ok();
+}
+
 class VllmRadianceModel::State {
 public:
     explicit State(model::ModelInfo value) : info(std::move(value)) {}
@@ -225,22 +260,10 @@ foundation::Result<void> VllmRadianceModel::load()
     const std::filesystem::path python_root = std::filesystem::weakly_canonical(root->second);
     const std::filesystem::path executable = python_root / "python.exe";
     if (!std::filesystem::is_regular_file(executable)) return fail("python_root does not contain python.exe");
-    static std::mutex interpreter_mutex;
     {
-        std::lock_guard interpreter_lock(interpreter_mutex);
+        std::lock_guard interpreter_lock(g_python_interpreter_mutex);
         if (!Py_IsInitialized())
-        {
-            PyConfig config;
-            PyConfig_InitIsolatedConfig(&config);
-            config.site_import = 1;
-            PyStatus status = PyConfig_SetString(&config, &config.home, python_root.c_str());
-            if (!PyStatus_Exception(status)) status = PyConfig_SetString(&config, &config.executable, executable.c_str());
-            if (!PyStatus_Exception(status)) status = Py_InitializeFromConfig(&config);
-            const std::string error = PyStatus_Exception(status) && status.err_msg ? status.err_msg : "";
-            PyConfig_Clear(&config);
-            if (PyStatus_Exception(status)) return fail("CPython initialization failed: " + error);
-            PyEval_SaveThread();
-        }
+            return fail("CPython runtime must be initialized on the gateway startup thread");
     }
     GIL gil;
     try
@@ -263,6 +286,11 @@ foundation::Result<void> VllmRadianceModel::load()
         for (const auto& [key, value] : state_->info.artifacts)
             set_owned(config.get(), key.c_str(), owned(PyUnicode_FromString(value.c_str())));
         set_owned(config.get(), "runtime", owned(PyUnicode_FromString("vllm_radiance")));
+        if (state_->info.mtp_enabled)
+        {
+            set_owned(config.get(), "speculative", owned(PyUnicode_FromString("mtp")));
+            set_owned(config.get(), "speculative_draft_tokens", owned(PyLong_FromLong(state_->info.mtp_draft_tokens)));
+        }
         set_owned(config.get(), "context_size", owned(PyLong_FromLong(state_->info.context_size)));
         set_owned(config.get(), "n_slots", owned(PyLong_FromLong(state_->info.n_slots)));
         set_owned(config.get(), "min_slots", owned(PyLong_FromLong(state_->info.min_slots)));

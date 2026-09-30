@@ -29,9 +29,16 @@ struct R4DInt4TiledArgs {
     int64_t k_scale_token_stride, v_scale_token_stride;
     int64_t k_scale_head_stride, v_scale_head_stride;
     float softmax_scale; // caller passes model_scale / head_dim (vLLM INT4 contract)
+    // cu_seqlens_q has seqs+1 entries; sequence s owns query rows
+    // [cu[s], cu[s+1]). q_len stays the batch-wide upper bound that sizes
+    // grid.x. Reading the split here instead of in the caller is what lets a
+    // ragged packed batch launch in one capture-safe call with no host readback
+    // and no per-sequence H2D copy.
+    const int32_t* cu_seqlens_q;
 };
 static_assert(offsetof(R4DInt4TiledArgs, softmax_scale) == 200, "R4D INT4 ABI float offset");
-static_assert(sizeof(R4DInt4TiledArgs) == 208, "R4D INT4 Win64 ABI size");
+static_assert(offsetof(R4DInt4TiledArgs, cu_seqlens_q) == 208, "R4D INT4 ABI cu_seqlens offset");
+static_assert(sizeof(R4DInt4TiledArgs) == 216, "R4D INT4 Win64 ABI size");
 
 #if defined(_WIN32) && !defined(__HIP_DEVICE_COMPILE__)
 #define R4D_INT4_EXPORT __declspec(dllexport)

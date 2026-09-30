@@ -355,25 +355,34 @@ class ProfileTests(unittest.TestCase):
         class ActualModel:
             pass
 
+        class DraftModel:
+            pass
+
         class Registry:
             @staticmethod
             def register_model(model_arch, model_cls):
-                captured["model_arch"] = model_arch
-                captured["model_cls"] = model_cls
+                captured.setdefault("all", []).append((model_arch, model_cls))
 
         modules = {
             "vllm.model_executor.models": NS(ModelRegistry=Registry),
             "vllm.model_executor.models.qwen3_5": NS(
                 Qwen3_5ForConditionalGeneration=ActualModel
             ),
+            "vllm.model_executor.models.qwen3_5_mtp": NS(
+                Qwen3_5MTP=DraftModel, Qwen3_5MoeMTP=DraftModel
+            ),
         }
         with patch.dict(sys.modules, modules):
             registered = profile._register_qwen35_model_class()
 
         self.assertIs(registered, ActualModel)
-        self.assertEqual(captured["model_arch"], "Qwen3_5ForConditionalGeneration")
-        self.assertIs(captured["model_cls"], ActualModel)
-        self.assertNotIsInstance(captured["model_cls"], str)
+        self.assertIn(("Qwen3_5ForConditionalGeneration", ActualModel), captured["all"])
+        for arch, cls in captured["all"]:
+            self.assertNotIsInstance(cls, str)
+        self.assertEqual(
+            [arch for arch, _ in captured["all"] if arch in ("Qwen3_5MTP", "Qwen3_5MoeMTP")],
+            ["Qwen3_5MTP", "Qwen3_5MoeMTP"],
+            "MTP draft heads must be registered so vLLM never inspects them in a subprocess")
     def test_begin_routes_image_messages_through_vllm_multimodal_renderer(self):
         captured = {}
         engine_input = {"type": "multimodal", "prompt_token_ids": [10, 11],
@@ -679,6 +688,155 @@ class ProfileTests(unittest.TestCase):
                 profile.shutdown(state)
         self.assertIsNone(state["engine"])
         self.assertEqual(calls, ["shutdown", "overlay_exit", "overlay_exit", "sync", "empty"])
+
+    def test_begin_rejects_sampling_penalties_while_speculative(self):
+        class ToolParser:
+            def __init__(self, tokenizer, tools):
+                del tokenizer, tools
+
+            def adjust_request(self, request):
+                return request
+
+        class Request:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                self.tools = None
+
+            def to_sampling_params(self, maximum, defaults):
+                del maximum, defaults
+                return NS(output_kind=None, structured_outputs=None, stop=None)
+
+        modules = {
+            "vllm.entrypoints.openai.chat_completion.protocol": NS(ChatCompletionRequest=Request),
+            "vllm.parser.qwen3": NS(Qwen3Parser=lambda *a, **kw: NS()),
+            "vllm.sampling_params": NS(RequestOutputKind=NS(DELTA=object()),
+                                       StructuredOutputsParams=lambda **kw: NS(**kw)),
+            "vllm.tool_parsers.structural_tag_registry": NS(
+                get_model_structural_tag=lambda *a, **kw: NS(model_dump=lambda: {})),
+            "vllm.tool_parsers.qwen3_engine_tool_parser": NS(Qwen3EngineToolParser=ToolParser),
+        }
+        state = {"tokenizer": NS(apply_chat_template=lambda *a, **k: [1, 2, 3]),
+                 "engine": NS(add_request=lambda *a, **k: None),
+                 "engine_lock": threading.Lock(), "active": set(), "requests": {},
+                 "speculative": True}
+        request = {"model": "qwen", "messages": [], "sampling": {"repetition_penalty": 1.2},
+                   "repeat_last_n": 64, "max_output_tokens": 16}
+        with patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(RuntimeError, "penalties are unsupported"):
+                profile.begin(state, request)
+
+    def test_begin_allows_default_penalties_while_speculative(self):
+        added = []
+
+        class ToolParser:
+            def __init__(self, tokenizer, tools):
+                del tokenizer, tools
+
+            def adjust_request(self, request):
+                return request
+
+        class Request:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                self.tools = None
+
+            def to_sampling_params(self, maximum, defaults):
+                del maximum, defaults
+                return NS(output_kind=None, structured_outputs=None, stop=None)
+
+        modules = {
+            "vllm.entrypoints.openai.chat_completion.protocol": NS(ChatCompletionRequest=Request),
+            "vllm.parser.qwen3": NS(Qwen3Parser=lambda *a, **kw: NS()),
+            "vllm.sampling_params": NS(RequestOutputKind=NS(DELTA=object()),
+                                       StructuredOutputsParams=lambda **kw: NS(**kw)),
+            "vllm.tool_parsers.structural_tag_registry": NS(
+                get_model_structural_tag=lambda *a, **kw: NS(model_dump=lambda: {})),
+            "vllm.tool_parsers.qwen3_engine_tool_parser": NS(Qwen3EngineToolParser=ToolParser),
+        }
+        state = {"tokenizer": NS(apply_chat_template=lambda *a, **k: [1, 2, 3]),
+                 "engine": NS(add_request=lambda *a, **k: added.append(a)),
+                 "engine_lock": threading.Lock(), "active": set(), "requests": {},
+                 "speculative": True}
+        request = {"model": "qwen", "messages": [], "sampling": {}, "max_output_tokens": 16}
+        with patch.dict(sys.modules, modules):
+            profile.begin(state, request)
+        self.assertTrue(added, "default-penalty request should still be admitted under MTP")
+
+    def test_speculative_config_disabled_by_default(self):
+        self.assertIsNone(profile._speculative_config({}))
+        self.assertIsNone(profile._speculative_config({"speculative": "none"}))
+
+    def test_speculative_config_mtp_uses_draft_tokens(self):
+        self.assertEqual(profile._speculative_config({"speculative": "mtp"}),
+                         {"method": "mtp", "num_speculative_tokens": 2, "enforce_eager": True})
+        self.assertEqual(
+            profile._speculative_config({"speculative": "mtp", "speculative_draft_tokens": "3"}),
+            {"method": "mtp", "num_speculative_tokens": 3, "enforce_eager": True})
+
+    def test_mtp_uses_measured_memory_budget_but_target_only_is_unchanged(self):
+        self.assertEqual(profile._gpu_memory_utilization("r4d_int4"), 0.90)
+        self.assertEqual(profile._gpu_memory_utilization("r4d"), 0.925)
+        self.assertEqual(profile._gpu_memory_utilization("r4d_int4", True), 0.991)
+
+    def test_mtp_bf16_exclusions_reach_the_draft_without_mutating_the_target(self):
+        exclude = ["model.layers.0.mlp.gate_proj.weight", "mtp.fc.weight",
+                   "mtp.eh_proj.weight", "lm_head.weight"]
+        target = NS(quantization_config={"exclude": list(exclude)})
+        self.assertEqual(profile.mtp_bf16_modules(target), ("mtp.eh_proj", "mtp.fc"))
+
+        draft = profile.apply_mtp_bf16_exclusions(target)
+        self.assertIsNot(draft, target)
+        self.assertEqual(target.quantization_config["exclude"], exclude)
+        # The drafter is derived from the same artifact, so every BF16 mtp
+        # exclusion must survive; an emptied exclude list is the shape assert.
+        self.assertLessEqual(set(exclude), set(draft.quantization_config["exclude"]))
+        self.assertEqual(profile.mtp_bf16_modules(draft), ("mtp.eh_proj", "mtp.fc"))
+
+    def test_mtp_bf16_exclusions_reject_a_quantized_artifact(self):
+        with self.assertRaises(RuntimeError):
+            profile.mtp_bf16_modules(NS(quantization_config={"exclude": ["model.layers.0.mlp.gate_proj.weight"]}))
+        with self.assertRaises(RuntimeError):
+            profile.mtp_bf16_modules(NS())
+
+    def test_target_only_decode_graph_stays_at_one(self):
+        self.assertEqual(
+            profile._compilation_config("int4_per_token_head", "r4d_int4", None, 0),
+            {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]})
+
+    def test_mtp_capture_sizes_round_up_to_a_spec_decode_multiple(self):
+        # vLLM rounds spec-decode capture sizes up to a multiple of
+        # draft_tokens+1 and fails closed when none survive, so 1 must become 3
+        # rather than a load-time error.
+        self.assertEqual(
+            profile._compilation_config("int4_per_token_head", "r4d_int4", None, 2),
+            {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [3]})
+        self.assertEqual(
+            profile._compilation_config("int4_per_token_head", "r4d_int4", "3,6,12", 2),
+            {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [3, 6, 12]})
+        # Draft 4 forces a multiple of 5, so the same request rounds to 5.
+        self.assertEqual(
+            profile._compilation_config("int4_per_token_head", "r4d_int4", None, 4)["cudagraph_capture_sizes"],
+            [5])
+
+    def test_draft_acceptance_reports_per_position_acceptance(self):
+        stats = NS(num_drafts=4, num_draft_tokens=8, num_accepted_tokens=5,
+                   num_accepted_tokens_per_pos=[4, 1], num_draft_tokens_per_pos=[4, 4])
+        with patch.object(profile, "_DRAFT_ACCEPTANCE", None):
+            self.assertEqual(profile.draft_acceptance_snapshot(), {"drafts": 0})
+        class StatLoggerBaseStub:
+            def __init__(self, vllm_config, engine_index=0):
+                self.vllm_config = vllm_config
+                self.engine_index = engine_index
+        logger_factory = profile._draft_acceptance_logger_factory(StatLoggerBaseStub)
+        logger = logger_factory(NS(), 0)
+        logger.record(NS(spec_decoding_stats=stats), None)
+        logger.record(NS(spec_decoding_stats=None), None)
+        snapshot = logger.snapshot()
+        self.assertEqual(snapshot["drafts"], 4)
+        self.assertEqual(snapshot["accepted"], 5)
+        # A falling per-position rate is the signal that depth is being wasted.
+        self.assertEqual(snapshot["acceptance_per_position"], [1.0, 0.25])
+        self.assertEqual(snapshot["drafted_per_position"], [4, 4])
 
     def test_radiance_env_defaults_when_absent(self):
         self.assertEqual(profile._radiance_env({}), profile._RADIANCE_ENV_DEFAULTS)

@@ -110,6 +110,30 @@ int run_gateway(const fs::path& config_path) {
                   config_selection.fallback_reason,
                   config_path.string());
     }
+#ifdef INFERDECK_VLLM_RADIANCE_ENABLE
+    const auto radiance_model = std::find_if(
+        cfg.models.begin(), cfg.models.end(), [](const model::ModelInfo& info) {
+            return info.runtime == "vllm_radiance";
+        });
+    if (radiance_model != cfg.models.end()) {
+        const auto python_root = radiance_model->artifacts.find("python_root");
+        if (python_root == radiance_model->artifacts.end()) {
+            LOG_ERROR("radiance_python_runtime_init_failed",
+                      "model={} has no python_root artifact", radiance_model->name);
+        } else {
+            const auto initialized =
+                vllm_radiance_wrapper::initialize_python_runtime(python_root->second);
+            if (!initialized) {
+                LOG_ERROR("radiance_python_runtime_init_failed",
+                          "model={} error={}", radiance_model->name,
+                          initialized.error().message);
+            } else {
+                LOG_INFO("radiance_python_runtime_initialized",
+                         "python_root={}", python_root->second);
+            }
+        }
+    }
+#endif
     std::call_once(g_llama_init_once, [] {
         LOG_INFO("vulkan_test", "About to initialize llama backend");
         llama_backend_init();
