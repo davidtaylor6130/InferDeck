@@ -110,6 +110,7 @@ int run_gateway(const fs::path& config_path) {
                   config_selection.fallback_reason,
                   config_path.string());
     }
+    initialize_optional_runtimes(cfg.models);
     std::call_once(g_llama_init_once, [] {
         LOG_INFO("vulkan_test", "About to initialize llama backend");
         llama_backend_init();

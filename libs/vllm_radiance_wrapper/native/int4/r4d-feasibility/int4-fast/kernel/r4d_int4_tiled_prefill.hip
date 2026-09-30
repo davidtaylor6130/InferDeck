@@ -144,12 +144,19 @@ void r4d_attn_prefill_kernel(const R4DInt4TiledArgs a)
     const int qb = blockIdx.x, kvh = blockIdx.y, seq = blockIdx.z;
     const int ctx = a.seq_lens[seq];
     if (ctx <= 0) return;
+    // Per-sequence query range, read from device memory. a.q_len is only the
+    // batch-wide bound that sized grid.x, so a ragged packed batch needs no
+    // host-side split and no per-sequence launch.
+    const int q_base = a.cu_seqlens_q[seq];
+    const int q_stop = a.cu_seqlens_q[seq + 1];
+    const int q_rows = q_stop - q_base;
+    if (q_rows <= 0) return;
 
     const int row = warp * 16 + c;
     const int qi = row / GQA, hi = row - qi * GQA;
     const int qpos = qb * BLOCK_Q + qi;
-    const bool live = (qpos < a.q_len);
-    const int qrow = live ? qpos : (a.q_len - 1);
+    const bool live = (qpos < q_rows);
+    const int qrow = q_base + (live ? qpos : (q_rows - 1));
     const int qhead = kvh * GQA + hi;
 
     const int* __restrict__ bt = a.block_table + (size_t)seq * a.max_blocks;
@@ -159,7 +166,7 @@ void r4d_attn_prefill_kernel(const R4DInt4TiledArgs a)
     frag16 qf[NKS];
     {
         const uint16_t* qp = (const uint16_t*)a.q
-                           + ((size_t)(seq * a.q_len + qrow) * a.q_heads + qhead) * HEAD_DIM;
+                           + ((size_t)qrow * a.q_heads + qhead) * HEAD_DIM;
         #pragma unroll
         for (int t = 0; t < NKS; ++t) {
             // CONTIG reads the same 8 d as ONE run; the legacy map splits them 4+4.
@@ -172,7 +179,7 @@ void r4d_attn_prefill_kernel(const R4DInt4TiledArgs a)
         }
     }
 
-    const int klimit = ctx - a.q_len + qpos;
+    const int klimit = ctx - q_rows + qpos;
 
     float m_ref = -3.0e38f;
     float off   = PSHIFT + 3.0e38f;
@@ -181,8 +188,8 @@ void r4d_attn_prefill_kernel(const R4DInt4TiledArgs a)
     #pragma unroll
     for (int t = 0; t < NKS; ++t) acc[t] = (v8f){0,0,0,0,0,0,0,0};
 
-    const int qmax_cta   = min(qb * BLOCK_Q + BLOCK_Q - 1, a.q_len - 1);
-    const int klimit_cta = ctx - a.q_len + qmax_cta;
+    const int qmax_cta   = min(qb * BLOCK_Q + BLOCK_Q - 1, q_rows - 1);
+    const int klimit_cta = ctx - q_rows + qmax_cta;
     const int ntiles = (min(klimit_cta + 1, ctx) + TILE - 1) / TILE;
 
     // ---- staging, split into a global FETCH (registers) and an LDS STORE ------------------------
@@ -396,7 +403,7 @@ void r4d_attn_prefill_kernel(const R4DInt4TiledArgs a)
     l_i += swap16(l_i);
     const float inv = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
     uint16_t* op = (uint16_t*)a.out
-                 + ((size_t)(seq * a.q_len + qpos) * a.q_heads + qhead) * HEAD_DIM;
+                 + ((size_t)(q_base + qpos) * a.q_heads + qhead) * HEAD_DIM;
     #pragma unroll
     for (int dt = 0; dt < NKS; ++dt) {
         uint32_t tw[4];
@@ -412,6 +419,7 @@ extern "C" R4D_INT4_EXPORT int r4d_int4_tiled_prefill_h256_gqa6(
     const R4DInt4TiledArgs* a, hipStream_t stream) {
     if (!a || !a->q || !a->k_cache || !a->v_cache || !a->k_scale_zp ||
         !a->v_scale_zp || !a->block_table || !a->seq_lens || !a->out ||
+        !a->cu_seqlens_q ||
         a->seqs <= 0 || a->q_len <= 0 || a->q_heads <= 0 || a->kv_heads <= 0 ||
         a->q_heads != a->kv_heads * 6 || a->head_dim != 256 ||
         a->virtual_page_size != 16 || a->physical_page_size <= 0 ||

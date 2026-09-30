@@ -2,10 +2,13 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
 
 #include "model/imodel.hpp"
 
 namespace inferdeck::vllm_radiance_wrapper {
+
+foundation::Result<void> initialize_python_runtime(const std::string& python_root);
 
 class VllmRadianceModel final : public model::IModel {
 public:

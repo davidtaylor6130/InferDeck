@@ -29,106 +29,49 @@ _REQUIRED=("model","python_root","python_site","vllm_source","radiance_source","
 _PREFILL_ATTENTION_DEFAULT = "r4d"
 _PREFILL_ATTENTION_OPTIONS = frozenset(("r4d", "r4d_int4", "upstream"))
 _KV_CACHE_DTYPE_OPTIONS = frozenset(("auto", "int4_per_token_head"))
-_MTP_DRAFT_TOKENS = 2
+_RADIANCE_ENV_PREFIX = "RADIANCE_"
+_RADIANCE_ENV_DEFAULTS = {
+    "RADIANCE_MXFP4_W4A8": "1",
+    "RADIANCE_MXFP4": "1",
+    "RADIANCE_MXFP4_WPERM": "1",
+    "RADIANCE_MXFP4_A_TILED_MIN_M": "513",
+    "RADIANCE_MXFP4_W4A8_MIN_M": "0",
+    "RADIANCE_MXFP4_DECODE_MAX_M": "8",
+    "RADIANCE_MXFP4_R4D_DECODE_MAX_M": "0",
+    "RADIANCE_FUSE_RMS_QUANT": "1",
+}
 
-def _gpu_memory_utilization(prefill_attention:str, mtp_enabled:bool=False)->float:
-    if mtp_enabled:
-        return 0.98
+def _gpu_memory_utilization(prefill_attention:str, speculative:bool=False)->float:
+    # Retained MTP3, batch-2048, 100k profile uses 0.991 memory utilization.
+    if speculative: return 0.991
     return 0.925 if prefill_attention == "r4d" else 0.90
 
 def _is_r4d_prefill(prefill_attention:str)->bool:
     return prefill_attention in ("r4d", "r4d_int4")
 
-def _compilation_config(kv_cache_dtype:str, prefill_attention:str)->dict[str,Any]:
+def _compilation_config(kv_cache_dtype:str, prefill_attention:str, capture_sizes:Any=None, draft_tokens:int=0)->dict[str,Any]:
     if kv_cache_dtype == "int4_per_token_head" and prefill_attention == "upstream":
         return {"mode":0,"cudagraph_mode":"NONE"}
-    return {"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1]}
-
-def _speculative_config(mtp_enabled:bool, mtp_draft_tokens:int)->dict[str,Any]|None:
-    if not mtp_enabled:
-        return None
-    if mtp_draft_tokens != _MTP_DRAFT_TOKENS:
-        raise RuntimeError("vllm_radiance MTP supports exactly two draft tokens")
-    return {"method":"mtp", "num_speculative_tokens":mtp_draft_tokens}
-
-def _runtime_logits_processors(mtp_enabled:bool, penalty_processor:Any)->list[Any]:
-    return [] if mtp_enabled else [penalty_processor]
-
-def _validate_mtp_sampling(r:dict[str,Any])->None:
-    sampling = r.get("sampling") or {}
-    unsupported = {
-        "repetition_penalty": (float(sampling.get("repetition_penalty", 1.0)), 1.0),
-        "frequency_penalty": (float(sampling.get("frequency_penalty", 0.0)), 0.0),
-        "presence_penalty": (float(sampling.get("presence_penalty", 0.0)), 0.0),
-    }
-    requested = {name: value for name, (value, neutral) in unsupported.items() if value != neutral}
-    if requested:
-        raise RuntimeError(f"MTP diagnostic profile does not support non-neutral penalties: {requested}")
-
-def _require_effective_speculative_config(engine:Any, mtp_enabled:bool, mtp_draft_tokens:int)->dict[str,Any]:
-    vllm_config = getattr(engine, "vllm_config", None)
-    speculative = getattr(vllm_config, "speculative_config", None)
-    method = None
-    if mtp_enabled:
-        method = getattr(speculative, "method", None)
-        method = getattr(method, "value", method)
-        tokens = getattr(speculative, "num_speculative_tokens", None)
-        if method != "mtp" or tokens != mtp_draft_tokens:
-            raise RuntimeError(f"effective speculative config mismatch: method={method!r}, num_speculative_tokens={tokens!r}")
-        draft_backend = getattr(speculative, "attention_backend", None)
-        draft_backend = getattr(draft_backend, "name", getattr(draft_backend, "value", draft_backend))
-        draft_dtype = getattr(speculative, "kv_cache_dtype", None)
-        draft_dtype = getattr(draft_dtype, "value", draft_dtype)
-        if draft_backend != "TRITON_ATTN" or draft_dtype != "int4_per_token_head":
-            raise RuntimeError(f"MTP draft must use TRITON_ATTN and int4_per_token_head KV: attention_backend={draft_backend!r}, kv_cache_dtype={draft_dtype!r}")
-        draft_model_config = getattr(speculative, "draft_model_config", None)
-        model_dtype = str(getattr(draft_model_config, "dtype", "")).lower()
-        if "bfloat16" not in model_dtype:
-            raise RuntimeError(f"effective MTP draft model must be BF16: dtype={model_dtype!r}")
-        executor = getattr(getattr(getattr(engine, "engine_core", None), "engine_core", None), "model_executor", None)
-        wrapper = getattr(executor, "driver_worker", None)
-        worker = getattr(wrapper, "worker", wrapper)
-        runner = getattr(worker, "model_runner", None)
-        drafter = getattr(runner, "drafter", None)
-        draft_model = getattr(drafter, "model", None)
-        if draft_model is None or not hasattr(draft_model, "named_modules"):
-            raise RuntimeError("effective MTP draft runtime is unavailable")
-        from vllm.model_executor.layers.attention.attention import Attention
-        actual_backends = set()
-        actual_kv_dtypes = set()
-        for _, module in draft_model.named_modules():
-            if isinstance(module, Attention):
-                backend = getattr(module, "attn_backend", None)
-                get_name = getattr(backend, "get_name", None)
-                actual_backends.add(str(get_name() if callable(get_name) else type(backend).__name__))
-                actual_kv_dtypes.add(getattr(module, "kv_cache_dtype", None))
-        if actual_backends != {"TRITON_ATTN"}:
-            raise RuntimeError(f"effective MTP draft attention backend mismatch: {sorted(actual_backends)}")
-        if actual_kv_dtypes != {"int4_per_token_head"}:
-            raise RuntimeError(f"effective MTP draft attention KV dtype mismatch: {sorted(map(str, actual_kv_dtypes))}")
-        actual_backend = "TRITON_ATTN"
-        actual_dtype = next(iter(actual_kv_dtypes))
-        compilation = getattr(vllm_config, "compilation_config", None)
-        mode = getattr(compilation, "cudagraph_mode", None)
-        mode = getattr(mode, "name", mode)
-        sizes = list(getattr(compilation, "cudagraph_capture_sizes", None) or [])
-        if mode != "NONE" or sizes:
-            raise RuntimeError(f"MTP requires CUDA graphs disabled for the native INT4 router: mode={mode!r}, capture_sizes={sizes!r}")
-    elif speculative is not None:
-        raise RuntimeError("default speculative_config=None was not preserved")
-    compilation = getattr(vllm_config, "compilation_config", None)
-    target_graph_mode = getattr(compilation, "cudagraph_mode", None)
-    target_graph_mode = getattr(target_graph_mode, "name", target_graph_mode)
-    return {
-        "mtp_enabled": mtp_enabled,
-        "mtp_method": method,
-        "mtp_draft_tokens": getattr(speculative, "num_speculative_tokens", 0) if speculative is not None else 0,
-        "draft_attention_backend": actual_backend if mtp_enabled else None,
-        "draft_kv_cache_dtype": actual_dtype if mtp_enabled else None,
-        "draft_model_dtype": model_dtype if mtp_enabled else None,
-        "target_cudagraph_mode": target_graph_mode,
-        "target_cudagraph_capture_sizes": list(getattr(compilation, "cudagraph_capture_sizes", None) or []),
-    }
+    if isinstance(capture_sizes,str) and capture_sizes.strip():
+        try: sizes=[int(part) for part in capture_sizes.split(",") if part.strip()]
+        except ValueError: raise RuntimeError("cudagraph_capture_sizes must be comma-separated integers")
+    elif isinstance(capture_sizes,list) and capture_sizes:
+        sizes=[int(part) for part in capture_sizes]
+    else:
+        sizes=[1]
+    if not sizes or any(size<1 for size in sizes): raise RuntimeError("cudagraph_capture_sizes must be positive integers")
+    sizes=sorted(set(sizes))
+    if draft_tokens:
+        # Under spec decode vLLM rounds every capture size up to a multiple of
+        # draft_tokens+1 and fails closed if none survive, so a size of 1 is a
+        # load-time error, not a silently eager profile. The INT4 prefill path
+        # is capture-safe (no host readback, one launch per packed batch), which
+        # is what previously made this combination impossible.
+        step=draft_tokens+1
+        rounded=sorted({-(-size//step)*step for size in sizes})
+        if not rounded or -(-min(sizes)//step)*step>max(rounded): raise RuntimeError("cudagraph_capture_sizes must admit a multiple of draft_tokens+1")
+        sizes=rounded
+    return {"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":sizes}
 
 def _kv_cache_token_capacity(kv_cache_config:Any)->int:
     num_blocks = int(kv_cache_config.num_blocks)
@@ -174,6 +117,31 @@ def _need(c:dict[str,Any],k:str)->str:
     v=c.get(k)
     if not isinstance(v,str) or not v or not Path(v).exists(): raise RuntimeError(f"required vllm_radiance artifact is unavailable: {k}")
     return v
+def _truthy(v:Any)->bool:
+    if isinstance(v,bool):return v
+    if isinstance(v,str):return v.strip().lower() in ("1","true","yes","on")
+    if isinstance(v,int):return v!=0
+    return False
+def _radiance_env(c:dict[str,Any])->dict[str,str]:
+    merged=dict(_RADIANCE_ENV_DEFAULTS)
+    raw=c.get("radiance_env")
+    if raw is None or raw=="":
+        return merged
+    if not isinstance(raw,str):
+        raise RuntimeError("radiance_env must be a JSON object string")
+    try:
+        parsed=json.loads(raw)
+    except ValueError as error:
+        raise RuntimeError(f"radiance_env is not valid JSON: {error}") from None
+    if not isinstance(parsed,dict):
+        raise RuntimeError("radiance_env must be a JSON object")
+    for key,value in parsed.items():
+        if not isinstance(key,str) or not key.startswith(_RADIANCE_ENV_PREFIX):
+            raise RuntimeError(f"radiance_env key is not a {_RADIANCE_ENV_PREFIX} variable: {key!r}")
+        if isinstance(value,bool) or not isinstance(value,(str,int)):
+            raise RuntimeError(f"radiance_env value must be a string or int: {key!r}")
+        merged[key]=str(value)
+    return merged
 def _load(n:str,p:str)->Any:
     spec=importlib.util.spec_from_file_location(n,p)
     if spec is None or spec.loader is None: raise RuntimeError(f"cannot load {p}")
@@ -185,21 +153,12 @@ def validate_config(c:dict[str,Any])->None:
     min_slots = int(c.get("min_slots", 0))
     if context_size != 106496:
         raise RuntimeError("requires 106496 context")
+    _radiance_env(c)
     prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
     if not isinstance(prefill_attention, str) or prefill_attention not in _PREFILL_ATTENTION_OPTIONS:
         raise RuntimeError("prefill_attention must be one of: r4d, r4d_int4, upstream")
     if "gpu_memory_utilization" in c:
         raise RuntimeError("gpu_memory_utilization is not a supported profile setting")
-    mtp_enabled = c.get("mtp_enabled", False)
-    mtp_draft_tokens = c.get("mtp_draft_tokens", _MTP_DRAFT_TOKENS)
-    if not isinstance(mtp_enabled, bool):
-        raise RuntimeError("mtp_enabled must be a boolean")
-    if not isinstance(mtp_draft_tokens, int) or isinstance(mtp_draft_tokens, bool):
-        raise RuntimeError("mtp_draft_tokens must be an integer")
-    if mtp_enabled and prefill_attention != "r4d_int4":
-        raise RuntimeError("MTP requires prefill_attention r4d_int4")
-    if mtp_enabled and mtp_draft_tokens != _MTP_DRAFT_TOKENS:
-        raise RuntimeError("vllm_radiance MTP supports exactly two draft tokens")
     maximum_slots = 4 if prefill_attention == "r4d_int4" else 1
     if not 1 <= min_slots == n_slots <= maximum_slots:
         raise RuntimeError(f"{prefill_attention} requires min_slots == n_slots between 1 and {maximum_slots}")
@@ -236,10 +195,61 @@ def _configure_native_compiler(python_site: str)->str:
     if not cc.is_file(): raise RuntimeError(f"pinned native compiler is unavailable: {cc}")
     os.environ["CC"]=str(cc)
     return str(cc)
+def _speculative_config(c:dict[str,Any])->dict[str,Any]|None:
+    # ponytail: MTP only honours draft_tokens here; the llama.cpp-only p_min and
+    # max_active_requests knobs are not forwarded, so speculative decode runs on
+    # every slot. Revisit only if draft acceptance needs a floor.
+    if c.get("speculative") != "mtp":
+        return None
+    # The drafter's own graph replay is not HIP capture-safe on this build
+    # (hipErrorStreamCaptureUnsupported) and the target's FULL_DECODE_ONLY graph
+    # is where the decode win is, so only the draft runs eager.
+    return {"method": "mtp", "num_speculative_tokens": int(c.get("speculative_draft_tokens", 2)),
+            "enforce_eager": True}
+
+def _quantization_config(config:Any)->dict[str,Any]|None:
+    value = config.get("quantization_config") if isinstance(config,dict) else getattr(config,"quantization_config",None)
+    return value if isinstance(value,dict) else None
+
+def mtp_bf16_modules(config:Any)->tuple[str,...]:
+    # Module level, not a closure: vLLM rebinds this through
+    # functools.partial so the draft ModelConfig stays picklable.
+    quantization_config = _quantization_config(config)
+    if quantization_config is None:
+        raise RuntimeError("MTP quantization override requires a dictionary quantization_config")
+    modules = sorted(entry[:-len(".weight")]
+                     for entry in (quantization_config.get("exclude") or [])
+                     if isinstance(entry,str) and entry.startswith("mtp.") and entry.endswith(".weight"))
+    if not modules:
+        raise RuntimeError("MTP quantization override found no existing BF16 mtp.*.weight exclusions")
+    return tuple(modules)
+
+def apply_mtp_bf16_exclusions(config:Any)->Any:
+    """Carry only the artifact's existing BF16 MTP exclusions into the draft config."""
+    cloned = copy.deepcopy(config)
+    quantization_config = _quantization_config(cloned)
+    if quantization_config is None:
+        # vLLM's config parser calls this override with a synthetic dummy config
+        # to read model_type before the real artifact is parsed.
+        if str(getattr(cloned, "model_type", "")).startswith("dummy_"):
+            return cloned
+        raise RuntimeError("MTP quantization override requires a dictionary quantization_config")
+    excludes = set(quantization_config.get("exclude") or [])
+    excludes.update(mtp_bf16_modules(config))
+    quantization_config["exclude"] = sorted(excludes)
+    return cloned
+
 def _register_qwen35_model_class()->type:
     from vllm.model_executor.models import ModelRegistry
     from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
     ModelRegistry.register_model("Qwen3_5ForConditionalGeneration", Qwen3_5ForConditionalGeneration)
+    # vLLM inspects any architecture it has not already registered by running a
+    # subprocess, and that subprocess cannot import vLLM from the embedded
+    # interpreter. Pre-registering the MTP draft heads keeps inspection in-process,
+    # exactly as the target model class above already does.
+    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP, Qwen3_5MoeMTP
+    ModelRegistry.register_model("Qwen3_5MTP", Qwen3_5MTP)
+    ModelRegistry.register_model("Qwen3_5MoeMTP", Qwen3_5MoeMTP)
     return Qwen3_5ForConditionalGeneration
 def _verify_upstream_prefill_attention()->Any:
     """Return the active vLLM Triton attention binding after identity validation."""
@@ -257,36 +267,6 @@ def _verify_upstream_prefill_attention()->Any:
     if active is not definition or getattr(active, "__module__", None) != module_name:
         raise RuntimeError("vLLM Triton attention backend has an unexpected unified_attention binding")
     return active
-
-def _quantization_config(config:Any)->dict[str,Any]|None:
-    value = config.get("quantization_config") if isinstance(config, dict) else getattr(config, "quantization_config", None)
-    return value if isinstance(value, dict) else None
-
-def apply_mtp_bf16_exclusions(config:Any)->Any:
-    """Preserve the model artifact's existing BF16 MTP weight exclusions."""
-    cloned = copy.deepcopy(config)
-    quantization = _quantization_config(cloned)
-    source_quantization = _quantization_config(config)
-    if quantization is None or source_quantization is None:
-        model_type = config.get("model_type", "") if isinstance(config, dict) else getattr(config, "model_type", "")
-        if isinstance(model_type, str) and model_type.startswith("dummy_"):
-            return cloned
-        raise RuntimeError("MTP quantization override requires a dictionary quantization_config")
-    modules = sorted(
-        item[:-len(".weight")]
-        for item in (source_quantization.get("exclude") or [])
-        if isinstance(item, str) and item.startswith("mtp.") and item.endswith(".weight")
-    )
-    if not modules:
-        raise RuntimeError("MTP quantization override found no existing BF16 mtp.*.weight exclusions")
-    quantization["exclude"] = sorted(set(quantization.get("exclude") or []).union(modules))
-    return cloned
-
-def register_qwen_mtp_models()->None:
-    """Register pinned Qwen MTP class eagerly to avoid lazy registry probing."""
-    from vllm.model_executor.models import ModelRegistry
-    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
-    ModelRegistry.register_model("Qwen3_5MTP", Qwen3_5MTP)
 
 def _install_prefill_overlay(c:dict[str,Any], prefill_attention:str)->Any:
     if prefill_attention == "upstream":
@@ -332,6 +312,66 @@ def _capture_next_request(r:dict[str,Any], ids:list[Any])->None:
         print("vllm_radiance request capture failed", file=sys.stderr, flush=True)
 
 
+def _draft_acceptance_logger_factory(base:Any)->Any:
+    """Build a stat logger that accumulates per-position draft acceptance.
+
+    vLLM computes num_accepted_tokens_per_pos but only reports it in its
+    10-second logging window, which cannot answer whether a given draft depth
+    leaves acceptance on the table for one measured run. The base class is a
+    parameter so this stays unit-testable without importing vLLM.
+    """
+    class DraftAcceptanceLogger(base):
+        def __init__(self,vllm_config:Any,engine_index:int=0)->None:
+            super().__init__(vllm_config,engine_index)
+            self.drafts=0
+            self.draft_tokens=0
+            self.accepted_tokens=0
+            self.accepted_per_pos:list[int]=[]
+            self.drafted_per_pos:list[int]=[]
+        def record(self,scheduler_stats:Any=None,iteration_stats:Any=None,
+                   mm_cache_stats:Any=None,engine_idx:int=0)->None:
+            stats=getattr(scheduler_stats,"spec_decoding_stats",None)
+            if stats is None: return
+            self.drafts+=int(stats.num_drafts)
+            self.draft_tokens+=int(stats.num_draft_tokens)
+            self.accepted_tokens+=int(stats.num_accepted_tokens)
+            for i,value in enumerate(stats.num_accepted_tokens_per_pos):
+                while len(self.accepted_per_pos)<=i: self.accepted_per_pos.append(0)
+                self.accepted_per_pos[i]+=int(value)
+            for i,value in enumerate(stats.num_draft_tokens_per_pos):
+                while len(self.drafted_per_pos)<=i: self.drafted_per_pos.append(0)
+                self.drafted_per_pos[i]+=int(value)
+        def log_engine_initialized(self)->None:
+            return None
+        def log(self)->None:
+            if not self.drafts: return
+            print("event=draft_acceptance " + json.dumps(self.snapshot()),file=sys.stderr,flush=True)
+        def snapshot(self)->dict[str,Any]:
+            # Per-position acceptance is the draft-depth signal: a depth-d run
+            # should show a falling rate as position i grows, and a low final
+            # position is exactly the acceptance that deeper drafts would waste.
+            return {
+                "drafts":self.drafts,
+                "drafted":self.draft_tokens,
+                "accepted":self.accepted_tokens,
+                "acceptance_pct":round(100*self.accepted_tokens/self.draft_tokens,2) if self.draft_tokens else None,
+                "mean_acceptance_length":round(1+self.accepted_tokens/self.drafts,3) if self.drafts else None,
+                "acceptance_per_position":[round(a/self.drafts,4) for a in self.accepted_per_pos] if self.drafts else [],
+                "drafted_per_position":list(self.drafted_per_pos),
+            }
+    return DraftAcceptanceLogger
+
+def _install_draft_acceptance_logger()->Any:
+    from vllm.v1.metrics.loggers import StatLoggerBase
+    return _draft_acceptance_logger_factory(StatLoggerBase)
+
+_DRAFT_ACCEPTANCE:Any=None
+
+def draft_acceptance_snapshot()->dict[str,Any]:
+    """Cumulative per-position draft acceptance, or an empty report when MTP is off."""
+    if _DRAFT_ACCEPTANCE is None: return {"drafts":0}
+    return _DRAFT_ACCEPTANCE.snapshot()
+
 def create(c:dict[str,Any])->dict[str,Any]:
     return _create(c)
 
@@ -341,11 +381,9 @@ def _create(c:dict[str,Any])->dict[str,Any]:
     faulthandler.enable(file=sys.stderr, all_threads=True)
     os.environ.setdefault("GPU_RESOURCE_CACHE_SIZE", "64")
     prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
-    mtp_enabled = c.get("mtp_enabled", False)
-    mtp_draft_tokens = int(c.get("mtp_draft_tokens", _MTP_DRAFT_TOKENS))
     for path in reversed([_need(c,key) for key in ("python_site","vllm_source","radiance_source","radiance_extension")]):
         if path not in sys.path:sys.path.insert(0,path)
-    os.environ.update({"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1","TOKENIZERS_PARALLELISM":"false","VLLM_TARGET_DEVICE":"rocm","VLLM_ENABLE_V1_MULTIPROCESSING":"0","VLLM_NO_USAGE_STATS":"1","VLLM_USE_RUST_FRONTEND":"0","ROCM_PATH":_need(c,"rocm"),"HIP_PATH":_need(c,"rocm"),"RADIANCE_MXFP4_W4A8":"1","RADIANCE_MXFP4":"1","RADIANCE_MXFP4_WPERM":"1","RADIANCE_MXFP4_A_TILED_MIN_M":"513","RADIANCE_MXFP4_W4A8_MIN_M":"0","RADIANCE_MXFP4_DECODE_MAX_M":"8","RADIANCE_MXFP4_R4D_DECODE_MAX_M":"0","RADIANCE_FUSE_RMS_QUANT":"1"})
+    os.environ.update({"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1","TOKENIZERS_PARALLELISM":"false","VLLM_TARGET_DEVICE":"rocm","VLLM_ENABLE_V1_MULTIPROCESSING":"0","VLLM_NO_USAGE_STATS":"1","VLLM_USE_RUST_FRONTEND":"0","ROCM_PATH":_need(c,"rocm"),"HIP_PATH":_need(c,"rocm"),**_radiance_env(c)})
     dll_paths = [Path(c["python_root"]), Path(c["python_root"]) / "DLLs", Path(c["python_site"]),
                  Path(c["rocm"]), Path(c["radiance_extension"])]
     if not _DLL_HANDLES:
@@ -383,23 +421,30 @@ def _create(c:dict[str,Any])->dict[str,Any]:
             prefill.__enter__()
             contexts.insert(0, prefill)
         model=_need(c,"model");tokenizer_revision=register_tokenizer(model)
-        scheduler_options = {"async_scheduling": False} if _is_r4d_prefill(prefill_attention) else {}
+        scheduler_options = {"async_scheduling": _truthy(c.get("async_scheduling"))} if _is_r4d_prefill(prefill_attention) else {}
         if prefill_attention == "r4d_int4":
             scheduler_options["long_prefill_token_threshold"] = 2048
         kv_cache_dtype = c.get("kv_cache_dtype", "auto")
-        compilation_config = _compilation_config(kv_cache_dtype, prefill_attention)
-        speculative_config = _speculative_config(mtp_enabled, mtp_draft_tokens)
-        hf_overrides = apply_mtp_bf16_exclusions if mtp_enabled else {}
-        if mtp_enabled:
-            register_qwen_mtp_models()
-            compilation_config = {"mode": 0, "cudagraph_mode": "NONE"}
-            speculative_config.update(attention_backend="TRITON_ATTN", kv_cache_dtype="int4_per_token_head")
-        memory_utilization = _gpu_memory_utilization(prefill_attention, mtp_enabled)
+        speculative_config = _speculative_config(c)
+        # vLLM refuses custom logits processors when speculative decoding is on.
+        # The penalty processor is only meaningful for non-default penalties, which
+        # _penalties_supported rejects at admission rather than silently dropping.
+        logits_processors = [] if speculative_config else [InferDeckPenaltiesProcessor]
         n_slots = int(c["n_slots"])
-        engine_args=EngineArgs(model=model,logits_processors=_runtime_logits_processors(mtp_enabled, InferDeckPenaltiesProcessor),tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",kv_cache_dtype=kv_cache_dtype,max_model_len=106496,max_num_batched_tokens=4096,max_num_seqs=n_slots,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=memory_utilization,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config=compilation_config,speculative_config=speculative_config,hf_overrides=hf_overrides,**scheduler_options)
+        draft_tokens = speculative_config["num_speculative_tokens"] if speculative_config else 0
+        compilation_config = _compilation_config(kv_cache_dtype, prefill_attention, c.get("cudagraph_capture_sizes"), draft_tokens)
+        memory_utilization = _gpu_memory_utilization(prefill_attention, speculative_config is not None)
+        # The Quark target config must not be applied to the BF16 drafter; without
+        # this the draft load dies on a column-parallel shape assert.
+        hf_overrides = apply_mtp_bf16_exclusions if speculative_config else None
+        engine_args=EngineArgs(model=model,logits_processors=logits_processors,tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",kv_cache_dtype=kv_cache_dtype,max_model_len=100000,max_num_batched_tokens=2048,max_num_seqs=n_slots,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=memory_utilization,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config=compilation_config,speculative_config=speculative_config,hf_overrides=hf_overrides,**scheduler_options)
         with _r4d_cache_retention(prefill_attention):
-            engine=LLMEngine.from_engine_args(engine_args,enable_multiprocessing=False)
-        speculative_runtime = _require_effective_speculative_config(engine, mtp_enabled, mtp_draft_tokens)
+            global _DRAFT_ACCEPTANCE
+            stat_loggers=[]
+            if speculative_config:
+                _DRAFT_ACCEPTANCE=_install_draft_acceptance_logger()
+                stat_loggers.append(_DRAFT_ACCEPTANCE)
+            engine=LLMEngine.from_engine_args(engine_args,enable_multiprocessing=False,stat_loggers=stat_loggers or None)
         if engine.vllm_config.cache_config.cache_dtype != kv_cache_dtype:
             raise RuntimeError("effective KV cache dtype differs from requested profile")
         if _is_r4d_prefill(prefill_attention):
@@ -407,26 +452,25 @@ def _create(c:dict[str,Any])->dict[str,Any]:
             free_bytes,total_bytes=torch.cuda.mem_get_info()
             kv_token_capacity = _kv_cache_token_capacity(cache_manager.kv_cache_config)
             kv_max_concurrency = _kv_cache_max_concurrency(cache_manager.kv_cache_config, engine.vllm_config)
-            actual={"async":engine.vllm_config.scheduler_config.async_scheduling,"long_prefill_token_threshold":engine.vllm_config.scheduler_config.long_prefill_token_threshold,"retention":cache_manager.coordinator.retention_interval,"blocks":cache_manager.kv_cache_config.num_blocks,"kv_token_capacity":kv_token_capacity,"kv_max_concurrency":kv_max_concurrency,"context":engine.vllm_config.model_config.max_model_len,"memory_utilization":engine.vllm_config.cache_config.gpu_memory_utilization,"free_bytes":free_bytes,"total_bytes":total_bytes}
+            spec_config = engine.vllm_config.speculative_config
+            actual={"async":engine.vllm_config.scheduler_config.async_scheduling,"spec":spec_config.method if spec_config else "none","spec_tokens":spec_config.num_speculative_tokens if spec_config else 0,"long_prefill_token_threshold":engine.vllm_config.scheduler_config.long_prefill_token_threshold,"retention":cache_manager.coordinator.retention_interval,"blocks":cache_manager.kv_cache_config.num_blocks,"kv_token_capacity":kv_token_capacity,"kv_max_concurrency":kv_max_concurrency,"context":engine.vllm_config.model_config.max_model_len,"memory_utilization":engine.vllm_config.cache_config.gpu_memory_utilization,"free_bytes":free_bytes,"total_bytes":total_bytes}
             print("event=isolated_cache_profile "+json.dumps(actual),file=sys.stderr,flush=True)
             expected_memory_utilization = memory_utilization
             minimum_blocks = 185 if prefill_attention == "r4d" else 0
             capacity_valid = kv_max_concurrency >= n_slots if prefill_attention == "r4d_int4" else actual["blocks"] >= minimum_blocks
-            if actual["async"] or actual["long_prefill_token_threshold"] != scheduler_options.get("long_prefill_token_threshold", 0) or actual["retention"] != 0 or actual["context"] != 106496 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < 1073741824:
+            async_requested = bool(scheduler_options.get("async_scheduling", False))
+            spec_requested = speculative_config["method"] if speculative_config else "none"
+            if (actual["async"] and not async_requested) or actual["spec"] != spec_requested or actual["long_prefill_token_threshold"] != scheduler_options.get("long_prefill_token_threshold", 0) or actual["retention"] != 0 or actual["context"] != 100000 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < 1073741824:
                 raise RuntimeError("R4D cache profile or free-memory guard failed")
-            if mtp_enabled:
-                speculative_runtime["configured_slots"] = n_slots
-                speculative_runtime["kv_max_concurrency"] = kv_max_concurrency
         tokenizer=cached_tokenizer_from_config(engine.vllm_config.model_config)
         if engine.vllm_config.model_config.enable_prompt_embeds:raise RuntimeError("native pooled tokenizer does not support prompt embeds")
         if not isinstance(engine.engine_core,InprocClient):raise RuntimeError("V1 InprocClient was not constructed")
-        if engine.vllm_config.model_config.enforce_eager or engine.vllm_config.scheduler_config.max_num_batched_tokens!=4096 or engine.vllm_config.scheduler_config.max_num_seqs!=n_slots:raise RuntimeError("effective engine differs from configured profile")
-        speculative_runtime["effective_max_num_seqs"] = engine.vllm_config.scheduler_config.max_num_seqs
+        if engine.vllm_config.model_config.enforce_eager or engine.vllm_config.scheduler_config.max_num_batched_tokens!=2048 or engine.vllm_config.scheduler_config.max_num_seqs!=n_slots:raise RuntimeError("effective engine differs from configured profile")
         if prefill_attention == "upstream":
             _verify_upstream_prefill_attention()
         decode_kernel_enabled = prefill_attention == "r4d_int4" and "decode_dll" in c
-        print("event=vllm_radiance_profile " + json.dumps({"prefill_attention": prefill_attention, "kv_cache_dtype": kv_cache_dtype, "gpu_memory_utilization": memory_utilization, "int4_decode_kernel": decode_kernel_enabled, **speculative_runtime}), file=sys.stderr, flush=True)
-        return {"engine":engine,"engine_lock":threading.RLock(),"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention,"int4_decode_kernel":decode_kernel_enabled,"mtp_enabled":mtp_enabled}
+        print(f"vllm_radiance prefill_attention={prefill_attention} kv_cache_dtype={kv_cache_dtype} gpu_memory_utilization={memory_utilization} int4_decode_kernel={str(decode_kernel_enabled).lower()} async_req={c.get('async_scheduling')!r} spec={json.dumps(speculative_config, sort_keys=True)} radiance_env={json.dumps(_radiance_env(c), sort_keys=True)}", file=sys.stderr, flush=True)
+        return {"engine":engine,"engine_lock":threading.RLock(),"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention,"int4_decode_kernel":decode_kernel_enabled,"speculative":speculative_config is not None,"radiance_env":_radiance_env(c)}
     except Exception as load_error:
         try:
             shutdown({"engine": engine, "active": set(), "requests": {},
@@ -482,8 +526,6 @@ def _render_image_prompt(s:dict[str,Any], request:Any,
 
 def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
     if r.get("logprobs"):raise RuntimeError("logprobs are unsupported by vllm_radiance")
-    if s.get("mtp_enabled", False):
-        _validate_mtp_sampling(r)
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.parser.qwen3 import Qwen3Parser
     from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
@@ -534,19 +576,21 @@ def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
         raise RuntimeError("request exceeds configured context")
     _capture_next_request(r, ids)
     sampling=request.to_sampling_params(maximum,{})
-    if not s.get("mtp_enabled", False):
-        penalties = {
-            "repeat_last_n": int(r.get("repeat_last_n", 64)),
-            "repetition_penalty": float(r["sampling"].get("repetition_penalty", 1.0)),
-            "frequency_penalty": float(r["sampling"].get("frequency_penalty", 0.0)),
-            "presence_penalty": float(r["sampling"].get("presence_penalty", 0.0)),
-        }
-        sampling.extra_args = {**(getattr(sampling, "extra_args", None) or {}), "inferdeck_penalties": penalties}
-        sampling.repetition_penalty = 1.0
-        sampling.frequency_penalty = 0.0
-        sampling.presence_penalty = 0.0
-    else:
-        penalties = {"repetition_penalty": 1.0, "frequency_penalty": 0.0, "presence_penalty": 0.0}
+    penalties = {
+        "repeat_last_n": int(r.get("repeat_last_n", 64)),
+        "repetition_penalty": float(r["sampling"].get("repetition_penalty", 1.0)),
+        "frequency_penalty": float(r["sampling"].get("frequency_penalty", 0.0)),
+        "presence_penalty": float(r["sampling"].get("presence_penalty", 0.0)),
+    }
+    sampling.extra_args = {**(getattr(sampling, "extra_args", None) or {}), "inferdeck_penalties": penalties}
+    if s.get("speculative") and (penalties["repetition_penalty"] != 1.0 or
+                                 penalties["frequency_penalty"] != 0.0 or
+                                 penalties["presence_penalty"] != 0.0 or
+                                 penalties["repeat_last_n"] == 0):
+        raise RuntimeError("sampling penalties are unsupported while MTP speculative decoding is enabled")
+    sampling.repetition_penalty = 1.0
+    sampling.frequency_penalty = 0.0
+    sampling.presence_penalty = 0.0
     sampling.output_kind=RequestOutputKind.DELTA
     print("event=sampling_resolved runtime=vllm_radiance " + json.dumps({
         "model": r["model"], "inferdeck_penalties": penalties,
@@ -572,6 +616,9 @@ def step(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
 def _step_locked(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
     state=s["requests"].get(rid)
     if state is None:raise RuntimeError("unknown vllm_radiance request")
+    # Only advance the engine when this request has nothing queued. One step
+    # yields an output for every active request, so stepping per thread ran the
+    # engine once per concurrent request and did len(active) times the work.
     for output in s["engine"].step():
         output_state = s["requests"].get(output.request_id)
         if output_state is not None:
@@ -603,6 +650,7 @@ def _step_locked(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
                     "prompt_tokens": len(output.prompt_token_ids or []),
                     "cached_tokens": int(output.num_cached_tokens or 0),
                     "completion_tokens": state["completion_tokens"],
+                    "radiance_env": s.get("radiance_env"),
                 }), file=sys.stderr, flush=True)
         if done:s["active"].discard(rid);s["requests"].pop(rid,None)
     return result

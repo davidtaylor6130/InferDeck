@@ -35,108 +35,6 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(messages[1]["content"], "first turn")
         self.assertEqual(profile._template_messages(messages[1:2]), messages[1:2])
 
-    def test_mtp_is_opt_in_and_limited_to_int4_two_token_candidate(self):
-        self.assertIsNone(profile._speculative_config(False, 2))
-        self.assertEqual(profile._speculative_config(True, 2),
-                         {"method": "mtp", "num_speculative_tokens": 2})
-        penalty_processor = object()
-        self.assertEqual(profile._runtime_logits_processors(True, penalty_processor), [])
-        self.assertEqual(profile._runtime_logits_processors(False, penalty_processor), [penalty_processor])
-        profile._validate_mtp_sampling({"sampling": {"repetition_penalty": 1.0,
-            "frequency_penalty": 0.0, "presence_penalty": 0.0}})
-        for penalty, value in (("repetition_penalty", 1.1), ("frequency_penalty", 0.1),
-                               ("presence_penalty", 0.1)):
-            with self.subTest(penalty=penalty), self.assertRaisesRegex(RuntimeError, "does not support non-neutral penalties"):
-                profile._validate_mtp_sampling({"sampling": {penalty: value}})
-        self.assertEqual(profile._gpu_memory_utilization("r4d_int4", True), 0.98)
-        base = {"runtime": "vllm_radiance", "context_size": 106496,
-                "prefill_attention": "r4d_int4", "kv_cache_dtype": "int4_per_token_head",
-                "prefill_dll_sha256": "a" * 64, "decode_dll": "decode.dll",
-                "decode_dll_sha256": "b" * 64, "n_slots": 4, "min_slots": 4,
-                "mtp_enabled": True, "mtp_draft_tokens": 2}
-        with tempfile.TemporaryDirectory() as directory, patch.object(profile, "_need", return_value=directory):
-            base.update({key: directory for key in profile._REQUIRED})
-            base["prefill_dll_sha256"] = "a" * 64
-            profile.validate_config(base)
-            with self.assertRaisesRegex(RuntimeError, "r4d_int4"):
-                profile.validate_config(dict(base, prefill_attention="r4d"))
-            with self.assertRaisesRegex(RuntimeError, "exactly two"):
-                profile.validate_config(dict(base, mtp_draft_tokens=3))
-            profile.validate_config(dict(base, mtp_enabled=False, mtp_draft_tokens=1))
-
-    def test_mtp_bf16_exclusions_and_qwen_mtp_registration(self):
-        dummy = NS(model_type="dummy_qwen")
-        self.assertEqual(profile.apply_mtp_bf16_exclusions(dummy).model_type, "dummy_qwen")
-        with self.assertRaisesRegex(RuntimeError, "dictionary quantization_config"):
-            profile.apply_mtp_bf16_exclusions(NS(model_type="qwen3_5"))
-        with self.assertRaisesRegex(RuntimeError, "no existing BF16 mtp"):
-            profile.apply_mtp_bf16_exclusions({"quantization_config": {"exclude": ["other.weight"]}})
-        original = {"quantization_config": {"exclude": ["mtp.fc.weight", "keep.weight"]}}
-        updated = profile.apply_mtp_bf16_exclusions(original)
-        self.assertEqual(updated["quantization_config"]["exclude"], ["keep.weight", "mtp.fc", "mtp.fc.weight"])
-        self.assertEqual(original["quantization_config"]["exclude"], ["mtp.fc.weight", "keep.weight"])
-        captured = {}
-        class Registry:
-            @staticmethod
-            def register_model(name, model):
-                captured[name] = model
-        qwen_mtp = type("Qwen3_5MTP", (), {})
-        with patch.dict(sys.modules, {
-            "vllm.model_executor.models": NS(ModelRegistry=Registry),
-            "vllm.model_executor.models.qwen3_5_mtp": NS(Qwen3_5MTP=qwen_mtp),
-        }):
-            profile.register_qwen_mtp_models()
-        self.assertIs(captured["Qwen3_5MTP"], qwen_mtp)
-
-    def test_mtp_runtime_asserts_method_tokens_draft_backend_dtype_and_no_graphs(self):
-        class Attention:
-            def __init__(self, name, kv_dtype="int4_per_token_head"):
-                self.attn_backend = NS(get_name=lambda: name)
-                self.kv_cache_dtype = kv_dtype
-
-        class DraftModel:
-            def __init__(self, name, kv_dtype="int4_per_token_head"):
-                self.attention = Attention(name, kv_dtype)
-
-            def named_modules(self):
-                return [("", self), ("attention", self.attention)]
-
-        def engine(tokens=2, backend="TRITON_ATTN", dtype="int4_per_token_head", graph_mode="NONE", graph_sizes=None, actual_dtype="int4_per_token_head"):
-            draft = NS(model=DraftModel(backend, actual_dtype),
-                       vllm_config=NS(attention_config=NS(backend="TRITON_ATTN")))
-            runner = NS(drafter=draft)
-            executor = NS(driver_worker=NS(worker=NS(model_runner=runner)))
-            core = NS(model_executor=executor)
-            return NS(vllm_config=NS(
-                speculative_config=NS(method="mtp", num_speculative_tokens=tokens,
-                                       attention_backend="TRITON_ATTN", kv_cache_dtype=dtype,
-                                       draft_model_config=NS(dtype="torch.bfloat16")),
-                compilation_config=NS(cudagraph_mode=NS(name=graph_mode),
-                                      cudagraph_capture_sizes=graph_sizes or [])),
-                engine_core=NS(engine_core=core))
-        candidate = engine()
-        bad_engine = engine(backend="ROCM_ATTN")
-        bad_effective_dtype = engine(actual_dtype="auto")
-        modules = {
-            "vllm": NS(), "vllm.model_executor": NS(),
-            "vllm.model_executor.layers": NS(),
-            "vllm.model_executor.layers.attention": NS(),
-            "vllm.model_executor.layers.attention.attention": NS(Attention=Attention),
-        }
-        with patch.dict(sys.modules, modules):
-            runtime = profile._require_effective_speculative_config(candidate, True, 2)
-            with self.assertRaisesRegex(RuntimeError, "effective MTP draft attention KV dtype mismatch"):
-                profile._require_effective_speculative_config(bad_effective_dtype, True, 2)
-            self.assertEqual(runtime["mtp_method"], "mtp")
-            with self.assertRaisesRegex(RuntimeError, "effective MTP draft attention backend mismatch"):
-                profile._require_effective_speculative_config(bad_engine, True, 2)
-            with self.assertRaisesRegex(RuntimeError, "effective speculative config mismatch"):
-                profile._require_effective_speculative_config(engine(tokens=1), True, 2)
-            with self.assertRaisesRegex(RuntimeError, "CUDA graphs disabled"):
-                profile._require_effective_speculative_config(engine(graph_mode="FULL_DECODE_ONLY", graph_sizes=[1]), True, 2)
-            with self.assertRaisesRegex(RuntimeError, "None was not preserved"):
-                profile._require_effective_speculative_config(candidate, False, 2)
-
     def test_pal_resource_cache_is_bounded_before_runtime_dependencies(self):
         for explicit in (None, "128"):
             with self.subTest(explicit=explicit):
@@ -457,25 +355,34 @@ class ProfileTests(unittest.TestCase):
         class ActualModel:
             pass
 
+        class DraftModel:
+            pass
+
         class Registry:
             @staticmethod
             def register_model(model_arch, model_cls):
-                captured["model_arch"] = model_arch
-                captured["model_cls"] = model_cls
+                captured.setdefault("all", []).append((model_arch, model_cls))
 
         modules = {
             "vllm.model_executor.models": NS(ModelRegistry=Registry),
             "vllm.model_executor.models.qwen3_5": NS(
                 Qwen3_5ForConditionalGeneration=ActualModel
             ),
+            "vllm.model_executor.models.qwen3_5_mtp": NS(
+                Qwen3_5MTP=DraftModel, Qwen3_5MoeMTP=DraftModel
+            ),
         }
         with patch.dict(sys.modules, modules):
             registered = profile._register_qwen35_model_class()
 
         self.assertIs(registered, ActualModel)
-        self.assertEqual(captured["model_arch"], "Qwen3_5ForConditionalGeneration")
-        self.assertIs(captured["model_cls"], ActualModel)
-        self.assertNotIsInstance(captured["model_cls"], str)
+        self.assertIn(("Qwen3_5ForConditionalGeneration", ActualModel), captured["all"])
+        for arch, cls in captured["all"]:
+            self.assertNotIsInstance(cls, str)
+        self.assertEqual(
+            [arch for arch, _ in captured["all"] if arch in ("Qwen3_5MTP", "Qwen3_5MoeMTP")],
+            ["Qwen3_5MTP", "Qwen3_5MoeMTP"],
+            "MTP draft heads must be registered so vLLM never inspects them in a subprocess")
     def test_begin_routes_image_messages_through_vllm_multimodal_renderer(self):
         captured = {}
         engine_input = {"type": "multimodal", "prompt_token_ids": [10, 11],
@@ -781,6 +688,188 @@ class ProfileTests(unittest.TestCase):
                 profile.shutdown(state)
         self.assertIsNone(state["engine"])
         self.assertEqual(calls, ["shutdown", "overlay_exit", "overlay_exit", "sync", "empty"])
+
+    def test_begin_rejects_sampling_penalties_while_speculative(self):
+        class ToolParser:
+            def __init__(self, tokenizer, tools):
+                del tokenizer, tools
+
+            def adjust_request(self, request):
+                return request
+
+        class Request:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                self.tools = None
+
+            def to_sampling_params(self, maximum, defaults):
+                del maximum, defaults
+                return NS(output_kind=None, structured_outputs=None, stop=None)
+
+        modules = {
+            "vllm.entrypoints.openai.chat_completion.protocol": NS(ChatCompletionRequest=Request),
+            "vllm.parser.qwen3": NS(Qwen3Parser=lambda *a, **kw: NS()),
+            "vllm.sampling_params": NS(RequestOutputKind=NS(DELTA=object()),
+                                       StructuredOutputsParams=lambda **kw: NS(**kw)),
+            "vllm.tool_parsers.structural_tag_registry": NS(
+                get_model_structural_tag=lambda *a, **kw: NS(model_dump=lambda: {})),
+            "vllm.tool_parsers.qwen3_engine_tool_parser": NS(Qwen3EngineToolParser=ToolParser),
+        }
+        state = {"tokenizer": NS(apply_chat_template=lambda *a, **k: [1, 2, 3]),
+                 "engine": NS(add_request=lambda *a, **k: None),
+                 "engine_lock": threading.Lock(), "active": set(), "requests": {},
+                 "speculative": True}
+        request = {"model": "qwen", "messages": [], "sampling": {"repetition_penalty": 1.2},
+                   "repeat_last_n": 64, "max_output_tokens": 16}
+        with patch.dict(sys.modules, modules):
+            with self.assertRaisesRegex(RuntimeError, "penalties are unsupported"):
+                profile.begin(state, request)
+
+    def test_begin_allows_default_penalties_while_speculative(self):
+        added = []
+
+        class ToolParser:
+            def __init__(self, tokenizer, tools):
+                del tokenizer, tools
+
+            def adjust_request(self, request):
+                return request
+
+        class Request:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                self.tools = None
+
+            def to_sampling_params(self, maximum, defaults):
+                del maximum, defaults
+                return NS(output_kind=None, structured_outputs=None, stop=None)
+
+        modules = {
+            "vllm.entrypoints.openai.chat_completion.protocol": NS(ChatCompletionRequest=Request),
+            "vllm.parser.qwen3": NS(Qwen3Parser=lambda *a, **kw: NS()),
+            "vllm.sampling_params": NS(RequestOutputKind=NS(DELTA=object()),
+                                       StructuredOutputsParams=lambda **kw: NS(**kw)),
+            "vllm.tool_parsers.structural_tag_registry": NS(
+                get_model_structural_tag=lambda *a, **kw: NS(model_dump=lambda: {})),
+            "vllm.tool_parsers.qwen3_engine_tool_parser": NS(Qwen3EngineToolParser=ToolParser),
+        }
+        state = {"tokenizer": NS(apply_chat_template=lambda *a, **k: [1, 2, 3]),
+                 "engine": NS(add_request=lambda *a, **k: added.append(a)),
+                 "engine_lock": threading.Lock(), "active": set(), "requests": {},
+                 "speculative": True}
+        request = {"model": "qwen", "messages": [], "sampling": {}, "max_output_tokens": 16}
+        with patch.dict(sys.modules, modules):
+            profile.begin(state, request)
+        self.assertTrue(added, "default-penalty request should still be admitted under MTP")
+
+    def test_speculative_config_disabled_by_default(self):
+        self.assertIsNone(profile._speculative_config({}))
+        self.assertIsNone(profile._speculative_config({"speculative": "none"}))
+
+    def test_speculative_config_mtp_uses_draft_tokens(self):
+        self.assertEqual(profile._speculative_config({"speculative": "mtp"}),
+                         {"method": "mtp", "num_speculative_tokens": 2, "enforce_eager": True})
+        self.assertEqual(
+            profile._speculative_config({"speculative": "mtp", "speculative_draft_tokens": "3"}),
+            {"method": "mtp", "num_speculative_tokens": 3, "enforce_eager": True})
+
+    def test_mtp_uses_measured_memory_budget_but_target_only_is_unchanged(self):
+        self.assertEqual(profile._gpu_memory_utilization("r4d_int4"), 0.90)
+        self.assertEqual(profile._gpu_memory_utilization("r4d"), 0.925)
+        self.assertEqual(profile._gpu_memory_utilization("r4d_int4", True), 0.991)
+
+    def test_mtp_bf16_exclusions_reach_the_draft_without_mutating_the_target(self):
+        exclude = ["model.layers.0.mlp.gate_proj.weight", "mtp.fc.weight",
+                   "mtp.eh_proj.weight", "lm_head.weight"]
+        target = NS(quantization_config={"exclude": list(exclude)})
+        self.assertEqual(profile.mtp_bf16_modules(target), ("mtp.eh_proj", "mtp.fc"))
+
+        draft = profile.apply_mtp_bf16_exclusions(target)
+        self.assertIsNot(draft, target)
+        self.assertEqual(target.quantization_config["exclude"], exclude)
+        # The drafter is derived from the same artifact, so every BF16 mtp
+        # exclusion must survive; an emptied exclude list is the shape assert.
+        self.assertLessEqual(set(exclude), set(draft.quantization_config["exclude"]))
+        self.assertEqual(profile.mtp_bf16_modules(draft), ("mtp.eh_proj", "mtp.fc"))
+
+    def test_mtp_bf16_exclusions_reject_a_quantized_artifact(self):
+        with self.assertRaises(RuntimeError):
+            profile.mtp_bf16_modules(NS(quantization_config={"exclude": ["model.layers.0.mlp.gate_proj.weight"]}))
+        with self.assertRaises(RuntimeError):
+            profile.mtp_bf16_modules(NS())
+
+    def test_target_only_decode_graph_stays_at_one(self):
+        self.assertEqual(
+            profile._compilation_config("int4_per_token_head", "r4d_int4", None, 0),
+            {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]})
+
+    def test_mtp_capture_sizes_round_up_to_a_spec_decode_multiple(self):
+        # vLLM rounds spec-decode capture sizes up to a multiple of
+        # draft_tokens+1 and fails closed when none survive, so 1 must become 3
+        # rather than a load-time error.
+        self.assertEqual(
+            profile._compilation_config("int4_per_token_head", "r4d_int4", None, 2),
+            {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [3]})
+        self.assertEqual(
+            profile._compilation_config("int4_per_token_head", "r4d_int4", "3,6,12", 2),
+            {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [3, 6, 12]})
+        # Draft 4 forces a multiple of 5, so the same request rounds to 5.
+        self.assertEqual(
+            profile._compilation_config("int4_per_token_head", "r4d_int4", None, 4)["cudagraph_capture_sizes"],
+            [5])
+
+    def test_draft_acceptance_reports_per_position_acceptance(self):
+        stats = NS(num_drafts=4, num_draft_tokens=8, num_accepted_tokens=5,
+                   num_accepted_tokens_per_pos=[4, 1], num_draft_tokens_per_pos=[4, 4])
+        with patch.object(profile, "_DRAFT_ACCEPTANCE", None):
+            self.assertEqual(profile.draft_acceptance_snapshot(), {"drafts": 0})
+        class StatLoggerBaseStub:
+            def __init__(self, vllm_config, engine_index=0):
+                self.vllm_config = vllm_config
+                self.engine_index = engine_index
+        logger_factory = profile._draft_acceptance_logger_factory(StatLoggerBaseStub)
+        logger = logger_factory(NS(), 0)
+        logger.record(NS(spec_decoding_stats=stats), None)
+        logger.record(NS(spec_decoding_stats=None), None)
+        snapshot = logger.snapshot()
+        self.assertEqual(snapshot["drafts"], 4)
+        self.assertEqual(snapshot["accepted"], 5)
+        # A falling per-position rate is the signal that depth is being wasted.
+        self.assertEqual(snapshot["acceptance_per_position"], [1.0, 0.25])
+        self.assertEqual(snapshot["drafted_per_position"], [4, 4])
+
+    def test_radiance_env_defaults_when_absent(self):
+        self.assertEqual(profile._radiance_env({}), profile._RADIANCE_ENV_DEFAULTS)
+
+    def test_radiance_env_overrides_only_named_knobs(self):
+        merged = profile._radiance_env({"radiance_env": json.dumps({
+            "RADIANCE_MXFP4_DECODE_MAX_M": "64",
+            "RADIANCE_MXFP4_A_TILED_MIN_M": 1,
+        })})
+        self.assertEqual(merged["RADIANCE_MXFP4_DECODE_MAX_M"], "64")
+        self.assertEqual(merged["RADIANCE_MXFP4_A_TILED_MIN_M"], "1")
+        self.assertEqual(merged["RADIANCE_MXFP4_R4D_DECODE_MAX_M"], "0")
+        self.assertEqual(merged["RADIANCE_FUSE_RMS_QUANT"], "1")
+
+    def test_radiance_env_rejects_non_radiance_keys(self):
+        with self.assertRaisesRegex(RuntimeError, "is not a RADIANCE_ variable"):
+            profile._radiance_env({"radiance_env": json.dumps({"PATH": "C:/evil"})})
+
+    def test_radiance_env_rejects_malformed_payloads(self):
+        for payload in ("not json", json.dumps([1, 2]), json.dumps({"RADIANCE_X": True}),
+                        json.dumps({"RADIANCE_X": [1]}), json.dumps({1: "x"})):
+            with self.subTest(payload=payload):
+                with self.assertRaises(RuntimeError):
+                    profile._radiance_env({"radiance_env": payload})
+
+    def test_radiance_env_rejects_non_string_payload(self):
+        with self.assertRaisesRegex(RuntimeError, "must be a JSON object string"):
+            profile._radiance_env({"radiance_env": {"RADIANCE_MXFP4": "1"}})
+
+    def test_validate_config_rejects_bad_radiance_env(self):
+        with self.assertRaisesRegex(RuntimeError, "is not a RADIANCE_ variable"):
+            profile.validate_config({"runtime": "vllm_radiance", "context_size": 106496,
+                "n_slots": 1, "min_slots": 1, "radiance_env": json.dumps({"LD_PRELOAD": "/x"})})
 
 
 if __name__ == "__main__":
