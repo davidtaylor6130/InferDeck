@@ -349,6 +349,7 @@ public:
     std::atomic<bool> speech_should_cancel{false};
     std::atomic<bool> transcription_should_cancel{false};
     std::atomic<int> transcription_delay_ms{0};
+    std::string transcription_text{"test transcript"};
     std::vector<int> busy_slots;
     mutable std::mutex mtx;
     InferenceRequest last_request;
@@ -737,7 +738,7 @@ public:
         }
         if (progress && !progress(75)) return inferdeck::foundation::Err<TranscriptionResult>(ErrorCode::Cancelled, "cancelled");
         TranscriptionResult result;
-        result.text = "test transcript";
+        result.text = transcription_text;
         result.language = request.language.empty() ? "en" : request.language;
         result.duration_seconds = static_cast<float>(request.pcm.size()) / request.sample_rate;
         result.inference_ms = 7;
@@ -745,7 +746,7 @@ public:
         segment.id = 0;
         segment.start_seconds = 0.0f;
         segment.end_seconds = 0.5f;
-        segment.text = " test transcript";
+        segment.text = " " + transcription_text;
         segment.tokens = {50364, 1234, 50389};
         segment.avg_logprob = -0.25f;
         segment.no_speech_probability = 0.01f;
@@ -786,6 +787,7 @@ std::string test_wav() {
     put16(34, 16);
     std::memcpy(wav.data() + 36, "data", 4);
     put32(40, 320);
+    put16(44, 1024);
     return wav;
 }
 
@@ -975,6 +977,7 @@ TEST_CASE("Non-stream disconnect cancels execution and preserves peer capacity",
         REQUIRE(key);
         std::atomic<bool> disconnected{false};
         httplib::Request request;
+        request.is_connection_closed = [] { return false; };
         request.set_header("Content-Type", "application/json");
         request.set_header("Authorization", "Bearer " + key->key);
         request.is_connection_closed = [&] { return disconnected.load(); };
@@ -1017,6 +1020,41 @@ TEST_CASE("Non-stream disconnect cancels execution and preserves peer capacity",
     }
 }
 
+TEST_CASE("Configured model queue timeout reaches Chat and Responses admission",
+          "[routes][admission][queue-timeout]") {
+    for (const bool responses : {false, true}) {
+        INFO("responses=" << responses);
+        TestServer server;
+        auto info = make_info("queue-timeout-model");
+        info.n_slots = 1;
+        info.min_slots = 1;
+        info.request_queue_timeout_seconds = 1;
+        server.registry.register_model(info);
+        REQUIRE(server.coordinator.load("queue-timeout-model"));
+        const auto held = server.coordinator.acquire_slot("queue-timeout-model");
+        REQUIRE(held);
+
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        request.set_header("Content-Type", "application/json");
+        request.body = responses
+            ? R"({"model":"queue-timeout-model","input":"test","max_output_tokens":16})"
+            : R"({"model":"queue-timeout-model","messages":[{"role":"user","content":"test"}],"max_completion_tokens":16})";
+        httplib::Response response;
+        const auto started = std::chrono::steady_clock::now();
+        if (responses) handle_responses(request, response, server.make_deps());
+        else handle_chat_completions(request, response, server.make_deps());
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started);
+
+        CHECK(response.status == 503);
+        CHECK(nlohmann::json::parse(response.body).at("error").at("code") ==
+              "slot_timeout");
+        CHECK(elapsed.count() >= 800);
+        CHECK(elapsed.count() < 3000);
+        CHECK(server.coordinator.release_slot("queue-timeout-model", *held));
+    }
+}
 TEST_CASE("Route manifest matches the pinned strict OpenAI snapshot",
           "[routes][manifest]") {
     const auto fixture_path = std::filesystem::path(INFERDECK_SOURCE_DIR) /
@@ -1461,7 +1499,7 @@ TEST_CASE("Routes: stable aliases resolve while preserving request attribution",
     ts.stop();
 }
 
-TEST_CASE("Strict Chat never emits derivative reasoning fields",
+TEST_CASE("Strict Chat forwards assistant reasoning in both directions",
           "[routes][chat][profile][reasoning]") {
     TestServer ts;
     ts.registry.register_model(make_info("strict-reasoning"));
@@ -1474,13 +1512,18 @@ TEST_CASE("Strict Chat never emits derivative reasoning fields",
 
     const auto nonstream = client.Post(
         "/v1/chat/completions",
-        "{\"model\":\"strict-reasoning\",\"messages\":[{\"role\":\"user\",\"content\":\"list files\"}]," +
+        "{\"model\":\"strict-reasoning\",\"messages\":[{\"role\":\"assistant\",\"content\":\"prior reply\",\"reasoning_content\":\"prior thought\"},{\"role\":\"user\",\"content\":\"list files\"}]," +
             tools + "}",
         "application/json");
     REQUIRE(nonstream);
     REQUIRE(nonstream->status == 200);
-    CHECK_FALSE(nlohmann::json::parse(nonstream->body)["choices"][0]["message"]
-                    .contains("reasoning_content"));
+    CHECK(nlohmann::json::parse(nonstream->body)["choices"][0]["message"]
+                  ["reasoning_content"] == "need a tool");
+    const auto* model = dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_model("strict-reasoning"));
+    REQUIRE(model);
+    REQUIRE(model->last_request.messages.size() == 2);
+    CHECK(model->last_request.messages[0].reasoning == "prior thought");
 
     const auto stream = client.Post(
         "/v1/chat/completions",
@@ -1489,7 +1532,8 @@ TEST_CASE("Strict Chat never emits derivative reasoning fields",
         "application/json");
     REQUIRE(stream);
     REQUIRE(stream->status == 200);
-    CHECK(stream->body.find("reasoning_content") == std::string::npos);
+    CHECK(stream->body.find("\"reasoning_content\":\"need a tool\"") !=
+          std::string::npos);
     CHECK(stream->body.ends_with("data: [DONE]\n\n"));
     ts.stop();
 }
@@ -1694,6 +1738,12 @@ TEST_CASE("Routes: complete Chat shape validates before model resolution",
     auto unknown_message = base();
     unknown_message["messages"][0]["reasoning_content"] = "private";
     invalid.push_back(std::move(unknown_message));
+    auto invalid_reasoning = base();
+    invalid_reasoning["messages"][0] = {
+        {"role", "assistant"}, {"content", "reply"},
+        {"reasoning_content", nlohmann::json::array({"wrong type"})},
+    };
+    invalid.push_back(std::move(invalid_reasoning));
     auto missing_content = base();
     missing_content["messages"][0].erase("content");
     invalid.push_back(std::move(missing_content));
@@ -1743,22 +1793,18 @@ TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering"
           "[routes][chat][stream][golden]") {
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123, {{"content", "Hi"}}, true,
-        false, "", false) ==
+        "", false) ==
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123,
-        {{"reasoning_content", "thinking"}}, true, true, "", false) ==
+        {{"reasoning_content", "thinking"}}, true, "", false) ==
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
-    REQUIRE(serialize_chat_stream_delta(
-        "chatcmpl-test", "model", 123,
-        {{"reasoning_content", "thinking"}}, true, false, "", false) ==
-        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
     REQUIRE(serialize_chat_stream_delta(
         "chatcmpl-test", "model", 123,
         {{"tool_calls", nlohmann::json::array({{
             {"index", 0}, {"id", "call_1"}, {"type", "function"},
             {"function", {{"name", "f"}, {"arguments", "{}"}}},
-        }})}}, true, false, "", false) ==
+        }})}}, true, "", false) ==
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{}\",\"name\":\"f\"},\"id\":\"call_1\",\"index\":0,\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":123,\"id\":\"chatcmpl-test\",\"model\":\"model\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n");
 
     InferenceResult result;
@@ -1777,18 +1823,18 @@ TEST_CASE("Routes: Chat stream serializers preserve exact OpenAI event ordering"
     std::string actual;
     actual += serialize_chat_stream_delta(
         "chatcmpl-contract", "contract-model", 1787171200,
-        {{"content", "Hi"}}, true, false, "", false);
+        {{"content", "Hi"}}, true, "", false);
     actual += serialize_chat_stream_delta(
         "chatcmpl-contract", "contract-model", 1787171200,
         {{"tool_calls", nlohmann::json::array({{
             {"index", 0}, {"id", "call_1"}, {"type", "function"},
             {"function", {{"name", "lookup"}, {"arguments", ""}}},
-        }})}}, true, false, "", false);
+        }})}}, true, "", false);
     actual += serialize_chat_stream_delta(
         "chatcmpl-contract", "contract-model", 1787171200,
         {{"tool_calls", nlohmann::json::array({{
             {"index", 0}, {"function", {{"arguments", "{}"}}},
-        }})}}, true, false, "", false);
+        }})}}, true, "", false);
     actual += serialize_chat_stream_terminal(
         "chatcmpl-contract", "contract-model", 1787171200,
         "tool_calls", &result, true, "", false);
@@ -3278,18 +3324,17 @@ TEST_CASE("Routes: POST /v1/audio/speech returns runtime audio", "[routes][speec
 
     response = client.Post("/v1/audio/speech",
         nlohmann::json{{"model", "speech-model"}, {"input", "hello"},
-                       {"voice", "default"}, {"response_format", "mp3"},
+                       {"voice", "default"},
                        {"speed", 1.0}}.dump(), "application/json");
     REQUIRE(response);
-    CHECK(response->status == 400);
-    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
-          "unsupported_capability");
+    CHECK(response->status == 200);
+    CHECK(response->get_header_value("Content-Type") == "audio/mpeg");
     const auto usage = ts.stats_db.model_usage();
     REQUIRE(usage.size() == 1);
     CHECK(usage[0].model == "speech-model");
-    CHECK(usage[0].requests == 2);
-    CHECK(usage[0].successful_requests == 1);
-    CHECK(usage[0].input_characters == 5);
+    CHECK(usage[0].requests == 3);
+    CHECK(usage[0].successful_requests == 2);
+    CHECK(usage[0].input_characters == 10);
     CHECK(usage[0].input_audio_seconds == 0.0);
     const auto rows = ts.stats_db.recent_requests(10);
     const auto successful = std::find_if(rows.begin(), rows.end(),
@@ -3367,8 +3412,6 @@ TEST_CASE("Routes: speech validates the OpenAI request contract before admission
     expect_error({{"model", info.name}, {"input", "hello"},
                   {"voice", {{"id", "voice_custom"}, {"ignored", true}}},
                   {"response_format", "wav"}}, "invalid_speech_request");
-    expect_error({{"model", info.name}, {"input", "hello"}, {"voice", "default"}},
-                 "unsupported_capability");
     expect_error({{"model", info.name}, {"input", "hello"},
                   {"voice", "not-a-voice"}, {"response_format", "wav"}},
                  "invalid_speech_request");
@@ -3480,6 +3523,48 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts request-scoped WAV", "[
     CHECK(rows[0].modality == "audio_transcription");
     CHECK(rows[0].input_audio_seconds == Catch::Approx(0.01));
     CHECK_FALSE(rows[0].request_id.empty());
+    ts.stop();
+}
+
+TEST_CASE("Transcription rejects silent audio and punctuation-only output",
+          "[routes][transcriptions]") {
+    TestServer ts;
+    auto info = make_info("whisper-model");
+    info.runtime = "whisper_cpp";
+    info.modality = "audio_transcription";
+    info.capabilities = {"audio_transcription"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load(info.name));
+    auto* backend = const_cast<IModelMock*>(dynamic_cast<const IModelMock*>(
+        ts.coordinator.get_backend(info.name)));
+    REQUIRE(backend);
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+    std::string silence = test_wav();
+    silence[44] = '\0';
+    silence[45] = '\0';
+    const auto post = [&client](const std::string& audio) {
+        return client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+            {"file", audio, "test.wav", "audio/wav"},
+            {"model", "whisper-model", "", ""},
+        });
+    };
+    auto response = post(silence);
+    REQUIRE(response);
+    CHECK(response->status == 422);
+    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
+          "no_speech_detected");
+    backend->transcription_text = " -  -  - ";
+    response = post(test_wav());
+    REQUIRE(response);
+    CHECK(response->status == 422);
+    CHECK(nlohmann::json::parse(response->body)["error"]["code"] ==
+          "no_speech_detected");
+    backend->transcription_text = "clear speech";
+    response = post(test_wav());
+    REQUIRE(response);
+    CHECK(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body)["text"] == "clear speech");
     ts.stop();
 }
 
@@ -4021,7 +4106,7 @@ TEST_CASE("Routes: chat stream applies producer backpressure until disconnect",
         chunk["id"].get<std::string>(), chunk["model"].get<std::string>(),
         chunk["created"].get<std::int64_t>(),
         {{"content", std::string(64 * 1024, 'x')}}, false,
-        false, "", false));
+        "", false));
     CHECK(emitted.find("finish_reason\":\"stop") == std::string::npos);
     CHECK(emitted.find("\"usage\"") == std::string::npos);
     CHECK(emitted.find("[DONE]") == std::string::npos);
@@ -4273,6 +4358,8 @@ TEST_CASE("request observation uses one canonical record for every sink",
     result.completion_tokens = 20;
     result.reasoning_tokens = 7;
     result.prompt_duration_ms = 20.0f;
+    result.prompt_decode_duration_ms = 8.0;
+    result.prompt_decode_tokens = 40;
     result.generation_duration_ms = 10.0f;
     result.duration_ms = 35.0f;
     result.tokens_per_second = 1.0f;
@@ -4305,6 +4392,8 @@ TEST_CASE("request observation uses one canonical record for every sink",
     CHECK(payload["endpoint"] == rows[0].endpoint);
     CHECK(payload["protocolProfile"] == rows[0].protocol_profile);
     CHECK(payload["cacheWriteTokens"] == rows[0].cache_write_tokens);
+    CHECK(payload["promptDecodeTokens"] == rows[0].prompt_decode_tokens);
+    CHECK(payload["promptDecodeDurationMs"] == rows[0].prompt_decode_duration_ms);
     CHECK(payload["reasoningTokens"] == rows[0].reasoning_tokens);
     CHECK(payload["queueDurationMs"] == rows[0].queue_duration_ms);
     CHECK(payload["swapLoadDurationMs"] == rows[0].swap_load_duration_ms);
@@ -4313,6 +4402,8 @@ TEST_CASE("request observation uses one canonical record for every sink",
     CHECK(payload["inputImageCount"] == rows[0].input_image_count);
     CHECK(payload["outputImageCount"] == rows[0].output_image_count);
     CHECK(rows[0].cache_write_tokens == 40);
+    CHECK(rows[0].prompt_decode_tokens == 40);
+    CHECK(rows[0].prompt_decode_duration_ms == Catch::Approx(8.0));
     CHECK(rows[0].tokens_per_second == Catch::Approx(2000.0));
     CHECK(payload["tokensPerSecond"].get<double>() ==
           Catch::Approx(rows[0].tokens_per_second));

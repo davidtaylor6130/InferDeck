@@ -66,7 +66,7 @@ Require-Text 'docs/post-training.md' @(
 Require-Text 'docs/opencode-setup-guide.md' @(
     'InferDeck model aliases',
     'inferdeck/Normal',
-    'inferdeck/n8n-model'
+    'inferdeck/qwen2.5-0.5b-instruct'
 )
 Reject-Text 'docs/opencode-setup-guide.md' @(
     'LlamaEngine (in-process inference)',

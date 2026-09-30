@@ -14,8 +14,10 @@
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
 #include "llama_cpp_wrapper/llama_chat_adapter.hpp"
 #include "llama_cpp_wrapper/streaming_tool_call_state.hpp"
+#include "../src/sampling_windows.hpp"
 #include "foundation/logging.hpp"
 #include "model/imodel.hpp"
+#include "llama.h"
 
 using namespace inferdeck;
 using namespace inferdeck::llama_wrapper;
@@ -31,6 +33,33 @@ std::filesystem::path write_fake_gguf(const std::filesystem::path& dir) {
   return path;
 }
 
+}
+
+TEST_CASE("Llama sampler full-context history windows survive current llama.cpp",
+          "[llama][sampling]") {
+  common_params_sampling sampling;
+  sampling.penalty_last_n = -1;
+  sampling.dry_penalty_last_n = -1;
+  detail::resolve_sampling_windows(sampling, 4096);
+  CHECK(sampling.penalty_last_n == 4096);
+  CHECK(sampling.dry_penalty_last_n == 4096);
+
+  llama_sampler* penalty = llama_sampler_init_penalties(8, sampling.penalty_last_n,
+                                                      2.0f, 0.0f, 0.0f);
+  REQUIRE(penalty != nullptr);
+  llama_sampler_accept(penalty, 3);
+  llama_token_data tokens[] = {{3, 2.0f, 0.0f}, {4, 1.0f, 0.0f}};
+  llama_token_data_array candidates = {tokens, 2, -1, false};
+  llama_sampler_apply(penalty, &candidates);
+  llama_sampler_free(penalty);
+  CHECK(tokens[0].logit == 1.0f);
+  CHECK(tokens[1].logit == 1.0f);
+
+  sampling.penalty_last_n = 64;
+  sampling.dry_penalty_last_n = 0;
+  detail::resolve_sampling_windows(sampling, 4096);
+  CHECK(sampling.penalty_last_n == 64);
+  CHECK(sampling.dry_penalty_last_n == 0);
 }
 
 TEST_CASE("LlamaCppModel: version string non-empty", "[llama][meta]") {
@@ -384,6 +413,41 @@ TEST_CASE("Generation TPS excludes prompt prefill duration",
   CHECK(generation_tokens_per_second(200, 0.0f) == 0.0f);
 }
 
+TEST_CASE("Prompt decode timing rejects shared and invalid batches",
+          "[llama][scheduler][metrics]") {
+  SlotTask task;
+  detail::record_prompt_decode(task, 100, 100, 2.5);
+  detail::record_prompt_decode(task, 20, 20, 1.5);
+  CHECK(task.out_prompt_decode_tokens == 120);
+  CHECK(task.out_prompt_decode_duration_ms == 4.0);
+  CHECK_FALSE(task.out_prompt_decode_invalid);
+
+  SECTION("mixed prompt and generation") {
+    detail::record_prompt_decode(task, 20, 21, 1.0);
+  }
+  SECTION("multiple prompt owners") {
+    detail::record_prompt_decode(task, 20, 40, 1.0);
+  }
+  SECTION("missing measurement") {
+    detail::record_prompt_decode(task, 20, 20, 0.0);
+  }
+  SECTION("nonfinite measurement") {
+    detail::record_prompt_decode(task, 20, 20,
+        std::numeric_limits<double>::infinity());
+  }
+  SECTION("media") {
+    task.media_chunks.emplace_back();
+    detail::record_prompt_decode(task, 20, 20, 1.0);
+  }
+  CHECK(task.out_prompt_decode_invalid);
+  CHECK(task.out_prompt_decode_tokens == 0);
+  CHECK(task.out_prompt_decode_duration_ms == 0.0);
+  task.media_chunks.clear();
+  detail::record_prompt_decode(task, 20, 20, 1.0);
+  CHECK(task.out_prompt_decode_invalid);
+  CHECK(task.out_prompt_decode_tokens == 0);
+}
+
 TEST_CASE("Recurrent checkpoint eligibility requires a reusable prefix",
           "[llama][scheduler][recurrent]") {
   REQUIRE(detail::recurrent_checkpoint_usable(4096, 128, 256, 512));
@@ -485,7 +549,7 @@ TEST_CASE("recurrent checkpoint: second predict on same slot reuses cache",
   minfo.n_slots         = 1;
   minfo.context_size    = 512;
   minfo.vram_required_mb = 0;
-  LlamaCppModel lm(minfo);
+  LlamaCppModel lm(minfo, test_runtime_config());
   REQUIRE(lm.load().has_value());
 
   auto slot_r = lm.acquire_slot();
@@ -497,6 +561,11 @@ TEST_CASE("recurrent checkpoint: second predict on same slot reuses cache",
   req.max_output_tokens = 4;
   auto r1 = lm.predict(slot_id, req);
   REQUIRE(r1.has_value());
+  CHECK(r1->prompt_decode_tokens == r1->prompt_tokens - r1->cached_prompt_tokens);
+  CHECK(r1->prompt_decode_tokens > 0);
+  CHECK(std::isfinite(r1->prompt_decode_duration_ms));
+  CHECK(r1->prompt_decode_duration_ms > 0.0);
+  CHECK(r1->prompt_decode_duration_ms <= r1->prompt_duration_ms);
 
   // Second identical request: for full-attention models this exercises KV reuse;
   // for recurrent models it exercises the checkpoint no-op path (size == 0).

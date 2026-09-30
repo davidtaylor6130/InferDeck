@@ -163,6 +163,10 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             }
             info.n_slots = m["n_slots"] ? m["n_slots"].as<int>() : 2;
             info.min_slots = m["min_slots"] ? m["min_slots"].as<int>() : 1;
+            info.continuation_grace_ms = m["continuation_grace_ms"]
+                ? m["continuation_grace_ms"].as<int>() : 0;
+            info.request_queue_timeout_seconds = m["request_queue_timeout_seconds"]
+                ? m["request_queue_timeout_seconds"].as<int>() : 300;
             if (m["role"]) {
                 info.role = *model::parse_model_role(
                     m["role"].as<std::string>());
@@ -186,6 +190,8 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             info.vram_per_slot_mb = m["vram_per_slot_mb"] ? m["vram_per_slot_mb"].as<int>() : 0;
             info.context_size =
                 m["context_size"] ? m["context_size"].as<int>() : 65536;
+            info.default_max_output_tokens = m["default_max_output_tokens"]
+                ? m["default_max_output_tokens"].as<int>() : 0;
             if (m["kv_unified"]) info.kv_unified = m["kv_unified"].as<bool>();
             if (m["context_pool_size"]) info.context_pool_size = m["context_pool_size"].as<int>();
             if (m["context_pool_auto"]) info.context_pool_auto = m["context_pool_auto"].as<bool>();

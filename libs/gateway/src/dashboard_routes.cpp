@@ -4,6 +4,7 @@
 #include "gateway/background_lease_routes.hpp"
 #include "gateway/config_repository.hpp"
 #include "gateway/config_secrets.hpp"
+#include "gateway/gpu_backend.hpp"
 
 #include "foundation/logging.hpp"
 #include "optimize/profile_optimizer.hpp"
@@ -336,6 +337,8 @@ nlohmann::json build_dashboard_jobs(const observability::StatsDb& stats_db,
             {"promptTokensPerSecond", row.prompt_tokens_per_second},
             {"generationDurationMs", row.generation_duration_ms},
             {"promptDurationMs", row.prompt_duration_ms},
+            {"promptDecodeDurationMs", row.prompt_decode_duration_ms},
+            {"promptDecodeTokens", row.prompt_decode_tokens},
             {"queueDurationMs", row.queue_duration_ms},
             {"swapLoadDurationMs", row.swap_load_duration_ms},
             {"firstTokenDurationMs", row.first_token_duration_ms},
@@ -611,6 +614,7 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
             {"lastError", swap.last_deferred ? std::string{} : swap.last_error}
         }},
         {"hardware", hardware},
+        {"gpuBackend", gpu_backend_diagnostics()},
         {"summary", {
             {"totalRequests", requests},
             {"totalTokens", prompt_tokens + completion_tokens},

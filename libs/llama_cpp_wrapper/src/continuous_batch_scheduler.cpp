@@ -1,7 +1,9 @@
 #include "llama_cpp_wrapper/continuous_batch_scheduler.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 
@@ -58,6 +60,27 @@ int detail::prepare_batch_order(std::vector<SlotTask*>& tasks, int capacity, std
             });
     }
     return prompts > 0 ? (available + prompts - 1) / prompts : 0;
+}
+
+void detail::record_prompt_decode(
+    SlotTask& task, int prompt_tokens, int batch_tokens, double duration_ms)
+{
+    if (task.out_prompt_decode_invalid) return;
+    const bool exclusive_prompt =
+        batch_tokens > 0 && prompt_tokens == batch_tokens;
+    const double measured = std::isfinite(duration_ms) && duration_ms > 0.0
+        ? duration_ms : 0.0;
+    if (!exclusive_prompt || measured == 0.0 || !task.media_chunks.empty() ||
+        task.out_prompt_decode_tokens > std::numeric_limits<int>::max() - prompt_tokens ||
+        !std::isfinite(task.out_prompt_decode_duration_ms + measured))
+    {
+        task.out_prompt_decode_invalid = true;
+        task.out_prompt_decode_tokens = 0;
+        task.out_prompt_decode_duration_ms = 0.0;
+        return;
+    }
+    task.out_prompt_decode_tokens += prompt_tokens;
+    task.out_prompt_decode_duration_ms += measured;
 }
 
 ContinuousBatchScheduler::ContinuousBatchScheduler(
@@ -707,6 +730,7 @@ void ContinuousBatchScheduler::run_loop() {
         std::vector<SlotTask*> stopped;
         std::vector<SlotTask*> checkpoint_ready;
         std::vector<SlotTask*> replay_checkpoint_ready;
+        std::vector<std::pair<SlotTask*, int>> prompt_contributions;
 
         for (auto* t : tasks) {
             if (should_cancel(t)) {
@@ -797,6 +821,7 @@ void ContinuousBatchScheduler::run_loop() {
                     process_mtp = process_mtp || t->mtp_eligible;
                     if (is_last && i == chunk - 1) t->i_batch = bi;
                 }
+                prompt_contributions.emplace_back(t, chunk);
                 t->prompt_pos += chunk;
                 t->n_pos += chunk;
                 if (draft_ctx_ && llama_get_ctx_other(draft_ctx_) != ctx_ && t->mtp_eligible && t->checkpoint_capture_pos > 1 &&
@@ -892,11 +917,26 @@ void ContinuousBatchScheduler::run_loop() {
         }
 
         // ---- Decode ----
+        const bool measure_prompt = prompt_contributions.size() == 1 &&
+            prompt_contributions.front().second == batch.n_tokens &&
+            prompt_contributions.front().first->media_chunks.empty() &&
+            !prompt_contributions.front().first->out_prompt_decode_invalid;
+        if (measure_prompt) llama_synchronize(ctx_);
+        const auto decode_started = std::chrono::steady_clock::now();
         const int rc = llama_decode(ctx_, batch);
         if (rc != 0) {
             LOG_ERROR("scheduler_decode_failed", "llama_decode rc={} batch_tokens={}", rc, batch.n_tokens);
             fail_all("llama_decode failed (rc=" + std::to_string(rc) + ")");
             break;
+        }
+        double decode_ms = 0.0;
+        if (measure_prompt) {
+            llama_synchronize(ctx_);
+            decode_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - decode_started).count();
+        }
+        for (const auto& [task, tokens] : prompt_contributions) {
+            detail::record_prompt_decode(*task, tokens, batch.n_tokens, decode_ms);
         }
         if (speculative_ && process_mtp &&
             !common_speculative_process(speculative_, batch)) {

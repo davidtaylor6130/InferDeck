@@ -377,6 +377,26 @@ TEST_CASE("ModelRegistry: reports missing runtime", "[model][registry]") {
     REQUIRE(result.error().code == ErrorCode::Unavailable);
 }
 
+TEST_CASE("Unavailable Radiance runtime never falls back to llama",
+          "[model][registry][radiance]")
+{
+    ModelRegistry registry;
+    bool llama_called = false;
+    registry.register_factory("llama_cpp", [&](const ModelInfo& info)
+    {
+        llama_called = true;
+        return std::make_unique<IModelMock>(info);
+    });
+    ModelInfo info = make_info("qwen-candidate");
+    info.runtime = "vllm_radiance";
+    registry.register_model(info);
+    const auto result = registry.create_result(info.name);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == ErrorCode::Unavailable);
+    CHECK(result.error().message == "runtime not registered: vllm_radiance");
+    CHECK_FALSE(llama_called);
+}
+
 TEST_CASE("ModelRegistry: register rejects empty name", "[model][registry]") {
     ModelRegistry reg;
     REQUIRE_THROWS_AS(reg.register_model(ModelInfo{}), std::invalid_argument);
@@ -2518,8 +2538,10 @@ TEST_CASE("BackendCoordinator: zero-budget swap restores failed replacement",
 }
 
 TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model", "[model][coordinator][runtime-preflight]") {
+    int resident_creations = 0;
     ModelRegistry reg;
-    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        if (i.name == "resident") ++resident_creations;
         return std::make_unique<IModelMock>(i);
     });
     reg.register_model(make_info("resident"));
@@ -2535,6 +2557,7 @@ TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model"
     CHECK(coordinator.is_loaded("resident"));
     CHECK(coordinator.get_loaded_model().value_or("") == "resident");
     CHECK_FALSE(coordinator.is_loaded("broken-runtime"));
+    CHECK(resident_creations == 1);
     int unloads = 0;
     auto* resident_mock = as_mock(const_cast<IModel*>(coordinator.get_model("resident")));
     REQUIRE(resident_mock != nullptr);
@@ -2545,8 +2568,10 @@ TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model"
 }
 
 TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model even over budget", "[model][coordinator][runtime-preflight]") {
+    int resident_creations = 0;
     ModelRegistry reg;
-    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IModel> {
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IModel> {
+        if (i.name == "resident") ++resident_creations;
         auto backend = std::make_unique<IModelMock>(i);
         backend->vram_mb.store(i.vram_required_mb);
         return backend;
@@ -2566,6 +2591,43 @@ TEST_CASE("BackendCoordinator: swap to missing runtime preserves resident model 
     REQUIRE_FALSE(result.has_value());
     CHECK(coordinator.is_loaded("resident"));
     CHECK(coordinator.get_loaded_model().value_or("") == "resident");
+    CHECK(resident_creations == 1);
+}
+
+TEST_CASE("BackendCoordinator: missing runtime does not drain active resident work",
+          "[model][coordinator][runtime-preflight]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel> {
+        return std::make_unique<IModelMock>(info);
+    });
+    auto resident = make_info("resident");
+    resident.vram_required_mb = 9000;
+    reg.register_model(resident);
+    auto broken = make_info("broken-runtime");
+    broken.runtime = "never_registered";
+    broken.vram_required_mb = 9000;
+    reg.register_model(broken);
+    BackendCoordinator coordinator(reg);
+    SECTION("single resident") {}
+    SECTION("memory budget") {
+        coordinator.set_vram_budget(10000, 0);
+    }
+    REQUIRE(coordinator.swap_to("resident"));
+    const auto slot = coordinator.acquire_slot("resident");
+    REQUIRE(slot);
+
+    const auto result = coordinator.swap_to_cancellable(
+        "broken-runtime", std::chrono::milliseconds{100});
+    CHECK_FALSE(result);
+    if (!result) CHECK(result.error().code == ErrorCode::Unavailable);
+    CHECK(coordinator.active_request_count("resident") == 1);
+    CHECK_FALSE(coordinator.swap_in_progress());
+    InferenceRequest request;
+    request.prompt = "continue resident work";
+    CHECK(coordinator.predict("resident", *slot, request));
+    REQUIRE(coordinator.release_slot("resident", *slot));
+    CHECK(coordinator.active_request_count() == 0);
+    CHECK(coordinator.is_ready("resident"));
 }
 
 TEST_CASE("BackendCoordinator: unregister refuses loaded model", "[model][coordinator]") {
@@ -3264,4 +3326,194 @@ TEST_CASE("BackendCoordinator dispatches video generation through its lease",
     CHECK(result->content_type == "video/x-msvideo");
     CHECK(result->output_video_seconds == 33.0 / 24.0);
     REQUIRE(coordinator.release_slot(info.name, *lease));
+}
+
+TEST_CASE("BackendCoordinator: opt-in continuation admission is bounded", "[model][continuation]") {
+    ModelRegistry registry;
+    const auto factory = [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots = 1;
+        return backend;
+    };
+    registry.register_factory("vllm_radiance", factory);
+    registry.set_factory(factory);
+    ModelInfo info = make_info("continuation-test");
+    info.runtime = "vllm_radiance";
+    info.n_slots = info.min_slots = 1;
+    info.continuation_grace_ms = 300;
+    SECTION("native opt-in") {}
+    SECTION("default off") { info.continuation_grace_ms = 0; }
+    SECTION("Vulkan ignores opt-in") { info.runtime = "llama_cpp"; }
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions owner;
+    owner.reservation_key = "openai-cache:owner";
+    owner.timeout = std::chrono::seconds(2);
+    const auto seed = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(seed);
+    REQUIRE(coordinator.release_slot(info.name, *seed));
+    AcquireSlotOptions peer;
+    peer.block = false;
+    peer.reservation_key = "openai-cache:peer";
+    const auto admitted = coordinator.acquire_slot(info.name, peer);
+    if (info.runtime == "llama_cpp" || info.continuation_grace_ms == 0) {
+        REQUIRE(admitted);
+        CHECK(coordinator.release_slot(info.name, *admitted));
+    } else {
+        REQUIRE_FALSE(admitted);
+    }
+}
+
+TEST_CASE("BackendCoordinator: one cached continuation yields to a queued peer", "[model][continuation]") {
+    ModelRegistry registry;
+    const auto factory = [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots = 1;
+        return backend;
+    };
+    registry.register_factory("vllm_radiance", factory);
+    registry.set_factory(factory);
+    ModelInfo info = make_info("continuation-fairness");
+    info.runtime = "vllm_radiance";
+    info.n_slots = info.min_slots = 1;
+    info.continuation_grace_ms = 1500;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions owner;
+    owner.reservation_key = "openai-cache:owner";
+    owner.timeout = std::chrono::seconds(2);
+    AcquireSlotOptions peer = owner;
+    peer.reservation_key = "openai-cache:peer";
+    SECTION("basic admission") {}
+    SECTION("real capacity preparation preserves continuation") {
+        owner.demand = [] { return Ok(RequestDemand{0, 200, 200, 1, 0}); };
+        owner.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl& control) {
+            if (demand.aggregate_sequences > 1)
+                return Err<void>(ErrorCode::ResourceBusy, "one native sequence is active");
+            return coordinator.prepare_request_capacity(info.name, demand, control);
+        };
+        peer.demand = owner.demand;
+        peer.prepare_capacity = owner.prepare_capacity;
+    }
+    const auto seed = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(seed);
+    auto waiting = std::async(std::launch::async, [&] { return coordinator.acquire_slot(info.name, peer); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (coordinator.queued_request_count() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    REQUIRE(coordinator.queued_request_count() == 1);
+    REQUIRE(coordinator.release_slot(info.name, *seed));
+    CHECK(waiting.wait_for(std::chrono::milliseconds(1100)) == std::future_status::timeout);
+    const auto continuation = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(continuation);
+    REQUIRE(coordinator.release_slot(info.name, *continuation));
+    REQUIRE(waiting.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    const auto peer_lease = waiting.get();
+    REQUIRE(peer_lease);
+    CHECK(coordinator.release_slot(info.name, *peer_lease));
+}
+
+TEST_CASE("BackendCoordinator: continuation hold respects interruption and expiry", "[model][continuation]") {
+    ModelRegistry registry;
+    const auto factory = [](const ModelInfo& info) {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots = 1;
+        return backend;
+    };
+    registry.register_factory("vllm_radiance", factory);
+    registry.set_factory(factory);
+    ModelInfo info = make_info("continuation-limits");
+    info.runtime = "vllm_radiance";
+    info.n_slots = info.min_slots = 1;
+    info.continuation_grace_ms = 100;
+    registry.register_model(info);
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load(info.name));
+    AcquireSlotOptions owner;
+    owner.reservation_key = "openai-cache:owner";
+    const auto seed = coordinator.acquire_slot(info.name, owner);
+    REQUIRE(seed);
+    REQUIRE(coordinator.release_slot(info.name, *seed));
+    AcquireSlotOptions peer;
+    peer.reservation_key = "openai-cache:peer";
+    peer.timeout = std::chrono::seconds(1);
+    SECTION("higher priority bypasses hold") { peer.priority = 1; peer.block = false; }
+    SECTION("expiry releases peer") {}
+    SECTION("cancelled waiter does not consume hold") {
+        AcquireSlotOptions cancelled = peer;
+        cancelled.reservation_key = owner.reservation_key;
+        cancelled.cancelled = [] { return true; };
+        CHECK_FALSE(coordinator.acquire_slot(info.name, cancelled));
+        CHECK(coordinator.queued_request_count() == 0);
+        peer.block = false;
+    }
+    SECTION("unload clears admission generation") {
+        REQUIRE(coordinator.unload(info.name));
+        REQUIRE(coordinator.load(info.name));
+        peer.block = false;
+    }
+    const auto lease = coordinator.acquire_slot(info.name, peer);
+    REQUIRE(lease);
+    CHECK(coordinator.release_slot(info.name, *lease));
+}
+
+TEST_CASE("ModelRegistry: rejects invalid Radiance prefill before admission", "[model][registry][radiance]")
+{
+    ModelRegistry registry;
+    ModelInfo info = make_info("prefill-candidate");
+    info.runtime = "vllm_radiance";
+    registry.register_model(info);
+    for (const std::string& selection : {std::string("r4d"), std::string("upstream")})
+    {
+        info.artifacts["prefill_attention"] = selection;
+        registry.register_model(info);
+        CHECK(registry.get_info(info.name).artifacts.at("prefill_attention") == selection);
+    }
+    info.artifacts["prefill_attention"] = "automatic";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    CHECK(registry.get_info(info.name).artifacts.at("prefill_attention") == "upstream");
+
+    info.artifacts["prefill_attention"] = "r4d_int4";
+    info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
+    info.artifacts["prefill_overlay"] = "C:/runtime/r4d_int4_prefill_overlay.py";
+    info.artifacts["prefill_dll"] = "C:/runtime/r4d_int4_tiled.dll";
+    info.artifacts["prefill_dll_sha256"] = std::string(64, 'a');
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+
+    info.artifacts["decode_dll"] = "C:/runtime/r4d_int4_decode.dll";
+    info.artifacts["decode_dll_sha256"] = std::string(64, 'b');
+    registry.register_model(info);
+    CHECK(registry.get_info(info.name).artifacts.at("prefill_attention") == "r4d_int4");
+    CHECK(registry.get_info(info.name).artifacts.at("decode_dll") == "C:/runtime/r4d_int4_decode.dll");
+    info.artifacts.erase("decode_dll_sha256");
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["decode_dll_sha256"] = std::string(64, 'b');
+    info.artifacts["decode_dll_sha256"][0] = 'z';
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["decode_dll_sha256"] = std::string(64, 'b');
+    info.artifacts["prefill_attention"] = "r4d";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_attention"] = "r4d_int4";
+    info.artifacts.erase("decode_dll");
+    info.artifacts.erase("decode_dll_sha256");
+
+    info.artifacts.erase("prefill_dll_sha256");
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_dll_sha256"] = "not-a-digest";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_dll_sha256"] = std::string(64, 'a');
+    info.artifacts["kv_cache_dtype"] = "auto";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+
+    info.artifacts["prefill_attention"] = "r4d";
+    info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts["prefill_attention"] = "upstream";
+    info.artifacts["kv_cache_dtype"] = "int8";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
+    info.artifacts.erase("prefill_attention");
+    info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
+    CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
 }

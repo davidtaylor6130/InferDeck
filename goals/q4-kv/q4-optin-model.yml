@@ -1,0 +1,60 @@
+﻿model_registry:
+- name: qwen3.8-27b-radiance-q4
+  family: qwen3.8
+  runtime: vllm_radiance
+  modality: text
+  capabilities:
+  - chat_completions
+  - responses
+  role: conversation
+  compute: rocm_gpu
+  residency: managed
+  admission_pool: radiance-qwen3.8-q4
+  concurrency_limit: 4
+  memory_required_mb: 30000
+  eviction_eligible: true
+  vram_required_mb: 30000
+  context_size: 106496
+  n_slots: 4
+  min_slots: 4
+  has_vision: false
+  reasoning:
+    supported: true
+    efforts:
+    - low
+    - medium
+    - xhigh
+    default: xhigh
+    none_disables: true
+    aliases:
+      high: xhigh
+  speculative:
+    type: none
+    draft_tokens: 1
+    p_min: 0.0
+    max_active_requests: 1
+  sampling:
+    temperature: 1.0
+    top_p: 0.95
+    top_k: 20
+    min_p: 0.0
+    repeat_penalty: 1.0
+  artifacts:
+    prefill_attention: r4d_int4
+    kv_cache_dtype: int4_per_token_head
+    model: C:/path/to/InferDeck/build/runtime-radiance-probe/models/Qwen3.8-27B-Quark-AWQ-MXFP4
+    python_root: C:/path/to/InferDeck/build/runtime-radiance-probe/toolchain/python312-standalone/python
+    python_site: C:/path/to/InferDeck/build/runtime-radiance-probe/.venv-rocm10/Lib/site-packages
+    vllm_source: C:/path/to/InferDeck/build/runtime-radiance-probe/vLLM_for_AMD
+    radiance_source: C:/path/to/InferDeck/build/runtime-radiance-probe/radiance-src
+    radiance_extension: C:/path/to/InferDeck/build/runtime-radiance-probe/radiance-extension/kmag-rne-wide-candidate
+    rocm: C:/path/to/InferDeck/build/runtime-radiance-probe/.venv-rocm10/Lib/site-packages/_rocm_sdk_devel
+    selector_overlay: C:/path/to/InferDeck/build/runtime-radiance-probe/radiance-src/radiance_selector_overlay.py
+    pread_overlay: C:/path/to/InferDeck/build/runtime-radiance-probe/pread_safetensors_overlay.py
+    prefill_overlay: C:/InferDeck/python/r4d_int4_prefill_overlay_wave64.py
+    prefill_dll: C:/InferDeck/kernels/q4/r4d_int4_tiled.dll
+    prefill_dll_sha256: c9b7e3d8fbf6156cca62256af752089af2f4ba62b253c786e289eb82c68ff976
+    decode_dll: C:/InferDeck/kernels/q4/r4d_int4_decode_wave32.dll
+    decode_dll_sha256: 9256cd513c8161b2552a89c87b6321ee12e01f0ff483db7a3aaebba781263d2c
+  continuation_grace_ms: 1000
+  request_queue_timeout_seconds: 600

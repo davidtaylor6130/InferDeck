@@ -289,6 +289,18 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "invalid slot bounds for model: " + name);
                 }
+                if (entry["continuation_grace_ms"] &&
+                    (entry["continuation_grace_ms"].as<int>() < 0 ||
+                     entry["continuation_grace_ms"].as<int>() > 2000)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "continuation_grace_ms must be between 0 and 2000: " + name);
+                }
+                if (entry["request_queue_timeout_seconds"] &&
+                    (entry["request_queue_timeout_seconds"].as<int>() < 1 ||
+                     entry["request_queue_timeout_seconds"].as<int>() > 1800)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "request_queue_timeout_seconds must be between 1 and 1800: " + name);
+                }
                 const std::array resource_keys{
                     "role", "compute", "residency", "admission_pool",
                     "concurrency_limit", "memory_required_mb",
@@ -363,6 +375,12 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 if (entry["context_size"] && entry["context_size"].as<int>() < 1) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "model context_size must be positive: " + name);
+                }
+                if (entry["default_max_output_tokens"] &&
+                    (entry["default_max_output_tokens"].as<int>() < 1 ||
+                     entry["default_max_output_tokens"].as<int>() > 65536)) {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                        "model default_max_output_tokens must be between 1 and 65536: " + name);
                 }
                 if (entry["concurrency_auto"] && entry["concurrency_auto"].as<bool>() &&
                     (!(entry["context_pool_auto"] && entry["context_pool_auto"].as<bool>()) ||
@@ -440,13 +458,30 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "native model requires artifacts: " + name);
                 }
+                std::map<std::string, std::string> runtime_artifacts;
+                if (entry["artifacts"] && entry["artifacts"].IsMap())
+                {
+                    for (const YAML::detail::iterator_value& artifact : entry["artifacts"])
+                    {
+                        runtime_artifacts.emplace(artifact.first.as<std::string>(),
+                                                  artifact.second.as<std::string>());
+                    }
+                }
+                const std::optional<std::string> profile_error =
+                    model::validate_runtime_artifacts(runtime, runtime_artifacts);
+                if (profile_error)
+                {
+                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                 *profile_error + ": " + name);
+                }
                 if (entry["has_vision"] && entry["has_vision"].as<bool>() &&
                     (!runtime_contract->vision ||
-                     !entry["mmproj_path"] || entry["mmproj_path"].IsNull() ||
-                     entry["mmproj_path"].as<std::string>().empty())) {
+                     (runtime == "llama_cpp" &&
+                      (!entry["mmproj_path"] || entry["mmproj_path"].IsNull() ||
+                       entry["mmproj_path"].as<std::string>().empty())))) {
                     return foundation::Err<void>(
                         foundation::ErrorCode::InvalidArgument,
-                        "vision model requires llama_cpp and mmproj_path: " + name);
+                        "vision model requires a vision-capable runtime; llama_cpp also requires mmproj_path: " + name);
                 }
                 if (entry["reasoning"]) {
                     const auto reasoning = entry["reasoning"];
@@ -487,7 +522,9 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     }
                     const auto default_effort = reasoning["default"]
                         ? reasoning["default"].as<std::string>() : std::string{};
-                    if (supported && !efforts.contains(default_effort)) {
+                    if (supported && !efforts.contains(default_effort) &&
+                        !(default_effort == "none" && reasoning["none_disables"] &&
+                          reasoning["none_disables"].as<bool>())) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
                             "reasoning default must be a supported effort: " + name);
@@ -526,7 +563,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     if (type == "mtp" && !runtime_contract->speculative) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP requires a llama_cpp text model: " + name);
+                            "MTP requires a runtime with speculative support: " + name);
                     }
                     const int draft_tokens = speculative["draft_tokens"]
                         ? speculative["draft_tokens"].as<int>() : 2;

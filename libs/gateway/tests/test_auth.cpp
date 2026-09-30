@@ -360,6 +360,40 @@ TEST_CASE("Request headers reject oversized and streaming bodies before bufferin
           RequestValidationStatus::InvalidContentLength);
 }
 
+TEST_CASE("Request headers admit only bounded chunked transcription uploads",
+          "[auth][request-policy][headers]") {
+    httplib::Request request;
+    request.headers.emplace("Transfer-Encoding", "chunked");
+    request.headers.emplace("Content-Type", "multipart/form-data; boundary=audio");
+    const auto transcription = request_policy("POST", "/v1/audio/transcriptions");
+    CHECK(validate_request_headers(request, transcription) ==
+          RequestValidationStatus::Allowed);
+
+    request.headers.emplace("Content-Length", "4");
+    CHECK(validate_request_headers(request, transcription) ==
+          RequestValidationStatus::UnsupportedTransferEncoding);
+    request.headers.erase("Content-Length");
+
+    CHECK(validate_request_headers(request, request_policy("POST", "/v1/chat/completions")) ==
+          RequestValidationStatus::UnsupportedTransferEncoding);
+    request.headers.erase("Content-Type");
+    request.headers.emplace("Content-Type", "application/json");
+    CHECK(validate_request_headers(request, transcription) ==
+          RequestValidationStatus::UnsupportedMediaType);
+    request.headers.erase("Content-Type");
+    request.headers.emplace("Content-Type", "multipart/form-data; boundary=audio");
+
+    request.headers.erase("Transfer-Encoding");
+    request.headers.emplace("Transfer-Encoding", "gzip, chunked");
+    CHECK(validate_request_headers(request, transcription) ==
+          RequestValidationStatus::UnsupportedTransferEncoding);
+    request.headers.erase("Transfer-Encoding");
+    request.headers.emplace("Transfer-Encoding", "chunked");
+    request.headers.emplace("Transfer-Encoding", "chunked");
+    CHECK(validate_request_headers(request, transcription) ==
+          RequestValidationStatus::UnsupportedTransferEncoding);
+}
+
 TEST_CASE("CorsMiddleware: echoes only an exact allowlisted origin", "[cors]") {
     CorsMiddleware cors({"http://127.0.0.1:11434", "http://localhost:11434"});
     httplib::Request allowed;

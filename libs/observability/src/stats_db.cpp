@@ -16,7 +16,7 @@ namespace inferdeck::observability {
 
 namespace {
 
-constexpr int current_schema_version = 4;
+constexpr int current_schema_version = 5;
 
 void throw_on_error(int rc, sqlite3* db, const char* what) {
   if (rc != SQLITE_OK && rc != SQLITE_DONE && rc != SQLITE_ROW) {
@@ -146,6 +146,8 @@ void StatsDb::open() {
     "  ,output_audio_seconds REAL NOT NULL DEFAULT 0"
     "  ,input_image_count INTEGER NOT NULL DEFAULT 0"
     "  ,output_image_count INTEGER NOT NULL DEFAULT 0"
+    "  ,prompt_decode_duration_ms REAL NOT NULL DEFAULT 0"
+    "  ,prompt_decode_tokens INTEGER NOT NULL DEFAULT 0"
     ");"
     "CREATE TABLE IF NOT EXISTS swaps ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -199,6 +201,8 @@ void StatsDb::open() {
          "ALTER TABLE requests ADD COLUMN output_audio_seconds REAL NOT NULL DEFAULT 0;",
          "ALTER TABLE requests ADD COLUMN input_image_count INTEGER NOT NULL DEFAULT 0;",
          "ALTER TABLE requests ADD COLUMN output_image_count INTEGER NOT NULL DEFAULT 0;",
+         "ALTER TABLE requests ADD COLUMN prompt_decode_duration_ms REAL NOT NULL DEFAULT 0;",
+         "ALTER TABLE requests ADD COLUMN prompt_decode_tokens INTEGER NOT NULL DEFAULT 0;",
          "ALTER TABLE swaps ADD COLUMN requested_model TEXT NOT NULL DEFAULT '';",
          "ALTER TABLE swaps ADD COLUMN request_id TEXT NOT NULL DEFAULT '';",
          "ALTER TABLE swaps ADD COLUMN api_key_id TEXT NOT NULL DEFAULT '';",
@@ -216,7 +220,7 @@ void StatsDb::open() {
       }
     }
   }
-  if (sqlite3_exec(db, "PRAGMA user_version=4; COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
+  if (sqlite3_exec(db, "PRAGMA user_version=5; COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK) {
     sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
     healthy_ = false;
     return;
@@ -227,8 +231,9 @@ void StatsDb::open() {
     "generation_duration_ms, prompt_duration_ms, prompt_tps, resolved_model, request_id, "
     "principal_class, endpoint, protocol_profile, modality, stream, finish_code, error_code, "
     "cache_write_tokens, reasoning_tokens, queue_duration_ms, swap_load_duration_ms, "
-    "first_token_duration_ms, output_audio_seconds, input_image_count, output_image_count, api_key_id, api_key_name) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+    "first_token_duration_ms, output_audio_seconds, input_image_count, output_image_count, "
+    "prompt_decode_duration_ms, prompt_decode_tokens, api_key_id, api_key_name) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
   const char* swap_sql =
     "INSERT INTO swaps (ts, from_model, to_model, duration_ms, success, error, requested_model, request_id, api_key_id, api_key_name) VALUES (?,?,?,?,?,?,?,?,?,?);";
   if (sqlite3_prepare_v2(db, request_sql, -1,
@@ -360,8 +365,11 @@ void StatsDb::record_request(const RequestRow& row) {
   sqlite3_bind_double(stmt, 29, std::max(0.0, row.output_audio_seconds));
   sqlite3_bind_int(stmt, 30, std::max(0, row.input_image_count));
   sqlite3_bind_int(stmt, 31, std::max(0, row.output_image_count));
-  sqlite3_bind_text(stmt, 32, row.api_key_id.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 33, row.api_key_name.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_double(stmt, 32, std::isfinite(row.prompt_decode_duration_ms)
+      ? std::max(0.0, row.prompt_decode_duration_ms) : 0.0);
+  sqlite3_bind_int(stmt, 33, std::max(0, row.prompt_decode_tokens));
+  sqlite3_bind_text(stmt, 34, row.api_key_id.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 35, row.api_key_name.c_str(), -1, SQLITE_TRANSIENT);
   finish_write(sqlite3_step(stmt), "record_request");
   sqlite3_reset(stmt);
 }
@@ -404,7 +412,8 @@ std::vector<RequestRow> StatsDb::recent_requests_locked(int limit, const std::st
     "prompt_duration_ms, prompt_tps, resolved_model, request_id, principal_class, endpoint, "
     "protocol_profile, modality, stream, finish_code, error_code, cache_write_tokens, "
     "reasoning_tokens, queue_duration_ms, swap_load_duration_ms, first_token_duration_ms, "
-    "output_audio_seconds, input_image_count, output_image_count, api_key_id, api_key_name FROM requests";
+    "output_audio_seconds, input_image_count, output_image_count, "
+    "prompt_decode_duration_ms, prompt_decode_tokens, api_key_id, api_key_name FROM requests";
   if (!protocol_profile.empty() || !endpoint.empty()) {
     sql += " WHERE ";
     if (!protocol_profile.empty()) sql += "protocol_profile=?";
@@ -457,8 +466,10 @@ std::vector<RequestRow> StatsDb::recent_requests_locked(int limit, const std::st
     r.output_audio_seconds = sqlite3_column_double(stmt, 28);
     r.input_image_count = sqlite3_column_int(stmt, 29);
     r.output_image_count = sqlite3_column_int(stmt, 30);
-    r.api_key_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 31));
-    r.api_key_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 32));
+    r.prompt_decode_duration_ms = sqlite3_column_double(stmt, 31);
+    r.prompt_decode_tokens = sqlite3_column_int(stmt, 32);
+    r.api_key_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 33));
+    r.api_key_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 34));
     out.push_back(std::move(r));
   }
   throw_on_error(result, reinterpret_cast<sqlite3*>(db_), "read usage query");

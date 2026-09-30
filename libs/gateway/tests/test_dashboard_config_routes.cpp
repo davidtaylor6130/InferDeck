@@ -695,6 +695,7 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     CHECK(created_body["name"] == "stable-chat");
     CHECK(created_body["target"] == "concrete-model");
     CHECK(created_body["requiredContextSize"] == 16384);
+    CHECK(routes.reloads.load() == 0);
 
     const auto listed = client.Get("/api/inferdeck/v1/model-aliases");
     REQUIRE(listed);
@@ -713,8 +714,94 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     REQUIRE(removed);
     REQUIRE(removed->status == 200);
     CHECK(routes.registry.aliases().empty());
-    const auto after_delete = YAML::Load(TempConfig::read(config.active));
+    const auto after_delete_response = client.Get("/api/inferdeck/v1/model-aliases");
+    REQUIRE(after_delete_response);
+    REQUIRE(after_delete_response->status == 200);
+    CHECK(nlohmann::json::parse(after_delete_response->body)["aliases"].empty());
+    CHECK(routes.reloads.load() == 0);
+    const auto deleted_yaml = TempConfig::read(config.active);
+    const auto after_delete = YAML::Load(deleted_yaml);
     CHECK(after_delete["model_aliases"].size() == 0);
+    CHECK(routes.reloads.load() == 0);
+}
+
+TEST_CASE("Model alias API retargets an indentless YAML sequence at EOF",
+          "[gateway][dashboard][aliases]") {
+    TempConfig config;
+    TempConfig::write(config.base,
+        "gateway:\n  host: 127.0.0.1\n  port: 11434\n"
+        "model_aliases:\n"
+        "- name: deep\n  target: model-a\n"
+        "  required_context_size: 32768\n"
+        "  required_capabilities:\n  - chat_completions\n  - responses\n"
+        "- name: everyday\n  target: model-a\n"
+        "  required_context_size: 32768\n"
+        "  required_capabilities:\n  - chat_completions\n  - responses\n");
+    ConfigRouteServer routes(config);
+    for (const std::string& name : {"model-a", "model-b"}) {
+        inferdeck::model::ModelInfo target;
+        target.name = name;
+        target.gguf_path = "C:/fake/model.gguf";
+        target.context_size = 32768;
+        target.capabilities = {"chat_completions", "responses"};
+        routes.registry.register_model(target);
+    }
+    for (const std::string& name : {"deep", "everyday"}) {
+        inferdeck::model::ModelAlias alias;
+        alias.name = name;
+        alias.target = "model-a";
+        alias.required_context_size = 32768;
+        alias.required_capabilities = {"chat_completions", "responses"};
+        REQUIRE(routes.registry.set_alias(alias));
+    }
+    routes.validate = [](const std::string& value) {
+        YAML::Load(value);
+        return Ok();
+    };
+    auto client = routes.client();
+    const auto listed = client.Get("/api/inferdeck/v1/model-aliases");
+    REQUIRE(listed);
+    REQUIRE(listed->status == 200);
+    const nlohmann::json change{
+        {"target", "model-b"},
+        {"revision", nlohmann::json::parse(listed->body)["revision"]},
+    };
+    const auto updated = client.Put(
+        "/api/inferdeck/v1/model-aliases/deep", change.dump(), "application/json");
+    REQUIRE(updated);
+    REQUIRE(updated->status == 200);
+    CHECK(routes.reloads.load() == 0);
+    const auto after_update = client.Get("/api/inferdeck/v1/model-aliases");
+    REQUIRE(after_update);
+    REQUIRE(after_update->status == 200);
+    const auto updated_aliases = nlohmann::json::parse(after_update->body)["aliases"];
+    REQUIRE(updated_aliases.size() == 2);
+    CHECK(updated_aliases[0]["target"] == "model-b");
+    const auto persisted_text = TempConfig::read(config.active);
+    const auto persisted = YAML::Load(persisted_text);
+    REQUIRE(persisted["model_aliases"].size() == 2);
+    CHECK(persisted["model_aliases"][0]["name"].as<std::string>() == "deep");
+    CHECK(persisted["model_aliases"][0]["target"].as<std::string>() == "model-b");
+    CHECK(persisted["model_aliases"][1]["name"].as<std::string>() == "everyday");
+    CHECK(routes.reloads.load() == 0);
+
+    routes.validate = [](const std::string&) {
+        return inferdeck::foundation::Err<void>(
+            ErrorCode::InvalidArgument, "expected validation failure");
+    };
+    const nlohmann::json failed_update_body{
+        {"target", "model-a"},
+        {"revision", nlohmann::json::parse(after_update->body)["revision"]},
+    };
+    const auto failed_update = client.Put(
+        "/api/inferdeck/v1/model-aliases/deep", failed_update_body.dump(),
+        "application/json");
+    REQUIRE(failed_update);
+    CHECK(failed_update->status == 400);
+    REQUIRE(routes.registry.aliases().size() == 2);
+    CHECK(routes.registry.aliases()[0].target == "model-b");
+    CHECK(TempConfig::read(config.active) == persisted_text);
+    CHECK(routes.reloads.load() == 0);
 }
 
 TEST_CASE("Pricing API exposes cached input rates for models and aliases",
@@ -832,6 +919,34 @@ TEST_CASE("Pricing API exposes cached input rates for models and aliases",
     CHECK((*new_completion)["prompt_price_per_million"] == 0.0);
     CHECK((*new_completion)["cached_prompt_price_per_million"] == 0.0);
     CHECK((*new_completion)["completion_price_per_million"] == 1.1);
+}
+
+TEST_CASE("Jobs API exposes measured prompt decode separately from elapsed prefill",
+          "[gateway][dashboard][jobs]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    inferdeck::observability::RequestRow row;
+    row.request_id = "decode-evidence";
+    row.timestamp_unix_ms = 1787011200000LL;
+    row.model = "test-model";
+    row.status_code = 200;
+    row.prompt_tokens = 100;
+    row.cached_prompt_tokens = 60;
+    row.cache_write_tokens = 40;
+    row.prompt_duration_ms = 20.0;
+    row.prompt_decode_duration_ms = 8.0;
+    row.prompt_decode_tokens = 40;
+    routes.stats_db.record_request(row);
+    auto client = routes.client();
+    const auto response = client.Get("/api/inferdeck/v1/jobs");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body["jobs"].size() == 1);
+    CHECK(body["jobs"][0]["id"] == row.request_id);
+    CHECK(body["jobs"][0]["promptDurationMs"] == 20.0);
+    CHECK(body["jobs"][0]["promptDecodeDurationMs"] == 8.0);
+    CHECK(body["jobs"][0]["promptDecodeTokens"] == 40);
 }
 
 TEST_CASE("Usage API exposes daily usage for the complete retained history",

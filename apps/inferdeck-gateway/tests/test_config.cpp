@@ -80,6 +80,110 @@ model_registry:
           std::string::npos);
 }
 
+TEST_CASE("Radiance runtime configuration preserves explicit artifact selection",
+          "[config][runtime-contract][radiance]")
+{
+    const std::string prefix = R"(
+model_registry:
+  - name: qwen-candidate
+    runtime: vllm_radiance
+    modality: text
+    context_size: 106496
+    n_slots: 1
+    artifacts:
+      model: C:/models/qwen-mxfp4
+)";
+    REQUIRE(validate_config_text(prefix +
+        "    capabilities: [chat_completions, responses]\n"));
+    const auto incompatible = validate_config_text(prefix +
+        "    capabilities: [image_generation]\n");
+    REQUIRE_FALSE(incompatible);
+    CHECK(incompatible.error().message.find("does not support capability image_generation") !=
+          std::string::npos);
+    const auto vision = validate_config_text(R"(
+model_registry:
+  - name: qwen-vision
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    has_vision: true
+    context_size: 106496
+    n_slots: 1
+    artifacts:
+      model: C:/models/qwen-multimodal
+)");
+    REQUIRE(vision);
+}
+
+TEST_CASE("Continuation grace configuration is opt-in and bounded",
+          "[config][admission][continuation]") {
+    const std::string prefix = R"(
+model_registry:
+  - name: qwen-candidate
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    n_slots: 1
+    artifacts:
+      model: C:/models/qwen-mxfp4
+)";
+    CHECK(validate_config_text(prefix + "    continuation_grace_ms: 0\n"));
+    CHECK(validate_config_text(prefix + "    continuation_grace_ms: 1000\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    continuation_grace_ms: -1\n"));
+    CHECK(validate_config_text(prefix + "    continuation_grace_ms: 2000\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    continuation_grace_ms: 2001\n"));
+
+    const auto path = std::filesystem::temp_directory_path() /
+        "inferdeck-continuation-grace-config.yml";
+    {
+        std::ofstream output(path);
+        output << prefix << "    continuation_grace_ms: 731\n";
+    }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    CHECK(config.models.front().continuation_grace_ms == 731);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
+TEST_CASE("Model request queue timeout is bounded and decoded",
+          "[config][admission][queue-timeout]") {
+    const std::string prefix = R"(
+model_registry:
+  - name: queue-model
+    runtime: llama_cpp
+    modality: text
+    capabilities: [chat_completions, responses]
+    gguf_path: C:/models/queue.gguf
+)";
+    CHECK(validate_config_text(prefix + "    request_queue_timeout_seconds: 1\n"));
+    CHECK(validate_config_text(prefix + "    request_queue_timeout_seconds: 1800\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    request_queue_timeout_seconds: 0\n"));
+    CHECK_FALSE(validate_config_text(prefix + "    request_queue_timeout_seconds: 1801\n"));
+
+    const auto default_path = std::filesystem::temp_directory_path() /
+        "inferdeck-request-queue-timeout-default-config.yml";
+    {
+        std::ofstream output(default_path);
+        output << prefix;
+    }
+    const auto default_config = load_config(default_path);
+    REQUIRE(default_config.models.size() == 1);
+    CHECK(default_config.models.front().request_queue_timeout_seconds == 300);
+    std::error_code default_error;
+    std::filesystem::remove(default_path, default_error);
+
+    const auto path = std::filesystem::temp_directory_path() /
+        "inferdeck-request-queue-timeout-config.yml";
+    {
+        std::ofstream output(path);
+        output << prefix << "    request_queue_timeout_seconds: 600\n";
+    }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    CHECK(config.models.front().request_queue_timeout_seconds == 600);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
 TEST_CASE("Gateway configuration accepts native runtime artifacts", "[config]") {
     auto result = validate_config_text(R"(
 server:
@@ -420,6 +524,8 @@ TEST_CASE("Repository gateway configuration exposes native speech models",
 
 TEST_CASE("Gateway configuration rejects unsafe operational values", "[config]") {
     CHECK_FALSE(validate_config_text("server:\n  port: 70000\n"));
+    CHECK(validate_config_text("model_registry:\n  - name: bounded\n    gguf_path: model.gguf\n    default_max_output_tokens: 1024\n"));
+    CHECK_FALSE(validate_config_text("model_registry:\n  - name: unbounded\n    gguf_path: model.gguf\n    default_max_output_tokens: 0\n"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:
   - name: duplicate
@@ -546,6 +652,23 @@ model_registry:
     reasoning:
       efforts: [low, high]
       default: medium
+)"));
+    CHECK(validate_config_text(R"(
+model_registry:
+  - name: no-thinking-by-default
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [low, high]
+      default: none
+      none_disables: true
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: invalid-no-thinking-default
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [low, high]
+      default: none
 )"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:
@@ -728,4 +851,74 @@ TEST_CASE("Published LTX profile loads through gateway configuration", "[config]
     CHECK(config.models.front().runtime == "ltx_video_cpp");
     CHECK(config.models.front().modality == "video");
     CHECK(config.models.front().n_slots == 1);
+}
+
+TEST_CASE("Radiance prefill selection is validated before startup", "[config][radiance]")
+{
+    const std::string prefix = R"(
+model_registry:
+  - name: prefill-candidate
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    artifacts:
+      model: C:/models/qwen-mxfp4
+)";
+    CHECK(validate_config_text(prefix));
+    CHECK(validate_config_text(prefix + "      prefill_attention: r4d\n"));
+    CHECK(validate_config_text(prefix + "      prefill_attention: upstream\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      gpu_memory_utilization: 0.80\n"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+)"));
+    CHECK(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+      decode_dll_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+)"));
+    CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: r4d_int4\n"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+      decode_dll_sha256: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d
+      decode_dll: C:/runtime/r4d_int4_decode.dll
+      decode_dll_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: auto
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d_int4
+      kv_cache_dtype: int4_per_token_head
+      prefill_overlay: C:/runtime/r4d_int4_prefill_overlay.py
+      prefill_dll: C:/runtime/r4d_int4_tiled.dll
+      prefill_dll_sha256: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+)"));
+    CHECK_FALSE(validate_config_text(prefix + R"(      prefill_attention: r4d
+      kv_cache_dtype: int4_per_token_head
+)"));
+    CHECK_FALSE(validate_config_text(prefix + "      kv_cache_dtype: int8\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      kv_cache_dtype: int4_per_token_head\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: automatic\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: ''\n"));
 }

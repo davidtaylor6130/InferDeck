@@ -59,7 +59,7 @@
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
-#include "native_runtimes/runtime_factories.hpp"
+#include "optional_runtime_factories.hpp"
 #include "observability/gpu_telemetry.hpp"
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
@@ -110,6 +110,7 @@ int run_gateway(const fs::path& config_path) {
                   config_selection.fallback_reason,
                   config_path.string());
     }
+    initialize_optional_runtimes(cfg.models);
     std::call_once(g_llama_init_once, [] {
         LOG_INFO("vulkan_test", "About to initialize llama backend");
         llama_backend_init();
@@ -124,7 +125,7 @@ int run_gateway(const fs::path& config_path) {
         return std::make_unique<llama_wrapper::LlamaCppModel>(
             info, make_llama_config(cfg, info));
     });
-    native_runtimes::register_factories(registry);
+    register_optional_runtime_factories(registry);
     for (const auto& m : cfg.models) {
         registry.register_model(m);
         LOG_INFO("model_registered", "name={} vram_mb={} n_slots={}",
@@ -330,7 +331,7 @@ int run_gateway(const fs::path& config_path) {
                         "request Content-Length is invalid");
         } else if (validation == RequestValidationStatus::UnsupportedTransferEncoding) {
             write_error(resp, 411, "content_length_required",
-                        "chunked request bodies are not supported");
+                        "request Transfer-Encoding is not supported for this endpoint");
         }
     };
 

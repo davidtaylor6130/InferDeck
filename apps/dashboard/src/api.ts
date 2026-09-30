@@ -51,51 +51,38 @@ async function getJson<T>(path: string, timeoutMs = 15_000, signal?: AbortSignal
 }
 
 async function postJson<T>(path: string, body?: unknown, timeoutMs = 30_000): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    signal: AbortSignal.timeout(timeoutMs),
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: body == null ? undefined : JSON.stringify(body),
-  });
-  const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
-  if (!response.ok && response.status !== 202) {
-    throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
-  }
-  return payload;
+  return writeJson('POST', path, body, timeoutMs);
 }
 
 async function putJson<T>(path: string, body: unknown, timeoutMs = 30_000): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: 'PUT',
-    signal: AbortSignal.timeout(timeoutMs),
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
-  if (!response.ok) throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
-  return payload;
+  return writeJson('PUT', path, body, timeoutMs);
 }
 
 async function patchJson<T>(path: string, body: unknown, timeoutMs = 30_000): Promise<T> {
-  const response = await fetch(API_BASE + path, {
-    method: 'PATCH',
-    signal: AbortSignal.timeout(timeoutMs),
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
-  if (!response.ok) throw new Error(payload?.error?.message || path + ' responded ' + response.status);
-  return payload;
+  return writeJson('PATCH', path, body, timeoutMs);
 }
 
 async function deleteJson<T>(path: string, timeoutMs = 30_000, headers?: Record<string, string>): Promise<T> {
+  return writeJson('DELETE', path, undefined, timeoutMs, headers);
+}
+
+async function writeJson<T>(
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  path: string,
+  body: unknown,
+  timeoutMs: number,
+  headers?: Record<string, string>,
+): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    method: 'DELETE',
+    method,
     signal: AbortSignal.timeout(timeoutMs),
     headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...headers },
+    body: method === 'DELETE' || (method === 'POST' && body == null) ? undefined : JSON.stringify(body),
   });
   const payload = (await response.json().catch(() => ({}))) as T & { error?: { message?: string } };
-  if (!response.ok) throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
+  if (!response.ok && !(method === 'POST' && response.status === 202)) {
+    throw new Error(payload?.error?.message || `${path} responded ${response.status}`);
+  }
   return payload;
 }
 

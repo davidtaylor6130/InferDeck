@@ -10,6 +10,7 @@
     "nlohmann-json",
     "openssl",
     "fmt",
+    "mp3lame",
     "yaml-cpp",
     "sqlite3",
     "spirv-headers",

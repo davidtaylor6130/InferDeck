@@ -149,6 +149,10 @@ Result<InferenceResult> LlamaCppModel::predict_cancellable(
   out.completion_tokens     = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
   out.prompt_duration_ms = task.out_prompt_duration_ms;
+  if (!task.out_prompt_decode_invalid && task.generation_started) {
+    out.prompt_decode_duration_ms = task.out_prompt_decode_duration_ms;
+    out.prompt_decode_tokens = task.out_prompt_decode_tokens;
+  }
   out.first_token_duration_ms = task.out_first_token_duration_ms;
   out.generation_duration_ms = task.generation_started
       ? task.out_generation_duration_ms : 0.0f;
@@ -329,6 +333,10 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   out.completion_tokens    = static_cast<int>(decoded_ids.size());
   out.duration_ms = std::chrono::duration<float, std::milli>(end - start).count();
   out.prompt_duration_ms = task.out_prompt_duration_ms;
+  if (!task.out_prompt_decode_invalid && task.generation_started) {
+    out.prompt_decode_duration_ms = task.out_prompt_decode_duration_ms;
+    out.prompt_decode_tokens = task.out_prompt_decode_tokens;
+  }
   out.first_token_duration_ms = task.out_first_token_duration_ms;
   out.generation_duration_ms = task.generation_started
       ? task.out_generation_duration_ms : 0.0f;

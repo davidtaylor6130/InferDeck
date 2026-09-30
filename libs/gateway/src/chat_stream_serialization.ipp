@@ -202,10 +202,9 @@ foundation::Result<std::optional<std::string>> normalize_reasoning_request(
     return foundation::Ok(std::optional<std::string>{std::move(resolved)});
 }
 
-nlohmann::json delta_json(const model::InferenceDelta& delta,
-                          bool include_reasoning_content) {
+nlohmann::json delta_json(const model::InferenceDelta& delta) {
     nlohmann::json out = nlohmann::json::object();
-    if (include_reasoning_content && !delta.reasoning_text.empty()) {
+    if (!delta.reasoning_text.empty()) {
         out["reasoning_content"] = delta.reasoning_text;
     }
     if (!delta.content.empty()) out["content"] = delta.content;
@@ -307,11 +306,9 @@ std::string serialize_chat_stream_delta(const std::string& id,
                                         std::int64_t created,
                                         const nlohmann::json& delta,
                                         bool include_usage,
-                                        bool include_reasoning_content,
                                         const std::string& service_tier,
                                         bool include_obfuscation) {
     auto filtered = delta;
-    if (!include_reasoning_content) filtered.erase("reasoning_content");
     nlohmann::json logprobs = nullptr;
     if (filtered.contains("logprobs")) {
         logprobs = std::move(filtered["logprobs"]);

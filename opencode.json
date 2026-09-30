@@ -1,10 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "compaction": {
-    "auto": true,
-    "prune": true,
-    "reserved": 16000
-  },
+  "model": "inferdeck/Normal",
+  "small_model": "inferdeck/qwen2.5-0.5b-instruct",
   "provider": {
     "inferdeck": {
       "npm": "@ai-sdk/openai-compatible",
@@ -13,69 +10,6 @@
         "baseURL": "http://192.168.0.168:11434/v1"
       },
       "models": {
-        "gemma-4-26b-a4b": {
-          "name": "gemma-4-26b-a4b",
-          "limit": {
-            "context": 100000,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "gemma-4-31b": {
-          "name": "gemma-4-31b",
-          "limit": {
-            "context": 262144,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "gpt-oss-20b": {
-          "name": "gpt-oss-20b",
-          "limit": {
-            "context": 32768,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "n8n-model": {
-          "name": "n8n-model",
-          "limit": {
-            "context": 100000,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
         "Normal": {
           "name": "Normal",
           "limit": {
@@ -83,57 +17,8 @@
             "output": 16384
           },
           "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "ornith-1.5-35b-a3b": {
-          "name": "ornith-1.5-35b-a3b",
-          "limit": {
-            "context": 100000,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
-          },
-          "reasoning": true,
-          "variants": {
-            "low": {
-              "reasoningEffort": "low"
-            },
-            "medium": {
-              "reasoningEffort": "medium"
-            },
-            "high": {
-              "reasoningEffort": "high"
-            }
-          }
-        },
-        "Pro": {
-          "name": "Pro",
-          "limit": {
-            "context": 100000,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
+            "input": ["text", "image"],
+            "output": ["text"]
           }
         },
         "qwen2.5-0.5b-instruct": {
@@ -143,144 +28,11 @@
             "output": 4096
           },
           "modalities": {
-            "input": [
-              "text"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "qwen2.5-coder-3b": {
-          "name": "qwen2.5-coder-3b",
-          "limit": {
-            "context": 4096,
-            "output": 4096
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "qwen3-coder-30b-a3b": {
-          "name": "qwen3-coder-30b-a3b",
-          "limit": {
-            "context": 262144,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "qwen3-coder-next": {
-          "name": "qwen3-coder-next",
-          "limit": {
-            "context": 262144,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "qwen3.6-27b": {
-          "name": "qwen3.6-27b",
-          "limit": {
-            "context": 100000,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "qwen3.6-35b-a3b": {
-          "name": "qwen3.6-35b-a3b",
-          "limit": {
-            "context": 100096,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        },
-        "qwen3.8-27b": {
-          "name": "qwen3.8-27b",
-          "limit": {
-            "context": 100000,
-            "output": 16384
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image"
-            ],
-            "output": [
-              "text"
-            ]
-          },
-          "reasoning": true,
-          "variants": {
-            "low": {
-              "reasoningEffort": "low"
-            },
-            "medium": {
-              "reasoningEffort": "medium"
-            },
-            "xhigh": {
-              "reasoningEffort": "xhigh"
-            },
-            "off": {
-              "reasoningEffort": "none"
-            }
+            "input": ["text"],
+            "output": ["text"]
           }
         }
       }
-    }
-  },
-  "model": "inferdeck/Normal",
-  "small_model": "inferdeck/n8n-model",
-  "plugin": [
-    "@tarquinen/opencode-dcp",
-    "@mohak34/opencode-notifier@latest",
-    "@mbanucu/opencode-background",
-    "opencode-ignore",
-    "superbased-opencode-plugin"
-  ],
-  "mcp": {
-    "puppeteer-screenshot-mcp": {
-      "type": "local",
-      "command": [
-        "npx",
-        "-y",
-        "puppeteer-screenshot-mcp"
-      ],
-      "enabled": true
     }
   }
 }

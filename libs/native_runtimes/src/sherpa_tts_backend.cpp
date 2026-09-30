@@ -2,6 +2,7 @@
 #include "model/imodel.hpp"
 
 #include <sherpa-onnx/c-api/c-api.h>
+#include <lame/lame.h>
 
 #include <algorithm>
 #include <array>
@@ -166,6 +167,53 @@ std::vector<std::byte> wave(const float* samples, std::size_t count, int sample_
     return output;
 }
 
+foundation::Result<std::vector<std::byte>> mp3(const float* samples,
+                                               std::size_t count,
+                                               int sample_rate) {
+    if (!samples || count == 0 || sample_rate <= 0) {
+        return foundation::Err<std::vector<std::byte>>(
+            foundation::ErrorCode::InvalidArgument, "invalid speech samples");
+    }
+    const std::unique_ptr<lame_global_flags, decltype(&lame_close)> encoder(
+        lame_init(), lame_close);
+    if (!encoder || lame_set_in_samplerate(encoder.get(), sample_rate) < 0 ||
+        lame_set_num_channels(encoder.get(), 1) < 0 ||
+        lame_set_brate(encoder.get(), 128) < 0 ||
+        lame_set_quality(encoder.get(), 2) < 0 ||
+        lame_init_params(encoder.get()) < 0) {
+        return foundation::Err<std::vector<std::byte>>(
+            foundation::ErrorCode::Internal, "MP3 encoder initialization failed");
+    }
+    constexpr std::size_t chunk_samples = 8192;
+    std::array<unsigned char, 17440> buffer{};
+    std::vector<std::byte> output;
+    for (std::size_t offset = 0; offset < count; offset += chunk_samples) {
+        const int size = static_cast<int>(std::min(chunk_samples, count - offset));
+        const int encoded = lame_encode_buffer_ieee_float(
+            encoder.get(), samples + offset, nullptr, size,
+            buffer.data(), static_cast<int>(buffer.size()));
+        if (encoded < 0) {
+            return foundation::Err<std::vector<std::byte>>(
+                foundation::ErrorCode::Internal, "MP3 encoding failed");
+        }
+        const auto* begin = reinterpret_cast<const std::byte*>(buffer.data());
+        output.insert(output.end(), begin, begin + encoded);
+    }
+    const int flushed = lame_encode_flush(
+        encoder.get(), buffer.data(), static_cast<int>(buffer.size()));
+    if (flushed < 0) {
+        return foundation::Err<std::vector<std::byte>>(
+            foundation::ErrorCode::Internal, "MP3 encoding finalization failed");
+    }
+    const auto* begin = reinterpret_cast<const std::byte*>(buffer.data());
+    output.insert(output.end(), begin, begin + flushed);
+    if (output.empty()) {
+        return foundation::Err<std::vector<std::byte>>(
+            foundation::ErrorCode::Internal, "MP3 encoder returned no audio");
+    }
+    return foundation::Ok(std::move(output));
+}
+
 struct StreamState {
     const std::function<bool(const std::byte*, std::size_t)>* stream{};
     bool raw_pcm{false};
@@ -300,10 +348,11 @@ public:
 
     foundation::Result<void> validate_speech_request(
         const model::SpeechRequest& request) override {
-        if (request.format != "wav" && request.format != "pcm") {
+        if (request.format != "wav" && request.format != "pcm" &&
+            request.format != "mp3") {
             return foundation::Err<void>(
                 foundation::ErrorCode::InvalidArgument,
-                "sherpa-onnx runtime supports wav and pcm responses");
+                "sherpa-onnx runtime supports mp3, wav, and pcm responses");
         }
         if (!std::isfinite(request.speed) || request.speed < 0.25f ||
             request.speed > 4.0f) {
@@ -330,8 +379,8 @@ public:
         int, const model::SpeechRequest& request,
         const std::function<bool(const std::byte*, std::size_t)>& stream) override {
         if (!tts_) return foundation::Err<model::AudioResult>(foundation::ErrorCode::NotLoaded, "speech model is not loaded");
-        if (request.format != "wav" && request.format != "pcm") {
-            return foundation::Err<model::AudioResult>(foundation::ErrorCode::InvalidArgument, "sherpa-onnx runtime supports wav and pcm responses");
+        if (request.format != "wav" && request.format != "pcm" && request.format != "mp3") {
+            return foundation::Err<model::AudioResult>(foundation::ErrorCode::InvalidArgument, "sherpa-onnx runtime supports mp3, wav, and pcm responses");
         }
         if (!std::isfinite(request.speed) || request.speed < 0.25f || request.speed > 4.0f) {
             return foundation::Err<model::AudioResult>(foundation::ErrorCode::InvalidArgument, "speech speed must be finite and between 0.25 and 4");
@@ -356,9 +405,21 @@ public:
                                                         state.cancelled ? "speech generation cancelled" : "sherpa-onnx synthesis failed");
         }
         model::AudioResult result;
-        result.bytes = request.format == "wav" ? wave(audio->samples, audio->n, audio->sample_rate) :
-                                                 pcm16(audio->samples, audio->n);
-        result.content_type = request.format == "wav" ? "audio/wav" : "audio/pcm";
+        if (request.format == "mp3") {
+            auto encoded = mp3(audio->samples, audio->n, audio->sample_rate);
+            if (!encoded) {
+                SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+                return foundation::Err<model::AudioResult>(
+                    encoded.error().code, encoded.error().message);
+            }
+            result.bytes = std::move(*encoded);
+            result.content_type = "audio/mpeg";
+        } else {
+            result.bytes = request.format == "wav"
+                ? wave(audio->samples, audio->n, audio->sample_rate)
+                : pcm16(audio->samples, audio->n);
+            result.content_type = request.format == "wav" ? "audio/wav" : "audio/pcm";
+        }
         result.duration_ms = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - started).count();
         result.output_audio_seconds = audio->sample_rate > 0

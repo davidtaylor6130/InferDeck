@@ -109,10 +109,10 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
             if (!(result = reject_unknown_config_keys(model, path, {
                     "name", "family", "runtime", "modality", "capabilities",
                     "gguf_path", "artifacts", "mmproj_path", "n_slots",
-                    "min_slots", "role", "compute", "residency",
+                    "min_slots", "continuation_grace_ms", "request_queue_timeout_seconds", "role", "compute", "residency",
                     "admission_pool", "concurrency_limit", "memory_required_mb",
                     "eviction_eligible", "vram_required_mb", "vram_fixed_mb",
-                    "vram_per_slot_mb", "context_size", "kv_unified", "context_pool_size", "context_pool_auto", "concurrency_auto", "n_batch", "n_ubatch",
+                    "vram_per_slot_mb", "context_size", "default_max_output_tokens", "kv_unified", "context_pool_size", "context_pool_auto", "concurrency_auto", "n_batch", "n_ubatch",
                     "cache_type_k", "cache_type_v", "n_gpu_layers",
                     "speculative", "has_vision", "reasoning_format",
                     "chat_template_path", "reasoning",

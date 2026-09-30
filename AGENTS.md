@@ -120,8 +120,10 @@ OpenAI-compatible (`/v1`):
 
 The OpenAI-derivative compatibility profile is default-off. Its chat,
 Responses, embeddings, and image-generation routes use
-`/compat/openai-derivative/v1` and may never add routes or fields to strict
-`/v1`. InferDeck Core owns no non-OpenAI protocol.
+`/compat/openai-derivative/v1`. The `/v1` Chat Completions route forwards
+`reasoning_content` in responses and accepts it in assistant history for
+UAM/OpenCode. Other derivative fields remain on `/compat`. InferDeck Core owns
+no non-OpenAI protocol.
 
 Swap control:
 - `POST /api/inferdeck/v1/swap/to/:name` — **async**: returns `202 {"status":"swapping"}`

@@ -427,8 +427,10 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
 
   const int ctx_budget = std::max(
       1, s.n_ctx_seq - s.prompt_position_count - 1);
-  s.max_tokens = req.max_output_tokens > 0
-      ? std::min(req.max_output_tokens, ctx_budget) : ctx_budget;
+  const int output_limit = req.max_output_tokens > 0
+      ? req.max_output_tokens : info_.default_max_output_tokens;
+  s.max_tokens = output_limit > 0
+      ? std::min(output_limit, ctx_budget) : ctx_budget;
 
   // Snapshot per-slot KV state under the mutex (scheduler may touch these after submit)
   {
@@ -485,6 +487,7 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_inference(
     s.mtp_cache_synced     = slots_[slot_id].mtp_cache_synced;
   }
 
+  detail::resolve_sampling_windows(s.sampling_params, s.n_ctx_seq);
   common_sampler* smp = common_sampler_init(model_, s.sampling_params);
   if (smp == nullptr)
     return Result<PredictSetup>(std::unexpect,
