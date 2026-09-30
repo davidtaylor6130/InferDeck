@@ -42,6 +42,7 @@ Modality interfaces add only their execution contract:
 - `IModel` for chat and Responses;
 - `IEmbeddingBackend` for embeddings;
 - `IImageBackend` for image generation;
+- `IAudioGenerationBackend` for music generation;
 - `ISpeechBackend` for text-to-speech;
 - `ITranscriptionBackend` for speech-to-text.
 
@@ -52,12 +53,14 @@ Routes dispatch through the coordinator and a typed modality interface. They nev
 1. The route validates and bounds the complete request before admission.
 2. The shared coordinator queue records model, priority, arrival time, deadline, cancellation callback, and any client-scoped voice-session reservation.
 3. The head request asks the resource planner to make its model resident.
-4. The planner uses configured or DXGI-reported VRAM minus the safety margin. It may keep the current residents, shrink idle calibrated slot pools, evict an idle resident, or reject the request.
+4. The planner uses fresh observed GPU usage and total VRAM, capped by the configured budget and safety margin. It falls back to declared footprints when telemetry is stale or unavailable. It may keep the current residents, shrink idle calibrated slot pools, evict an idle resident, or reject the request.
 5. A slot increments the per-model and global active-request counts. Inference runs without holding the coordinator mutex.
 6. Client disconnect or dashboard cancellation reaches the native runtime callback.
 7. The route streams or returns output, records metrics/SQLite/EventBus activity, releases the slot, and leaves model residency to policy.
 
-This lifecycle is shared by text, embeddings, image, TTS, and STT. A swap or load does not create a second modality-specific queue.
+This lifecycle is shared by text, embeddings, image, music generation, TTS,
+and STT. A swap or load does not create a second modality-specific queue.
+Resident models with independent admission pools may execute at the same time.
 
 Successful STT reserves the configured default conversation model for the same client through the STT-to-chat hand-off. The matching chat runs at media priority, and TTS releases the reservation. `gateway.voice_session_grace_ms` bounds abandoned sessions; clients behind a shared address can send `X-InferDeck-Voice-Session` to provide a distinct key.
 
@@ -65,9 +68,58 @@ Priority is preemptive at queue and swap boundaries. A native backend load that 
 
 ## Residency and automatic expansion
 
-`BackendCoordinator` can keep multiple models resident when their estimated footprints fit. `gateway.vram_budget_mb` overrides hardware detection; otherwise DXGI total VRAM activates multi-residency. `gateway.vram_safety_margin_mb` is always reserved.
+`BackendCoordinator` can keep multiple models resident when their actual
+headroom fits. The gateway refreshes used and total VRAM from telemetry; a
+sample expires after three seconds and every load, unload, or slot resize
+invalidates it. Live headroom is used only when every resident GPU runtime can
+account for its future peak. Otherwise the planner uses the more conservative
+of declared availability and observed pressure with the incomplete runtime's
+full declared footprint reserved.
+`gateway.vram_budget_mb` caps hardware detection and
+`gateway.vram_safety_margin_mb` defaults to 1024 MB and may be set to 0. It reserves GPU headroom only; host/system memory reserve is separate.
+
+Lazy native runtimes reserve their declared peak beyond memory already retained
+by the runtime. This prevents an unloaded phase from being double-spent while
+allowing warmed modules already present in the observed usage to count once.
+Execution uses independent per-model slots and does not hold the coordinator
+mutex. Lifecycle loads, resizes, and evictions remain serialized because
+overlapping native model initialization is unsafe.
 
 For a resident model with calibrated `vram_fixed_mb` and `vram_per_slot_mb`, the planner may reduce slots down to `min_slots`. It never guesses slot savings. Active models are not resized or evicted. If preparation fails, the coordinator preserves or restores the previous usable residency where possible and returns a typed error.
+
+Automatic unified context pooling is measured and bounded. It preserves each request context limit, shares capacity within a model, and may reclaim idle slot cache. Recreating an idle context keeps model weights and a vision projector resident but clears that slot cache. Active slots are protected.
+
+Enable automatic fit on an individual model entry with `kv_unified: true`,
+`context_pool_auto: true`, and `context_pool_size: 0`. Keep `context_size` as
+that model's per-request limit. Add `concurrency_auto: true` to derive sequence
+capacity from available hardware instead of limiting requests to `n_slots`.
+Without that option, `n_slots` remains the concurrency limit.
+
+Automatic concurrency first fits the largest number of complete request contexts,
+then uses remaining memory for additional independent sequences sharing that pool.
+Both target and MTP memory are included. The backend sequence limit and batch size
+bound the search. Admission uses the fitted capacity and each request's actual
+prompt/output reservation, rather than the model's configured concurrency limit.
+A short request can therefore run alongside more peers than full-length requests.
+The ceiling is fitted when loading; active contexts are not rebuilt to grow it.
+Dashboard model status exposes `concurrency_auto` and `context_pool_capacity`, with
+`n_slots` reporting the fitted capacity while resident. Recurrent/MTP state still
+has a per-sequence cost. This is not shared KV between different models.
+
+For a manually bounded pool, disable `context_pool_auto` and set a positive
+`context_pool_size`. Automatic mode and a fixed pool size are mutually exclusive.
+
+The pool is shared storage for independent sequences within one model. Different
+models retain separate weights and KV tensors. Physical fit accounts for target,
+draft and execution buffers; it does not promise every slot its maximum context
+simultaneously. Requests wait when their reserved prompt/output capacity cannot
+fit. Idle context reclamation can save a model reload but discards its cached
+conversation state; later requests may need prefill again.
+
+The dashboard's Settings > Configuration & recovery page exposes the VRAM
+reserve. Saving it reloads configuration. Zero disables the extra GPU reserve;
+it does not disable allocation checks or the separate host-memory budget.
+
 
 When no VRAM budget is known, the coordinator retains the conservative single-resident swap behavior.
 
@@ -89,10 +141,18 @@ OpenAI-compatible routes:
 - `POST /v1/audio/transcriptions`
 - `GET /v1/models`
 
-`strict_openai` is the only Core profile. OpenAI-derivative and non-OpenAI
-routes are not registered. Core owns no non-OpenAI protocol.
+InferDeck data-plane routes:
 
-InferDeck control routes cover model load/unload, swap status/cancellation, media job cancellation, metrics, history, configuration, model aliases, and the model store. Dashboard live state uses one SSE connection; there is no WebSocket layer.
+- `POST /api/inferdeck/v1/audio/generations`
+
+`strict_openai` is the only Core profile. It owns no non-OpenAI protocol.
+OpenAI-derivative routes use a separate disabled-by-default compatibility
+prefix, while InferDeck-specific contracts remain under `/api/inferdeck/v1`.
+
+InferDeck control routes cover model load/unload, swap status/cancellation,
+dashboard image/music generation, media job cancellation and output retrieval,
+metrics, history, configuration, model aliases, and the model store. Dashboard
+live state uses one SSE connection; there is no WebSocket layer.
 
 Responses is stateless. Storage/background/conversation parameters are rejected rather than silently retained.
 
@@ -120,7 +180,31 @@ Each model can enable `optimization.schedule` with `window_start` and `window_en
 
 Model Settings owns runtime, capacity, pricing, sampler, and optimization controls. A completed optimization run is only a recommendation until the user selects **Use these values** and saves; **Discard results**, **Rerun**, closing, and cancellation never alter the active profile. Icon-only load, unload, settings, and close actions expose keyboard focus, accessible names, and tooltips.
 
-Models owns stable aliases plus catalogue and installed-artifact operations. Catalogue filters combine name, runtime, modality, selected VRAM capacity, and Hugging Face download/like popularity. The active filter summary includes a one-step reset. Archive and permanent delete remain explicit, confirmed actions and refuse loaded or active models.
+Each AI section owns a route-scoped Model Store with Discover, Downloads, and Installed views. Discover queries Hugging Face for locally compatible artifacts, defaults to trending results, and supports search, popularity or recency sorting, gated-model opt-in, and relevant runtime or VRAM filters. Repository inspection revalidates the exact standalone artifact or complete native bundle before installation. Archive and permanent delete remain explicit, confirmed actions and refuse loaded or active models.
+
+## Post-training boundary
+
+InferDeck currently implements GGUF quantisation, not fine-tuning. A
+control-plane request starts one background call to llama.cpp's public
+`llama_model_quantize` API. The source must be an unloaded, managed, regular
+GGUF file inside the model-store root. The destination is server-derived inside
+that root, written as a new partial artifact, hashed, finalized without
+overwrite, added to the manifest, and registered as a separate model. Q4_K_M,
+Q5_K_M, Q6_K, and Q8_0 are supported. Requantisation is disabled.
+
+The upstream call has no progress or cancellation callback, so the API reports
+the job as non-cancellable and shutdown waits for it to finish. Full-model FP32
+training in the vendored example remains experimental, and the public backend
+does not expose a compatible LoRA training and save path. The capability route
+reports fine-tuning as unavailable rather than presenting an unsafe workflow.
+
+Quantisation atomically owns the shared CPU maintenance resource from admission
+until either installation or failure. This blocks competing CPU-backed model
+work, configuration mutation, and new background leases while leaving
+GPU-backed inference eligible. Background availability reports `maintenance`
+with a suggested report-back time. The measured benchmark and quantisation
+workers release only reservations they own, so one maintenance subsystem cannot
+clear the other's resource state.
 
 ## Throughput and usage semantics
 
@@ -137,9 +221,7 @@ Models owns stable aliases plus catalogue and installed-artifact operations. Cat
 
 The LLM Usage range selector drives the chart, summary totals, per-model requests and tokens, weighted throughput, peaks, and cost through the same hourly, daily, or monthly buckets. The table headers are keyboard-sortable, expose `aria-sort`, start alphabetically for model names and highest-first for numeric columns, and reverse on a second activation. Lifetime data is only shown where it is labelled lifetime.
 
-SQLite uses WAL mode and schema version 2. Upgrading a disk ledger creates a
-`stats.db.backup-v<old-version>` backup and applies the migration in one
-transaction; failure rolls back without exposing a partially upgraded schema.
+SQLite uses WAL mode and schema version 4. Schema 4 adds swap identity fields. Before migration, SQLite creates a `stats.db.backup-v<old-version>` backup with `.backup` and applies the migration in one transaction. Older binaries reject newer schemas. Rollback must restore the matching executable, configuration, and database; post-backup history is lost, so preserve the newer database separately.
 Prepared insert statements remain open for the database lifetime. Dashboard
 lifetime totals are folded from the same all-time daily buckets used by cost
 views, so lifetime and date-aware cache pricing cannot diverge. Diagnostic jobs
@@ -154,7 +236,10 @@ InferDeck persists operational data only:
 - YAML configuration;
 - request/swap metrics and logs.
 
-Generated images, synthesized audio, uploaded audio, transcripts, chat output, and Responses state are request-scoped and are not retained.
+Generated images and music are retained in a 100-job, 2 GB bounded media
+history beside the configured stats database. Synthesized speech, uploaded
+audio, transcripts, chat output, and Responses state remain request-scoped and
+are not retained.
 
 ## Concurrency invariants
 
@@ -163,20 +248,44 @@ Generated images, synthesized audio, uploaded audio, transcripts, chat output, a
 - Slot release is idempotently owned by the route or stream state, never both.
 - Streaming state outlives both its inference thread and HTTP provider.
 - Native cancellation callbacks must terminate work and release GPU capacity.
+- Non-cancellable llama.cpp quantisation is limited to one job and joined on
+  shutdown so a partial model is never presented as installed.
 - stable-diffusion.cpp generation is serialized while its upstream progress callback remains process-global.
+- acestep.cpp music generation uses one slot and strict module eviction; jobs
+  are serialized across ACE-Step models.
 - Runtime absence is visible; no unavailable path returns synthetic success.
 
 ## Source layout
 
+The source layout includes benchmark implementation modules and stream serialization and control YAML modules.
+
 ```text
-apps/inferdeck-gateway/       composition root plus process, static-hosting and
-                             benchmark implementation modules
-apps/dashboard/               React dashboard
-libs/model/                   contracts, registry, shared queue/coordinator
-libs/llama_cpp_wrapper/       in-process llama.cpp implementation
-libs/native_runtimes/         optional image, TTS, and STT adapters
-libs/gateway/                 endpoint adapters plus focused content parsing,
-                             stream serialization and control YAML modules
-libs/observability/           GPU telemetry, metrics, SQLite
-libs/foundation/              Result/Error, logging, EventBus
+OpenAI clients                           React dashboard
+          │                                    │
+          └──────── HTTP + SSE ────────────────┘
+                               │
+                    apps/inferdeck-gateway
+                  validation · auth · streaming
+                               │
+               ┌───────────────┴───────────────┐
+               │ shared priority/aging queue   │
+               │ cancellation · 30s admission  │
+               └───────────────┬───────────────┘
+                               │
+                     BackendCoordinator
+          residency · slot capacity · VRAM fit · eviction
+                               │
+                         ModelRegistry
+                  runtime-keyed native factories
+                               │
+       ┌───────────────┬───────┴────────┬──────────────┐
+       │ llama.cpp     │ stable-        │ whisper.cpp  │ sherpa-onnx
+       │ text/embed    │ diffusion.cpp  │ STT          │ TTS
+       │ Vulkan        │ Vulkan         │ GPU          │ CPU/CUDA
+       └───────────────┴────────────────┴──────────────┘
 ```
+
+## Request-aware context allocation
+
+Models with `concurrency_auto` start with a small batch-aligned context pool. Each resident text request is rendered and tokenized before its lease is issued. Admission records prompt positions, output budget, context demand, and sequence demand. Requests that fit the current pool continue concurrently. If aggregate demand exceeds the pool, the coordinator waits for the model to become idle and grows context geometrically and adds sequence capacity as needed within the configured context and native sequence limits. Context recreation clears KV and recurrent caches; cache transfer is not transparent. An unspecified `max_tokens` uses the remaining requested context budget.
+`slots` reports currently allocated sequence capacity and does not promise unlimited concurrency.

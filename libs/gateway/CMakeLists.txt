@@ -4,6 +4,7 @@ project(gateway LANGUAGES CXX)
 set(GATEWAY_SOURCES
     src/streaming_sanitizer.cpp
     src/generation_session.cpp
+    src/gpu_backend.cpp
     src/routes.cpp
     src/openai_adapter.cpp
     src/responses_adapter.cpp
@@ -12,12 +13,16 @@ set(GATEWAY_SOURCES
     src/dashboard_routes.cpp
     src/metrics_builder.cpp
     src/model_store.cpp
+    src/model_quantizer.cpp
     src/audio_decoder.cpp
     src/media_routes.cpp
     src/profile_benchmark.cpp
     src/profile_benchmark_scheduler.cpp
     src/config_repository.cpp
     src/config_secrets.cpp
+    src/api_key_store.cpp
+    src/api_key_routes.cpp
+    src/background_lease_routes.cpp
 )
 
 add_library(gateway STATIC ${GATEWAY_SOURCES})
@@ -27,6 +32,7 @@ target_include_directories(gateway
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE
         ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/vendor
+        ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/ggml/include
 )
 
 target_link_libraries(gateway
@@ -38,7 +44,9 @@ target_link_libraries(gateway
         nlohmann_json::nlohmann_json
         httplib::httplib
     PRIVATE
+        llama
         yaml-cpp::yaml-cpp
+        unofficial::sqlite3::sqlite3
 )
 
 if(WIN32)

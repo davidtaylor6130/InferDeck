@@ -19,6 +19,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
@@ -30,6 +31,7 @@ namespace {
 namespace fs = std::filesystem;
 using inferdeck::foundation::ErrorCode;
 using inferdeck::foundation::Ok;
+using inferdeck::gateway::ApiKeyStore;
 using inferdeck::gateway::DashboardDeps;
 using inferdeck::gateway::ComputeResource;
 using inferdeck::gateway::ConfigRepository;
@@ -85,6 +87,7 @@ struct ConfigRouteServer {
         [this](const inferdeck::model::ModelInfo& info,
                const inferdeck::optimize::ProfileCandidate& candidate,
                const std::vector<ProfileBenchmarkPrompt>&,
+               const std::vector<int>& concurrency_levels,
                const std::atomic<bool>& cancel,
                const ProfileBenchmarkProgress& progress) {
             progress("quality", "fake measured quality probe");
@@ -114,8 +117,8 @@ struct ConfigRouteServer {
             result.quality_total = 3;
             result.prompt_tokens = 128;
             result.completion_tokens = 24;
-            for (const int requests : {2, 4}) {
-                if (requests > candidate.slots) continue;
+            for (const int requests : concurrency_levels) {
+
                 ProfileBenchmarkConcurrencyMetrics concurrency;
                 concurrency.requests = requests;
                 concurrency.aggregate_tokens_per_second =
@@ -142,15 +145,18 @@ struct ConfigRouteServer {
         [this](const inferdeck::model::ModelInfo& info,
                const inferdeck::optimize::ProfileCandidate& candidate,
                const std::vector<ProfileBenchmarkPrompt>& prompts,
+               const std::vector<int>& concurrency_levels,
                const std::atomic<bool>& cancel,
                const ProfileBenchmarkProgress& progress) {
             return benchmark_runner(
-                info, candidate, prompts, cancel, progress);
+                info, candidate, prompts, concurrency_levels, cancel, progress);
         }};
     httplib::Server server;
     std::thread thread;
     int port{0};
     std::atomic<int> reloads{0};
+    std::shared_ptr<ApiKeyStore> api_keys{
+        std::make_shared<ApiKeyStore>(":memory:")};
     std::function<inferdeck::foundation::Result<void>(const std::string&)> validate =
         [](const std::string&) { return Ok(); };
     std::shared_ptr<ConfigRepository> config_repository;
@@ -169,6 +175,7 @@ struct ConfigRouteServer {
             &swap_tracker, &maintenance_resource};
         gateway_deps.metrics = &metrics;
         gateway_deps.stats_db = &stats_db;
+        gateway_deps.api_keys = api_keys;
         DashboardDeps deps{
             gateway_deps,
             gpu,
@@ -185,7 +192,7 @@ struct ConfigRouteServer {
                 return Ok();
             },
             nullptr,
-            [] { return std::int64_t{1}; },
+            [] { return std::int64_t{3600}; },
             &profile_benchmark,
             nullptr,
             config_repository,
@@ -208,6 +215,311 @@ struct ConfigRouteServer {
     }
 };
 
+}
+
+TEST_CASE("Post-training routes report exact native capability boundaries",
+          "[gateway][dashboard][post-training]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+
+    const auto capabilities = client.Get(
+        "/api/inferdeck/v1/post-training/capabilities");
+    REQUIRE(capabilities);
+    REQUIRE(capabilities->status == 200);
+    const auto body = nlohmann::json::parse(capabilities->body);
+    CHECK(body["inProcess"] == true);
+    CHECK(body["quantization"]["available"] == true);
+    CHECK(body["quantization"]["requantization"] == false);
+    CHECK(body["quantization"]["cancellable"] == false);
+    CHECK(body["quantization"]["computeResource"] == "cpu");
+    CHECK(body["quantization"]["blocksNewBackgroundLeases"] == true);
+    CHECK(body["quantization"]["types"] ==
+          nlohmann::json::array({"Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"}));
+    CHECK(body["fineTuning"]["available"] == false);
+
+    const auto jobs = client.Get(
+        "/api/inferdeck/v1/post-training/quantizations");
+    REQUIRE(jobs);
+    CHECK(jobs->status == 503);
+    const auto start = client.Post(
+        "/api/inferdeck/v1/post-training/quantizations",
+        R"({"sourceModel":"source","outputModel":"output","quantization":"Q4_K_M"})",
+        "application/json");
+    REQUIRE(start);
+    CHECK(start->status == 503);
+}
+
+TEST_CASE("API key control routes create, reprioritize, list, and revoke",
+          "[gateway][dashboard][api-key]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+
+    const auto created = client.Post(
+        "/api/inferdeck/v1/api-keys",
+        R"({"name":"background worker","priority":-60})",
+        "application/json");
+    REQUIRE(created);
+    REQUIRE(created->status == 201);
+    CHECK(created->get_header_value("Cache-Control") == "no-store");
+    const auto created_body = nlohmann::json::parse(created->body);
+    const std::string id = created_body["id"].get<std::string>();
+    const std::string key = created_body["key"].get<std::string>();
+    REQUIRE(routes.api_keys->authenticate_bearer("Bearer " + key));
+
+    const auto updated = client.Patch(
+        "/api/inferdeck/v1/api-keys/" + id,
+        R"({"priority":45})", "application/json");
+    REQUIRE(updated);
+    REQUIRE(updated->status == 200);
+    CHECK(nlohmann::json::parse(updated->body)["priority"] == 45);
+    REQUIRE(routes.api_keys->authenticate_bearer("Bearer " + key));
+    CHECK(routes.api_keys->authenticate_bearer("Bearer " + key)->priority == 45);
+
+    const auto listed = client.Get("/api/inferdeck/v1/api-keys");
+    REQUIRE(listed);
+    REQUIRE(listed->status == 200);
+    CHECK(listed->body.find(key) == std::string::npos);
+    const auto listed_body = nlohmann::json::parse(listed->body);
+    REQUIRE(listed_body["apiKeys"].size() == 1);
+    CHECK_FALSE(listed_body["apiKeys"][0].contains("key"));
+
+    const auto revoked = client.Delete("/api/inferdeck/v1/api-keys/" + id);
+    REQUIRE(revoked);
+    CHECK(revoked->status == 204);
+    CHECK_FALSE(routes.api_keys->authenticate_bearer("Bearer " + key));
+}
+
+TEST_CASE("API settings safely persist public data-plane access",
+          "[gateway][dashboard][api-settings]") {
+    TempConfig config;
+    TempConfig::write(config.base,
+        "auth:\n"
+        "  required: true\n"
+        "  token: preserved-secret\n"
+        "gateway:\n"
+        "  auto_swap: true\n");
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+
+    const auto initial = client.Get("/api/inferdeck/v1/api-settings");
+    REQUIRE(initial);
+    REQUIRE(initial->status == 200);
+    const auto initial_body = nlohmann::json::parse(initial->body);
+    CHECK(initial_body["allowPublicTraffic"] == false);
+    CHECK(initial_body["runningAllowPublicTraffic"] == false);
+    CHECK(initial_body["publicPriority"] == -999999);
+    CHECK(initial->body.find("preserved-secret") == std::string::npos);
+
+    const std::string revision =
+        initial_body["activeRevision"].get<std::string>();
+    const auto updated = client.Put(
+        "/api/inferdeck/v1/api-settings",
+        nlohmann::json{{"allowPublicTraffic", true},
+                       {"revision", revision}}.dump(),
+        "application/json");
+    REQUIRE(updated);
+    REQUIRE(updated->status == 200);
+    const auto updated_body = nlohmann::json::parse(updated->body);
+    CHECK(updated_body["allowPublicTraffic"] == true);
+    CHECK(updated_body["publicPriority"] == -999999);
+    CHECK(updated_body["applyScheduled"] == true);
+    CHECK(routes.reloads.load() == 1);
+
+    const auto active = YAML::Load(TempConfig::read(config.active));
+    REQUIRE(active["auth"]);
+    CHECK(active["auth"]["required"].as<bool>() == false);
+    CHECK(active["auth"]["token"].as<std::string>() == "preserved-secret");
+    CHECK(active["gateway"]["auto_swap"].as<bool>() == true);
+
+    const auto stale = client.Put(
+        "/api/inferdeck/v1/api-settings",
+        nlohmann::json{{"allowPublicTraffic", false},
+                       {"revision", revision}}.dump(),
+        "application/json");
+    REQUIRE(stale);
+    CHECK(stale->status == 409);
+
+    const auto invalid = client.Put(
+        "/api/inferdeck/v1/api-settings",
+        R"({"allowPublicTraffic":true,"revision":7})",
+        "application/json");
+    REQUIRE(invalid);
+    CHECK(invalid->status == 400);
+}
+
+TEST_CASE("Background lease routes require managed keys and report conflicts",
+          "[gateway][dashboard][background-lease]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+    const auto first_key = routes.api_keys->create("first worker", -60);
+    const auto second_key = routes.api_keys->create("second worker", -40);
+    REQUIRE(first_key);
+    REQUIRE(second_key);
+    const httplib::Headers first_headers{
+        {"Authorization", "Bearer " + first_key->key}};
+    const httplib::Headers second_headers{
+        {"Authorization", "Bearer " + second_key->key}};
+    constexpr const char* availability_path =
+        "/api/inferdeck/v1/background/availability";
+    constexpr const char* lease_path =
+        "/api/inferdeck/v1/background/lease";
+
+    const auto unauthenticated = client.Get(availability_path);
+    REQUIRE(unauthenticated);
+    CHECK(unauthenticated->status == 401);
+
+    const auto too_short = client.Post(
+        lease_path, first_headers, R"({"durationSeconds":10})",
+        "application/json");
+    REQUIRE(too_short);
+    CHECK(too_short->status == 400);
+    const auto too_large = client.Post(
+        lease_path, first_headers,
+        R"({"durationSeconds":18446744073709551615})",
+        "application/json");
+    REQUIRE(too_large);
+    CHECK(too_large->status == 400);
+    const auto unknown_field = client.Post(
+        lease_path, first_headers, R"({"durationSeconds":120,"owner":"x"})",
+        "application/json");
+    REQUIRE(unknown_field);
+    CHECK(unknown_field->status == 400);
+
+    const auto available = client.Get(availability_path, first_headers);
+    REQUIRE(available);
+    REQUIRE(available->status == 200);
+    const auto available_body = nlohmann::json::parse(available->body);
+    CHECK(available_body["available"] == true);
+    CHECK(available_body["reason"] == "idle");
+
+    const auto acquired = client.Post(
+        lease_path, first_headers, R"({"durationSeconds":120})",
+        "application/json");
+    REQUIRE(acquired);
+    REQUIRE(acquired->status == 201);
+    CHECK(acquired->get_header_value("Cache-Control") == "no-store");
+    const auto acquired_body = nlohmann::json::parse(acquired->body);
+    CHECK(acquired_body["status"] == "acquired");
+    const std::string lease_id =
+        acquired_body["lease"]["id"].get<std::string>();
+    const std::int64_t original_expiry =
+        acquired_body["lease"]["expiresAtUnixMs"].get<std::int64_t>();
+
+    const auto conflict = client.Post(
+        lease_path, second_headers, R"({"durationSeconds":120})",
+        "application/json");
+    REQUIRE(conflict);
+    REQUIRE(conflict->status == 409);
+    CHECK_FALSE(conflict->get_header_value("Retry-After").empty());
+    const auto conflict_body = nlohmann::json::parse(conflict->body);
+    CHECK(conflict_body["reason"] == "lease_active");
+    CHECK(conflict_body.contains("suggestedReportBackAtUnixMs"));
+    CHECK(conflict_body.contains("expiresAtUnixMs"));
+    CHECK(conflict->body.find(first_key->record.id) == std::string::npos);
+    CHECK(conflict->body.find(first_key->record.name) == std::string::npos);
+    CHECK(conflict->body.find(lease_id) == std::string::npos);
+
+    const auto repeated = client.Post(
+        lease_path, first_headers, R"({"durationSeconds":240})",
+        "application/json");
+    REQUIRE(repeated);
+    REQUIRE(repeated->status == 200);
+    const auto repeated_body = nlohmann::json::parse(repeated->body);
+    CHECK(repeated_body["status"] == "existing");
+    CHECK(repeated_body["lease"]["id"] == lease_id);
+    CHECK(repeated_body["lease"]["expiresAtUnixMs"] == original_expiry);
+
+    const auto renewed = client.Patch(
+        std::string(lease_path) + "/" + lease_id, first_headers,
+        R"({"durationSeconds":180})", "application/json");
+    REQUIRE(renewed);
+    REQUIRE(renewed->status == 200);
+    const auto renewed_body = nlohmann::json::parse(renewed->body);
+    CHECK(renewed_body["lease"]["id"] == lease_id);
+    CHECK(renewed_body["lease"]["expiresAtUnixMs"].get<std::int64_t>() >
+          original_expiry);
+
+    const auto wrong_release = client.Delete(
+        std::string(lease_path) + "/" + lease_id, second_headers);
+    REQUIRE(wrong_release);
+    CHECK(wrong_release->status == 204);
+    const auto still_owned = client.Get(availability_path, first_headers);
+    REQUIRE(still_owned);
+    REQUIRE(still_owned->status == 200);
+    const auto still_owned_body = nlohmann::json::parse(still_owned->body);
+    CHECK(still_owned_body["reason"] == "lease_owned");
+    CHECK(still_owned_body["lease"]["id"] == lease_id);
+
+    const auto released = client.Delete(
+        std::string(lease_path) + "/" + lease_id, first_headers);
+    REQUIRE(released);
+    CHECK(released->status == 204);
+    const auto replacement = client.Post(
+        lease_path, second_headers, R"({"durationSeconds":120})",
+        "application/json");
+    REQUIRE(replacement);
+    CHECK(replacement->status == 201);
+}
+
+TEST_CASE("Background lease acquisition waits for the configured quiet period",
+          "[gateway][dashboard][background-lease]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    auto client = routes.client();
+    const auto key = routes.api_keys->create("quiet worker", -60);
+    REQUIRE(key);
+    const httplib::Headers headers{
+        {"Authorization", "Bearer " + key->key}};
+    routes.maintenance_resource.store(ComputeResource::Cpu);
+    const auto maintenance = client.Get(
+        "/api/inferdeck/v1/background/availability", headers);
+    REQUIRE(maintenance);
+    REQUIRE(maintenance->status == 200);
+    const auto maintenance_body = nlohmann::json::parse(maintenance->body);
+    CHECK(maintenance_body["available"] == false);
+    CHECK(maintenance_body["reason"] == "maintenance");
+    CHECK(maintenance_body.contains("suggestedReportBackAtUnixMs"));
+    const auto maintenance_lease = client.Post(
+        "/api/inferdeck/v1/background/lease", headers,
+        R"({"durationSeconds":120})", "application/json");
+    REQUIRE(maintenance_lease);
+    REQUIRE(maintenance_lease->status == 409);
+    CHECK(nlohmann::json::parse(maintenance_lease->body)["reason"] ==
+          "maintenance");
+    routes.maintenance_resource.store(ComputeResource::None);
+
+    const std::int64_t now = std::chrono::duration_cast<
+        std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    routes.stats_db.record_request(
+        {now, "interactive-model", 10, 5, 100.0, 50.0, 200, 0});
+
+    const auto availability = client.Get(
+        "/api/inferdeck/v1/background/availability", headers);
+    REQUIRE(availability);
+    REQUIRE(availability->status == 200);
+    CHECK_FALSE(availability->get_header_value("Retry-After").empty());
+    const auto availability_body =
+        nlohmann::json::parse(availability->body);
+    CHECK(availability_body["available"] == false);
+    CHECK(availability_body["reason"] == "quiet_period");
+    CHECK(availability_body["requiredIdleSeconds"] == 900);
+    CHECK(availability_body["suggestedReportBackAtUnixMs"]
+              .get<std::int64_t>() > now);
+
+    const auto blocked = client.Post(
+        "/api/inferdeck/v1/background/lease", headers,
+        R"({"durationSeconds":120})", "application/json");
+    REQUIRE(blocked);
+    REQUIRE(blocked->status == 409);
+    CHECK_FALSE(blocked->get_header_value("Retry-After").empty());
+    const auto blocked_body = nlohmann::json::parse(blocked->body);
+    CHECK(blocked_body["error"]["code"] == "background_not_idle");
+    CHECK(blocked_body["reason"] == "quiet_period");
+    CHECK(blocked_body.contains("suggestedReportBackAtUnixMs"));
 }
 
 TEST_CASE("Active configuration save schedules an automatic runtime reload",
@@ -383,6 +695,7 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     CHECK(created_body["name"] == "stable-chat");
     CHECK(created_body["target"] == "concrete-model");
     CHECK(created_body["requiredContextSize"] == 16384);
+    CHECK(routes.reloads.load() == 0);
 
     const auto listed = client.Get("/api/inferdeck/v1/model-aliases");
     REQUIRE(listed);
@@ -401,8 +714,94 @@ TEST_CASE("Model alias API persists CRUD changes and compatibility contract",
     REQUIRE(removed);
     REQUIRE(removed->status == 200);
     CHECK(routes.registry.aliases().empty());
-    const auto after_delete = YAML::Load(TempConfig::read(config.active));
+    const auto after_delete_response = client.Get("/api/inferdeck/v1/model-aliases");
+    REQUIRE(after_delete_response);
+    REQUIRE(after_delete_response->status == 200);
+    CHECK(nlohmann::json::parse(after_delete_response->body)["aliases"].empty());
+    CHECK(routes.reloads.load() == 0);
+    const auto deleted_yaml = TempConfig::read(config.active);
+    const auto after_delete = YAML::Load(deleted_yaml);
     CHECK(after_delete["model_aliases"].size() == 0);
+    CHECK(routes.reloads.load() == 0);
+}
+
+TEST_CASE("Model alias API retargets an indentless YAML sequence at EOF",
+          "[gateway][dashboard][aliases]") {
+    TempConfig config;
+    TempConfig::write(config.base,
+        "gateway:\n  host: 127.0.0.1\n  port: 11434\n"
+        "model_aliases:\n"
+        "- name: deep\n  target: model-a\n"
+        "  required_context_size: 32768\n"
+        "  required_capabilities:\n  - chat_completions\n  - responses\n"
+        "- name: everyday\n  target: model-a\n"
+        "  required_context_size: 32768\n"
+        "  required_capabilities:\n  - chat_completions\n  - responses\n");
+    ConfigRouteServer routes(config);
+    for (const std::string& name : {"model-a", "model-b"}) {
+        inferdeck::model::ModelInfo target;
+        target.name = name;
+        target.gguf_path = "C:/fake/model.gguf";
+        target.context_size = 32768;
+        target.capabilities = {"chat_completions", "responses"};
+        routes.registry.register_model(target);
+    }
+    for (const std::string& name : {"deep", "everyday"}) {
+        inferdeck::model::ModelAlias alias;
+        alias.name = name;
+        alias.target = "model-a";
+        alias.required_context_size = 32768;
+        alias.required_capabilities = {"chat_completions", "responses"};
+        REQUIRE(routes.registry.set_alias(alias));
+    }
+    routes.validate = [](const std::string& value) {
+        YAML::Load(value);
+        return Ok();
+    };
+    auto client = routes.client();
+    const auto listed = client.Get("/api/inferdeck/v1/model-aliases");
+    REQUIRE(listed);
+    REQUIRE(listed->status == 200);
+    const nlohmann::json change{
+        {"target", "model-b"},
+        {"revision", nlohmann::json::parse(listed->body)["revision"]},
+    };
+    const auto updated = client.Put(
+        "/api/inferdeck/v1/model-aliases/deep", change.dump(), "application/json");
+    REQUIRE(updated);
+    REQUIRE(updated->status == 200);
+    CHECK(routes.reloads.load() == 0);
+    const auto after_update = client.Get("/api/inferdeck/v1/model-aliases");
+    REQUIRE(after_update);
+    REQUIRE(after_update->status == 200);
+    const auto updated_aliases = nlohmann::json::parse(after_update->body)["aliases"];
+    REQUIRE(updated_aliases.size() == 2);
+    CHECK(updated_aliases[0]["target"] == "model-b");
+    const auto persisted_text = TempConfig::read(config.active);
+    const auto persisted = YAML::Load(persisted_text);
+    REQUIRE(persisted["model_aliases"].size() == 2);
+    CHECK(persisted["model_aliases"][0]["name"].as<std::string>() == "deep");
+    CHECK(persisted["model_aliases"][0]["target"].as<std::string>() == "model-b");
+    CHECK(persisted["model_aliases"][1]["name"].as<std::string>() == "everyday");
+    CHECK(routes.reloads.load() == 0);
+
+    routes.validate = [](const std::string&) {
+        return inferdeck::foundation::Err<void>(
+            ErrorCode::InvalidArgument, "expected validation failure");
+    };
+    const nlohmann::json failed_update_body{
+        {"target", "model-a"},
+        {"revision", nlohmann::json::parse(after_update->body)["revision"]},
+    };
+    const auto failed_update = client.Put(
+        "/api/inferdeck/v1/model-aliases/deep", failed_update_body.dump(),
+        "application/json");
+    REQUIRE(failed_update);
+    CHECK(failed_update->status == 400);
+    REQUIRE(routes.registry.aliases().size() == 2);
+    CHECK(routes.registry.aliases()[0].target == "model-b");
+    CHECK(TempConfig::read(config.active) == persisted_text);
+    CHECK(routes.reloads.load() == 0);
 }
 
 TEST_CASE("Pricing API exposes cached input rates for models and aliases",
@@ -522,6 +921,34 @@ TEST_CASE("Pricing API exposes cached input rates for models and aliases",
     CHECK((*new_completion)["completion_price_per_million"] == 1.1);
 }
 
+TEST_CASE("Jobs API exposes measured prompt decode separately from elapsed prefill",
+          "[gateway][dashboard][jobs]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    inferdeck::observability::RequestRow row;
+    row.request_id = "decode-evidence";
+    row.timestamp_unix_ms = 1787011200000LL;
+    row.model = "test-model";
+    row.status_code = 200;
+    row.prompt_tokens = 100;
+    row.cached_prompt_tokens = 60;
+    row.cache_write_tokens = 40;
+    row.prompt_duration_ms = 20.0;
+    row.prompt_decode_duration_ms = 8.0;
+    row.prompt_decode_tokens = 40;
+    routes.stats_db.record_request(row);
+    auto client = routes.client();
+    const auto response = client.Get("/api/inferdeck/v1/jobs");
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    const auto body = nlohmann::json::parse(response->body);
+    REQUIRE(body["jobs"].size() == 1);
+    CHECK(body["jobs"][0]["id"] == row.request_id);
+    CHECK(body["jobs"][0]["promptDurationMs"] == 20.0);
+    CHECK(body["jobs"][0]["promptDecodeDurationMs"] == 8.0);
+    CHECK(body["jobs"][0]["promptDecodeTokens"] == 40);
+}
+
 TEST_CASE("Usage API exposes daily usage for the complete retained history",
           "[gateway][dashboard][usage]") {
     TempConfig config;
@@ -530,6 +957,22 @@ TEST_CASE("Usage API exposes daily usage for the complete retained history",
         1704067200000LL, "old-model", 100, 50, 0.0, 0.0, 200, -1});
     routes.stats_db.record_request({
         1787011200000LL, "new-model", 10, 5, 0.0, 0.0, 200, -1});
+    inferdeck::observability::RequestRow image;
+    image.timestamp_unix_ms = 1787011201000LL;
+    image.model = "stable-diffusion-v1-5";
+    image.modality = "image_generation";
+    image.status_code = 200;
+    image.generation_duration_ms = 4'000.0;
+    image.output_image_count = 2;
+    routes.stats_db.record_request(image);
+    inferdeck::observability::RequestRow music;
+    music.timestamp_unix_ms = 1787011202000LL;
+    music.model = "ace-step-v1.5";
+    music.modality = "audio_generation";
+    music.status_code = 200;
+    music.generation_duration_ms = 6'000.0;
+    music.output_audio_seconds = 10.0;
+    routes.stats_db.record_request(music);
     auto client = routes.client();
     const auto status_response = client.Get("/api/inferdeck/v1/status");
     REQUIRE(status_response);
@@ -543,11 +986,33 @@ TEST_CASE("Usage API exposes daily usage for the complete retained history",
     };
     CHECK(sum_tokens(status["tokenUsage"]) == 165);
     CHECK(sum_tokens(status["monthlyTokenUsage"]) == 165);
+    const auto find_model = [](const auto& rows, const std::string& model) {
+        return std::find_if(rows.begin(), rows.end(), [&model](const auto& row) {
+            return row.value("model", "") == model;
+        });
+    };
+    const auto image_usage =
+        find_model(status["tokenUsage"], "stable-diffusion-v1-5");
+    const auto music_usage = find_model(status["tokenUsage"], "ace-step-v1.5");
+    REQUIRE(image_usage != status["tokenUsage"].end());
+    REQUIRE(music_usage != status["tokenUsage"].end());
+    CHECK((*image_usage)["outputImageCount"] == 2);
+    CHECK((*image_usage)["generationDurationMs"] == 4'000.0);
+    CHECK((*music_usage)["outputAudioSeconds"] == 10.0);
+    CHECK((*music_usage)["generationDurationMs"] == 6'000.0);
     const auto response = client.Get("/api/inferdeck/v1/usage/daily");
     REQUIRE(response);
     REQUIRE(response->status == 200);
     const auto body = nlohmann::json::parse(response->body);
     CHECK(body["dailyTokenUsageAllTime"] == true);
+    const auto image_daily =
+        find_model(body["dailyTokenUsage"], "stable-diffusion-v1-5");
+    const auto music_daily =
+        find_model(body["dailyTokenUsage"], "ace-step-v1.5");
+    REQUIRE(image_daily != body["dailyTokenUsage"].end());
+    REQUIRE(music_daily != body["dailyTokenUsage"].end());
+    CHECK((*image_daily)["outputImageCount"] == 2);
+    CHECK((*music_daily)["outputAudioSeconds"] == 10.0);
     CHECK(std::any_of(
         body["dailyTokenUsage"].begin(), body["dailyTokenUsage"].end(),
         [](const auto& row) {
@@ -675,6 +1140,7 @@ TEST_CASE("Scheduled optimization starts once while the gateway is idle",
     CHECK(status->last_started_unix_ms > 0);
     CHECK(status->last_finished_unix_ms > 0);
     CHECK(status->last_outcome == "completed");
+    CHECK_FALSE(routes.profile_benchmark.snapshot().has_recommendation);
     const auto first_started = status->last_started_unix_ms;
     scheduler.evaluate();
     const auto repeated = scheduler.statuses();
@@ -733,6 +1199,20 @@ TEST_CASE("Resetting an active configuration applies the stable baseline",
     CHECK(body["restartRequired"] == false);
     CHECK(routes.reloads.load() == 1);
     CHECK_FALSE(fs::exists(config.active));
+}
+
+TEST_CASE("Profile benchmark teardown preserves another maintenance owner",
+          "[gateway][dashboard][optimize][maintenance]") {
+    inferdeck::model::ModelRegistry registry;
+    BackendCoordinator coordinator{registry};
+    inferdeck::gateway::SwapTracker swap_tracker;
+    std::atomic<ComputeResource> maintenance_resource{ComputeResource::Cpu};
+    {
+        ProfileBenchmarkManager benchmark{
+            coordinator, &swap_tracker, maintenance_resource,
+            inferdeck::gateway::ProfileBenchmarkTrialRunner{}};
+    }
+    CHECK(maintenance_resource.load() == ComputeResource::Cpu);
 }
 
 TEST_CASE("Profile analysis returns a quality-first fitting candidate",
@@ -828,6 +1308,7 @@ TEST_CASE("Measured profile benchmark runs candidates and returns real metrics",
         {"nUbatch", 2048},
         {"cacheTypeK", "q4_0"},
         {"cacheTypeV", "q8_0"},
+        {"flashAttention", "off"},
         {"candidateLimit", 2},
     };
 
@@ -850,7 +1331,8 @@ TEST_CASE("Measured profile benchmark runs candidates and returns real metrics",
     CHECK(body["baseline"]["completed"] == true);
     CHECK(body["baseline"]["qualityTotal"] == 3);
     CHECK(body["baseline"]["performanceIndex"] == 100.0);
-    REQUIRE(body["recommended"].is_object());
+    CHECK(body["baseline"]["flashAttention"] == "off");
+    CHECK(body["recommended"].is_null());
     CHECK(body["candidates"].size() == 2);
     CHECK(body["candidates"][0]["averageTokensPerSecond"].get<double>() > 0.0);
     CHECK(body["candidates"][0]["promptTokensPerSecond"].get<double>() > 0.0);
@@ -994,4 +1476,149 @@ TEST_CASE("Measured benchmark blocks model changes and can be cancelled",
     CHECK_FALSE(inferdeck::gateway::maintenance_blocks_model(resource_deps, "test-27b"));
     CHECK(inferdeck::gateway::maintenance_blocks_model(resource_deps, "whisper-test"));
     routes.maintenance_resource.store(ComputeResource::None);
+}
+
+TEST_CASE("Measured benchmark only recommends a verified improvement",
+          "[gateway][dashboard][optimize][benchmark][improvement]") {
+    double prompt_ratio = 1.1;
+    double generation_ratio = 1.1;
+    double parallel_ratio = 1.1;
+    double quality = 1.0;
+    bool include_concurrency = true;
+    bool complete_quality = true;
+    bool valid_baseline = true;
+    bool expected = false;
+    bool baseline_failure = false;
+    bool candidate_failure = false;
+    SECTION("slower candidates") {
+        prompt_ratio = generation_ratio = parallel_ratio = 0.9;
+    }
+    SECTION("equal candidates") {
+        prompt_ratio = generation_ratio = parallel_ratio = 1.0;
+    }
+    SECTION("measurement noise") {
+        prompt_ratio = generation_ratio = parallel_ratio = 1.01;
+    }
+    SECTION("prompt regression hidden by faster generation") {
+        prompt_ratio = 0.9;
+        generation_ratio = 2.0;
+    }
+    SECTION("concurrency regression hidden by faster generation") {
+        parallel_ratio = 0.9;
+        generation_ratio = 2.0;
+    }
+    SECTION("missing concurrent workload") { include_concurrency = false; }
+    SECTION("quality regression") { quality = 0.9; }
+    SECTION("invalid baseline throughput") { valid_baseline = false; }
+    SECTION("nonfinite throughput") { generation_ratio = std::numeric_limits<double>::infinity(); }
+    SECTION("nonfinite quality") { quality = std::numeric_limits<double>::quiet_NaN(); }
+    SECTION("incomplete quality probes") { complete_quality = false; }
+    SECTION("baseline measurement failed") { baseline_failure = true; }
+    SECTION("candidate measurement failed") { candidate_failure = true; }
+    SECTION("verified improvement") { expected = true; }
+
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    int calls = 0;
+    routes.benchmark_runner = [&](const inferdeck::model::ModelInfo&,
+                                  const inferdeck::optimize::ProfileCandidate&,
+                                  const std::vector<ProfileBenchmarkPrompt>&,
+                                  const std::vector<int>&,
+                                  const std::atomic<bool>&,
+                                  const ProfileBenchmarkProgress&) {
+        const bool baseline = calls++ == 0;
+        if ((baseline && baseline_failure) || (!baseline && candidate_failure)) {
+            return inferdeck::foundation::Err<ProfileBenchmarkTrialMetrics>(
+                ErrorCode::Internal, "benchmark measurement failed");
+        }
+        ProfileBenchmarkTrialMetrics metrics;
+        metrics.prompt_tokens_per_second = 100.0 * (baseline ? (valid_baseline ? 1.0 : 0.0) : prompt_ratio);
+        metrics.average_tokens_per_second = 100.0 * (baseline ? 1.0 : generation_ratio);
+        metrics.parallel_tokens_per_second = 100.0 * (baseline ? 1.0 : parallel_ratio);
+        metrics.peak_vram_mb = 24000.0;
+        metrics.quality_score = baseline ? 1.0 : quality;
+        metrics.quality_passes = 3;
+        metrics.quality_total = baseline || complete_quality ? 3 : 2;
+        if (baseline || include_concurrency) {
+            ProfileBenchmarkConcurrencyMetrics concurrent;
+            concurrent.requests = 2;
+            concurrent.aggregate_tokens_per_second = metrics.parallel_tokens_per_second;
+            metrics.concurrency.push_back(concurrent);
+        }
+        return inferdeck::foundation::Ok(std::move(metrics));
+    };
+    inferdeck::model::ModelInfo model;
+    model.name = "improvement-test";
+    model.runtime = "llama_cpp";
+    model.n_slots = 4;
+    routes.registry.register_model(model);
+    inferdeck::optimize::ProfileInput input;
+    input.model = model.name;
+    input.total_vram_mb = 32768.0;
+    input.configured_vram_mb = 24000.0;
+    input.context_per_slot = 100000;
+    input.slots = 4;
+    input.min_slots = 4;
+    REQUIRE(routes.profile_benchmark.start(model, input, 1));
+    REQUIRE(routes.profile_benchmark.wait_for_completion(std::chrono::seconds{2}));
+    const auto result = routes.profile_benchmark.snapshot();
+    REQUIRE(result.trials.size() == (baseline_failure ? 0 : 1));
+    CHECK(result.state == (baseline_failure || candidate_failure ? "failed" : "completed"));
+    CHECK(result.restored);
+    CHECK(result.has_recommendation == expected);
+}
+
+TEST_CASE("Measured benchmark freezes request counts across slot reductions",
+          "[gateway][dashboard][optimize][benchmark][workloads]") {
+    for (const int baseline_slots : {2, 3, 4}) {
+        CAPTURE(baseline_slots);
+        TempConfig config;
+        ConfigRouteServer routes(config);
+        std::vector<std::vector<int>> workloads;
+        std::vector<int> measured_slots;
+        routes.benchmark_runner = [&](const inferdeck::model::ModelInfo&,
+                                      const inferdeck::optimize::ProfileCandidate& candidate,
+                                      const std::vector<ProfileBenchmarkPrompt>&,
+                                      const std::vector<int>& required_counts,
+                                      const std::atomic<bool>&,
+                                      const ProfileBenchmarkProgress&) {
+            const bool baseline = workloads.empty();
+            workloads.push_back(required_counts);
+            measured_slots.push_back(candidate.slots);
+            ProfileBenchmarkTrialMetrics result;
+            result.prompt_tokens_per_second = baseline ? 100.0 : 110.0;
+            result.average_tokens_per_second = baseline ? 100.0 : 110.0;
+            result.parallel_tokens_per_second = baseline ? 100.0 : 110.0;
+            result.peak_vram_mb = 24000.0;
+            result.quality_total = result.quality_passes = 3;
+            result.quality_score = 1.0;
+            for (const int requests : required_counts) {
+                ProfileBenchmarkConcurrencyMetrics concurrent;
+                concurrent.requests = requests;
+                concurrent.aggregate_tokens_per_second = result.parallel_tokens_per_second;
+                result.concurrency.push_back(concurrent);
+            }
+            return inferdeck::foundation::Ok(std::move(result));
+        };
+        inferdeck::model::ModelInfo model;
+        model.name = "slot-transition";
+        model.runtime = "llama_cpp";
+        model.n_slots = baseline_slots;
+        routes.registry.register_model(model);
+        inferdeck::optimize::ProfileInput input;
+        input.model = model.name;
+        input.total_vram_mb = 32768.0;
+        input.configured_vram_mb = 35000.0;
+        input.context_per_slot = 512;
+        input.slots = baseline_slots;
+        input.min_slots = 1;
+        REQUIRE(routes.profile_benchmark.start(model, input, 1));
+        REQUIRE(routes.profile_benchmark.wait_for_completion(std::chrono::seconds{2}));
+        const auto result = routes.profile_benchmark.snapshot();
+        REQUIRE(workloads.size() == 2);
+        CHECK(workloads[0] == workloads[1]);
+        CHECK(workloads[0].back() == baseline_slots);
+        CHECK(measured_slots[1] < measured_slots[0]);
+        CHECK(result.has_recommendation);
+    }
 }

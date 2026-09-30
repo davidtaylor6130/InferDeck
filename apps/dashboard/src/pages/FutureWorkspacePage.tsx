@@ -1,23 +1,13 @@
 import React from 'react';
 import { Badge, Panel, SectionTitle } from '../components/ui';
 
-export type FutureArea = 'image' | 'music' | 'post-training';
+export type FutureArea = 'post-training';
 
 const AREAS: Record<FutureArea, { title: string; purpose: string; steps: string[] }> = {
-  image: {
-    title: 'Image',
-    purpose: 'A future workspace for local image generation using the same model residency, queue, progress, and cancellation controls as the rest of InferDeck.',
-    steps: ['Choose an installed image model', 'Submit a prompt and review resource requirements', 'Track generation and collect the finished image'],
-  },
-  music: {
-    title: 'Music',
-    purpose: 'A future workspace for queued local music generation with visible model state, duration, progress, and output history.',
-    steps: ['Choose an installed audio model', 'Set the prompt and duration', 'Track generation and collect the finished audio'],
-  },
   'post-training': {
     title: 'Post Training',
-    purpose: 'A future workspace for LoRA training and quantisation jobs scheduled around interactive inference workloads.',
-    steps: ['Choose a source model and training input', 'Review storage, memory, and time requirements', 'Run, pause, and inspect the resulting artefact'],
+    purpose: 'Native GGUF quantisation is available through the control API. Dashboard controls and fine-tuning remain planned.',
+    steps: ['Choose an unloaded managed GGUF source', 'Start a supported quantisation job through the API', 'Monitor the job and use the registered output model'],
   },
 };
 

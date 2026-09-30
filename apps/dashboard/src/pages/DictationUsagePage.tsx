@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getJobs, getPricing } from '../api';
 import { UsageLineChart, UsageRangeTabs } from '../components/UsageCharts';
-import { Badge, EmptyState, Panel, SectionTitle, Stat } from '../components/ui';
+import { Badge, DetailItem, EmptyState, Panel, SectionTitle, Stat } from '../components/ui';
 import {
   ALL_MODELS,
   DEFAULT_COST_CONFIG,
@@ -108,6 +108,17 @@ export const DictationUsagePage: React.FC = () => {
   const selectedCost = effectiveSelectedModel
     ? getCostConfigForModel(effectiveSelectedModel, saved, defaults.defaults, defaults.fallback)
     : DEFAULT_COST_CONFIG;
+  const usageDetails = useMemo(() => usage.map(row => {
+    const cost = getCostConfigForModel(row.model, saved, defaults.defaults, defaults.fallback);
+    return {
+      row,
+      cost,
+      avoided: estimateUsageCost(row, cost),
+      billable: cost.billingUnit === 'million_characters'
+        ? formatCharacters(Number(row.inputCharacters ?? 0))
+        : formatAudio(Number(row.inputAudioSeconds ?? 0)),
+    };
+  }), [usage, saved, defaults]);
 
   const persistConfig = (model: string, next: ModelCostConfig) => {
     const merged = {
@@ -172,10 +183,26 @@ export const DictationUsagePage: React.FC = () => {
 
       <Panel>
         <SectionTitle title="Per-model usage" aside="lifetime" />
-        {usage.length === 0 ? (
+        {usageDetails.length === 0 ? (
           <div className="mt-3"><EmptyState title="No persisted dictation usage" /></div>
         ) : (
-          <div className="mt-3 overflow-x-auto" role="region" aria-label="Per-model dictation usage" tabIndex={0}>
+          <>
+          <div className="mt-3 divide-y divide-white/10 md:hidden" aria-label="Per-model dictation usage cards">
+            {usageDetails.map(({ row, cost, avoided, billable }) => (
+              <article key={row.model} className="py-4 first:pt-0 last:pb-0">
+                <h3 className="break-words font-mono text-sm text-text-primary">{compactModel(row.model)}</h3>
+                <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
+                  <DetailItem label="Requests">{row.requests.toLocaleString()}</DetailItem>
+                  <DetailItem label="Success">{row.requests ? `${(row.successfulRequests / row.requests * 100).toFixed(1)}%` : '—'}</DetailItem>
+                  <DetailItem label="Billable work">{billable}</DetailItem>
+                  <DetailItem label="Estimated API cost"><span className="text-success-green">{formatCurrency(avoided)}</span></DetailItem>
+                  <DetailItem label="Equivalent">{cost.equivalentModel}</DetailItem>
+                  <DetailItem label="Last used">{row.lastTimestampUnixMs ? timeAgo(row.lastTimestampUnixMs) : 'Never'}</DetailItem>
+                </dl>
+              </article>
+            ))}
+          </div>
+          <div className="mt-3 hidden overflow-x-auto md:block" role="region" aria-label="Per-model dictation usage" tabIndex={0}>
             <table className="w-full min-w-[860px] text-left text-sm">
               <thead>
                 <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
@@ -189,13 +216,7 @@ export const DictationUsagePage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {usage.map(row => {
-                  const cost = getCostConfigForModel(row.model, saved, defaults.defaults, defaults.fallback);
-                  const avoided = estimateUsageCost(row, cost);
-                  const billable = cost.billingUnit === 'million_characters'
-                    ? formatCharacters(Number(row.inputCharacters ?? 0))
-                    : formatAudio(Number(row.inputAudioSeconds ?? 0));
-                  return (
+                {usageDetails.map(({ row, cost, avoided, billable }) => (
                     <tr key={row.model}>
                       <td className="py-2.5 pr-4 font-mono text-text-primary">{compactModel(row.model)}</td>
                       <td className="py-2.5 pr-4 text-text-secondary">{row.requests.toLocaleString()}</td>
@@ -205,11 +226,11 @@ export const DictationUsagePage: React.FC = () => {
                       <td className="py-2.5 pr-4 text-success-green">{formatCurrency(avoided)}</td>
                       <td className="py-2.5 text-text-secondary">{row.lastTimestampUnixMs ? timeAgo(row.lastTimestampUnixMs) : 'Never'}</td>
                     </tr>
-                  );
-                })}
+                ))}
               </tbody>
             </table>
           </div>
+          </>
         )}
       </Panel>
 

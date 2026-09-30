@@ -1,4 +1,5 @@
 #include "model/backend_coordinator.hpp"
+#include "foundation/logging.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -9,8 +10,72 @@
 #include <utility>
 
 namespace inferdeck::model {
+foundation::Result<RequestDemand> BackendCoordinator::estimate_request_demand(
+    const std::string& name, const InferenceRequest& req) const {
+    std::unique_lock<std::recursive_mutex> lifecycle_lock(swap_mutex_);
+    const IModel* model = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second || !it->second->is_loaded())
+            return foundation::Err<RequestDemand>(foundation::ErrorCode::NotFound,
+                                                  "model not loaded: " + name);
+        model = dynamic_cast<const IModel*>(it->second.get());
+        if (!model) return foundation::Err<RequestDemand>(foundation::ErrorCode::InvalidArgument,
+                                                           "backend is not a generation model: " + name);
+    }
+    return model->estimate_request_demand(req);
+}
+
+foundation::Result<void> BackendCoordinator::prepare_request_capacity(
+    const std::string& name, const RequestDemand& demand,
+    const LifecycleControl& control) {
+    std::unique_lock<std::recursive_mutex> lifecycle_lock(swap_mutex_);
+    IModel* model = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second || !it->second->is_loaded())
+            return foundation::Err<void>(foundation::ErrorCode::NotFound,
+                                         "model not loaded: " + name);
+        if (resizing_models_.contains(name))
+            return foundation::Err<void>(foundation::ErrorCode::ResourceBusy,
+                                         "request capacity is already being prepared: " + name);
+        model = dynamic_cast<IModel*>(it->second.get());
+        if (!model) return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                  "backend is not a generation model: " + name);
+        resizing_models_.insert(name);
+    }
+    foundation::Result<void> result;
+    try {
+        result = model->ensure_request_capacity(demand, control);
+    } catch (const std::exception& error) {
+        result = foundation::Err<void>(foundation::ErrorCode::Internal,
+            std::string("request capacity preparation threw: ") + error.what());
+    } catch (...) {
+        result = foundation::Err<void>(foundation::ErrorCode::Internal,
+            "request capacity preparation threw");
+    }
+    foundation::LOG_INFO("request_capacity_prepared", "model={} context={} sequences={} success={}",
+             name, demand.aggregate_context, demand.aggregate_sequences, result.has_value());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        resizing_models_.erase(name);
+        if (result) {
+            const auto hold = continuation_holds_.find(name);
+            const bool preserve_continuation = hold != continuation_holds_.end() &&
+                hold->second.generation == resource_generation_ &&
+                model->info().runtime == "vllm_radiance" && model->n_slots() == 1;
+            ++resource_generation_;
+            if (preserve_continuation) hold->second.generation = resource_generation_;
+        }
+    }
+    cv_.notify_all();
+    return result;
+}
 foundation::Result<InferenceResult> BackendCoordinator::predict(
-    const std::string& name, int lease_id, const InferenceRequest& req) {
+    const std::string& name, int lease_id, const InferenceRequest& req,
+    const std::atomic<bool>* cancel) {
     IModel* inst = nullptr;
     int backend_slot = 0;
     {
@@ -33,7 +98,8 @@ foundation::Result<InferenceResult> BackendCoordinator::predict(
     }
     // Safe to call unlocked: the caller holds a slot, so unload() drains before
     // the instance can be destroyed.
-    return inst->predict(backend_slot, req);
+    if (req.progress) req.progress->slot.store(backend_slot);
+    return inst->predict_cancellable(backend_slot, req, cancel);
 }
 
 foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
@@ -59,6 +125,7 @@ foundation::Result<InferenceResult> BackendCoordinator::predict_stream(
         }
         backend_slot = *slot;
     }
+    if (req.progress) req.progress->slot.store(backend_slot);
     return inst->predict_stream(backend_slot, req, callback, cancel);
 }
 
@@ -112,6 +179,67 @@ foundation::Result<ImageGenerationResult> BackendCoordinator::generate_images(
         backend_slot = *slot;
     }
     return backend->generate_images(backend_slot, request, progress);
+}
+
+foundation::Result<AudioGenerationResult> BackendCoordinator::generate_audio(
+    const std::string& name, int lease_id,
+    const AudioGenerationRequest& request,
+    const std::function<bool(int)>& progress) {
+    IAudioGenerationBackend* backend = nullptr;
+    int backend_slot = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second) {
+            return foundation::Err<AudioGenerationResult>(
+                foundation::ErrorCode::NotFound,
+                "model not loaded: " + name);
+        }
+        backend = dynamic_cast<IAudioGenerationBackend*>(it->second.get());
+        if (!backend ||
+            !it->second->info().supports("audio_generation")) {
+            return foundation::Err<AudioGenerationResult>(
+                foundation::ErrorCode::InvalidArgument,
+                "backend does not support audio generation: " + name);
+        }
+        auto slot = backend_slot_for_lease_locked(name, lease_id);
+        if (!slot) {
+            return foundation::Err<AudioGenerationResult>(
+                slot.error().code, slot.error().message);
+        }
+        backend_slot = *slot;
+    }
+    return backend->generate_audio(backend_slot, request, progress);
+}
+
+foundation::Result<VideoGenerationResult> BackendCoordinator::generate_video(
+    const std::string& name, int lease_id,
+    const VideoGenerationRequest& request,
+    const std::function<bool(int)>& progress) {
+    IVideoBackend* backend = nullptr;
+    int backend_slot = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second) {
+            return foundation::Err<VideoGenerationResult>(
+                foundation::ErrorCode::NotFound,
+                "model not loaded: " + name);
+        }
+        backend = dynamic_cast<IVideoBackend*>(it->second.get());
+        if (!backend || !it->second->info().supports("video_generation")) {
+            return foundation::Err<VideoGenerationResult>(
+                foundation::ErrorCode::InvalidArgument,
+                "backend does not support video generation: " + name);
+        }
+        auto slot = backend_slot_for_lease_locked(name, lease_id);
+        if (!slot) {
+            return foundation::Err<VideoGenerationResult>(
+                slot.error().code, slot.error().message);
+        }
+        backend_slot = *slot;
+    }
+    return backend->generate_video(backend_slot, request, progress);
 }
 
 foundation::Result<AudioResult> BackendCoordinator::synthesize(

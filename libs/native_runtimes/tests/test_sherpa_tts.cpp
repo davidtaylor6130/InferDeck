@@ -170,6 +170,13 @@ TEST_CASE("Supertonic synthesizes a real WAV in-process",
     CHECK(u32(result->bytes, 24) == 44100);
     CHECK(result->duration_ms > 0.0f);
 
+    request.format = "mp3";
+    auto mp3_result = speech->synthesize(0, request, {});
+    REQUIRE(mp3_result);
+    REQUIRE(mp3_result->content_type == "audio/mpeg");
+    REQUIRE(mp3_result->bytes.size() > 1000);
+    CHECK(std::memcmp(mp3_result->bytes.data(), "RIFF", 4) != 0);
+
     request.voice = "not-a-voice";
     auto invalid = speech->synthesize(0, request, {});
     REQUIRE_FALSE(invalid);

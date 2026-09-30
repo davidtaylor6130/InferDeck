@@ -7,13 +7,13 @@
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  --void-black: #0b1017;
-  --deck-navy: #101720;
+  --void-black: #000;
+  --deck-navy: #000;
   --panel-slate: #151e29;
   --elevated-slate: #1b2633;
   --card-highlight: #202d3c;
   --border-slate: #2b3949;
-  --text-primary: #f2f5f8;
+  --text-primary: #fff;
   --text-secondary: #b0bcc8;
   --text-muted: #7f8d9d;
   --infer-violet: #6e8fb5;
@@ -29,8 +29,15 @@
 body {
   margin: 0;
   min-width: 320px;
+  overflow-x: hidden;
   background: var(--void-black);
   color: var(--text-primary);
+}
+
+@supports (overflow: clip) {
+  body {
+    overflow-x: clip;
+  }
 }
 
 #root {
@@ -264,6 +271,15 @@ summary:focus-visible {
 }
 
 @media (max-width: 640px) {
+  button, select, summary, .file-action,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]) {
+    min-height: 44px;
+  }
+
+  .chart-ticks > span:nth-child(even):not(:last-child) {
+    display: none;
+  }
+
   .field-row {
     grid-template-columns: 1fr;
   }
@@ -287,3 +303,37 @@ summary:focus-visible {
     animation-iteration-count: 1 !important;
   }
 }
+
+.mock-home .mock-telemetry > div {
+  border-left: 0;
+  padding-left: 0;
+}
+.mock-home .mock-telemetry svg {
+  height: 3.5rem;
+  margin-top: .5rem;
+}
+.mock-home .mock-telemetry > div:nth-child(n + 3) {
+  border-top: 1px solid var(--border-slate);
+  padding-top: 1rem;
+}
+
+.mock-home .mock-telemetry > div {
+  display: flex;
+  flex-direction: column;
+}
+.mock-home .mock-telemetry svg {
+  margin-top: auto;
+  flex-shrink: 0;
+}
+
+body {
+  height: 100dvh;
+  overflow: hidden;
+}
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+html { height: 100%; overflow: hidden; }
+#root { position: relative; }

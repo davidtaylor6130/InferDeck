@@ -19,7 +19,7 @@ $version = (& $gatewayPath --version | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) {
     throw "Gateway version command failed with exit code $LASTEXITCODE"
 }
-if ($version -notmatch '^inferdeck-gateway (?<version>\d+\.\d+\.\d+) revision=(?<revision>[0-9a-f]{40}) dirty=(?<dirty>true|false)$') {
+if ($version -notmatch '^inferdeck-gateway (?<version>\d+\.\d+\.\d+(?:-alpha-[1-9]\d*)?) revision=(?<revision>[0-9a-f]{40}) dirty=(?<dirty>true|false)$') {
     throw "Gateway version output has no trustworthy build provenance: $version"
 }
 if ($ExpectedRevision -and $Matches.revision -ne $ExpectedRevision.ToLowerInvariant()) {

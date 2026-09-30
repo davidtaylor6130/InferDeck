@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "model": "ltx-2.3",
+  "destination": "E:/InferDeck/models/ltx-2.3",
+  "artifacts": [
+    {
+      "name": "ltx-2.3-22b-dev-UD-Q4_K_M.gguf",
+      "relativePath": "ltx-2.3-22b-dev-UD-Q4_K_M.gguf",
+      "repository": "unsloth/LTX-2.3-GGUF",
+      "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+      "url": "https://huggingface.co/unsloth/LTX-2.3-GGUF/resolve/96e8ed4925ead3db9ff4d0084f165ef6a74f28d0/ltx-2.3-22b-dev-UD-Q4_K_M.gguf",
+      "size": 16506438688,
+      "sha256": "a6983fcf16cda13ec6dc22711dae47fa7cf160204d5a3b42b0c09d1f13fc853b"
+    },
+    {
+      "name": "ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+      "relativePath": "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+      "repository": "unsloth/LTX-2.3-GGUF",
+      "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+      "url": "https://huggingface.co/unsloth/LTX-2.3-GGUF/resolve/96e8ed4925ead3db9ff4d0084f165ef6a74f28d0/text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+      "size": 2312144712,
+      "sha256": "a5c5148788d8d9d5d1e650e4cbf3502a46a2f7f975ce70c59082732c8905a8ae"
+    },
+    {
+      "name": "ltx-2.3-22b-dev_video_vae.safetensors",
+      "relativePath": "vae/ltx-2.3-22b-dev_video_vae.safetensors",
+      "repository": "unsloth/LTX-2.3-GGUF",
+      "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+      "url": "https://huggingface.co/unsloth/LTX-2.3-GGUF/resolve/96e8ed4925ead3db9ff4d0084f165ef6a74f28d0/vae/ltx-2.3-22b-dev_video_vae.safetensors",
+      "size": 1452256522,
+      "sha256": "8732bb70cf4343541815f45c9f90f5ff0519d679bd63483afc27bf79a08d3f4e"
+    },
+    {
+      "name": "ltx-2.3-22b-dev_audio_vae.safetensors",
+      "relativePath": "vae/ltx-2.3-22b-dev_audio_vae.safetensors",
+      "repository": "unsloth/LTX-2.3-GGUF",
+      "revision": "96e8ed4925ead3db9ff4d0084f165ef6a74f28d0",
+      "url": "https://huggingface.co/unsloth/LTX-2.3-GGUF/resolve/96e8ed4925ead3db9ff4d0084f165ef6a74f28d0/vae/ltx-2.3-22b-dev_audio_vae.safetensors",
+      "size": 364853140,
+      "sha256": "d7711812d9387ce940c2cd5d65a4f5a1e57bf6087cf618d89b56dd3c722c4dea"
+    },
+    {
+      "name": "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf",
+      "relativePath": "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf",
+      "repository": "unsloth/gemma-3-12b-it-qat-GGUF",
+      "revision": "858acec7ec0541a46c39985c95d3b52d8f3ab183",
+      "url": "https://huggingface.co/unsloth/gemma-3-12b-it-qat-GGUF/resolve/858acec7ec0541a46c39985c95d3b52d8f3ab183/gemma-3-12b-it-qat-UD-Q4_K_XL.gguf",
+      "size": 7432229248,
+      "sha256": "da98f81c86916ed1c76b3eeda56b25cb7b8352b01093e2edb8028110fe2cb53b"
+    }
+  ]
+}

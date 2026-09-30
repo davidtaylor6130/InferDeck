@@ -11,6 +11,14 @@ Result<void> ModelStore::retire(const std::string& model_name, bool archive_arti
     {
         std::lock_guard lock(mutex_);
         if (!installed_.contains(model_name)) return Err<void>(ErrorCode::NotFound, "installed model not found");
+        for (const auto& [_, job] : quantizations_) {
+            if ((job.state == "queued" || job.state == "quantizing") &&
+                (job.source_model == model_name || job.output_model == model_name)) {
+                return Err<void>(
+                    ErrorCode::Unavailable,
+                    "model cannot be archived or deleted during quantization");
+            }
+        }
         entry = installed_.at(model_name);
     }
     if (coordinator_.is_loaded(model_name) || coordinator_.active_request_count(model_name) > 0) {
@@ -23,6 +31,37 @@ Result<void> ModelStore::retire(const std::string& model_name, bool archive_arti
     if (error || !foundation::is_path_within(root, path) ||
         foundation::is_path_within(path, root)) {
         return Err<void>(ErrorCode::InvalidArgument, "installed artifact is outside the model store");
+    }
+    const auto overlaps = [&path](const std::filesystem::path& candidate) {
+        if (candidate.empty()) return false;
+        std::error_code path_error;
+        const auto canonical = std::filesystem::weakly_canonical(candidate, path_error);
+        return !path_error &&
+            (foundation::is_path_within(path, canonical) ||
+             foundation::is_path_within(canonical, path));
+    };
+    {
+        std::lock_guard lock(mutex_);
+        for (const auto& item : installed_.items()) {
+            if (item.key() != model_name &&
+                overlaps(item.value().value("path", ""))) {
+                return Err<void>(ErrorCode::Unavailable,
+                    "model artifact is shared with another installed model");
+            }
+        }
+    }
+    for (const std::string& other_name : coordinator_.registry().list()) {
+        if (other_name == model_name) continue;
+        const auto other = coordinator_.registry().get_info_result(other_name);
+        if (!other) continue;
+        bool shared = overlaps(other->gguf_path) || overlaps(other->mmproj_path);
+        for (const auto& [_, artifact] : other->artifacts) {
+            shared = shared || overlaps(artifact);
+        }
+        if (shared) {
+            return Err<void>(ErrorCode::Unavailable,
+                "model artifact is shared with another registered model");
+        }
     }
     std::filesystem::path archived_path;
     if (archive_artifact) {
@@ -200,7 +239,8 @@ nlohmann::json ModelStore::library() const {
             group.size += local_file_size(path);
             ++group.count;
             const auto searchable = lower(path.string());
-            const auto file_runtime = infer_runtime(path.filename().string(), "");
+            const auto file_runtime =
+                infer_runtime(path.filename().string(), "", searchable);
             if (group.runtime.empty() || file_runtime != "llama_cpp") {
                 group.runtime = file_runtime;
             }

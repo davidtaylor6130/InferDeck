@@ -62,7 +62,7 @@
         const std::string& model_name = *resolved;
         if (!model_name.empty() && maintenance_blocks_model(deps.gw, model_name)) {
             write_error(resp, 503, "maintenance_mode",
-                        "measured model optimization is using the same compute resource");
+                        "maintenance work is using the same compute resource");
             return;
         }
         auto result = model_name.empty() ? foundation::Ok() : deps.gw.coordinator.unload(model_name);

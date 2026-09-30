@@ -10,11 +10,13 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "foundation/result.hpp"
+#include "gateway/compute_resource.hpp"
 #include "model/backend_coordinator.hpp"
 
 namespace inferdeck::gateway {
@@ -42,6 +44,20 @@ struct StoreDownload {
     std::vector<StoreFile> artifacts;
 };
 
+struct StoreQuantization {
+    std::uint64_t id{0};
+    std::string source_model;
+    std::string output_model;
+    std::string quantization;
+    int threads{0};
+    std::string state{"queued"};
+    std::string error;
+    std::string source_path;
+    std::string output_path;
+    std::uint64_t output_size{0};
+    std::string output_sha256;
+};
+
 class IModelStoreTransport {
 public:
     virtual ~IModelStoreTransport() = default;
@@ -55,19 +71,37 @@ public:
 
 std::unique_ptr<IModelStoreTransport> make_native_model_store_transport();
 
+class IModelQuantizer {
+public:
+    virtual ~IModelQuantizer() = default;
+    virtual foundation::Result<void> quantize(
+        const std::filesystem::path& source,
+        const std::filesystem::path& destination,
+        const std::string& quantization,
+        int threads) = 0;
+};
+
+std::unique_ptr<IModelQuantizer> make_native_model_quantizer();
+
 class ModelStore {
 public:
     ModelStore(std::filesystem::path root, std::filesystem::path archive_root, std::string token,
                model::BackendCoordinator& coordinator,
-               std::unique_ptr<IModelStoreTransport> transport = {});
+               std::unique_ptr<IModelStoreTransport> transport = {},
+               std::unique_ptr<IModelQuantizer> quantizer = {},
+               std::atomic<ComputeResource>* maintenance_resource = nullptr);
     ModelStore(std::filesystem::path root, std::string token,
                model::BackendCoordinator& coordinator,
-               std::unique_ptr<IModelStoreTransport> transport = {});
+               std::unique_ptr<IModelStoreTransport> transport = {},
+               std::unique_ptr<IModelQuantizer> quantizer = {},
+               std::atomic<ComputeResource>* maintenance_resource = nullptr);
     ~ModelStore();
 
     foundation::Result<nlohmann::json> search(
         const std::string& query, const std::string& runtime,
-        const std::string& modality, int limit = 20);
+        const std::string& modality, int limit = 20,
+        const std::string& sort = "trending",
+        bool include_gated = false);
     foundation::Result<nlohmann::json> inspect(const std::string& repo);
     foundation::Result<std::uint64_t> install(
         const std::string& repo, const std::string& filename,
@@ -77,8 +111,14 @@ public:
     foundation::Result<void> resume(std::uint64_t id);
     foundation::Result<void> remove(const std::string& model_name);
     foundation::Result<void> archive(const std::string& model_name);
+    foundation::Result<std::uint64_t> quantize(
+        const std::string& source_model,
+        const std::string& output_model,
+        const std::string& quantization,
+        int threads = 0);
 
     [[nodiscard]] std::vector<StoreDownload> downloads() const;
+    [[nodiscard]] std::vector<StoreQuantization> quantizations() const;
     [[nodiscard]] nlohmann::json installed() const;
     [[nodiscard]] nlohmann::json library() const;
 
@@ -88,17 +128,28 @@ private:
         const std::string& runtime, const std::string& modality);
     foundation::Result<std::vector<StoreFile>> resolve_bundle(
         const std::string& repo, const std::string& runtime,
-        const std::string& modality);
+        const std::string& modality, const std::string& bundle_name);
     foundation::Result<void> start(std::uint64_t id);
     void worker_entry(std::uint64_t id,
                       const std::shared_ptr<std::atomic<bool>>& done) noexcept;
+    foundation::Result<void> start_quantization(std::uint64_t id);
+    void quantization_worker_entry(
+        std::uint64_t id,
+        const std::shared_ptr<std::atomic<bool>>& done) noexcept;
+    void run_quantization(std::uint64_t id);
+    void fail_quantization(std::uint64_t id, std::string error) noexcept;
+    void finish_quantization(
+        std::uint64_t id, std::string state, std::string error = {});
+    void release_quantization_resource() noexcept;
     void run(std::uint64_t id);
+    foundation::Result<void> begin_install_commit(std::uint64_t id);
     void run_bundle(std::uint64_t id, const StoreDownload& job,
                     const std::shared_ptr<std::atomic<bool>>& cancelled);
     void fail_job(std::uint64_t id, std::string error) noexcept;
     void finish_job(std::uint64_t id, std::string state, std::string error = {});
     void reap_completed_workers();
     void prune_completed_jobs_locked();
+    void prune_completed_quantizations_locked();
     void load_manifest();
     foundation::Result<void> save_manifest();
     foundation::Result<void> retire(const std::string& model_name, bool archive_artifact);
@@ -111,17 +162,23 @@ private:
     std::string token_;
     model::BackendCoordinator& coordinator_;
     std::unique_ptr<IModelStoreTransport> transport_;
+    std::unique_ptr<IModelQuantizer> quantizer_;
+    std::atomic<ComputeResource>* maintenance_resource_{nullptr};
+    std::atomic<bool> quantization_resource_reserved_{false};
     mutable std::mutex mutex_;
     std::unordered_map<std::uint64_t, StoreDownload> downloads_;
+    std::unordered_map<std::uint64_t, StoreQuantization> quantizations_;
     std::unordered_map<std::uint64_t, std::shared_ptr<std::atomic<bool>>> cancellations_;
     std::unordered_map<std::uint64_t, std::thread> workers_;
     std::unordered_map<std::uint64_t, std::shared_ptr<std::atomic<bool>>> worker_done_;
     std::unordered_map<std::string, std::uint64_t> reserved_names_;
+    std::unordered_set<std::uint64_t> committing_installs_;
     nlohmann::json installed_{nlohmann::json::object()};
     std::mutex manifest_mutex_;
     std::uint64_t next_id_{1};
 };
 
 nlohmann::json to_json(const StoreDownload& download);
+nlohmann::json to_json(const StoreQuantization& quantization);
 
 }

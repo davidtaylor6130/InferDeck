@@ -1,0 +1,28 @@
+﻿// Merge this object under the root "mcp" property in opencode.jsonc.
+// Set URL and token environment variables on each machine. Do not commit secrets.
+{
+  "inferdeck": {
+    "type": "remote",
+    "url": "{env:INFERDECK_MCP_PUBLIC_URL}",
+    "oauth": false,
+    "headers": {
+      "Authorization": "Bearer {env:INFERDECK_MCP_TOKEN}"
+    },
+    "timeout": 300000
+  },
+  "searxng": {
+    "type": "local",
+    "command": ["npx", "-y", "mcp-searxng-public"],
+    "environment": {
+      "SEARXNG_BASE_URL": "{env:SEARXNG_BASE_URL}"
+    }
+  }
+}
+
+// The generated OpenCode defaults are:
+// "model": "inferdeck/normal"
+// "small_model": "inferdeck/small-model"
+// Their model limits come from live /api/inferdeck/v1/models metadata.
+// Generation warns when OpenCode does not support the custom compaction fields.
+// Configure experimental.mcp_timeout in the generated root config for MCP calls.
+

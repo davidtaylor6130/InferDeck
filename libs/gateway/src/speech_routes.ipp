@@ -150,10 +150,11 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
     const auto input_characters = utf8_character_count(request.input);
     const auto observation = observe_request(
         req, resp, deps, "audio_speech", request.format != "wav");
-    if (wav_runtime && request.format != "wav" && request.format != "pcm") {
+    if (wav_runtime && request.format != "wav" && request.format != "pcm" &&
+        !(info->runtime == "sherpa_onnx" && request.format == "mp3")) {
         write_error(resp, 400, "unsupported_capability",
                     "model '" + resolved_model->resolved +
-                        "' supports wav and pcm speech output only",
+                        "' does not support that speech output format",
                     "response_format");
         return;
     }

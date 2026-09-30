@@ -6,6 +6,7 @@ add_executable(sanitizer_tests
 
 add_executable(route_tests
     test_routes.cpp
+    test_gpu_backend.cpp
     test_model_store.cpp
     test_dashboard_config_routes.cpp
     test_config_repository.cpp
@@ -13,6 +14,8 @@ add_executable(route_tests
 
 add_executable(auth_tests
     test_auth.cpp
+    test_api_key_store.cpp
+    test_background_lease.cpp
     test_shutdown_state.cpp
 )
 

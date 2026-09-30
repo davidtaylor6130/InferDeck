@@ -47,8 +47,11 @@ capacity eviction.
 ## Admission and lifecycle
 
 Slot leases are coordinator-owned and idempotently released. An explicit
-admission pool applies its concurrency limit across every member model. Queue
-waiting, lifecycle-lock acquisition, capacity resize, eviction, drain, unload,
+admission pool applies its concurrency limit across fixed-capacity member models.
+A llama.cpp model opting into `concurrency_auto` uses its hardware-fitted sequence
+capacity instead of that pool limit; shared KV admission still checks each request's
+prompt/output budget. Leave automatic concurrency disabled when a fixed shared
+quota or a single-request exclusive profile is required. Queue waiting, lifecycle-lock acquisition, capacity resize, eviction, drain, unload,
 and load receive one steady-clock deadline and cancellation predicate.
 Rollback uses a separate bounded recovery window so expiry of the failed
 operation cannot suppress restoration. llama.cpp model loading connects the
@@ -57,6 +60,16 @@ operation predicate to its native progress callback.
 Backends must implement the lifecycle-control overloads when an operation can
 block. The compatibility overload checks before and after synchronous work,
 but cannot interrupt an opaque third-party call by itself.
+
+GPU capacity admission prefers a fresh observed used/total VRAM sample. It
+reserves the configured safety margin plus any lazy runtime allocation not yet
+represented in that sample. Live headroom is accepted only when every resident
+GPU runtime reports complete accounting. Invalid or lifecycle-invalidated
+telemetry falls back to declared model footprints. With fresh telemetry and an
+incomplete runtime, the lower of declared availability and observed headroom
+with that runtime's full declared footprint reserved is used.
+Models in different admission pools may execute concurrently once resident;
+native load, resize, and eviction operations remain serialized.
 
 ## Voice sessions
 
@@ -79,3 +92,9 @@ Needle remains disabled until upstream supplies an MSVC-compatible pinned
 library with complete runtime dependencies, or source that builds within the
 pinned InferDeck toolchain. Issue #99 records artifact sizes, symbols, hashes,
 and upstream links. No Needle artifact is shipped by InferDeck Core.
+
+## Request demand and idle growth
+
+A resident llama.cpp request is rendered and tokenized before lease acquisition. Its context and sequence demand is retained while queued, while active leases retain their own reservations. Fitting requests acquire normally and can run together. Growth is performed only after active leases finish, because context recreation clears KV and recurrent caches. Context growth is geometric and bounded by the configured model context, native sequence limit, batch capacity, and actual allocation result. An unspecified `max_tokens` reserves the remaining requested context budget. For `concurrency_auto`, status `slots` reports currently allocated sequences. Idle reclamation can reduce the context pool to its initial batch-sized minimum; recreation discards retained caches.
+
+If a native model load runs out of memory after admission, managed loading can reclaim an idle context and retry once under the original deadline. This retry does not evict another model.

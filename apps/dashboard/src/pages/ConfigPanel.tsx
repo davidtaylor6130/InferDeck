@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { getConfig, resetActiveConfig, waitForStableConfig, type ConfigDocument } from '../api';
 import { Badge, Button, Panel } from '../components/ui';
+import { VramReserveSettings } from '../components/VramReserveSettings';
 
 export const ConfigPanel: React.FC = () => {
   const [config, setConfig] = useState<ConfigDocument | null>(null);
@@ -44,7 +45,9 @@ export const ConfigPanel: React.FC = () => {
   };
 
   return (
-    <Panel>
+    <>
+      <VramReserveSettings />
+      <Panel>
       <details>
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-base font-semibold text-text-primary">
           <span>
@@ -100,6 +103,7 @@ export const ConfigPanel: React.FC = () => {
           </div>
         </div>
       </details>
-    </Panel>
+      </Panel>
+    </>
   );
 };

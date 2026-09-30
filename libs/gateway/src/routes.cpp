@@ -3,6 +3,7 @@
 #include "gateway/openai_adapter.hpp"
 #include "gateway/openai_error.hpp"
 #include "gateway/generation_session.hpp"
+#include "gateway/gpu_backend.hpp"
 #include "gateway/request_id.hpp"
 #include "gateway/streaming_sanitizer.hpp"
 #include "foundation/logging.hpp"
@@ -54,7 +55,16 @@ RequestObservation observe_request(const httplib::Request& req,
     if (observation.request_id.empty()) {
         observation.request_id = request_id(header_value(req, "X-Request-Id"));
     }
-    observation.principal_class = "openai_data_plane";
+    const auto authorization = header_value(req, "Authorization");
+    observation.principal_class =
+        deps.api_keys && deps.api_keys->authenticate_bearer(authorization)
+            ? "managed_api_key" : "openai_data_plane";
+    if (deps.api_keys) {
+        if (const auto key = deps.api_keys->authenticate_bearer(authorization)) {
+            observation.api_key_id = key->id;
+            observation.api_key_name = key->name;
+        }
+    }
     observation.endpoint = req.path;
     observation.protocol_profile =
         deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative
@@ -81,6 +91,8 @@ void record_request(observability::Metrics* metrics,
     rec.resolved_model = resolved_model_name.empty() ? rec.model : resolved_model_name;
     rec.request_id = observation.request_id;
     rec.principal_class = observation.principal_class;
+    rec.api_key_id = observation.api_key_id;
+    rec.api_key_name = observation.api_key_name;
     rec.endpoint = observation.endpoint;
     rec.protocol_profile = observation.protocol_profile;
     rec.modality = observation.modality;
@@ -107,6 +119,13 @@ void record_request(observability::Metrics* metrics,
     rec.prompt_tokens_per_second = rec.prompt_duration_ms > 0.0
         ? rec.cache_write_tokens * 1000.0 / rec.prompt_duration_ms
         : 0.0;
+    if (rec.modality == "text" && status_code >= 200 && status_code < 300 &&
+        rec.error_code.empty() && result.prompt_decode_tokens > 0 &&
+        result.prompt_decode_tokens == rec.cache_write_tokens &&
+        std::isfinite(result.prompt_decode_duration_ms) && result.prompt_decode_duration_ms > 0.0) {
+        rec.prompt_decode_tokens = result.prompt_decode_tokens;
+        rec.prompt_decode_duration_ms = result.prompt_decode_duration_ms;
+    }
     rec.queue_duration_ms = std::max(0.0, observation.queue_duration_ms);
     rec.swap_load_duration_ms = std::max(0.0, observation.swap_load_duration_ms);
     rec.first_token_duration_ms = result.first_token_duration_ms > 0.0f
@@ -142,6 +161,8 @@ void record_request(observability::Metrics* metrics,
             {"timestampUnixMs", rec.timestamp_unix_ms},
             {"requestId", rec.request_id},
             {"principalClass", rec.principal_class},
+            {"apiKeyId", rec.api_key_id},
+            {"apiKeyName", rec.api_key_name},
             {"endpoint", rec.endpoint},
             {"protocolProfile", rec.protocol_profile},
             {"modality", rec.modality},
@@ -158,6 +179,8 @@ void record_request(observability::Metrics* metrics,
             {"durationMs", rec.duration_ms},
             {"generationDurationMs", rec.generation_duration_ms},
             {"promptDurationMs", rec.prompt_duration_ms},
+            {"promptDecodeDurationMs", rec.prompt_decode_duration_ms},
+            {"promptDecodeTokens", rec.prompt_decode_tokens},
             {"firstTokenDurationMs", rec.first_token_duration_ms},
             {"queueDurationMs", rec.queue_duration_ms},
             {"swapLoadDurationMs", rec.swap_load_duration_ms},
@@ -206,7 +229,8 @@ void record_swap(const GatewayDeps& deps,
                  const std::string& to_model,
                  double duration_ms,
                  bool success,
-                 const std::string& error) {
+                 const std::string& error,
+                 const SwapAttribution& attribution = {}) {
     observability::SwapRecord rec;
     rec.timestamp_unix_ms = now_ms();
     rec.from_model = from_model;
@@ -214,6 +238,10 @@ void record_swap(const GatewayDeps& deps,
     rec.duration_ms = duration_ms;
     rec.success = success;
     rec.error = error;
+    rec.requested_model = attribution.requested_model;
+    rec.request_id = attribution.request_id;
+    rec.api_key_id = attribution.api_key_id;
+    rec.api_key_name = attribution.api_key_name;
     if (deps.metrics) deps.metrics->record_swap(rec);
     if (deps.stats_db) {
         deps.stats_db->record_swap({
@@ -222,14 +250,19 @@ void record_swap(const GatewayDeps& deps,
             rec.to_model,
             rec.duration_ms,
             rec.success,
-            rec.error
+            rec.error,
+            rec.requested_model,
+            rec.request_id,
+            rec.api_key_id,
+            rec.api_key_name
         });
     }
 }
 
 void publish_model_event(const GatewayDeps& deps, const std::string& state,
                          const std::string& from, const std::string& to,
-                         double duration_ms, const std::string& error) {
+                         double duration_ms, const std::string& error,
+                         const SwapAttribution& attribution = {}) {
     if (!deps.events) return;
     deps.events->publish("model", nlohmann::json{
         {"state", state},
@@ -238,13 +271,18 @@ void publish_model_event(const GatewayDeps& deps, const std::string& state,
         {"durationMs", duration_ms},
         {"error", error},
         {"timestampUnixMs", now_ms()},
+        {"requestedModel", attribution.requested_model},
+        {"requestId", attribution.request_id},
+        {"apiKeyId", attribution.api_key_id},
+        {"apiKeyName", attribution.api_key_name},
     }.dump());
 }
 
 foundation::Result<void> perform_swap(const GatewayDeps& deps,
                                       const std::string& from,
                                       const std::string& target,
-                                      bool defer_resource_busy) {
+                                      bool defer_resource_busy,
+                                      const SwapAttribution& attribution) {
     LOG_INFO("swap_start", "from={} to={}", from, target);
     const auto start = std::chrono::steady_clock::now();
     foundation::Result<void> result;
@@ -265,11 +303,11 @@ foundation::Result<void> perform_swap(const GatewayDeps& deps,
     LOG_INFO("swap_complete", "to={} success={} duration_ms={} error={}",
              target, result.has_value(), elapsed, error);
     if (!deferred) {
-        record_swap(deps, from, target, elapsed, result.has_value(), error);
+        record_swap(deps, from, target, elapsed, result.has_value(), error, attribution);
     }
     publish_model_event(deps, result ? "ready" :
         (cancelled ? "cancelled" : deferred ? "waiting" : "failed"),
-                        from, target, elapsed, error);
+                        from, target, elapsed, error, attribution);
     if (deps.swap_tracker) {
         deps.swap_tracker->end(
             result.has_value(), error, cancelled,
@@ -346,7 +384,21 @@ std::string request_client_key(const httplib::Request& req) {
     if (!authorization.starts_with("Bearer ") || authorization.size() <= 7) {
         return {};
     }
-    return authorization.substr(7) + '\x1f' + session;
+    const std::string principal =
+        "credential:" + credential_fingerprint(authorization);
+    if (principal.ends_with(':')) return {};
+    return principal + '\x1f' + session;
+}
+
+std::string request_client_key(const httplib::Request& req,
+                               const GatewayDeps& deps) {
+    const auto fallback = request_client_key(req);
+    if (fallback.empty() || !deps.api_keys) return fallback;
+    const auto managed = deps.api_keys->authenticate_bearer(
+        header_value(req, "Authorization"));
+    if (!managed) return fallback;
+    return "api-key:" + managed->id + '\x1f' +
+        header_value(req, "X-InferDeck-Voice-Session");
 }
 
 bool require_json_media_type(const httplib::Request& req,
@@ -408,7 +460,8 @@ bool maintenance_blocks_model(const GatewayDeps& deps,
 }
 
 SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& model_name,
-                                 bool defer_resource_busy) {
+                                 bool defer_resource_busy,
+                                 SwapAttribution attribution) {
     const auto resolved = resolve_model_name(deps, model_name);
     if (!resolved) {
         return {404, make_error_json(404, "model_not_found",
@@ -418,7 +471,7 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
     if (maintenance_blocks_model(deps, target_name)) {
         return {503, make_error_json(
             503, "maintenance_mode",
-            "measured model optimization is using the same compute resource; retry after it restores the active profile")};
+            "maintenance work is using the same compute resource; retry when maintenance finishes")};
     }
     const auto info = deps.coordinator.registry().get_info_result(target_name);
     if (!info || !deps.coordinator.registry().has_factory(info->runtime)) {
@@ -428,7 +481,13 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
                 (info ? info->runtime : std::string("unknown")))};
     }
     auto current = deps.coordinator.get_loaded_model();
-    if (deps.coordinator.is_loaded(target_name)) {
+    if (info) {
+        if (const auto backend_error = validate_model_compute(*info); backend_error) {
+            return {503, make_error_json(
+                503, "backend_mismatch", *backend_error)};
+        }
+    }
+    if (deps.coordinator.is_ready(target_name)) {
         return {200, {{"status", "ready"},
                       {"model", model_name},
                       {"resolved_model", target_name},
@@ -441,13 +500,14 @@ SwapStartResult start_swap_async(const GatewayDeps& deps, const std::string& mod
     }
 
     GatewayDeps deps_copy = deps;
+    const SwapAttribution attribution_copy = std::move(attribution);
     const std::string from = current.value_or("");
     std::string launch_error;
     const auto start_result = deps.swap_tracker->start(
         from, target_name, now_ms(),
-        [deps_copy, from, target_name, defer_resource_busy]() {
-            publish_model_event(deps_copy, "swapping", from, target_name, 0.0, "");
-            (void)perform_swap(deps_copy, from, target_name, defer_resource_busy);
+        [deps_copy, from, target_name, defer_resource_busy, attribution_copy]() {
+            publish_model_event(deps_copy, "swapping", from, target_name, 0.0, "", attribution_copy);
+            (void)perform_swap(deps_copy, from, target_name, defer_resource_busy, attribution_copy);
         },
         launch_error);
     if (start_result == SwapTracker::StartResult::Busy) {
@@ -477,13 +537,14 @@ EnsureLoadedResult ensure_model_loaded(const GatewayDeps& deps,
 EnsureLoadedResult ensure_model_loaded(
     const GatewayDeps& deps, const std::string& model_name,
     std::chrono::steady_clock::time_point deadline,
-    const std::function<bool()>& cancelled) {
+    const std::function<bool()>& cancelled,
+    SwapAttribution attribution) {
     if (maintenance_blocks_model(deps, model_name)) {
         return {false, 503, "maintenance_mode",
-                "measured model optimization is using the same compute resource; retry after it restores the active profile",
+                "maintenance work is using the same compute resource; retry when maintenance finishes",
                 foundation::ErrorCode::Unavailable};
     }
-    if (deps.coordinator.is_loaded(model_name)) {
+    if (deps.coordinator.is_ready(model_name)) {
         return {true, 200, "", "", foundation::ErrorCode::Ok};
     }
     if (!deps.auto_swap) {
@@ -523,17 +584,17 @@ EnsureLoadedResult ensure_model_loaded(
                     "request cancelled while loading model: " + model_name,
                     foundation::ErrorCode::Cancelled};
         }
-        if (deps.coordinator.is_loaded(model_name)) {
+        if (deps.coordinator.is_ready(model_name)) {
             return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
 
-        auto started = start_swap_async(deps, model_name, true);
+        auto started = start_swap_async(deps, model_name, true, attribution);
         if (started.status != 200 && started.status != 202 &&
             started.status != 409) {
             return swap_start_error(started);
         }
 
-        if (deps.coordinator.is_loaded(model_name)) {
+        if (deps.coordinator.is_ready(model_name)) {
             return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
         const auto wait_deadline = std::min(
@@ -542,7 +603,7 @@ EnsureLoadedResult ensure_model_loaded(
             continue;
         }
 
-        if (deps.coordinator.is_loaded(model_name)) {
+        if (deps.coordinator.is_ready(model_name)) {
             return {true, 200, "", "", foundation::ErrorCode::Ok};
         }
         const auto snap = deps.swap_tracker->snapshot();
@@ -628,6 +689,8 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
             {"memory_required_mb", resident.memory_required_mb},
             {"eviction_eligible", resident.eviction_eligible},
             {"slots", resident.slots},
+            {"concurrency_auto", resident.concurrency_auto},
+            {"context_pool_capacity", resident.context_pool_capacity},
             {"free_slots", resident.free_slots},
             {"active_requests", resident.active_requests},
             {"estimated_vram_mb", resident.estimated_vram_mb},

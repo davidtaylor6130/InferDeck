@@ -15,7 +15,35 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 option(INFERDECK_BUILD_TESTS "Build tests" OFF)
+option(INFERDECK_VLLM_RADIANCE_ENABLE "Build the optional in-process vLLM Radiance runtime" OFF)
 option(INFERDECK_BUILD_WASM "Build WASM module" OFF)
+set(INFERDECK_STABLE_DIFFUSION_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/stable-diffusion.cpp"
+    CACHE PATH "stable-diffusion.cpp source tree")
+option(INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP
+       "Fail configuration when stable-diffusion.cpp is unavailable" OFF)
+set(INFERDECK_ACESTEP_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/acestep.cpp"
+    CACHE PATH "ACE-Step C++ source tree")
+option(INFERDECK_REQUIRE_ACESTEP_CPP
+       "Fail configuration when ACE-Step C++ is unavailable" OFF)
+
+if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" OR
+   EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
+    add_compile_definitions(GGML_MAX_NAME=128)
+endif()
+if(NOT EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" AND
+   INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP)
+    message(FATAL_ERROR
+            "stable-diffusion.cpp is required but unavailable: "
+            "${INFERDECK_STABLE_DIFFUSION_ROOT}")
+endif()
+if(NOT EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp" AND
+   INFERDECK_REQUIRE_ACESTEP_CPP)
+    message(FATAL_ERROR
+            "ACE-Step C++ is required but unavailable: "
+            "${INFERDECK_ACESTEP_ROOT}")
+endif()
 
 if(INFERDECK_BUILD_TESTS)
     enable_testing()
@@ -45,12 +73,26 @@ set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_UI OFF CACHE BOOL "" FORCE)
-set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+set(LLAMA_SUBPROCESS OFF CACHE BOOL "" FORCE)
+set(MTMD_VIDEO OFF CACHE BOOL "" FORCE)
+set(INFERDECK_GPU_BACKEND "VULKAN" CACHE STRING "GPU backend: VULKAN or HIP")
+set_property(CACHE INFERDECK_GPU_BACKEND PROPERTY STRINGS VULKAN HIP)
+if(NOT INFERDECK_GPU_BACKEND STREQUAL "VULKAN" AND NOT INFERDECK_GPU_BACKEND STREQUAL "HIP")
+    message(FATAL_ERROR "INFERDECK_GPU_BACKEND must be VULKAN or HIP; received ${INFERDECK_GPU_BACKEND}")
+endif()
+if(INFERDECK_GPU_BACKEND STREQUAL "HIP")
+    set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+    set(GGML_HIP ON CACHE BOOL "" FORCE)
+else()
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+    set(GGML_HIP OFF CACHE BOOL "" FORCE)
+endif()
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
-set(GGML_HIP OFF CACHE BOOL "" FORCE)
 set(GGML_SYCL OFF CACHE BOOL "" FORCE)
 set(GGML_METAL OFF CACHE BOOL "" FORCE)
+add_compile_definitions(INFERDECK_COMPILED_GPU_BACKEND="${INFERDECK_GPU_BACKEND}")
 
+if(INFERDECK_GPU_BACKEND STREQUAL "VULKAN")
 set(INFERDECK_VULKAN_SDK_VERSION "1.4.309.0" CACHE STRING "Required Vulkan SDK version")
 set(INFERDECK_VULKAN_SDK_ROOT "" CACHE PATH "Validated Vulkan SDK root override")
 if(INFERDECK_VULKAN_SDK_ROOT)
@@ -87,6 +129,8 @@ if (NOT TARGET Vulkan::Vulkan)
         IMPORTED_LOCATION "${_vulkan_root}/Bin/vulkan-1.dll"
         INTERFACE_INCLUDE_DIRECTORIES "${_vulkan_root}/Include"
     )
+endif()
+
 endif()
 
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
@@ -130,6 +174,9 @@ if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests/parity)
 endif()
 add_subdirectory(libs/llama_cpp_wrapper)
+if(INFERDECK_VLLM_RADIANCE_ENABLE)
+    add_subdirectory(libs/vllm_radiance_wrapper)
+endif()
 add_subdirectory(apps/inferdeck-gateway)
 add_subdirectory(apps/model-tester)
 

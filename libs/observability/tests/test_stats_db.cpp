@@ -129,7 +129,7 @@ TEST_CASE("StatsDb: existing token ledger is migrated without losing history",
   REQUIRE(sqlite3_prepare_v2(migrated_raw, "PRAGMA user_version;", -1,
                              &version, nullptr) == SQLITE_OK);
   REQUIRE(sqlite3_step(version) == SQLITE_ROW);
-  CHECK(sqlite3_column_int(version, 0) == 2);
+  CHECK(sqlite3_column_int(version, 0) == 5);
   sqlite3_finalize(version);
   sqlite3_close(migrated_raw);
   const auto rows = migrated.recent_requests(10);
@@ -281,7 +281,7 @@ TEST_CASE("StatsDb: record_swap persists and round-trips", "[observability][stat
   const auto path = (dir / "stats.db").string();
   StatsDb db(path);
   REQUIRE(db.healthy());
-  db.record_swap({1, "qwen3.6-27b", "qwen3-coder-next", 1500.0, true, ""});
+  db.record_swap({1, "qwen3.6-27b", "qwen3-coder-next", 1500.0, true, "", "qwen-alias", "req-swap", "key-id", "CLI owner"});
   db.record_swap({2, "qwen3-coder-next", "qwen3.6-27b", 0.0, false, "model_not_registered"});
   auto rows = db.recent_swaps(10);
   REQUIRE(rows.size() == 2);
@@ -292,6 +292,15 @@ TEST_CASE("StatsDb: record_swap persists and round-trips", "[observability][stat
   REQUIRE(rows[1].to_model == "qwen3-coder-next");
   REQUIRE(rows[1].success);
   REQUIRE(rows[1].duration_ms == 1500.0);
+  CHECK(rows[1].requested_model == "qwen-alias");
+  CHECK(rows[1].request_id == "req-swap");
+  CHECK(rows[1].api_key_id == "key-id");
+  CHECK(rows[1].api_key_name == "CLI owner");
+  StatsDb reopened(path);
+  const auto reopened_rows = reopened.recent_swaps(10);
+  REQUIRE(reopened_rows.size() == 2);
+  CHECK(reopened_rows[1].request_id == "req-swap");
+  CHECK(reopened_rows[1].api_key_name == "CLI owner");
 }
 
 TEST_CASE("StatsDb: recent_requests honors limit", "[observability][stats]") {
@@ -338,6 +347,8 @@ TEST_CASE("StatsDb: canonical request dimensions round-trip",
   row.resolved_model = "real-model";
   row.request_id = "req-canonical";
   row.principal_class = "openai_data_plane";
+  row.api_key_id = "key-test-id";
+  row.api_key_name = "CLI agent";
   row.endpoint = "/v1/chat/completions";
   row.protocol_profile = "strict_openai";
   row.modality = "text";
@@ -370,6 +381,8 @@ TEST_CASE("StatsDb: canonical request dimensions round-trip",
   REQUIRE(rows.size() == 1);
   CHECK(rows[0].request_id == row.request_id);
   CHECK(rows[0].principal_class == row.principal_class);
+  CHECK(rows[0].api_key_id == row.api_key_id);
+  CHECK(rows[0].api_key_name == row.api_key_name);
   CHECK(rows[0].endpoint == row.endpoint);
   CHECK(rows[0].protocol_profile == row.protocol_profile);
   CHECK(rows[0].modality == row.modality);
@@ -383,6 +396,36 @@ TEST_CASE("StatsDb: canonical request dimensions round-trip",
   CHECK(rows[0].output_audio_seconds == Catch::Approx(8.0));
   CHECK(rows[0].input_image_count == 10);
   CHECK(rows[0].output_image_count == 11);
+
+  RequestRow failed_output = row;
+  failed_output.timestamp_unix_ms = 1235;
+  failed_output.status_code = 500;
+  failed_output.generation_duration_ms = 50.0;
+  failed_output.output_audio_seconds = 80.0;
+  failed_output.input_image_count = 0;
+  failed_output.output_image_count = 110;
+  db.record_request(failed_output);
+
+  const auto usage = db.model_usage();
+  REQUIRE(usage.size() == 1);
+  CHECK(usage[0].output_audio_seconds == Catch::Approx(8.0));
+  CHECK(usage[0].input_image_count == 10);
+  CHECK(usage[0].output_image_count == 11);
+  CHECK(usage[0].total_generation_duration_ms == Catch::Approx(5.0));
+
+  const auto monthly = db.monthly_usage();
+  REQUIRE(monthly.size() == 1);
+  CHECK(monthly[0].output_audio_seconds == Catch::Approx(8.0));
+  CHECK(monthly[0].input_image_count == 10);
+  CHECK(monthly[0].output_image_count == 11);
+  CHECK(monthly[0].generation_duration_ms == Catch::Approx(5.0));
+
+  const auto daily = db.daily_usage(0);
+  REQUIRE(daily.size() == 1);
+  CHECK(daily[0].output_audio_seconds == Catch::Approx(8.0));
+  CHECK(daily[0].input_image_count == 10);
+  CHECK(daily[0].output_image_count == 11);
+  CHECK(daily[0].generation_duration_ms == Catch::Approx(5.0));
 }
 
 TEST_CASE("StatsDb: failed schema migration rolls back",
@@ -434,4 +477,91 @@ TEST_CASE("StatsDb: recent requests filter by profile and endpoint",
   CHECK(response_rows[0].model == "derivative");
   CHECK(db.recent_requests(10, "strict_openai",
       "/compat/openai-derivative/v1/responses").empty());
+}
+
+TEST_CASE("StatsDb: transient write contention does not disable later history",
+          "[observability][stats][recovery]")
+{
+  const std::filesystem::path directory = test_helpers::make_temp_dir("statsdb_busy");
+  const std::string path = (directory / "stats.db").string();
+  StatsDb db(path);
+  db.record_request({1000, "existing", 10, 20, 500.0, 40.0, 200, 0});
+  const std::shared_ptr<const DashboardStatsSnapshot> before = db.dashboard_snapshot();
+  sqlite3* raw = nullptr;
+  REQUIRE(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+  const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> blocker(raw, sqlite3_close);
+  REQUIRE(sqlite3_exec(raw, "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) == SQLITE_OK);
+  SECTION("request write")
+  {
+    db.record_request({2000, "blocked", 1, 1, 1.0, 1.0, 200, 0});
+  }
+  SECTION("swap write")
+  {
+    db.record_swap({2000, "existing", "blocked", 1.0, false, ""});
+  }
+  CHECK(db.healthy());
+  CHECK(db.dashboard_snapshot() == before);
+  REQUIRE(sqlite3_exec(raw, "ROLLBACK;", nullptr, nullptr, nullptr) == SQLITE_OK);
+  db.record_request({3000, "recovered", 1, 1, 1.0, 1.0, 200, 0});
+  db.record_swap({3000, "existing", "recovered", 1.0, true, ""});
+  CHECK(db.healthy());
+  CHECK(db.recent_requests().size() == 2);
+  REQUIRE(db.recent_swaps().size() == 1);
+  CHECK(db.recent_swaps()[0].to_model == "recovered");
+  CHECK(db.dashboard_snapshot() != before);
+}
+
+TEST_CASE("StatsDb: dashboard snapshot reuses and invalidates consistent aggregates",
+          "[observability][stats][snapshot]")
+{
+  StatsDb db(":memory:");
+  const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  db.record_request({now, "first", 100, 20, 30.0, 1.0, 200, 0,
+                     0.0, 0, 75, 20.0, 10.0, 2500.0});
+  const std::shared_ptr<const DashboardStatsSnapshot> first = db.dashboard_snapshot();
+  CHECK(db.dashboard_snapshot() == first);
+  REQUIRE(first->models.size() == 1);
+  REQUIRE(first->daily.size() == 1);
+  REQUIRE(first->monthly.size() == 1);
+  REQUIRE(first->hourly.size() == 1);
+  CHECK(first->models[0].cached_prompt_tokens == first->daily[0].cached_prompt_tokens);
+  CHECK(first->models[0].total_generation_duration_ms == first->monthly[0].generation_duration_ms);
+  CHECK(first->models[0].measured_prompt_tokens == first->hourly[0].measured_prompt_tokens);
+  db.record_request({now, "new-model", 7, 3, 1.0, 1.0, 200, 0});
+  const std::shared_ptr<const DashboardStatsSnapshot> second = db.dashboard_snapshot();
+  CHECK(second != first);
+  CHECK(first->models.size() == 1);
+  CHECK(second->models.size() == 2);
+  CHECK(second->monthly.size() == 2);
+  CHECK(second->daily.size() == 2);
+  CHECK(second->hourly.size() == 2);
+  CHECK(second->recent.size() == 2);
+}
+
+TEST_CASE("StatsDb: concurrent new models cannot split dashboard snapshots",
+          "[observability][stats][snapshot][concurrency]")
+{
+  StatsDb db(":memory:");
+  std::atomic<bool> started{false};
+  std::jthread writer([&]
+  {
+    while (!started.load()) std::this_thread::yield();
+    for (int index = 0; index < 40; ++index)
+    {
+      db.record_request({1000 + index, "model-" + std::to_string(index),
+                         10, 20, 1.0, 1.0, 200, 0});
+      std::this_thread::yield();
+    }
+  });
+  started = true;
+  for (int iteration = 0; iteration < 40; ++iteration)
+  {
+    const std::shared_ptr<const DashboardStatsSnapshot> snapshot = db.dashboard_snapshot();
+    CHECK(snapshot->models.size() == snapshot->monthly.size());
+    CHECK(snapshot->models.size() == snapshot->recent.size());
+    std::this_thread::yield();
+  }
+  writer.join();
+  CHECK(db.dashboard_snapshot()->models.size() == 40);
 }

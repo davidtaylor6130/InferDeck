@@ -24,6 +24,8 @@ export interface ModelInfo {
   context_size: number;
   vram_required_mb: number;
   n_slots: number;
+  concurrency_auto?: boolean;
+  context_pool_capacity?: number;
   has_vision: boolean;
   loaded: boolean;
   primary?: boolean;
@@ -129,8 +131,12 @@ export interface UsageRow {
   peakPromptTokensPerSecond?: number;
   avgPromptTokensPerSecond?: number;
   lastTimestampUnixMs: number;
+  generationDurationMs?: number;
   inputAudioSeconds?: number;
   inputCharacters?: number;
+  outputAudioSeconds?: number;
+  inputImageCount?: number;
+  outputImageCount?: number;
 }
 
 export interface MonthlyUsageRow {
@@ -150,12 +156,36 @@ export interface MonthlyUsageRow {
   peakPromptTokensPerSecond?: number;
   inputAudioSeconds?: number;
   inputCharacters?: number;
+  outputAudioSeconds?: number;
+  inputImageCount?: number;
+  outputImageCount?: number;
+}
+
+export interface LiveRequest {
+  id: string;
+  model: string;
+  requestedModel: string;
+  apiKeyId: string;
+  apiKeyName: string;
+  endpoint: string;
+  priority: number;
+  slotId: number;
+  startedUnixMs: number;
+  elapsedMs: number;
+  phase: 'waiting' | 'loading' | 'prefill' | 'generating';
+  promptTokens: number;
+  processedTokens: number;
+  cachedTokens: number;
+  completionTokens: number;
+  promptTokensPerSecond: number | null;
+  tokensPerSecond: number | null;
 }
 
 export interface StatusPayload {
   status: string;
   queue: {
     running: number;
+    liveRequests?: LiveRequest[];
     queued?: number;
     gpuLocked: boolean;
     lockOwner: string;
@@ -204,6 +234,8 @@ export interface JobRecord {
   model: string;
   resolvedModel?: string;
   principalClass?: string;
+  apiKeyId?: string;
+  apiKeyName?: string;
   endpoint?: string;
   protocolProfile?: string;
   modality?: string;

@@ -1,0 +1,19 @@
+{
+  "name": "@inferdeck/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "InferDeck MCP discovery, OpenCode configuration and media tools",
+  "scripts": {
+    "start": "node src/index.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

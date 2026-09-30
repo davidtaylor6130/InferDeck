@@ -3,16 +3,22 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
                                           const std::string& runtime,
                                           const std::string& modality,
                                           const std::string& model_name) {
-    if (model_name.empty() || model_name.size() > 160 || safe_name(model_name) != model_name) {
+    if (model_name.empty() || model_name.size() > 160 || model_name.back() == '.' ||
+        safe_name(model_name) != model_name) {
         return Err<std::uint64_t>(ErrorCode::InvalidArgument, "invalid model name");
     }
     std::vector<StoreFile> artifacts;
-    if (runtime == "sherpa_onnx") {
-        if (filename != sherpa_bundle_name) {
+    if (runtime == "sherpa_onnx" || runtime == "ace_step_cpp" || runtime == "ltx_video_cpp") {
+        const bool valid_bundle = runtime == "sherpa_onnx"
+            ? filename == sherpa_bundle_name
+            : runtime == "ltx_video_cpp"
+                ? filename == "__inferdeck_ltx_bundle__"
+                : ace_step_bundle_dit(filename).has_value();
+        if (!valid_bundle) {
             return Err<std::uint64_t>(ErrorCode::InvalidArgument,
-                                      "sherpa-onnx models must be installed as a complete bundle");
+                                      "multi-artifact runtime models must be installed as a complete bundle");
         }
-        auto bundle = resolve_bundle(repo, runtime, modality);
+        auto bundle = resolve_bundle(repo, runtime, modality, filename);
         if (!bundle) return Err<std::uint64_t>(bundle.error().code, bundle.error().message);
         artifacts = std::move(*bundle);
     } else {
@@ -52,6 +58,20 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
                 ErrorCode::AlreadyExists,
                 "model name is already installed, registered, or being installed");
         }
+#ifdef _WIN32
+        for (const auto& [name, _] : reserved_names_) {
+            if (lower(name) == lower(model_name)) {
+                return Err<std::uint64_t>(ErrorCode::AlreadyExists,
+                    "model name collides with an active installation on Windows");
+            }
+        }
+        for (const auto& entry : installed_.items()) {
+            if (lower(entry.key()) == lower(model_name)) {
+                return Err<std::uint64_t>(ErrorCode::AlreadyExists,
+                    "model name collides with an installed model on Windows");
+            }
+        }
+#endif
         id = next_id_++;
         reserved_names_.emplace(model_name, id);
         StoreDownload job;
@@ -117,6 +137,20 @@ Result<void> ModelStore::start(std::uint64_t id) {
                 ErrorCode::AlreadyExists,
                 "model name is already installed, registered, or being installed");
         }
+#ifdef _WIN32
+        for (const auto& [name, owner] : reserved_names_) {
+            if (owner != id && lower(name) == lower(job->second.model_name)) {
+                return Err<void>(ErrorCode::AlreadyExists,
+                    "model name collides with an active installation on Windows");
+            }
+        }
+        for (const auto& entry : installed_.items()) {
+            if (lower(entry.key()) == lower(job->second.model_name)) {
+                return Err<void>(ErrorCode::AlreadyExists,
+                    "model name collides with an installed model on Windows");
+            }
+        }
+#endif
         if (auto worker = workers_.find(id); worker != workers_.end()) {
             previous = std::move(worker->second);
             workers_.erase(worker);
@@ -177,6 +211,7 @@ void ModelStore::finish_job(std::uint64_t id, std::string state,
     std::lock_guard lock(mutex_);
     const auto job = downloads_.find(id);
     if (job == downloads_.end()) return;
+    committing_installs_.erase(id);
     job->second.state = std::move(state);
     job->second.error = std::move(error);
     const auto reservation = reserved_names_.find(job->second.model_name);
@@ -239,7 +274,7 @@ void ModelStore::run(std::uint64_t id) {
         return;
     }
     const std::filesystem::path directory = root_ / safe_name(job.file.runtime) /
-                                            safe_name(job.file.repo);
+                                            safe_name(job.file.repo) / safe_name(job.model_name);
     std::filesystem::create_directories(directory);
     const std::filesystem::path final_path = directory / safe_name(std::filesystem::path(job.file.name).filename().string());
     const std::filesystem::path partial_path = final_path.string() + ".partial";
@@ -287,7 +322,11 @@ void ModelStore::run(std::uint64_t id) {
                    "downloaded size does not match source metadata");
         return;
     }
-    auto checksum = sha256_file(partial_path);
+    auto checksum = sha256_file(partial_path, cancelled);
+    if (!checksum && checksum.error().code == ErrorCode::Cancelled) {
+        finish_job(id, "cancelled", checksum.error().message);
+        return;
+    }
     if (!checksum || lower(*checksum) != lower(job.file.sha256)) {
         std::error_code ignored;
         std::filesystem::remove(partial_path, ignored);
@@ -295,6 +334,15 @@ void ModelStore::run(std::uint64_t id) {
             id, "failed",
             checksum ? "downloaded checksum does not match source metadata"
                      : checksum.error().message);
+        return;
+    }
+    const auto commit = begin_install_commit(id);
+    if (!commit) {
+        finish_job(id, "cancelled", commit.error().message);
+        return;
+    }
+    if (std::filesystem::exists(final_path)) {
+        finish_job(id, "failed", "model artifact destination already exists");
         return;
     }
     auto finalized = replace_file(partial_path, final_path);
@@ -380,7 +428,11 @@ void ModelStore::run_bundle(
         }
         auto valid_existing = false;
         if (local_file_size(target) == artifact.size) {
-            const auto checksum = sha256_file(target);
+            const auto checksum = sha256_file(target, cancelled);
+            if (!checksum && checksum.error().code == ErrorCode::Cancelled) {
+                finish_job(id, "cancelled", checksum.error().message);
+                return;
+            }
             valid_existing = checksum && lower(*checksum) == lower(artifact.sha256);
         }
         if (!valid_existing) {
@@ -406,7 +458,11 @@ void ModelStore::run_bundle(
                            cancelled->load() ? "cancelled" : downloaded.error().message);
                 return;
             }
-            const auto checksum = sha256_file(partial);
+            const auto checksum = sha256_file(partial, cancelled);
+            if (!checksum && checksum.error().code == ErrorCode::Cancelled) {
+                finish_job(id, "cancelled", checksum.error().message);
+                return;
+            }
             if (local_file_size(partial) != artifact.size || !checksum ||
                 lower(*checksum) != lower(artifact.sha256)) {
                 std::filesystem::remove_all(staging, error);
@@ -425,6 +481,11 @@ void ModelStore::run_bundle(
             downloads_.at(id).bytes_downloaded = completed_bytes;
         }
     }
+    const auto commit = begin_install_commit(id);
+    if (!commit) {
+        finish_job(id, "cancelled", commit.error().message);
+        return;
+    }
     std::filesystem::rename(staging, destination, error);
     if (error) {
         finish_job(id, "failed", error.message());
@@ -436,9 +497,15 @@ void ModelStore::run_bundle(
     info.runtime = job.file.runtime;
     info.modality = job.file.modality;
     info.capabilities = job.file.capabilities;
+    info.vram_required_mb = (job.file.runtime == "ace_step_cpp" || job.file.runtime == "ltx_video_cpp")
+        ? static_cast<int>((job.file.size + 1024 * 1024 - 1) /
+                           (1024 * 1024))
+        : 0;
     nlohmann::json artifact_manifest = nlohmann::json::object();
     for (const auto& artifact : job.artifacts) {
-        auto key = artifact_key(artifact.name);
+        const std::string base_key = job.file.runtime == "ltx_video_cpp"
+            ? ltx_artifact_key(artifact.name) : artifact_key(artifact.name);
+        std::string key = base_key;
         const auto extension = lower(std::filesystem::path(artifact.name).extension().string());
         if (job.file.modality == "audio_speech" && !info.artifacts.contains("model") &&
             (extension == ".onnx" || extension == ".ort") &&
@@ -447,7 +514,7 @@ void ModelStore::run_bundle(
             key = "model";
         }
         for (std::size_t suffix = 2; info.artifacts.contains(key); ++suffix) {
-            key = artifact_key(artifact.name) + "_" + std::to_string(suffix);
+            key = base_key + "_" + std::to_string(suffix);
         }
         const auto path = destination / std::filesystem::path(artifact.name).lexically_normal();
         info.artifacts[key] = path.string();
@@ -460,7 +527,7 @@ void ModelStore::run_bundle(
             {"modality", info.modality}, {"capabilities", info.capabilities},
             {"path", destination.string()}, {"size", job.file.size},
             {"artifacts", artifact_manifest}, {"artifactCount", job.artifacts.size()},
-            {"vramRequiredMb", 0}
+            {"vramRequiredMb", info.vram_required_mb}
         };
         downloads_.at(id).installed_path = destination.string();
     }
@@ -489,10 +556,27 @@ void ModelStore::run_bundle(
     finish_job(id, "installed");
 }
 
+Result<void> ModelStore::begin_install_commit(std::uint64_t id) {
+    std::lock_guard lock(mutex_);
+    if (cancellations_.at(id)->load()) {
+        return Err<void>(ErrorCode::Cancelled, "cancelled before installation");
+    }
+    committing_installs_.insert(id);
+    return Ok();
+}
+
 Result<void> ModelStore::cancel(std::uint64_t id) {
     std::lock_guard lock(mutex_);
     const auto cancel = cancellations_.find(id);
     if (cancel == cancellations_.end()) return Err<void>(ErrorCode::NotFound, "download not found");
+    if (committing_installs_.contains(id)) {
+        return Err<void>(ErrorCode::Unavailable, "model installation is being finalized");
+    }
+    const auto job = downloads_.find(id);
+    if (job == downloads_.end() ||
+        (job->second.state != "queued" && job->second.state != "downloading")) {
+        return Err<void>(ErrorCode::InvalidArgument, "model download is not running");
+    }
     cancel->second->store(true);
     return Ok();
 }

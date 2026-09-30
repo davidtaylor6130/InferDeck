@@ -117,3 +117,18 @@ TEST_CASE("Metrics media duration cannot change text throughput",
         Catch::Approx(20.0));
   CHECK(metrics.snapshot_for("tts").last_tokens_per_second == 0.0);
 }
+
+TEST_CASE("Live request tracking expires owners and removes finished requests", "[observability][metrics]") {
+    Metrics metrics;
+    auto active = std::make_shared<LiveRequest>();
+    active->api_key_name = "CLI";
+    metrics.track_request(active);
+    REQUIRE(metrics.live_requests().size() == 1);
+    CHECK(metrics.live_requests()[0]->api_key_name == "CLI");
+    active->finished.store(true);
+    CHECK(metrics.live_requests().empty());
+    auto cancelled = std::make_shared<LiveRequest>();
+    metrics.track_request(cancelled);
+    cancelled.reset();
+    CHECK(metrics.live_requests().empty());
+}

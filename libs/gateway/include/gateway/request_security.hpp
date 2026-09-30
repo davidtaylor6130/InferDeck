@@ -40,6 +40,7 @@ struct RequestPolicy {
     std::size_t max_body_bytes{0};
     ContentPolicy content{ContentPolicy::None};
     bool require_content_type{false};
+    bool allow_chunked{false};
 };
 
 inline RequestPolicy request_policy(std::string_view method,
@@ -49,7 +50,10 @@ inline RequestPolicy request_policy(std::string_view method,
         return {};
     }
     if (path == "/v1/audio/transcriptions") {
-        return {audio_body_limit, ContentPolicy::Multipart, false};
+        return {audio_body_limit, ContentPolicy::Multipart, false, true};
+    }
+    if (path == "/api/inferdeck/v1/video/generations") {
+        return {json_body_limit, ContentPolicy::Json, false};
     }
     if (path.starts_with("/api/")) {
         return {control_body_limit, ContentPolicy::Json, control_write};
@@ -78,8 +82,15 @@ inline RequestValidationStatus validate_request_headers(
     const httplib::Request& req,
     const RequestPolicy& policy) {
     const auto transfer_encoding = req.get_header_value("Transfer-Encoding");
-    if (!transfer_encoding.empty()) {
-        return RequestValidationStatus::UnsupportedTransferEncoding;
+    bool chunked = false;
+    if (req.has_header("Transfer-Encoding")) {
+        std::string encoding = transfer_encoding;
+        std::transform(encoding.begin(), encoding.end(), encoding.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        chunked = policy.allow_chunked && encoding == "chunked" &&
+                  req.headers.count("Transfer-Encoding") == 1 &&
+                  !req.has_header("Content-Length");
+        if (!chunked) return RequestValidationStatus::UnsupportedTransferEncoding;
     }
     std::size_t content_length = 0;
     const auto length = req.get_header_value("Content-Length");
@@ -96,7 +107,7 @@ inline RequestValidationStatus validate_request_headers(
     if (content_length > policy.max_body_bytes) {
         return RequestValidationStatus::PayloadTooLarge;
     }
-    if (content_length == 0 && !policy.require_content_type) {
+    if (content_length == 0 && !policy.require_content_type && !chunked) {
         return RequestValidationStatus::Allowed;
     }
     const auto media_type = normalized_media_type(req);

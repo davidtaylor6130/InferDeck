@@ -207,7 +207,7 @@ foundation::Result<ConfigCommit> ConfigRepository::reset_active(
 
 foundation::Result<ConfigCommit> ConfigRepository::transact_active(
     const std::string& expected_revision, ActiveTransform transform,
-    Rollback rollback) {
+    Rollback rollback, ReloadPolicy reload_policy) {
     std::lock_guard lock(mutex_);
     auto current = snapshot_locked();
     if (!current) return foundation::Err<ConfigCommit>(
@@ -233,7 +233,7 @@ foundation::Result<ConfigCommit> ConfigRepository::transact_active(
         if (rollback) rollback();
         return foundation::Err<ConfigCommit>(written.error().code, written.error().message);
     }
-    if (reload_) {
+    if (reload_ && reload_policy == ReloadPolicy::AfterCommit) {
         auto reloaded = reload_();
         if (!reloaded) {
             if (current->has_active) {

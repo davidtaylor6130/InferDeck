@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  authenticateDashboard, cancelProfileBenchmark, getModels, getProfileBenchmark, optimizeProfile,
-  startProfileBenchmark, waitForActiveConfig, waitForStableConfig,
+  ApiError, authenticateDashboard, isAuthenticationError, logoutDashboard, cancelProfileBenchmark, createApiKey,
+  generateImages, generateMusic, generateVideo, getApiKeys, getApiSettings, getModels, getMediaJobs, getStoreActivity,
+  getProfileBenchmark, optimizeProfile, saveApiSettings, searchStore,
+  startProfileBenchmark,
+  updateApiKey,
+  waitForActiveConfig, waitForStableConfig,
 } from './api';
 import type { ModelInfo } from './types';
 
@@ -17,7 +21,35 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('searchStore', () => {
+  it('sends the selected browse order, modality, runtime, and gated policy', async () => {
+    respondWith({ models: [] });
+
+    await searchStore(
+      '', 'stable_diffusion_cpp', 'image', 50, 'trending', false,
+    );
+
+    const fetchMock = vi.mocked(fetch);
+    const url = String(fetchMock.mock.calls[0]?.[0]);
+    expect(url).toContain('/api/inferdeck/v1/model-store/search?');
+    expect(url).toContain('q=');
+    expect(url).toContain('runtime=stable_diffusion_cpp');
+    expect(url).toContain('modality=image');
+    expect(url).toContain('sort=trending');
+    expect(url).toContain('includeGated=false');
+    expect(url).toContain('limit=50');
+  });
+});
+
 describe('getModels', () => {
+  it('uses fitted capacity and shared pool metadata rather than the configured slot hint', async () => {
+    respondWith({ models: [{ id: 'automatic', n_slots: 1, inferdeck: { residency: {
+      loaded: true, slots: 12, concurrency_auto: true, context_pool_capacity: 131072,
+    } } }] });
+    const [model] = await getModels();
+    expect(model).toMatchObject({ n_slots: 12, concurrency_auto: true, context_pool_capacity: 131072 });
+  });
+
   it('normalizes loaded residency fields while preserving registry metadata', async () => {
     respondWith({
       models: [{
@@ -119,8 +151,11 @@ describe('getModels', () => {
 });
 
 describe('dashboard authentication', () => {
-  it('exchanges the control token for an HTTP-only session', async () => {
-    const fetchMock = vi.fn(async () => ({
+  it('requests a remembered HTTP-only dashboard session', async () => {
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
       ok: true,
       status: 200,
       json: async () => ({ ok: true }),
@@ -133,7 +168,163 @@ describe('dashboard authentication', () => {
       '/api/inferdeck/v1/dashboard/session',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ token: 'local-network-secret' }),
+        body: JSON.stringify({ token: 'local-network-secret', remember: true }),
+      }),
+    );
+  });
+});
+
+describe('API access settings', () => {
+  it('uses typed control routes for public access and managed keys', async () => {
+    const responses = [
+      {
+        allowPublicTraffic: false,
+        runningAllowPublicTraffic: false,
+        publicPriority: -999999,
+        activeRevision: 'rev-a',
+        restartRequired: false,
+      },
+      {
+        ok: true,
+        allowPublicTraffic: true,
+        runningAllowPublicTraffic: false,
+        publicPriority: -999999,
+        activeRevision: 'rev-b',
+        restartRequired: false,
+        applyScheduled: true,
+      },
+      { apiKeys: [] },
+      {
+        id: 'a'.repeat(32),
+        name: 'worker',
+        prefix: 'idk_1234',
+        priority: -20,
+        createdAtUnixMs: 1,
+        updatedAtUnixMs: 1,
+        revokedAtUnixMs: null,
+        key: 'one-time-key',
+      },
+      {
+        id: 'a'.repeat(32),
+        name: 'worker',
+        prefix: 'idk_1234',
+        priority: 40,
+        createdAtUnixMs: 1,
+        updatedAtUnixMs: 2,
+        revokedAtUnixMs: null,
+      },
+    ];
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => ({
+      ok: true,
+      status: 200,
+      json: async () => responses.shift(),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect((await getApiSettings()).publicPriority).toBe(-999999);
+    expect((await saveApiSettings(true, 'rev-a')).activeRevision)
+      .toBe('rev-b');
+    expect(await getApiKeys()).toEqual([]);
+    expect((await createApiKey('worker', -20)).key).toBe('one-time-key');
+    expect((await updateApiKey('a'.repeat(32), 'worker', 40)).priority)
+      .toBe(40);
+
+    expect(fetchMock.mock.calls[0]?.[0])
+      .toContain('/api/inferdeck/v1/api-settings');
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      method: 'PUT',
+      body: JSON.stringify({
+        allowPublicTraffic: true,
+        revision: 'rev-a',
+      }),
+    });
+    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify({ name: 'worker', priority: -20 }),
+    });
+    expect(fetchMock.mock.calls[4]?.[1]).toMatchObject({
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'worker', priority: 40 }),
+    });
+  });
+});
+
+describe('dashboard media generation', () => {
+  it('accepts the backend AVI MIME type for video generation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Disposition': 'attachment; filename="clip.avi"' }),
+      blob: async () => new Blob(['RIFF'], { type: 'video/x-msvideo' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await generateVideo({ model: 'ltx-2.3', prompt: 'a fox', negative_prompt: '', width: 512, height: 320, frames: 33, fps: 24, steps: 20, seed: -1, guidanceScale: 6 });
+    expect(result.video.type).toBe('video/x-msvideo');
+    expect(result.filename).toBe('clip.avi');
+    expect(fetchMock).toHaveBeenCalledWith('/api/inferdeck/v1/media/video/generations', expect.objectContaining({ method: 'POST', headers: expect.objectContaining({ Accept: expect.stringContaining('video/x-msvideo') }) }));
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ model: 'ltx-2.3', prompt: 'a fox', negative_prompt: '', width: 512, height: 320, frames: 33, fps: 24, steps: 20, seed: -1, guidance_scale: 6 });
+  });
+  it('uses control-session routes and returns image and music job metadata', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'X-InferDeck-Job-Id': '41' }),
+        json: async () => ({
+          created: 1,
+          output_format: 'png',
+          data: [{ b64_json: 'iVBORw==' }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          'X-InferDeck-Job-Id': '42',
+          'X-InferDeck-Seed': '1234',
+          'X-InferDeck-Audio-Duration-Seconds': '10',
+        }),
+        blob: async () => new Blob(['RIFF'], { type: 'audio/wav' }),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const image = await generateImages({
+      model: 'stable-diffusion',
+      prompt: 'a lighthouse',
+      size: '512x512',
+      n: 1,
+    });
+    const music = await generateMusic({
+      model: 'ace-step',
+      prompt: 'warm analogue synths',
+      lyrics: '',
+      duration: 10,
+      seed: 1234,
+      steps: 0,
+      guidance_scale: 0,
+    });
+
+    expect(image.jobId).toBe(41);
+    expect(music.jobId).toBe(42);
+    expect(music.seed).toBe(1234);
+    expect(music.audio.type).toBe('audio/wav');
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/inferdeck/v1/media/images/generations',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"prompt":"a lighthouse"'),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/inferdeck/v1/media/audio/generations',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"duration":10'),
       }),
     );
   });
@@ -315,5 +506,51 @@ describe('profile optimization', () => {
       '/api/inferdeck/v1/optimize/benchmark/cancel',
       expect.objectContaining({ method: 'POST' }),
     );
+  });
+});
+
+describe('polling request cancellation', () => {
+  it.each([getMediaJobs, getStoreActivity])('forwards caller cancellation and retains the timeout', async load => {
+    respondWith({ jobs: [], downloads: [], installed: {}, library: [] });
+    const timeout = new AbortController();
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(timeout.signal);
+    try {
+      const caller = new AbortController();
+      await load(caller.signal);
+      const signal = vi.mocked(fetch).mock.calls[0]?.[1]?.signal;
+      expect(signal?.aborted).toBe(false);
+      caller.abort();
+      expect(signal?.aborted).toBe(true);
+      await load(new AbortController().signal);
+      const timedSignal = vi.mocked(fetch).mock.calls[1]?.[1]?.signal;
+      expect(timedSignal?.aborted).toBe(false);
+      timeout.abort();
+      expect(timedSignal?.aborted).toBe(true);
+      expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+});
+
+
+describe('dashboard session controls', () => {
+  it('honours session-only login without persisting the key client-side', async () => {
+    respondWith({});
+    await authenticateDashboard('test-only-key', false);
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body)))
+      .toEqual({ token: 'test-only-key', remember: false });
+  });
+  it('logs out through the control session endpoint', async () => {
+    respondWith({});
+    await logoutDashboard();
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('/api/inferdeck/v1/dashboard/session');
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]?.method).toBe('DELETE');
+  });
+  it('distinguishes rejected access from a network or server failure', () => {
+    expect(isAuthenticationError(new ApiError(401, 'unauthorized'))).toBe(true);
+    expect(isAuthenticationError(new ApiError(403, 'forbidden'))).toBe(true);
+    expect(isAuthenticationError(new ApiError(503, 'unavailable'))).toBe(false);
+    expect(isAuthenticationError(new TypeError('Failed to fetch'))).toBe(false);
   });
 });

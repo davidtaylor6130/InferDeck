@@ -1,4 +1,5 @@
 #include "model/model_registry.hpp"
+#include "model/runtime_contract.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -41,6 +42,13 @@ bool ModelRegistry::has_factory(const std::string& runtime) const {
 void ModelRegistry::register_model(ModelInfo info) {
     std::lock_guard<std::mutex> lock(mutex_);
     normalize_model_resources(info);
+    const std::optional<std::string> profile_error =
+        validate_runtime_artifacts(info.runtime, info.artifacts);
+    if (profile_error)
+    {
+        throw std::invalid_argument(
+            "ModelRegistry::register_model: " + info.name + ": " + *profile_error);
+    }
     if (const auto error = validate_model_resources(info)) {
         throw std::invalid_argument(
             "ModelRegistry::register_model: " + info.name + ": " + *error);

@@ -7,6 +7,7 @@
 #include <limits>
 #include <thread>
 #include <utility>
+#include <unordered_set>
 
 namespace inferdeck::model {
 
@@ -26,12 +27,22 @@ bool is_independent_sidecar(const ModelInfo& info) {
     return !is_primary_model(info) && info.compute == ModelCompute::Cpu;
 }
 
+constexpr auto live_vram_observation_ttl = std::chrono::seconds{3};
+
 }
 bool BackendCoordinator::is_loaded(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = instances_.find(name);
     if (it == instances_.end() || !it->second) return false;
     return it->second->is_loaded();
+}
+
+bool BackendCoordinator::is_ready(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto backend = instances_.find(name);
+    return !resizing_models_.contains(name) &&
+        backend != instances_.end() && backend->second &&
+        backend->second->is_loaded() && backend->second->execution_healthy();
 }
 
 std::optional<std::string> BackendCoordinator::get_loaded_model() const {
@@ -81,13 +92,15 @@ std::vector<ResidencyInfo> BackendCoordinator::residency() const {
         out.push_back({name, info.runtime, info.modality,
                        to_string(info.role), to_string(info.compute),
                        to_string(info.residency), info.admission_pool,
-                       info.concurrency_limit, info.memory_required_mb,
+                       info.concurrency_auto ? backend->n_slots() : info.concurrency_limit, info.memory_required_mb,
                        info.eviction_eligible,
-                       backend->n_slots(), backend->n_free_slots(),
+                       backend->n_slots(),
+                       resizing_models_.contains(name) ? 0 : backend->n_free_slots(),
                        active == active_requests_by_model_.end() ? 0 : active->second,
                        backend->estimate_vram_mb(backend->n_slots()),
                        current_loaded_ && *current_loaded_ == name,
-                       resizing_models_.contains(name)});
+                       resizing_models_.contains(name),
+                       info.concurrency_auto, backend->context_pool_capacity()});
     }
     std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
     return out;
@@ -116,6 +129,32 @@ void BackendCoordinator::set_vram_budget(int total_mb, int safety_margin_mb) {
             vram_safety_margin_mb_ = margin;
             ++resource_generation_;
         }
+    }
+    if (changed) cv_.notify_all();
+}
+
+void BackendCoordinator::update_vram_observation(int used_mb, int total_mb) {
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const bool was_fresh = live_vram_observation_fresh_locked();
+        if (total_mb <= 0 || used_mb < 0) {
+            changed = observed_vram_total_mb_ != 0 ||
+                observed_vram_used_mb_ != 0 ||
+                observed_vram_at_ != time_point{};
+            observed_vram_used_mb_ = 0;
+            observed_vram_total_mb_ = 0;
+            observed_vram_at_ = {};
+        } else {
+            const int clamped_used_mb = std::min(used_mb, total_mb);
+            changed = !was_fresh ||
+                observed_vram_total_mb_ != total_mb ||
+                observed_vram_used_mb_ != clamped_used_mb;
+            observed_vram_total_mb_ = total_mb;
+            observed_vram_used_mb_ = clamped_used_mb;
+            observed_vram_at_ = clock::now();
+        }
+        if (changed) ++resource_generation_;
     }
     if (changed) cv_.notify_all();
 }
@@ -157,7 +196,53 @@ int BackendCoordinator::estimated_vram_locked() const {
 
 int BackendCoordinator::available_vram_locked() const {
     if (vram_budget_mb_ <= 0) return 0;
-    return std::max(0, vram_budget_mb_ - vram_safety_margin_mb_ - estimated_vram_locked());
+    const int declared_available = std::max(
+        0, vram_budget_mb_ - vram_safety_margin_mb_ - estimated_vram_locked());
+    if (live_vram_observation_fresh_locked()) {
+        const int capacity =
+            std::min(vram_budget_mb_, observed_vram_total_mb_);
+        std::int64_t reserved = 0;
+        for (const auto& [_, backend] : instances_) {
+            if (!backend || !backend->is_loaded() ||
+                backend->estimate_vram_mb(backend->n_slots()) <= 0) continue;
+            reserved += backend->live_vram_accounting_complete()
+                ? std::max(0, backend->additional_vram_reserve_mb())
+                : std::max(0, backend->estimate_vram_mb(backend->n_slots()));
+        }
+        const std::int64_t available =
+            static_cast<std::int64_t>(capacity) -
+            static_cast<std::int64_t>(vram_safety_margin_mb_) -
+            static_cast<std::int64_t>(observed_vram_used_mb_) - reserved;
+        const int observed_available = static_cast<int>(
+            std::clamp<std::int64_t>(
+                available, 0, std::numeric_limits<int>::max()));
+        return live_vram_observation_usable_locked()
+            ? observed_available
+            : std::min(declared_available, observed_available);
+    }
+    return declared_available;
+}
+
+bool BackendCoordinator::live_vram_observation_fresh_locked() const {
+    return observed_vram_total_mb_ > 0 &&
+        observed_vram_at_ != time_point{} &&
+        clock::now() - observed_vram_at_ <= live_vram_observation_ttl;
+}
+
+bool BackendCoordinator::live_vram_observation_usable_locked() const {
+    if (!live_vram_observation_fresh_locked()) return false;
+    for (const auto& [_, backend] : instances_) {
+        if (backend && backend->is_loaded() &&
+            backend->estimate_vram_mb(backend->n_slots()) > 0 &&
+            !backend->live_vram_accounting_complete()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void BackendCoordinator::invalidate_vram_observation_locked() {
+    observed_vram_at_ = {};
 }
 
 void BackendCoordinator::select_primary_locked() {
@@ -177,7 +262,8 @@ void BackendCoordinator::select_primary_locked() {
 }
 
 foundation::Result<void> BackendCoordinator::prepare_capacity_for(
-    const std::string& name, const LifecycleControl& control) {
+    const std::string& name, const LifecycleControl& control,
+    bool force_idle_reclaim) {
     if (control.is_cancelled()) {
         return foundation::Err<void>(foundation::ErrorCode::Cancelled,
                                      "capacity preparation cancelled: " + name);
@@ -198,11 +284,84 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
             last_resource_decision_ = name + " already resident";
             return foundation::Ok();
         }
-        if (vram_budget_mb_ <= 0 || available_vram_locked() >= required) {
-            last_resource_decision_ = name + " fits without rebalancing";
+        if (!force_idle_reclaim && (vram_budget_mb_ <= 0 || available_vram_locked() >= required)) {
+            last_resource_decision_ = live_vram_observation_usable_locked()
+                ? name + " fits live GPU headroom"
+                : name + " fits configured VRAM budget";
             return foundation::Ok();
         }
     }
+
+    std::unordered_set<std::string> reclaim_attempts;
+    while (!control.is_cancelled() && !control.is_expired()) {
+        std::string candidate;
+        IBackend* backend = nullptr;
+        bool had_observation = false;
+        int previous_observed_mb = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!force_idle_reclaim && available_vram_locked() >= required) return foundation::Ok();
+            for (const auto& [loaded_name, instance] : instances_) {
+                const auto active = active_requests_by_model_.find(loaded_name);
+                if (loaded_name == name || resizing_models_.contains(loaded_name) ||
+                    reclaim_attempts.contains(loaded_name) ||
+                    !instance || !instance->is_loaded() || !instance->execution_healthy() ||
+                    (active != active_requests_by_model_.end() && active->second > 0) ||
+                    instance->estimate_vram_mb(instance->n_slots()) <= 0 ||
+                    !instance->can_reclaim_idle_context()) continue;
+                candidate = loaded_name;
+                backend = instance.get();
+                reclaim_attempts.insert(candidate);
+                resizing_models_.insert(candidate);
+                had_observation = live_vram_observation_fresh_locked();
+                previous_observed_mb = observed_vram_used_mb_;
+                break;
+            }
+        }
+        if (candidate.empty()) break;
+        priority_allowed = require_priority_session_allows(name);
+        if (!priority_allowed) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            resizing_models_.erase(candidate);
+            cv_.notify_all();
+            return priority_allowed;
+        }
+        foundation::Result<bool> reclaimed = false;
+        try {
+            reclaimed = backend->reclaim_idle_context(required, control);
+        } catch (const std::exception& error) {
+            reclaimed = foundation::Err<bool>(foundation::ErrorCode::Internal,
+                std::string("idle context reclamation failed: ") + error.what());
+        } catch (...) {
+            reclaimed = foundation::Err<bool>(foundation::ErrorCode::Internal,
+                "idle context reclamation failed");
+        }
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (reclaimed && *reclaimed) {
+                last_resource_decision_ = "reclaimed idle context from " + candidate + " for " + name;
+                invalidate_vram_observation_locked();
+                ++resource_generation_;
+                if (had_observation) {
+                    const auto deadline = std::min(control.deadline,
+                        clock::now() + live_vram_observation_ttl);
+                    cv_.wait_until(lock, deadline, [&] {
+                        return live_vram_observation_fresh_locked() &&
+                            observed_vram_used_mb_ < previous_observed_mb;
+                    });
+                }
+            }
+            resizing_models_.erase(candidate);
+        }
+        cv_.notify_all();
+        if (reclaimed && *reclaimed) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (available_vram_locked() >= required) return foundation::Ok();
+        }
+        if (!reclaimed) return foundation::Err<void>(reclaimed.error().code, reclaimed.error().message);
+    }
+
+    if (force_idle_reclaim) return foundation::Err<void>(foundation::ErrorCode::OutOfMemory, "unable to reclaim idle context for " + name);
 
     while (true) {
         if (control.is_cancelled()) {
@@ -250,6 +409,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
             if (resized) {
                 last_resource_decision_ = "shrunk " + candidate + " to " +
                     std::to_string(next_slots) + " slots for " + name;
+                invalidate_vram_observation_locked();
                 ++resource_generation_;
             }
         }
