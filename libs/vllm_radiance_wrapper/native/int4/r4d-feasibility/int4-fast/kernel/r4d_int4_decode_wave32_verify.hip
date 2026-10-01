@@ -92,17 +92,36 @@ void int4_decode_wave32_kernel(Int4DecodeArgs a, int query_tokens) {
 __global__ __launch_bounds__(256)
 void int4_decode_combine_kernel(Int4DecodeArgs a) {
     const int head = blockIdx.z * a.q_heads + blockIdx.x, d = threadIdx.x;
-    float gm = -INFINITY;
-    for (int s = 0; s < a.splits; ++s) gm = fmaxf(gm, a.partial_m[size_t(head) * a.splits + s]);
-    float den = 0.0f, num = 0.0f;
+    __shared__ float weights[256], maximum, denominator;
+    if (d == 0)
+    {
+        float gm = -INFINITY;
+        for (int s = 0; s < a.splits; ++s) gm = fmaxf(gm, a.partial_m[size_t(head) * a.splits + s]);
+        maximum = gm;
+    }
+    __syncthreads();
+    if (d < a.splits)
+    {
+        weights[d] = expf(a.partial_m[size_t(head) * a.splits + d] - maximum);
+    }
+    __syncthreads();
+    if (d == 0)
+    {
+        float den = 0.0f;
+        for (int s = 0; s < a.splits; ++s)
+        {
+            den = fmaf(weights[s], a.partial_l[size_t(head) * a.splits + s], den);
+        }
+        denominator = den;
+    }
+    __syncthreads();
+    float num = 0.0f;
     for (int s = 0; s < a.splits; ++s) {
         const size_t row = size_t(head) * a.splits + s;
-        const float w = expf(a.partial_m[row] - gm);
-        den += w * a.partial_l[row];
         const uint16_t partial_bits = a.partial_o[row * a.head_dim + d];
-        num += w * __builtin_bit_cast(float, uint32_t(partial_bits) << 16);
+        num = fmaf(weights[s], __builtin_bit_cast(float, uint32_t(partial_bits) << 16), num);
     }
-    const float result = den > 0.0f ? num / den : 0.0f;
+    const float result = denominator > 0.0f ? num / denominator : 0.0f;
     const uint32_t rw = __builtin_bit_cast(uint32_t, result);
     a.out[size_t(head) * a.head_dim + d] = uint16_t((rw + 0x7fffu + ((rw >> 16) & 1u)) >> 16);
 }

@@ -62,6 +62,24 @@ def measure(fn):
         times.append((time.perf_counter() - start) * 1000)
     return statistics.median(times)
 
+def measure_graphs(graphs):
+    samples = [[] for _ in graphs]
+    for graph in graphs:
+        graph.replay()
+    torch.cuda.synchronize()
+    for trial in range(5):
+        order = range(len(graphs)) if trial % 2 == 0 else reversed(range(len(graphs)))
+        for index in order:
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(10):
+                graphs[index].replay()
+            end.record()
+            end.synchronize()
+            samples[index].append(start.elapsed_time(end) / 10)
+    return [statistics.median(values) for values in samples]
+
 results = []
 torch.manual_seed(9100)
 for context, query_count, page in ((1, 1, 64), (214, 1, 64), (32537, 1, 3104), (50000, 1, 3104), (100000, 1, 3104), (4, 2, 64), (214, 3, 64), (214, 4, 64), (32537, 4, 3104), (100000, 4, 3104)):
@@ -109,7 +127,17 @@ for context, query_count, page in ((1, 1, 64), (214, 1, 64), (32537, 1, 3104), (
     torch.testing.assert_close(candidate_output, reference_output, rtol=.02, atol=.02)
     if baseline_decode is not None:
         torch.testing.assert_close(candidate_output, output, rtol=0, atol=0)
-    results.append(dict(context=context, query_count=query_count, page=page, baseline_ms=baseline_ms, candidate_ms=candidate_ms, speedup=baseline_ms/candidate_ms, graph_parity=True, bit_identical_baseline=True if baseline_decode is not None else None, max_abs_error=float((candidate_output.float()-reference_output.float()).abs().max().item())))
+    candidate_graph_ms = None
+    baseline_graph_ms = None
+    if baseline_decode is not None:
+        baseline_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(baseline_graph):
+            baseline()
+        baseline_graph_ms, candidate_graph_ms = measure_graphs([baseline_graph, graph])
+        torch.testing.assert_close(candidate_output, output, rtol=0, atol=0)
+    else:
+        candidate_graph_ms = measure_graphs([graph])[0]
+    results.append(dict(context=context, query_count=query_count, page=page, baseline_ms=baseline_ms, candidate_ms=candidate_ms, speedup=baseline_ms/candidate_ms, candidate_graph_ms=candidate_graph_ms, baseline_graph_ms=baseline_graph_ms, graph_parity=True, bit_identical_baseline=True if baseline_decode is not None else None, max_abs_error=float((candidate_output.float()-reference_output.float()).abs().max().item())))
     del keys, values, physical, key, value, scales, ks, vs, kwargs
     torch.cuda.empty_cache()
 print(json.dumps(results, indent=2))
