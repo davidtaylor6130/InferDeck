@@ -25,6 +25,24 @@
     "source_url": "https://openrouter.ai/qwen/qwen3.8-27b"
   },
   {
+    "cached_prompt_price_per_million": 0.05,
+    "completion_price_per_million": 3.2,
+    "currency": "USD",
+    "equivalent_api_model": "OpenRouter Qwen3.8 27B",
+    "model_name": "qwen3.8-27b-radiance",
+    "prompt_price_per_million": 0.45,
+    "source_url": "https://openrouter.ai/qwen/qwen3.8-27b"
+  },
+  {
+    "cached_prompt_price_per_million": 0.05,
+    "completion_price_per_million": 3.2,
+    "currency": "USD",
+    "equivalent_api_model": "OpenRouter Qwen3.8 27B",
+    "model_name": "qwen3.8-27b-radiance-q4",
+    "prompt_price_per_million": 0.45,
+    "source_url": "https://openrouter.ai/qwen/qwen3.8-27b"
+  },
+  {
     "cached_prompt_price_per_million": 0.289,
     "completion_price_per_million": 2.4,
     "currency": "USD",
