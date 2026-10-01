@@ -16,6 +16,29 @@ import inferdeck_vllm_radiance_profile as profile
 
 
 class ProfileTests(unittest.TestCase):
+    def test_idle_vulkan_cleanup_uses_loaded_backend_and_propagates_failure(self):
+        from unittest.mock import Mock
+        get_module = Mock(return_value=123)
+        release = Mock(return_value=1)
+        kernel = NS(GetModuleHandleW=get_module)
+        backend = NS(inferdeck_ggml_vk_release_idle_cache=release)
+        with patch.object(profile.os, "name", "nt"), patch.object(profile.ctypes, "WinDLL", create=True, side_effect=[kernel, backend]) as load:
+            self.assertEqual(profile._release_idle_vulkan_cache(), 1)
+            get_module.assert_called_once_with("ggml-vulkan.dll")
+            self.assertEqual(load.call_args_list[1].kwargs, {"handle": 123})
+            release.assert_called_once_with()
+        release.return_value = -1
+        with patch.object(profile.os, "name", "nt"), patch.object(profile.ctypes, "WinDLL", create=True, side_effect=[kernel, backend]):
+            with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                profile._release_idle_vulkan_cache()
+
+    def test_idle_vulkan_cleanup_skips_missing_backend_or_older_export(self):
+        from unittest.mock import Mock
+        for handle, backend in ((None, None), (123, NS())):
+            with self.subTest(handle=handle), patch.object(profile.os, "name", "nt"), patch.object(profile.ctypes, "WinDLL", create=True, side_effect=[NS(GetModuleHandleW=Mock(return_value=handle)), backend]) as load:
+                self.assertEqual(profile._release_idle_vulkan_cache(), 0)
+                self.assertEqual(load.call_count, 1 if handle is None else 2)
+
     def test_hillclimb_sampling_uses_greedy_temperature_and_keeps_request_controls(self):
         request = {"reasoning_effort": "medium", "max_output_tokens": 16384,
                    "sampling": {"temperature": 0.8, "top_p": 0.95, "top_k": 40, "seed": 42}}
@@ -890,7 +913,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(options["num_gpu_blocks_override"], 192)
         self.assertLess(math.ceil(total * options["gpu_memory_utilization"]), free)
         self.assertGreaterEqual(options["gpu_memory_utilization"], 0.97)
-        with self.assertRaisesRegex(RuntimeError, "four-by-100K"):
+        with self.assertRaisesRegex(RuntimeError, "four-by-100K.*free=.*required=.*shortfall="):
             profile._engine_memory_config("r4d_int4", speculative, 4, int(total * 0.96), total)
         self.assertEqual(profile._engine_memory_config("r4d", None, 1, free, total),
                          {"gpu_memory_utilization": 0.925})

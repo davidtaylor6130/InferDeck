@@ -108,6 +108,8 @@ Before activation, back up the matching executable, DLLs, Python modules, static
 
 ## Sampling compatibility
 
+On Windows, Radiance releases idle Vulkan shader pipelines and device-wide staging memory before measuring its startup GPU budget. The backend retains its device and buffer-type identities; shaders compile again on demand when Vulkan resumes. Cleanup skips devices with outstanding backend, tensor-buffer, or pinned-memory owners. Deploy the matching `ggml-vulkan.dll` and Python profile together. The four-by-100K minimum utilization, 192-block fallback and post-load capacity checks remain unchanged. Rejected startup budgets report free, required and missing MiB.
+
 The native adapter must resolve omitted temperature, top-p, top-k, min-p and repetition settings from the model configuration, with explicit request values taking precedence. A disabled top-k is represented as `-1` in vLLM. Native sampling diagnostics record effective values, not prompt text.
 
 Penalty implementations have different history semantics. The native runtime uses a request-local logits processor for repetition, frequency and presence penalties over the requested generated-token window. Zero disables penalties; positive values retain that many recent output tokens; `-1` retains all output tokens. Native built-in penalties are disabled to avoid double application. Unsupported samplers such as DRY remain explicitly rejected. Matching supported settings does not imply identical sampled text across different kernels and quantizations.

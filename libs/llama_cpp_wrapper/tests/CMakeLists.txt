@@ -19,6 +19,12 @@ else()
 endif()
 
 include(CTest)
+if(TARGET ggml-vulkan)
+    add_executable(vulkan_idle_cache_tests test_vulkan_idle_cache.cpp)
+    target_link_libraries(vulkan_idle_cache_tests PRIVATE ggml-vulkan ggml-base)
+    add_test(NAME vulkan_idle_cache COMMAND vulkan_idle_cache_tests)
+    set_tests_properties(vulkan_idle_cache PROPERTIES LABELS "integration")
+endif()
 include(Catch)
 catch_discover_tests(llama_cpp_model_tests
     TEST_PREFIX "llama_"
