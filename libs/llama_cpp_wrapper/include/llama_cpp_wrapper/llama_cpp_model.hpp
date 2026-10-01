@@ -138,6 +138,7 @@ private:
     bool mtp_cache_synced{true};
   };
 
+  llama_model_params model_params() const;
   llama_context_params shared_context_params_locked(int capacity) const;
   inferdeck::foundation::Result<void> init_shared_context_locked(
       const llama_model_params& model_params,

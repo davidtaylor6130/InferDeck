@@ -21,6 +21,25 @@ LlamaCppModel::LlamaCppModel(inferdeck::model::ModelInfo info, LlamaCppConfig cf
     : info_(std::move(info)), cfg_(std::move(cfg)) {
   resolved_gguf_path_ = normalize_path(info_.gguf_path);
   resolved_mmproj_path_ = normalize_path(info_.mmproj_path);
+  if (info_.compute == inferdeck::model::ModelCompute::Cpu) {
+    cfg_.n_gpu_layers = 0;
+    cfg_.kv_offload = false;
+    cfg_.op_offload = false;
+  }
+}
+
+llama_model_params LlamaCppModel::model_params() const {
+  llama_model_params parameters = llama_model_default_params();
+  parameters.load_mode = cfg_.use_mmap
+      ? (cfg_.use_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP)
+      : (cfg_.use_mlock ? LLAMA_LOAD_MODE_MLOCK : LLAMA_LOAD_MODE_NONE);
+  parameters.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
+  parameters.load_mtp = cfg_.mtp_enabled;
+  if (info_.compute == inferdeck::model::ModelCompute::Cpu) {
+    static ggml_backend_dev_t aCpuDevices[] = {nullptr};
+    parameters.devices = aCpuDevices;
+  }
+  return parameters;
 }
 
 LlamaCppModel::~LlamaCppModel() {
@@ -98,12 +117,7 @@ Result<void> LlamaCppModel::load(
         make_error(ErrorCode::NotFound, "mmproj not found: " + resolved_mmproj_path_.string()));
   }
 
-  llama_model_params mparams = llama_model_default_params();
-  mparams.load_mode = cfg_.use_mmap
-      ? (cfg_.use_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP)
-      : (cfg_.use_mlock ? LLAMA_LOAD_MODE_MLOCK : LLAMA_LOAD_MODE_NONE);
-  mparams.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
-  mparams.load_mtp = cfg_.mtp_enabled;
+  llama_model_params mparams = model_params();
   mparams.progress_callback = [](float, void* user_data) {
     const auto* lifecycle = static_cast<
         const inferdeck::model::LifecycleControl*>(user_data);
@@ -178,7 +192,7 @@ Result<void> LlamaCppModel::load(
   }
   if (info_.has_vision) {
     auto mtmd_params = mtmd_context_params_default();
-    mtmd_params.use_gpu = true;
+    mtmd_params.use_gpu = info_.compute != inferdeck::model::ModelCompute::Cpu;
     mtmd_params.n_threads = cfg_.n_threads;
     mtmd_params.flash_attn_type = flash_attn_from_string(cfg_.flash_attn);
     mtmd_ = mtmd_init_from_file(
@@ -570,12 +584,7 @@ Result<void> LlamaCppModel::ensure_request_capacity(
         "request capacity preparation cancelled"));
   }
 
-  llama_model_params model_params = llama_model_default_params();
-  model_params.load_mode = cfg_.use_mmap
-      ? (cfg_.use_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP)
-      : (cfg_.use_mlock ? LLAMA_LOAD_MODE_MLOCK : LLAMA_LOAD_MODE_NONE);
-  model_params.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
-  model_params.load_mtp = cfg_.mtp_enabled;
+  const llama_model_params model_parameters = model_params();
 
   if (scheduler_) {
     scheduler_->stop();
@@ -601,7 +610,7 @@ Result<void> LlamaCppModel::ensure_request_capacity(
 
   const auto initialized = [&]() {
     try {
-      return init_shared_context_locked(model_params, control, target_capacity,
+      return init_shared_context_locked(model_parameters, control, target_capacity,
                                          cfg_.vram_safety_margin_mb);
     } catch (const std::exception& error) {
       return Result<void>(std::unexpect, make_error(
@@ -640,7 +649,7 @@ Result<void> LlamaCppModel::ensure_request_capacity(
     const auto recovered = [&]() {
       try {
         return init_shared_context_locked(
-            model_params, recovery_control, current_capacity,
+            model_parameters, recovery_control, current_capacity,
             cfg_.vram_safety_margin_mb);
       } catch (const std::exception& error) {
         return Result<void>(std::unexpect, make_error(
@@ -690,7 +699,7 @@ Result<void> LlamaCppModel::ensure_request_capacity(
     const auto recovered = [&]() {
       try {
         return init_shared_context_locked(
-            model_params, recovery_control, current_capacity,
+            model_parameters, recovery_control, current_capacity,
             cfg_.vram_safety_margin_mb);
       } catch (const std::exception& error) {
         return Result<void>(std::unexpect, make_error(
@@ -879,18 +888,13 @@ Result<bool> LlamaCppModel::reclaim_idle_context(
         ErrorCode::Timeout, "idle context reclamation deadline expired"));
   }
 
-  llama_model_params model_params = llama_model_default_params();
-  model_params.load_mode = cfg_.use_mmap
-      ? (cfg_.use_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP)
-      : (cfg_.use_mlock ? LLAMA_LOAD_MODE_MLOCK : LLAMA_LOAD_MODE_NONE);
-  model_params.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
-  model_params.load_mtp = cfg_.mtp_enabled;
+  const llama_model_params model_parameters = model_params();
 
   const int effective_reserve = cfg_.vram_safety_margin_mb + additional_reserve_mb;
   auto preflight_params = shared_context_params_locked(old_capacity);
   preflight_params.n_seq_max = static_cast<std::uint32_t>(target_sequences);
   const Result<int> preflight = fit_context_pool(
-      resolved_gguf_path_, model_params, preflight_params,
+      resolved_gguf_path_, model_parameters, preflight_params,
       cfg_.mtp_enabled, minimum_pool, old_capacity, effective_reserve, control,
       shared_ctx_, draft_ctx_);
   int reclaim_maximum = preflight ? *preflight : old_capacity;
@@ -937,7 +941,7 @@ Result<bool> LlamaCppModel::reclaim_idle_context(
       -> Result<void> {
     try {
       return init_shared_context_locked(
-          model_params, operation_control, maximum_capacity, reserve_mb);
+          model_parameters, operation_control, maximum_capacity, reserve_mb);
     } catch (const std::exception& error) {
       return Result<void>(std::unexpect, make_error(
           ErrorCode::Internal,
