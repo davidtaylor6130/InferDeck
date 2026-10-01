@@ -66,6 +66,34 @@ Selection takes effect when the model is loaded; it is not a per-request switch.
 
 ## Validation and packaging
 
+The four-slot `r4d_int4` MTP profile uses vLLM compilation mode 3 with AOT compilation disabled, native decode through M=16, and decode graphs for one and four speculative steps. MTP3 defaults to capture sizes `[4,16]`; explicit artifact overrides still take precedence. Deployment must also carry the validated batched prefill DLL and its matching SHA-256. A matching executable version alone does not identify the Python profile or native kernels.
+
+For the pinned four-slot MTP3 profile, memory admission adjusts the requested utilization when existing GPU allocations prevent the 0.991 budget. It retains 192 cache blocks, the measured minimum for four 100K contexts, only when the adjusted budget remains at least 0.97. Startup continues to require measured capacity for all four contexts and at least 1 GiB free after initialization. Larger competing allocations are rejected rather than reducing context capacity.
+
+The optional `compiler_cache_root` artifact places vLLM, Inductor, Triton, and compiler temporary output beneath the selected directory. Use a volume with enough free space for cold compilation; a Windows LocalSystem service uses a different default cache from an interactive benchmark account.
+
+The optional `hillclimb_sampling: "true"` artifact pins the HC82 sampling settings for every request: temperature 0, top-p 1, top-k 20, min-p 0, repetition penalty 1, and frequency/presence penalties 0. It overrides client sampling values for that model while retaining request reasoning, seed, structured output, and output length. Models without this artifact continue to honor client sampling values.
+
+The INT4 attention overlay detects the optional `r4d_int4_verify_splitk` export in the hash-pinned decode DLL. This kernel handles two to four query tokens for a single sequence, partitions long-context attention across the GPU, and shares K/V reads between MTP verification queries. Older DLLs and multi-sequence batches retain the prefill path. Attention parity, CUDA graph replay, and actual request throughput must be checked separately; the HC82 generation workload used a 214-token prompt and does not establish throughput for long coding histories.
+
+Build the verification DLL for the tested RDNA4 target from the repository root:
+
+```powershell
+New-Item -ItemType Directory -Force build/kernels | Out-Null
+& 'C:/Program Files/AMD/ROCm/7.1/bin/hipcc.exe' -O3 -std=c++17 --offload-arch=gfx1201 -shared libs/vllm_radiance_wrapper/native/int4/r4d-feasibility/int4-fast/kernel/r4d_int4_decode_wave32_verify.hip -o build/kernels/r4d_int4_decode_wave32_verify.dll
+Get-FileHash build/kernels/r4d_int4_decode_wave32_verify.dll -Algorithm SHA256
+```
+
+Deploy the rebuilt DLL together with the updated overlay, then set the model's `decode_dll` and `decode_dll_sha256` artifacts to that file and its actual hash. Keep the validated batched prefill DLL. The optional `hillclimb_sampling` flag enables the greedy profile; setting model defaults alone does not override an explicit client temperature. The DLL is an external runtime artifact and is not rebuilt by the gateway CMake target.
+
+The focused GPU check compares causal attention against vLLM for two to four queries, short/32K/100K contexts, reversed physical page mappings, and CUDA graph replay. It requires the pinned runtime dependency tree:
+
+```powershell
+python libs/vllm_radiance_wrapper/tests/verify_int4_mtp_attention.py --prefill-dll <batched-prefill.dll> --decode-dll build/kernels/r4d_int4_decode_wave32_verify.dll --runtime-root build/runtime-radiance-probe
+```
+
+Before a drained Radiance engine shuts down, cleanup unregisters compiler bytecode hooks for both target and MTP draft models. The pinned vLLM finalizer covers only the target; the draft hooks otherwise retain its embedding, output, and transformer weights. After release, cleanup resets PyTorch's in-process compiler state before emptying the device allocator. This reset preserves the compiler filesystem caches.
+
 Executed local checks include 148 C++ unit/integration targets, 12 Python bridge tests, 58 benchmark-harness tests, and seven real-model API checks covering structured output, tools, streaming arguments, Responses and cancellation. Native loading and Vulkan recovery succeeded under LocalSystem. An earlier build completed 20 switches and 155 mixed requests; that endurance run was not repeated after the service-start fixes.
 
 Python integration tests require the private pinned dependency tree and fixtures under `build/runtime-radiance-probe` and `build/perf`; they are not a dependency-free fresh-checkout suite. Raw hardware evidence and local deployment records are intentionally not published here.
