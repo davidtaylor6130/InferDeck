@@ -5,6 +5,8 @@
 
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -13,10 +15,16 @@ extern "C" GGML_BACKEND_API int inferdeck_ggml_vk_release_idle_cache();
 
 int main()
 {
+    const char* const pszRunGpuTest = std::getenv("INFERDECK_TEST_VULKAN");
+    if (!pszRunGpuTest || std::strcmp(pszRunGpuTest, "1") != 0)
+    {
+        std::cout << "SKIP: set INFERDECK_TEST_VULKAN=1 on a Vulkan GPU machine\n";
+        return 77;
+    }
     if (ggml_backend_vk_get_device_count() == 0)
     {
         std::cout << "SKIP: no Vulkan device\n";
-        return 0;
+        return 77;
     }
     try
     {

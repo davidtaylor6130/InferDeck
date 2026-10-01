@@ -23,7 +23,7 @@ if(TARGET ggml-vulkan)
     add_executable(vulkan_idle_cache_tests test_vulkan_idle_cache.cpp)
     target_link_libraries(vulkan_idle_cache_tests PRIVATE ggml-vulkan ggml-base)
     add_test(NAME vulkan_idle_cache COMMAND vulkan_idle_cache_tests)
-    set_tests_properties(vulkan_idle_cache PROPERTIES LABELS "integration")
+    set_tests_properties(vulkan_idle_cache PROPERTIES LABELS "integration;gpu" SKIP_RETURN_CODE 77 TIMEOUT 60)
 endif()
 include(Catch)
 catch_discover_tests(llama_cpp_model_tests
