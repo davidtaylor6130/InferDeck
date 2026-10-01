@@ -12,6 +12,7 @@ repo = Path(__file__).resolve().parents[3]
 parser = argparse.ArgumentParser(description='Check INT4 MTP attention against vLLM, including graph replay.')
 parser.add_argument('--prefill-dll', type=Path, required=True)
 parser.add_argument('--decode-dll', type=Path, required=True)
+parser.add_argument('--baseline-decode-dll', type=Path)
 parser.add_argument('--runtime-root', type=Path, default=repo / 'build/runtime-radiance-probe')
 parser.add_argument('--output', type=Path)
 args = parser.parse_args()
@@ -37,6 +38,18 @@ verify_lib = ctypes.CDLL(str(args.decode_dll.resolve()))
 verify = verify_lib.r4d_int4_verify_splitk
 verify.argtypes = [ctypes.POINTER(overlay.R4DInt4DecodeArgs), ctypes.c_int32, ctypes.c_void_p]
 verify.restype = ctypes.c_int
+decode = verify_lib.r4d_int4_decode_splitk
+decode.argtypes = [ctypes.POINTER(overlay.R4DInt4DecodeArgs), ctypes.c_void_p]
+decode.restype = ctypes.c_int
+baseline_decode = baseline_verify = None
+if args.baseline_decode_dll:
+    baseline_lib = ctypes.CDLL(str(args.baseline_decode_dll.resolve()))
+    baseline_decode = baseline_lib.r4d_int4_decode_splitk
+    baseline_decode.argtypes = decode.argtypes
+    baseline_decode.restype = ctypes.c_int
+    baseline_verify = baseline_lib.r4d_int4_verify_splitk
+    baseline_verify.argtypes = verify.argtypes
+    baseline_verify.restype = ctypes.c_int
 
 def measure(fn):
     fn()
@@ -51,7 +64,7 @@ def measure(fn):
 
 results = []
 torch.manual_seed(9100)
-for context, query_count, page in ((4, 2, 64), (214, 3, 64), (214, 4, 64), (32537, 4, 3104), (100000, 4, 3104)):
+for context, query_count, page in ((1, 1, 64), (214, 1, 64), (32537, 1, 3104), (50000, 1, 3104), (100000, 1, 3104), (4, 2, 64), (214, 3, 64), (214, 4, 64), (32537, 4, 3104), (100000, 4, 3104)):
     pages = (context + page - 1) // page
     physical = torch.zeros((pages, page, 4, 264), device='cuda', dtype=torch.uint8)
     key, value = physical[..., :132], physical[..., 132:]
@@ -71,9 +84,12 @@ for context, query_count, page in ((4, 2, 64), (214, 3, 64), (214, 4, 64), (3253
     table = torch.arange(pages - 1, -1, -1, device='cuda', dtype=torch.int32).reshape(1, -1)
     kwargs = dict(q=query, k=key, v=value, out=output, cu_seqlens_q=cu, max_seqlen_q=4, seqused_k=lengths, max_seqlen_k=context, softmax_scale=256 ** -.5, window_size=(-1, -1), block_table=table, softcap=0., sinks=None, alibi_slopes=None, use_alibi_sqrt=False, qq_bias=None, output_scale=None, mm_prefix_range=None, k_scale_cache=ks, v_scale_cache=vs, causal=True, kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD)
     def baseline():
-        overlay.run_int4_prefill({**kwargs, 'max_seqlen_q': query_count}, prefill)
+        if baseline_decode is not None:
+            overlay.run_int4_decode(kwargs, baseline_decode if query_count == 1 else baseline_verify, query_tokens=query_count)
+        else:
+            overlay.run_int4_prefill({**kwargs, 'max_seqlen_q': query_count}, prefill)
     def candidate():
-        overlay.run_int4_decode({**kwargs, 'max_seqlen_q': query_count, 'out': candidate_output}, verify, query_tokens=query_count)
+        overlay.run_int4_decode({**kwargs, 'out': candidate_output}, decode if query_count == 1 else verify, query_tokens=query_count)
     kwargs['max_seqlen_q'] = query_count
     unified_attention_int4(query, key, value, reference_output, **{k:v for k,v in kwargs.items() if k not in ('q','k','v','out','causal','kv_quant_mode')})
     baseline()
@@ -81,6 +97,8 @@ for context, query_count, page in ((4, 2, 64), (214, 3, 64), (214, 4, 64), (3253
     torch.cuda.synchronize()
     torch.testing.assert_close(output, reference_output, rtol=.02, atol=.02)
     torch.testing.assert_close(candidate_output, reference_output, rtol=.02, atol=.02)
+    if baseline_decode is not None:
+        torch.testing.assert_close(candidate_output, output, rtol=0, atol=0)
     baseline_ms = measure(baseline)
     candidate_ms = measure(candidate)
     graph = torch.cuda.CUDAGraph()
@@ -89,7 +107,9 @@ for context, query_count, page in ((4, 2, 64), (214, 3, 64), (214, 4, 64), (3253
     graph.replay()
     torch.cuda.synchronize()
     torch.testing.assert_close(candidate_output, reference_output, rtol=.02, atol=.02)
-    results.append(dict(context=context, query_count=query_count, page=page, baseline_ms=baseline_ms, candidate_ms=candidate_ms, speedup=baseline_ms/candidate_ms, graph_parity=True, max_abs_error=float((candidate_output.float()-reference_output.float()).abs().max().item())))
+    if baseline_decode is not None:
+        torch.testing.assert_close(candidate_output, output, rtol=0, atol=0)
+    results.append(dict(context=context, query_count=query_count, page=page, baseline_ms=baseline_ms, candidate_ms=candidate_ms, speedup=baseline_ms/candidate_ms, graph_parity=True, bit_identical_baseline=True if baseline_decode is not None else None, max_abs_error=float((candidate_output.float()-reference_output.float()).abs().max().item())))
     del keys, values, physical, key, value, scales, ks, vs, kwargs
     torch.cuda.empty_cache()
 print(json.dumps(results, indent=2))

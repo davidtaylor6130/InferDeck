@@ -86,11 +86,17 @@ Get-FileHash build/kernels/r4d_int4_decode_wave32_verify.dll -Algorithm SHA256
 
 Deploy the rebuilt DLL together with the updated overlay, then set the model's `decode_dll` and `decode_dll_sha256` artifacts to that file and its actual hash. Keep the validated batched prefill DLL. The optional `hillclimb_sampling` flag enables the greedy profile; setting model defaults alone does not override an explicit client temperature. The DLL is an external runtime artifact and is not rebuilt by the gateway CMake target.
 
-The focused GPU check compares causal attention against vLLM for two to four queries, short/32K/100K contexts, reversed physical page mappings, and CUDA graph replay. It requires the pinned runtime dependency tree:
+Single-token decoding shares the packed K/V loads across three Qwen attention heads. The 24-query-head, four-KV-head geometry uses this path; other geometries retain the original decode kernel. MTP verification keeps one head per wave. Explicit fused operations preserve the original single-token accumulation rounding with the pinned HIP compiler. The DLL exports and overlay ABI are unchanged.
+
+On an AMD R9700, captured single-token attention calls at the coding workload's 32K/50K contexts took 0.494/0.617 ms versus 0.593/0.770 ms before this change; at 100K they took 0.987 versus 1.316 ms. These are attention timings, not whole-model TPS. Single-request MTP uses this path in the drafter, so its overall gain will be smaller. Full-model gains require validation after activation.
+
+The focused GPU check compares causal attention against vLLM for one to four queries, short/32K/50K/100K contexts, reversed physical page mappings, and CUDA graph replay. Supplying the previous decode DLL also requires bit-identical output for all cases. It requires the pinned runtime dependency tree:
 
 ```powershell
 python libs/vllm_radiance_wrapper/tests/verify_int4_mtp_attention.py --prefill-dll <batched-prefill.dll> --decode-dll build/kernels/r4d_int4_decode_wave32_verify.dll --runtime-root build/runtime-radiance-probe
 ```
+
+Add `--baseline-decode-dll <previous-decode.dll>` to check exact parity with the previously deployed kernel.
 
 Before a drained Radiance engine shuts down, cleanup unregisters compiler bytecode hooks for both target and MTP draft models. The pinned vLLM finalizer covers only the target; the draft hooks otherwise retain its embedding, output, and transformer weights. After release, cleanup resets PyTorch's in-process compiler state before emptying the device allocator. This reset preserves the compiler filesystem caches.
 
