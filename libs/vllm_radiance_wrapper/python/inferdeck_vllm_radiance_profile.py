@@ -81,8 +81,8 @@ def _engine_memory_config(prefill_attention:str, speculative_config:dict[str,Any
     if not retained_profile or free_bytes >= math.ceil(total_bytes * desired):
         return options
     available = (free_bytes - 64 * 1024 * 1024) / total_bytes
-    if available < 0.97:
-        required = math.ceil(total_bytes * 0.97) + 64 * 1024 * 1024
+    if available < 0.96:
+        required = math.ceil(total_bytes * 0.96) + 64 * 1024 * 1024
         raise RuntimeError("Insufficient free GPU memory to preserve Radiance four-by-100K capacity "
                            f"(free={free_bytes / 1048576:.0f} MiB, required={required / 1048576:.0f} MiB, "
                            f"shortfall={max(0, required-free_bytes) / 1048576:.0f} MiB)")

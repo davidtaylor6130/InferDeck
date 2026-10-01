@@ -918,6 +918,15 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(profile._engine_memory_config("r4d", None, 1, free, total),
                          {"gpu_memory_utilization": 0.925})
 
+    def test_retained_memory_budget_admits_observed_qwen4b_swap_without_shrinking_cache(self):
+        total = 34208743424
+        free = 31634 * 1024 * 1024
+        options = profile._engine_memory_config("r4d_int4", {"method": "mtp", "num_speculative_tokens": 3}, 4, free, total)
+        self.assertEqual(options["num_gpu_blocks_override"], 192)
+        self.assertAlmostEqual(options["gpu_memory_utilization"], (free - 64 * 1024 * 1024) / total)
+        self.assertLess(options["gpu_memory_utilization"], 0.97)
+        self.assertGreaterEqual(options["gpu_memory_utilization"], 0.96)
+
     def test_radiance_env_overrides_only_named_knobs(self):
         merged = profile._radiance_env({"radiance_env": json.dumps({
             "RADIANCE_MXFP4_DECODE_MAX_M": "64",
