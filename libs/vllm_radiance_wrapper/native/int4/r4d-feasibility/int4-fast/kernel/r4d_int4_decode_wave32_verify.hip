@@ -92,50 +92,75 @@ void int4_decode_wave32_kernel(Int4DecodeArgs a, int query_tokens) {
 __global__ __launch_bounds__(256)
 void int4_decode_combine_kernel(Int4DecodeArgs a) {
     const int head = blockIdx.z * a.q_heads + blockIdx.x, d = threadIdx.x;
-    float gm = -INFINITY;
-    for (int s = 0; s < a.splits; ++s) gm = fmaxf(gm, a.partial_m[size_t(head) * a.splits + s]);
-    float den = 0.0f, num = 0.0f;
+    __shared__ float weights[256], maximum, denominator;
+    if (d == 0)
+    {
+        float gm = -INFINITY;
+        for (int s = 0; s < a.splits; ++s) gm = fmaxf(gm, a.partial_m[size_t(head) * a.splits + s]);
+        maximum = gm;
+    }
+    __syncthreads();
+    if (d < a.splits)
+    {
+        weights[d] = expf(a.partial_m[size_t(head) * a.splits + d] - maximum);
+    }
+    __syncthreads();
+    if (d == 0)
+    {
+        float den = 0.0f;
+        for (int s = 0; s < a.splits; ++s)
+        {
+            den = fmaf(weights[s], a.partial_l[size_t(head) * a.splits + s], den);
+        }
+        denominator = den;
+    }
+    __syncthreads();
+    float num = 0.0f;
     for (int s = 0; s < a.splits; ++s) {
         const size_t row = size_t(head) * a.splits + s;
-        const float w = expf(a.partial_m[row] - gm);
-        den += w * a.partial_l[row];
         const uint16_t partial_bits = a.partial_o[row * a.head_dim + d];
-        num += w * __builtin_bit_cast(float, uint32_t(partial_bits) << 16);
+        num = fmaf(weights[s], __builtin_bit_cast(float, uint32_t(partial_bits) << 16), num);
     }
-    const float result = den > 0.0f ? num / den : 0.0f;
+    const float result = denominator > 0.0f ? num / denominator : 0.0f;
     const uint32_t rw = __builtin_bit_cast(uint32_t, result);
     a.out[size_t(head) * a.head_dim + d] = uint16_t((rw + 0x7fffu + ((rw >> 16) & 1u)) >> 16);
 }
 
+static int launch_grouped_decode(const Int4DecodeArgs* pArgs, hipStream_t stream);
+
 extern "C" __declspec(dllexport) int r4d_int4_decode_splitk(const Int4DecodeArgs* a, hipStream_t stream) {
     if (!a || a->q_heads <= 0 || a->kv_heads <= 0 || a->q_heads % a->kv_heads || a->head_dim != 256 ||
         a->context <= 0 || a->page_size <= 0 || a->splits <= 0 || a->splits > 256) return -1;
+    if (a->q_heads == 24 && a->kv_heads == 4)
+    {
+        return launch_grouped_decode(a, stream);
+    }
     hipLaunchKernelGGL(int4_decode_wave32_kernel, dim3(a->q_heads, a->splits), dim3(32), 0, stream, *a, 1);
     hipError_t e = hipGetLastError(); if (e != hipSuccess) return -100 - (int)e;
     hipLaunchKernelGGL(int4_decode_combine_kernel, dim3(a->q_heads), dim3(256), 0, stream, *a);
     e = hipGetLastError(); return e == hipSuccess ? 0 : -100 - (int)e;
 }
 
-template<int QueryTokens>
+template<int QueryTokens, int HeadGroup = 1>
 __global__ __launch_bounds__(32)
 void int4_verify_wave32_kernel(Int4DecodeArgs a)
 {
-    const int head = blockIdx.x, split = blockIdx.y, lane = threadIdx.x;
+    const int head = blockIdx.x * HeadGroup, split = blockIdx.y, lane = threadIdx.x;
     const int ctx = max(0, a.seq_lens[0]);
     const int chunk = (ctx + a.splits - 1) / a.splits;
     const int begin = split * chunk, end = min(begin + chunk, ctx);
     const int kvh = head / (a.q_heads / a.kv_heads), dim = lane * 8;
-    float q[QueryTokens][8], acc[QueryTokens][8];
-    float m[QueryTokens], l[QueryTokens];
+    float q[QueryTokens * HeadGroup][8], acc[QueryTokens * HeadGroup][8];
+    float m[QueryTokens * HeadGroup], l[QueryTokens * HeadGroup];
     #pragma unroll
-    for (int query = 0; query < QueryTokens; ++query)
+    for (int query = 0; query < QueryTokens * HeadGroup; ++query)
     {
         m[query] = -INFINITY;
         l[query] = 0.0f;
         #pragma unroll
         for (int i = 0; i < 8; ++i)
         {
-            q[query][i] = __builtin_bit_cast(float, uint32_t(a.q[(query * a.q_heads + head) * a.head_dim + dim + i]) << 16);
+            q[query][i] = __builtin_bit_cast(float, uint32_t(a.q[((query / HeadGroup) * a.q_heads + head + query % HeadGroup) * a.head_dim + dim + i]) << 16);
             acc[query][i] = 0.0f;
         }
     }
@@ -158,29 +183,30 @@ void int4_verify_wave32_kernel(Int4DecodeArgs a)
             vv[i] = (int((vw >> (4 * i)) & 15u) - vzp) * vscale;
         }
         #pragma unroll
-        for (int query = 0; query < QueryTokens; ++query)
+        for (int query = 0; query < QueryTokens * HeadGroup; ++query)
         {
-            if (pos < ctx - QueryTokens + query + 1)
+            if (pos < ctx - QueryTokens + query / HeadGroup + 1)
             {
                 float dot = 0.0f;
                 #pragma unroll
                 for (int i = 0; i < 8; ++i) dot = fmaf(q[query][i], kk[i], dot);
                 for (int offset = 16; offset > 0; offset >>= 1) dot += __shfl_down(dot, offset, 32);
-                const float score = __shfl(dot, 0, 32) * a.scale;
+                const float reduced_dot = __shfl(dot, 0, 32);
+                const float score = reduced_dot * a.scale;
                 const float mn = fmaxf(m[query], score);
                 const float alpha = isfinite(m[query]) ? expf(m[query] - mn) : 0.0f;
-                const float beta = expf(score - mn);
+                const float beta = QueryTokens == 1 ? expf(fmaf(reduced_dot, a.scale, -mn)) : expf(score - mn);
                 #pragma unroll
-                for (int i = 0; i < 8; ++i) acc[query][i] = acc[query][i] * alpha + vv[i] * beta;
+                for (int i = 0; i < 8; ++i) acc[query][i] = QueryTokens == 1 ? fmaf(acc[query][i], alpha, vv[i] * beta) : acc[query][i] * alpha + vv[i] * beta;
                 l[query] = l[query] * alpha + beta;
                 m[query] = mn;
             }
         }
     }
     #pragma unroll
-    for (int query = 0; query < QueryTokens; ++query)
+    for (int query = 0; query < QueryTokens * HeadGroup; ++query)
     {
-        const size_t row = (size_t(query) * a.q_heads + head) * a.splits + split;
+        const size_t row = (size_t(query / HeadGroup) * a.q_heads + head + query % HeadGroup) * a.splits + split;
         #pragma unroll
         for (int i = 0; i < 8; ++i)
         {
@@ -216,7 +242,7 @@ extern "C" __declspec(dllexport) int r4d_int4_verify_splitk(const Int4DecodeArgs
     }
     else
     {
-        hipLaunchKernelGGL(int4_decode_wave32_kernel, dim3(pArgs->q_heads, pArgs->splits), dim3(32), 0, stream, *pArgs, 1);
+        return r4d_int4_decode_splitk(pArgs, stream);
     }
     hipError_t eError = hipGetLastError();
     if (eError != hipSuccess)
@@ -224,6 +250,19 @@ extern "C" __declspec(dllexport) int r4d_int4_verify_splitk(const Int4DecodeArgs
         return -100 - int(eError);
     }
     hipLaunchKernelGGL(int4_decode_combine_kernel, dim3(pArgs->q_heads, 1, query_tokens), dim3(256), 0, stream, *pArgs);
+    eError = hipGetLastError();
+    return eError == hipSuccess ? 0 : -100 - int(eError);
+}
+
+static int launch_grouped_decode(const Int4DecodeArgs* pArgs, hipStream_t stream)
+{
+    hipLaunchKernelGGL((int4_verify_wave32_kernel<1, 3>), dim3(pArgs->q_heads / 3, pArgs->splits), dim3(32), 0, stream, *pArgs);
+    hipError_t eError = hipGetLastError();
+    if (eError != hipSuccess)
+    {
+        return -100 - int(eError);
+    }
+    hipLaunchKernelGGL(int4_decode_combine_kernel, dim3(pArgs->q_heads), dim3(256), 0, stream, *pArgs);
     eError = hipGetLastError();
     return eError == hipSuccess ? 0 : -100 - int(eError);
 }
