@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import math
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -275,14 +276,16 @@ def run_int4_prefill(
     return result
 
 
-def run_int4_decode(kwargs: dict[str, Any], fn: Any) -> dict[str, Any]:
+def run_int4_decode(kwargs: dict[str, Any], fn: Any, *, query_tokens: int = 1) -> dict[str, Any]:
     q, key, value, out = (kwargs.get(name) for name in ("q", "k", "v", "out"))
-    if not isinstance(q, torch.Tensor) or q.dtype != torch.bfloat16 or tuple(q.shape) != (1, Q_HEADS, HEAD_DIM) or not q.is_contiguous():
-        raise RuntimeError("INT4 R4D decode requires contiguous BF16 q[1,24,256]")
+    if query_tokens < 1 or query_tokens > 4:
+        raise RuntimeError("INT4 R4D decode supports one to four query tokens")
+    if not isinstance(q, torch.Tensor) or q.dtype != torch.bfloat16 or tuple(q.shape) != (query_tokens, Q_HEADS, HEAD_DIM) or not q.is_contiguous():
+        raise RuntimeError("INT4 R4D decode requires contiguous BF16 q[query_tokens,24,256]")
     if not isinstance(out, torch.Tensor) or out.dtype != q.dtype or out.shape != q.shape or not out.is_contiguous():
         raise RuntimeError("INT4 R4D decode requires contiguous BF16 output matching q")
-    if kwargs.get("max_seqlen_q") != 1 or kwargs.get("causal") is not True:
-        raise RuntimeError("INT4 R4D decode requires q_len=1 and causal=True")
+    if kwargs.get("max_seqlen_q") != query_tokens or kwargs.get("causal") is not True:
+        raise RuntimeError("INT4 R4D decode requires matching query length and causal=True")
     cu_seqlens_q = kwargs.get("cu_seqlens_q")
     if not isinstance(cu_seqlens_q, torch.Tensor) or cu_seqlens_q.dtype != torch.int32 or cu_seqlens_q.numel() != 2 or not cu_seqlens_q.is_cuda or not cu_seqlens_q.is_contiguous():
         raise RuntimeError("INT4 R4D decode requires one contiguous CUDA int32 query sequence")
@@ -329,8 +332,8 @@ def run_int4_decode(kwargs: dict[str, Any], fn: Any) -> dict[str, Any]:
     if not isinstance(scale, (int, float)) or not math.isfinite(float(scale)) or not math.isclose(float(scale), HEAD_DIM ** -0.5, rel_tol=1e-6, abs_tol=1e-8):
         raise RuntimeError("INT4 R4D decode received an unsupported softmax scale")
     splits = 256
-    partial_o = torch.empty((Q_HEADS, splits, HEAD_DIM), dtype=torch.bfloat16, device=q.device)
-    partial_m = torch.empty((Q_HEADS, splits), dtype=torch.float32, device=q.device)
+    partial_o = torch.empty((query_tokens * Q_HEADS, splits, HEAD_DIM), dtype=torch.bfloat16, device=q.device)
+    partial_m = torch.empty((query_tokens * Q_HEADS, splits), dtype=torch.float32, device=q.device)
     partial_l = torch.empty_like(partial_m)
     q_rht = _single_rht(q.float()).to(q.dtype)
     out_rht = torch.empty_like(out)
@@ -344,11 +347,11 @@ def run_int4_decode(kwargs: dict[str, Any], fn: Any) -> dict[str, Any]:
         int(k_scale.stride(2)), float(scale) / HEAD_DIM,
     )
     stream = torch.cuda.current_stream(device=out.device).cuda_stream
-    status = int(fn(ctypes.byref(args), ctypes.c_void_p(stream)))
+    status = int(fn(ctypes.byref(args), ctypes.c_void_p(stream))) if query_tokens == 1 else int(fn(ctypes.byref(args), query_tokens, ctypes.c_void_p(stream)))
     if status != 0:
         raise RuntimeError(f"R4D INT4 decode kernel returned {status}")
     out.copy_((_single_rht(out_rht.float(), inverse=True) / HEAD_DIM).to(out.dtype))
-    return {"output": out, "q_tokens": 1, "context_tokens": context, "physical_page_size": page_size, "splits": splits}
+    return {"output": out, "q_tokens": query_tokens, "context_tokens": context, "physical_page_size": page_size, "splits": splits}
 
 
 def _run_batched_sequences(
@@ -429,6 +432,7 @@ def install_int4_prefill_overlay(
     fn.argtypes = [ctypes.POINTER(R4DInt4TiledArgs), ctypes.c_void_p]
     fn.restype = ctypes.c_int
     decode_fn = None
+    verify_fn = None
     decode_hash = None
     if (decode_dll_path is None) != (expected_decode_dll_sha256 is None):
         raise ValueError("decode_dll_path and expected_decode_dll_sha256 must be supplied together")
@@ -443,6 +447,10 @@ def install_int4_prefill_overlay(
         decode_fn = decode_library.r4d_int4_decode_splitk
         decode_fn.argtypes = [ctypes.POINTER(R4DInt4DecodeArgs), ctypes.c_void_p]
         decode_fn.restype = ctypes.c_int
+        verify_fn = getattr(decode_library, "r4d_int4_verify_splitk", None)
+        if verify_fn is not None:
+            verify_fn.argtypes = [ctypes.POINTER(R4DInt4DecodeArgs), ctypes.c_int32, ctypes.c_void_p]
+            verify_fn.restype = ctypes.c_int
     module = __import__("vllm.v1.attention.backends.triton_attn", fromlist=["unified_attention"])
     original = module.unified_attention
     mode_type = __import__("vllm.v1.kv_cache_interface", fromlist=["KVQuantMode"]).KVQuantMode
@@ -463,6 +471,8 @@ def install_int4_prefill_overlay(
         "dispatch_calls": 0,
         "decode_dispatch_calls": 0,
         "decode_enabled": decode_fn is not None,
+        "verify_enabled": verify_fn is not None,
+        "verify_dispatch_calls": 0,
         "decode_dll": str(decode_dll_path) if decode_dll_path is not None else None,
         "decode_dll_sha256": decode_hash,
         "decode_symbol": "r4d_int4_decode_splitk" if decode_fn is not None else None,
@@ -497,7 +507,13 @@ def install_int4_prefill_overlay(
                 {k: v for k, v in result.items() if k != "output"} for result in sequence_results
             ]
             return kwargs["out"]
-        if int(kwargs.get("max_seqlen_q", 0)) == 1 and decode_fn is not None:
+        query_tokens = int(kwargs.get("max_seqlen_q", 0))
+        if verify_fn is not None and 2 <= query_tokens <= 4 and q.shape[0] == query_tokens:
+            result = run_int4_decode(kwargs, verify_fn, query_tokens=query_tokens)
+            info["verify_dispatch_calls"] += 1
+            info["verify_last_call"] = {k: v for k, v in result.items() if k != "output"}
+            return result["output"]
+        if query_tokens == 1 and decode_fn is not None:
             try:
                 result = run_int4_decode(kwargs, decode_fn)
             except (RuntimeError, ValueError) as exc:
@@ -519,6 +535,7 @@ def install_int4_prefill_overlay(
         return result["output"]
 
     module.unified_attention = wrapped
+    print(f"event=int4_mtp_verify enabled={str(verify_fn is not None).lower()} decode_sha256={decode_hash}", file=sys.stderr, flush=True)
     try:
         yield info
     finally:
