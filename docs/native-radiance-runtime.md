@@ -108,6 +108,10 @@ Before activation, back up the matching executable, DLLs, Python modules, static
 
 ## Sampling compatibility
 
+On Windows, Radiance releases idle Vulkan shader pipelines and device-wide staging memory before measuring its startup GPU budget. The backend retains its device and buffer-type identities; shaders compile again on demand when Vulkan resumes. Cleanup skips devices with outstanding backend, tensor-buffer, or pinned-memory owners. Deploy the matching `ggml-vulkan.dll` and Python profile together. The retained four-by-100K profile uses 0.991 utilization when free memory permits. For reloads, admission allows an available budget down to 0.96 after a 64 MiB allowance, with exactly 192 cache blocks. The override fixes actual cache allocation independently of the utilization budget. Post-load checks still require four 100K contexts and at least 1 GiB free memory. Rejected startup budgets report free, required and missing MiB.
+
+The `vulkan_idle_cache` GPU regression is opt-in: set `INFERDECK_TEST_VULKAN=1` on a machine with a working Vulkan GPU, then run `ctest --test-dir build -C Release -R '^vulkan_idle_cache$' --output-on-failure`. Without opt-in it returns CTest's configured skip code before initializing Vulkan, so ordinary hosted CI compiles the test but reports it as skipped.
+
 The native adapter must resolve omitted temperature, top-p, top-k, min-p and repetition settings from the model configuration, with explicit request values taking precedence. A disabled top-k is represented as `-1` in vLLM. Native sampling diagnostics record effective values, not prompt text.
 
 Penalty implementations have different history semantics. The native runtime uses a request-local logits processor for repetition, frequency and presence penalties over the requested generated-token window. Zero disables penalties; positive values retain that many recent output tokens; `-1` retains all output tokens. Native built-in penalties are disabled to avoid double application. Unsupported samplers such as DRY remain explicitly rejected. Matching supported settings does not imply identical sampled text across different kernels and quantizations.

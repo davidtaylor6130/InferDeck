@@ -146,7 +146,22 @@ if(TARGET llama)
     )
 endif()
 if(TARGET ggml-vulkan)
+    get_target_property(_vulkan_sources ggml-vulkan SOURCES)
+    get_target_property(_vulkan_source_dir ggml-vulkan SOURCE_DIR)
+    set(_vulkan_wrapped_sources "")
+    foreach(_source IN LISTS _vulkan_sources)
+        if(_source MATCHES "(^|/)ggml-vulkan\\.cpp$")
+            list(APPEND _vulkan_wrapped_sources
+                "${CMAKE_CURRENT_SOURCE_DIR}/libs/llama_cpp_wrapper/native/inferdeck_vulkan_runtime.cpp")
+        elseif(IS_ABSOLUTE "${_source}")
+            list(APPEND _vulkan_wrapped_sources "${_source}")
+        else()
+            list(APPEND _vulkan_wrapped_sources "${_vulkan_source_dir}/${_source}")
+        endif()
+    endforeach()
+    set_property(TARGET ggml-vulkan PROPERTY SOURCES "${_vulkan_wrapped_sources}")
     target_include_directories(ggml-vulkan PRIVATE
+        "${_vulkan_source_dir}"
         ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/libs/third_party/llama.cpp/ggml/include
     )

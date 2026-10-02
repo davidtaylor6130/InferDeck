@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import importlib
 import copy
+import ctypes
 import faulthandler
 from contextlib import contextmanager
 import json
@@ -42,6 +43,28 @@ _RADIANCE_ENV_DEFAULTS = {
     "RADIANCE_FUSE_RMS_QUANT": "1",
 }
 
+def _release_idle_vulkan_cache()->int:
+    if os.name != "nt":
+        return 0
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_module = kernel.GetModuleHandleW
+    get_module.argtypes = [ctypes.c_wchar_p]
+    get_module.restype = ctypes.c_void_p
+    handle = get_module("ggml-vulkan.dll")
+    if not handle:
+        return 0
+    backend = ctypes.WinDLL("ggml-vulkan.dll", handle=handle)
+    release = getattr(backend, "inferdeck_ggml_vk_release_idle_cache", None)
+    if release is None:
+        return 0
+    release.argtypes = []
+    release.restype = ctypes.c_int
+    released = release()
+    if released < 0:
+        raise RuntimeError("Vulkan idle GPU cache cleanup failed; see runtime log")
+    return released
+
+
 def _gpu_memory_utilization(prefill_attention:str, speculative:bool=False)->float:
     # Retained MTP3, batch-2048, 100k profile uses 0.991 memory utilization.
     if speculative: return 0.991
@@ -58,8 +81,11 @@ def _engine_memory_config(prefill_attention:str, speculative_config:dict[str,Any
     if not retained_profile or free_bytes >= math.ceil(total_bytes * desired):
         return options
     available = (free_bytes - 64 * 1024 * 1024) / total_bytes
-    if available < 0.97:
-        raise RuntimeError("Insufficient free GPU memory to preserve Radiance four-by-100K capacity")
+    if available < 0.96:
+        required = math.ceil(total_bytes * 0.96) + 64 * 1024 * 1024
+        raise RuntimeError("Insufficient free GPU memory to preserve Radiance four-by-100K capacity "
+                           f"(free={free_bytes / 1048576:.0f} MiB, required={required / 1048576:.0f} MiB, "
+                           f"shortfall={max(0, required-free_bytes) / 1048576:.0f} MiB)")
     options["gpu_memory_utilization"] = min(desired, available)
     options["num_gpu_blocks_override"] = 192
     return options
@@ -469,6 +495,7 @@ def _create(c:dict[str,Any])->dict[str,Any]:
         n_slots = int(c["n_slots"])
         draft_tokens = speculative_config["num_speculative_tokens"] if speculative_config else 0
         compilation_config = _compilation_config(kv_cache_dtype, prefill_attention, c.get("cudagraph_capture_sizes"), draft_tokens)
+        _release_idle_vulkan_cache()
         free_before,total_before = torch.cuda.mem_get_info()
         memory_options = _engine_memory_config(prefill_attention, speculative_config, n_slots, free_before, total_before)
         memory_utilization = memory_options["gpu_memory_utilization"]
