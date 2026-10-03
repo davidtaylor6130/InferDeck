@@ -197,9 +197,9 @@ int run_gateway(const fs::path& config_path) {
     GatewayDeps deps{coordinator, "15", cfg.auto_swap, cfg.default_model,
                      cfg.voice_session_grace_ms, &metrics, &stats_db,
                      &events, &swap_tracker, &maintenance_resource};
+    deps.media_default_models = cfg.media_default_models;
     deps.api_keys = api_keys;
-    deps.background_idle_after_seconds =
-        cfg.background_idle_after_seconds;
+    deps.background_idle_after_seconds = cfg.background_idle_after_seconds;
     deps.public_data_plane_access = !cfg.auth_required;
     auto derivative_deps = deps;
     derivative_deps.compatibility_profile =

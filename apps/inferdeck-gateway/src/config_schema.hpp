@@ -50,7 +50,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
     }
     auto result = reject_unknown_config_keys(root, "", {
         "schema_version", "server", "logging", "auth", "control", "cors",
-        "state", "model_store", "default_model", "observability", "gateway",
+        "state", "model_store", "default_model", "default_models", "observability", "gateway",
         "compatibility", "model_aliases", "model_registry",
         "extensions"});
     if (!result) return result;
@@ -59,6 +59,21 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
         return reject_unknown_config_keys(root[std::string(name)], name, keys);
     };
     if (!(result = check("server", {"host", "port"}))) return result;
+    if (!(result = check("default_models", {"image", "music", "video"}))) return result;
+    if (root["default_models"] && !root["default_models"].IsMap()) {
+        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                     "default_models must be a mapping");
+    }
+    if (root["default_models"]) {
+        for (const auto& item : root["default_models"]) {
+            if (!item.second.IsScalar() ||
+                item.second.as<std::string>().empty()) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "default_models entries must be non-empty model names");
+            }
+        }
+    }
     if (!(result = check("logging", {"level", "file"}))) return result;
     if (!(result = check("auth", {"required", "token", "api_keys_db"}))) return result;
     if (!(result = check("control", {

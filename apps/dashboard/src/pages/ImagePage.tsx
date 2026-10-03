@@ -23,13 +23,18 @@ function readiness(model: ModelInfo | undefined): {
   return { label: 'Loads on request', tone: 'info' };
 }
 
+function preferredImageModel(models: ModelInfo[]): string {
+  return models.find(entry => entry.personal_default &&
+    entry.runtime_available !== false)?.id ??
+    models.find(entry => entry.runtime_available !== false)?.id ??
+    models[0]?.id ?? '';
+}
+
 export const ImagePage: React.FC = () => {
   const { connection, models } = useGateway();
   const generators = useMemo(() => imageModels(models), [models]);
   const [model, setModel] = useState(() =>
-    generators.find(entry => entry.runtime_available !== false)?.id ??
-    generators[0]?.id ??
-    '',
+    preferredImageModel(generators),
   );
   const [prompt, setPrompt] = useState('');
   const [size, setSize] = useState('512x512');
@@ -42,11 +47,7 @@ export const ImagePage: React.FC = () => {
 
   useEffect(() => {
     if (generators.some(entry => entry.id === model)) return;
-    setModel(
-      generators.find(entry => entry.runtime_available !== false)?.id ??
-      generators[0]?.id ??
-      '',
-    );
+    setModel(preferredImageModel(generators));
   }, [generators, model]);
 
   useEffect(

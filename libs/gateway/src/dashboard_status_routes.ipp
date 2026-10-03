@@ -6,7 +6,8 @@
     server.Get(R"(^/api/inferdeck/v1/models$)", wrap([deps](const httplib::Request& req,
                                                httplib::Response& resp) {
         (void)req;
-        write_json(resp, 200, build_dashboard_models(deps.gw.coordinator));
+        write_json(resp, 200, build_dashboard_models(
+            deps.gw.coordinator, deps.gw.media_default_models));
     }));
 
     server.Get(R"(^/api/inferdeck/v1/usage/daily$)",

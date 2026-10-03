@@ -175,7 +175,9 @@ nlohmann::json system_hardware_json() {
     return out;
 }
 
-nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
+nlohmann::json build_dashboard_models(
+    model::BackendCoordinator& coordinator,
+    const std::map<std::string, std::string>& media_defaults) {
     nlohmann::json models = nlohmann::json::array();
     auto loaded = coordinator.get_loaded_model();
     std::unordered_map<std::string, model::ResidencyInfo> residency;
@@ -183,6 +185,11 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
     for (const auto& name : coordinator.registry().list()) {
         const auto& info = coordinator.registry().get_info(name);
         const auto resident = residency.find(name);
+        std::string default_key;
+        if (info.supports("image_generation")) default_key = "image";
+        else if (info.supports("audio_generation")) default_key = "music";
+        else if (info.supports("video_generation")) default_key = "video";
+        const auto default_model = media_defaults.find(default_key);
         models.push_back({
             {"id", name},
             {"name", name},
@@ -190,6 +197,8 @@ nlohmann::json build_dashboard_models(model::BackendCoordinator& coordinator) {
             {"runtime", info.runtime},
             {"runtime_available", coordinator.registry().has_factory(info.runtime)},
             {"modality", info.modality},
+            {"personal_default", default_model != media_defaults.end() &&
+                                     default_model->second == name},
             {"role", model::to_string(info.role)},
             {"compute", model::to_string(info.compute)},
             {"residency_policy", model::to_string(info.residency)},
@@ -559,7 +568,8 @@ nlohmann::json build_dashboard_status(const DashboardDeps& deps) {
         gpu_locked = true;
         if (gpu_lock_owner.empty() || item.primary) gpu_lock_owner = item.name;
     }
-    auto model_json = build_dashboard_models(coordinator);
+    auto model_json = build_dashboard_models(
+        coordinator, deps.gw.media_default_models);
     nlohmann::json live_requests = nlohmann::json::array();
     for (const auto& request : metrics.live_requests()) {
         const auto& progress = *request->progress;

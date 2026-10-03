@@ -92,6 +92,12 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
     if (root["default_model"]) {
         cfg.default_model = root["default_model"].as<std::string>();
     }
+    if (root["default_models"] && root["default_models"].IsMap()) {
+        for (const auto& item : root["default_models"]) {
+            cfg.media_default_models.emplace(
+                item.first.as<std::string>(), item.second.as<std::string>());
+        }
+    }
     if (root["observability"]) {
         const auto& o = root["observability"];
         if (o["stats_db"]) cfg.stats_db_path = o["stats_db"].as<std::string>();

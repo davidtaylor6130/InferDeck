@@ -20,6 +20,7 @@ export interface ModelInfo {
   runtime?: string;
   runtime_available?: boolean;
   modality?: string;
+  personal_default?: boolean;
   capabilities?: string[];
   context_size: number;
   vram_required_mb: number;

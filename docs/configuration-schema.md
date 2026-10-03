@@ -29,6 +29,23 @@ contract owns its modalities, capabilities, artifact policy, and support for
 vision, reasoning, and speculative decoding. A runtime cannot silently accept a
 modality or capability it did not register.
 
+## Media defaults
+
+`default_model` selects the chat model. Optional `default_models` entries select
+the model used when an image, music, or video generation request omits `model`:
+
+```yaml
+default_models:
+  image: stable-diffusion-xl-1.0-fp16
+  music: ace-step-v1.5-xl-sft-bf16
+  video: ltx-2.3
+```
+
+An explicit request model takes precedence. The image and video pages initially
+select their configured default when its runtime is available. These settings
+do not download models or add runtime support. Without a media default, image
+and video retain the existing `default_model` fallback; music requires `model`.
+
 ## Files and selection
 
 - The stable base is the requested `gateway.yml`.

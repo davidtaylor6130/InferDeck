@@ -59,7 +59,11 @@ type VideoGenerationInput = {
 export const VideoPage: React.FC = () => {
   const { connection, models } = useGateway();
   const generators = useMemo(() => videoModels(models), [models]);
-  const [model, setModel] = useState('');
+  const [model, setModel] = useState(() =>
+    generators.find(entry => entry.personal_default &&
+      entry.runtime_available !== false)?.id ??
+    generators.find(entry => entry.runtime_available !== false)?.id ?? '',
+  );
   const [prompt, setPrompt] = useState('');
   const [negativePrompt, setNegativePrompt] = useState('');
   const [width, setWidth] = useState<number>(VIDEO_DEFAULTS.width);
@@ -85,6 +89,8 @@ export const VideoPage: React.FC = () => {
   useEffect(() => {
     if (generators.some(entry => entry.id === model)) return;
     setModel(
+      generators.find(entry => entry.personal_default &&
+        entry.runtime_available !== false)?.id ??
       generators.find(entry => entry.runtime_available !== false)?.id ??
       generators[0]?.id ??
       '',

@@ -27,7 +27,9 @@ void handle_audio_generations(const httplib::Request& req,
             return;
         }
     }
-    if (!body.contains("model") || !body["model"].is_string()) {
+    if ((body.contains("model") && !body["model"].is_string()) ||
+        (!body.contains("model") &&
+         !deps.media_default_models.contains("music"))) {
         write_error(resp, 400, "invalid_audio_generation",
                     "model must be a string", "model");
         return;
@@ -67,7 +69,10 @@ void handle_audio_generations(const httplib::Request& req,
     model::AudioGenerationRequest request;
     std::string model_name;
     try {
-        model_name = body["model"].get<std::string>();
+        model_name = body.contains("model") && !body["model"].is_null()
+            ? body["model"].get<std::string>()
+            : (deps.media_default_models.contains("music")
+                ? deps.media_default_models.at("music") : std::string{});
         request.prompt = body["prompt"].get<std::string>();
         request.lyrics = body.value("lyrics", "");
         request.duration_seconds = body.value("duration", 30.0f);
