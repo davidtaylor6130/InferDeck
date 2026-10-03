@@ -17,16 +17,15 @@ def _runner(engine: Any) -> Any:
 
 
 def _model_chain(engine: Any) -> list[Any]:
-    model = getattr(_runner(engine), "model", None)
+    runner = _runner(engine)
+    roots = [getattr(runner, "model", None), getattr(getattr(runner, "drafter", None), "model", None)]
     chain = []
-    for _ in range(5):
-        if model is None:
-            break
-        chain.append(model)
-        child = getattr(model, "runnable", None)
-        if child is model:
-            break
-        model = child
+    for model in roots:
+        for _ in range(5):
+            if model is None or any(model is existing for existing in chain):
+                break
+            chain.append(model)
+            model = getattr(model, "runnable", None)
     return chain
 
 
@@ -156,3 +155,17 @@ def finalize_engine_caches(engine: Any) -> bool:
     active = finalizer.alive
     finalizer()
     return active
+
+
+def release_model_compilation_hooks(engine: Any) -> int:
+    wrapper_module = sys.modules.get("vllm.compilation.wrapper")
+    wrapper_type = getattr(wrapper_module, "TorchCompileWithNoGuardsWrapper", None)
+    if wrapper_type is None:
+        return 0
+    released = set()
+    for model in _model_chain(engine):
+        for module in model.modules():
+            if isinstance(module, wrapper_type) and id(module) not in released:
+                module.cleanup()
+                released.add(id(module))
+    return len(released)

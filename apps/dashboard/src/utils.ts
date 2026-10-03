@@ -97,21 +97,21 @@ export function toneText(tone: Tone): string {
 }
 
 export function toneBg(tone: Tone): string {
-  if (tone === 'good') return 'bg-success-green/10';
-  if (tone === 'warn') return 'bg-warning-amber/10';
-  if (tone === 'critical') return 'bg-danger-rose/10';
-  if (tone === 'info') return 'bg-queue-blue/10';
-  if (tone === 'violet') return 'bg-infer-violet/10';
-  return 'bg-white/[0.04]';
+  if (tone === 'good') return 'bg-success-green/15';
+  if (tone === 'warn') return 'bg-warning-amber/15';
+  if (tone === 'critical') return 'bg-danger-rose/15';
+  if (tone === 'info') return 'bg-queue-blue/15';
+  if (tone === 'violet') return 'bg-infer-violet/15';
+  return 'bg-elevated-slate';
 }
 
 export function toneHex(tone: Tone): string {
-  if (tone === 'good') return '#22C55E';
-  if (tone === 'warn') return '#F59E0B';
-  if (tone === 'critical') return '#F43F5E';
-  if (tone === 'info') return '#60A5FA';
-  if (tone === 'violet') return '#8B5CF6';
-  return '#64748B';
+  if (tone === 'good') return 'rgb(var(--good))';
+  if (tone === 'warn') return 'rgb(var(--warn))';
+  if (tone === 'critical') return 'rgb(var(--bad))';
+  if (tone === 'info') return 'rgb(var(--accent))';
+  if (tone === 'violet') return 'rgb(var(--violet))';
+  return 'rgb(var(--ink-3))';
 }
 
 // Explicit text for tone-mapped values so status never rides on color alone.

@@ -5,14 +5,8 @@ import {
   mediaOutputUrl,
   type MediaJob,
 } from '../api';
-import {
-  Badge,
-  Button,
-  EmptyState,
-  Panel,
-  ProgressBar,
-  SectionTitle,
-} from '../components/ui';
+import { ArrowDownTrayIcon, FilmIcon, MicrophoneIcon, MusicalNoteIcon, PhotoIcon, SparklesIcon } from '@heroicons/react/24/solid';
+import { Badge, Button, EmptyState, GroupList, Notice, ProgressBar } from '../components/ui';
 
 import { usePolling } from '../usePolling';
 
@@ -94,32 +88,36 @@ export const MediaJobsPanel: React.FC<MediaJobsPanelProps> = ({
 
   if (visibleJobs.length === 0 && !showEmpty && !loadError) return null;
   return (
-    <Panel>
-      <SectionTitle
-        title={title}
-        aside={visibleJobs.length ? `${visibleJobs.length}` : 'idle'}
-      />
-      {loadError && (
-        <p className="mt-3 border-l-2 border-danger-rose pl-3 text-sm text-danger-rose" role="alert">
-          {loadError}
-        </p>
-      )}
+    <section aria-label={title}>
+      <div className="flex items-baseline justify-between gap-3 px-4 pb-1.5 pt-1">
+        <h2 className="text-base font-semibold">{title}</h2>
+        <span className="text-xs text-text-muted">{visibleJobs.length ? `${visibleJobs.length} recent` : 'idle'}</span>
+      </div>
+      {loadError && <Notice tone="critical" role="alert" className="mb-2">{loadError}</Notice>}
       {visibleJobs.length === 0 ? (
-        <div className="mt-3">
-          <EmptyState title={emptyTitle} detail={emptyDetail} />
-        </div>
+        <EmptyState icon={<SparklesIcon className="h-8 w-8" />} title={emptyTitle} detail={emptyDetail} />
       ) : (
-        <div className="mt-3 divide-y divide-white/10 border-b border-white/10">
+        <GroupList>
           {visibleJobs.map(job => {
             const parameters = parameterSummary(job);
+            const images = job.outputs?.filter(output => output.content_type === 'image/png') ?? [];
+            const others = job.outputs?.filter(output => output.content_type !== 'image/png') ?? [];
+            const Icon = job.modality === 'image' ? PhotoIcon : job.modality === 'video_generation' ? FilmIcon : job.modality === 'audio_generation' ? MusicalNoteIcon : MicrophoneIcon;
             return (
-              <article key={job.id} className="py-4">
-                <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="min-w-0">
-                    <p className="break-words text-sm font-medium text-text-primary">
+              <article key={job.id} className="px-3 py-3.5">
+                <div className="flex min-w-0 items-start gap-3.5">
+                  {images[0] ? (
+                    <a href={mediaOutputUrl(images[0])} target="_blank" rel="noreferrer" className="shrink-0">
+                      <img src={mediaOutputUrl(images[0])} alt="" loading="lazy" className="h-12 w-12 rounded-md bg-void-black object-cover" />
+                    </a>
+                  ) : (
+                    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-elevated-slate text-text-muted"><Icon className="h-5 w-5" /></span>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="line-clamp-2 break-words text-base font-medium text-text-primary">
                       {job.prompt || job.model}
                     </p>
-                    <p className="mt-1 break-words text-xs text-text-muted">
+                    <p className="mt-0.5 break-words text-xs text-text-muted">
                       {job.model}{parameters ? ` / ${parameters}` : ''}{jobTime(job) ? ` / ${jobTime(job)}` : ''}
                     </p>
                   </div>
@@ -140,65 +138,62 @@ export const MediaJobsPanel: React.FC<MediaJobsPanelProps> = ({
                   </div>
                 </div>
                 {job.state === 'running' && (
-                  <div className="mt-3">
-                    <ProgressBar percent={job.progress} tone="info" />
-                    <p className="mt-1 text-right text-xs text-text-muted">{job.progress}%</p>
+                  <div className="mt-3 flex items-center gap-3 pl-[62px]">
+                    <div className="flex-1"><ProgressBar percent={job.progress} tone="info" /></div>
+                    <span className="tabular text-xs text-text-muted">{job.progress}%</span>
                   </div>
                 )}
-                {job.error && (
-                  <p className="mt-3 border-l-2 border-danger-rose pl-3 text-xs text-danger-rose">
-                    {job.error}
-                  </p>
+                {job.error && <p className="mt-2 pl-[62px] text-xs text-danger-rose">{job.error}</p>}
+                {images.length > 0 && (
+                  <div className="mt-3 grid grid-cols-2 gap-2 pl-[62px] sm:grid-cols-3 lg:grid-cols-4">
+                    {images.map(output => (
+                      <a key={output.url} href={mediaOutputUrl(output)} target="_blank" rel="noreferrer" className="group relative block overflow-hidden rounded-md bg-void-black">
+                        <img
+                          src={mediaOutputUrl(output)}
+                          alt={job.prompt || 'Generated image'}
+                          loading="lazy"
+                          className="aspect-square w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+                        />
+                      </a>
+                    ))}
+                  </div>
                 )}
-                {job.outputs?.length > 0 && (
-                  <div
-                    className={job.modality === 'image'
-                      ? 'mt-3 grid gap-3 sm:grid-cols-2'
-                      : 'mt-3 space-y-3'}
-                  >
-                    {job.outputs.map(output => (
+                {others.length > 0 && (
+                  <div className="mt-3 space-y-2 pl-[62px]">
+                    {others.map(output => (
                       <div key={output.url} className="min-w-0">
-                        {output.content_type === 'image/png' ? (
-                          <a href={mediaOutputUrl(output)} target="_blank" rel="noreferrer">
-                            <img
-                              src={mediaOutputUrl(output)}
-                              alt={job.prompt || 'Generated image'}
-                              loading="lazy"
-                              className="max-h-[36rem] w-full bg-black object-contain"
-                            />
-                          </a>
-                        ) : output.content_type === 'video/avi' ? (
-                          <p className="border-l-2 border-white/15 pl-3 text-xs text-text-muted">
-                            AVI output is download-only. Download the AVI to watch it.
-                          </p>
+                        {output.content_type === 'video/avi' ? (
+                          <p className="text-xs text-text-muted">AVI output is download-only. Download the AVI to watch it.</p>
                         ) : output.content_type === 'video/mp4' ? (
-                          <video controls preload="metadata" src={mediaOutputUrl(output)} className="max-h-[36rem] w-full bg-black">Video playback is not supported by this browser.</video>
+                          <video controls preload="metadata" src={mediaOutputUrl(output)} className="max-h-[28rem] w-full rounded-md bg-void-black">Video playback is not supported by this browser.</video>
                         ) : (
-                          <audio
-                            controls
-                            preload="metadata"
-                            src={mediaOutputUrl(output)}
-                            className="w-full"
-                          >
+                          <audio controls preload="metadata" src={mediaOutputUrl(output)} className="h-10 w-full">
                             Audio playback is not supported by this browser.
                           </audio>
                         )}
-                        <a
-                          href={mediaOutputUrl(output)}
-                          download={output.filename}
-                          className="mt-2 inline-flex min-h-11 items-center text-xs font-medium text-queue-blue hover:underline sm:min-h-10"
-                        >
-                          Download {output.filename}
-                        </a>
                       </div>
+                    ))}
+                  </div>
+                )}
+                {job.outputs?.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 pl-[62px]">
+                    {job.outputs.map(output => (
+                      <a
+                        key={`download:${output.url}`}
+                        href={mediaOutputUrl(output)}
+                        download={output.filename}
+                        className="inline-flex min-h-8 items-center gap-1 text-xs font-medium text-queue-blue hover:underline"
+                      >
+                        <ArrowDownTrayIcon className="h-3.5 w-3.5" />Download {output.filename}
+                      </a>
                     ))}
                   </div>
                 )}
               </article>
             );
           })}
-        </div>
+        </GroupList>
       )}
-    </Panel>
+    </section>
   );
 };

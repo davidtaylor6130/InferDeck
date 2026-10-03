@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useFeedback } from '../components/Feedback';
 import { getConfig, resetActiveConfig, waitForStableConfig, type ConfigDocument } from '../api';
 import { Badge, Button, Panel } from '../components/ui';
 import { VramReserveSettings } from '../components/VramReserveSettings';
 
 export const ConfigPanel: React.FC = () => {
+  const { confirm } = useFeedback();
   const [config, setConfig] = useState<ConfigDocument | null>(null);
   const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState('');
@@ -23,7 +25,7 @@ export const ConfigPanel: React.FC = () => {
   useEffect(() => { void load(); }, [load]);
 
   const reset = async () => {
-    if (!window.confirm('Discard the complete active profile and apply the stable base configuration now?')) return;
+    if (!(await confirm({ title: 'Restore the stable baseline?', detail: 'This discards every change in the active profile and restarts models with gateway.yml.', confirmLabel: 'Discard and restore', destructive: true }))) return;
     setBusy(true);
     setMessage('');
     try {
@@ -62,12 +64,12 @@ export const ConfigPanel: React.FC = () => {
             }
           </span>
         </summary>
-        <div className="mt-3 border-l border-border-slate pl-4">
+        <div className="mt-4">
           <p className="max-w-3xl text-xs text-text-muted">
             The complete baseline is preserved below. Model Details writes a separate validated active profile; this file remains the recovery point if that profile cannot load.
           </p>
           {config?.fallbackReason && (
-            <div className="mt-3 border-l-2 border-warning-amber bg-warning-amber/10 px-3 py-2 text-xs text-warning-amber">
+            <div className="mt-3 rounded-md bg-warning-amber/15 px-3.5 py-2.5 text-xs text-warning-amber">
               The saved active profile was rejected at startup and InferDeck fell back safely: {config.fallbackReason}
             </div>
           )}
@@ -78,19 +80,19 @@ export const ConfigPanel: React.FC = () => {
               aria-label="Complete stable YAML"
               spellCheck={false}
               readOnly
-              className="mt-1 h-[420px] w-full resize-y rounded border border-border-slate bg-[#05080f] p-3 font-mono text-xs leading-5 text-text-secondary"
+              className="mt-1 h-[420px] w-full resize-y rounded-md !bg-void-black p-4 font-mono text-xs leading-5 text-text-secondary"
               value={config?.yaml ?? ''}
             />
           </label>
 
           {config?.hasActiveProfile && (
-            <details className="mt-3 border-t border-border-slate pt-3">
+            <details className="mt-3">
               <summary className="cursor-pointer text-sm font-medium text-text-secondary">Compare saved active profile</summary>
               <textarea
                 aria-label="Complete active YAML"
                 spellCheck={false}
                 readOnly
-                className="mt-2 h-[320px] w-full resize-y rounded border border-border-slate bg-[#05080f] p-3 font-mono text-xs leading-5 text-text-secondary"
+                className="mt-2 h-[320px] w-full resize-y rounded-md !bg-void-black p-4 font-mono text-xs leading-5 text-text-secondary"
                 value={config.activeYaml}
               />
             </details>

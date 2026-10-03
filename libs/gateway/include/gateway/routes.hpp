@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 
@@ -40,7 +41,15 @@ struct GatewayDeps {
     std::shared_ptr<ApiKeyStore> api_keys;
     int background_idle_after_seconds{900};
     bool public_data_plane_access{false};
+    std::map<std::string, std::string> media_default_models;
 };
+
+inline std::string media_default_model(const GatewayDeps& deps,
+                                       const std::string& media) {
+    const auto found = deps.media_default_models.find(media);
+    return found == deps.media_default_models.end()
+        ? deps.default_model : found->second;
+}
 
 struct RequestObservation {
     std::string request_id;

@@ -3,7 +3,7 @@ import type { InstalledStoreModel, StoreFile } from '../api';
 import { Badge } from '../components/ui';
 import type { DashboardSection } from '../dashboardSections';
 
-export const storeInputClass = 'min-h-11 rounded border border-white/10 bg-[#07101d] px-3 text-sm text-text-primary';
+export const storeInputClass = 'min-h-10 px-2.5 text-sm text-text-primary sm:min-h-8';
 export type StoreTab = 'discover' | 'downloads' | 'installed';
 export type CatalogueSort = 'trending' | 'downloads' | 'likes' | 'recent';
 export type ServerSortKey = 'name' | 'type' | 'configured' | 'runtime' | 'size';
@@ -62,6 +62,12 @@ export const ArtifactFit: React.FC<{
   if (share <= 0.85) return <Badge label="Fits / tight at long context" tone="warn" />;
   return <Badge label="Not recommended for this VRAM" tone="critical" />;
 };
+
+export function parameterLabel(modelId: string): string {
+  const matches = Array.from(modelId.matchAll(/(?:^|[-_.])(\d+(?:\.\d+)?)b(?:$|[-_.])/gi));
+  if (!matches.length) return '';
+  return `${Math.max(...matches.map(match => Number(match[1])))}B`;
+}
 
 export function estimateRepositoryVramMb(modelId: string): number {
   const matches = Array.from(modelId.matchAll(/(?:^|[-_.])(\d+(?:\.\d+)?)b(?:$|[-_.])/gi));

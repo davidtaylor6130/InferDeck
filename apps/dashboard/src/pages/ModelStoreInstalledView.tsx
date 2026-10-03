@@ -1,9 +1,17 @@
 import React, { useMemo } from 'react';
 import type { InstalledStoreModel } from '../api';
-import { Badge, Button, EmptyState, Panel, SectionTitle } from '../components/ui';
+import { Badge, Button, EmptyState } from '../components/ui';
 import { sectionLabel, type DashboardSection } from '../dashboardSections';
 import { formatBytes } from '../utils';
-import { serverModelType, storeInputClass, type ServerSortKey } from './modelStoreUi';
+import { serverModelType, type ServerSortKey } from './modelStoreUi';
+
+const COLUMNS: Array<{ key: ServerSortKey; label: string; align?: 'right' }> = [
+  { key: 'name', label: 'Model' },
+  { key: 'type', label: 'Type' },
+  { key: 'runtime', label: 'Runtime' },
+  { key: 'configured', label: 'Status' },
+  { key: 'size', label: 'Disk size', align: 'right' },
+];
 
 export const ModelStoreInstalledView: React.FC<{
   section: DashboardSection;
@@ -32,97 +40,73 @@ export const ModelStoreInstalledView: React.FC<{
       return sort.direction === 'asc' ? compared : -compared;
     });
   }, [entries, sort]);
+  const totalBytes = entries.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
 
   return (
-    <Panel className="border-t-0 pt-0">
-      <SectionTitle title="Installed models" aside={`${entries.length} detected`} />
-      <p className="mt-2 max-w-3xl text-xs text-text-muted">
-        External models can be removed from InferDeck without deleting their files.
-        Managed downloads can be archived or permanently deleted.
-      </p>
-      <div className="mt-4 flex flex-wrap items-end gap-2">
-        <label className="text-xs text-text-muted">
-          Sort by
-          <select
-            className={`${storeInputClass} mt-1`}
-            value={sort.key}
-            onChange={event => onSort({
-              ...sort,
-              key: event.target.value as ServerSortKey,
-            })}
-          >
-            <option value="name">Name</option>
-            <option value="type">Type</option>
-            <option value="configured">Configured</option>
-            <option value="runtime">Runtime</option>
-            <option value="size">Disk size</option>
-          </select>
-        </label>
-        <Button onClick={() => onSort({
-          ...sort,
-          direction: sort.direction === 'asc' ? 'desc' : 'asc',
-        })}>
-          {sort.direction === 'asc' ? 'Ascending' : 'Descending'}
-        </Button>
+    <section aria-label="Installed models">
+      <div className="flex flex-wrap items-baseline justify-between gap-3 pb-2">
+        <h2 className="text-sm font-semibold">Installed models</h2>
+        <span className="tabular text-xs text-text-muted">{entries.length} detected, {formatBytes(totalBytes)} on disk</span>
       </div>
       {sorted.length === 0 ? (
-        <div className="mt-4">
-          <EmptyState
-            title={`No downloaded ${sectionLabel(section)} models`}
-            detail="No compatible artifacts were detected in this model library."
-          />
-        </div>
+        <EmptyState
+          title={`No downloaded ${sectionLabel(section)} models`}
+          detail="No compatible model files were found in this model library."
+        />
       ) : (
-        <div className="mt-4 divide-y divide-white/10 border-y border-white/10">
-          {sorted.map(entry => (
-            <div
-              key={entry.id || `${entry.name}:${entry.path}`}
-              className="grid gap-3 py-3 md:grid-cols-[minmax(0,1fr)_minmax(220px,auto)] md:items-center"
-            >
-              <div className="min-w-0">
-                <p className="break-all font-mono text-sm text-text-primary">
-                  {entry.name || 'Unconfigured model artifact'}
-                </p>
-                <p className="mt-1 break-all text-xs text-text-muted">
-                  {entry.path || 'Managed storage'}
-                </p>
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-secondary">
-                  <Badge label={serverModelType(entry)} tone={entry.hasVision ? 'violet' : 'idle'} />
-                  <Badge
-                    label={entry.configured ? 'Configured' : 'Not configured'}
-                    tone={entry.configured ? 'good' : 'warn'}
-                  />
-                  <span>{entry.runtime || 'Unknown runtime'}</span>
-                  <span>{formatBytes(entry.size ?? 0)}</span>
-                  <span>{entry.managed ? 'InferDeck managed' : 'External'}</span>
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2 md:justify-end">
-                {entry.managed ? (
-                  <>
-                    <Button onClick={() => {
-                      if (entry.name) onRetire(entry.name, 'archive');
-                    }}>
-                      Archive
-                    </Button>
-                    <Button tone="danger" onClick={() => {
-                      if (entry.name) onRetire(entry.name, 'remove');
-                    }}>
-                      Delete permanently
-                    </Button>
-                  </>
-                ) : entry.configured && entry.name ? (
-                  <Button tone="danger" onClick={() => onUnregister(entry.name!)}>
-                    Remove from InferDeck
-                  </Button>
-                ) : (
-                  <span className="text-xs text-text-muted">Detected on disk</span>
-                )}
-              </div>
-            </div>
-          ))}
+        <div className="overflow-x-auto rounded-lg border border-border-slate bg-panel-slate shadow-card">
+          <table className="w-full min-w-[720px] border-collapse text-left text-sm">
+            <thead>
+              <tr className="border-b border-border-slate text-xs text-text-muted">
+                {COLUMNS.map(column => {
+                  const active = sort.key === column.key;
+                  return (
+                    <th key={column.key} className={`px-3 py-2 font-medium ${column.align === 'right' ? 'text-right' : ''}`} aria-sort={active ? (sort.direction === 'asc' ? 'ascending' : 'descending') : undefined}>
+                      <button
+                        type="button"
+                        className={`hover:text-text-primary ${active ? 'text-text-primary' : ''}`}
+                        onClick={() => onSort({ key: column.key, direction: active && sort.direction === 'asc' ? 'desc' : 'asc' })}
+                      >
+                        {column.label}{active ? (sort.direction === 'asc' ? ' ↑' : ' ↓') : ''}
+                      </button>
+                    </th>
+                  );
+                })}
+                <th className="px-3 py-2"><span className="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map(entry => (
+                <tr key={entry.id || `${entry.name}:${entry.path}`} className="border-b border-border-slate last:border-b-0">
+                  <td className="max-w-0 px-3 py-2">
+                    <div className="truncate font-mono text-text-primary">{entry.name || 'Unconfigured model file'}</div>
+                    <div className="truncate text-xs text-text-muted" title={entry.path}>{entry.managed ? 'InferDeck managed' : 'External'}, {entry.path || 'managed storage'}</div>
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-text-secondary">{serverModelType(entry)}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-text-secondary">{entry.runtime || 'Unknown'}</td>
+                  <td className="px-3 py-2"><Badge label={entry.configured ? 'Configured' : 'Not configured'} tone={entry.configured ? 'good' : 'warn'} /></td>
+                  <td className="tabular whitespace-nowrap px-3 py-2 text-right text-text-secondary">{formatBytes(entry.size ?? 0)}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-right">
+                    {entry.managed ? (
+                      <div className="flex justify-end gap-1.5">
+                        <Button onClick={() => { if (entry.name) onRetire(entry.name, 'archive'); }} title={`Archive ${entry.name}`}>Archive</Button>
+                        <Button tone="danger" onClick={() => { if (entry.name) onRetire(entry.name, 'remove'); }} title={`Delete ${entry.name} permanently`}>Delete</Button>
+                      </div>
+                    ) : entry.configured && entry.name ? (
+                      <Button tone="danger" onClick={() => onUnregister(entry.name!)}>Remove from InferDeck</Button>
+                    ) : (
+                      <span className="text-xs text-text-muted">Detected on disk</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
-    </Panel>
+      <p className="mt-2 text-xs text-text-muted">
+        Removing an external model from InferDeck keeps its files. Managed downloads can be archived or deleted permanently.
+      </p>
+    </section>
   );
 };

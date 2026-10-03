@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { authenticateDashboard, getStatus, isAuthenticationError, logoutDashboard } from '../api';
+import logoUrl from '../../../../Assets/Logo.png';
 
 type AccessPhase = 'checking' | 'ready' | 'required' | 'offline';
 interface DashboardAccessValue {
@@ -69,25 +70,44 @@ export const DashboardAccess: React.FC<{ children: React.ReactNode }> = ({ child
     return <AccessContext.Provider value={{ remote, remembered, requireSignIn, logout }}>{children}</AccessContext.Provider>;
   }
   return (
-    <div className="dashboard-access min-h-screen bg-black text-white">
-      <header className="flex items-center justify-between border-b border-white/20 px-6 py-5">
-        <strong>InferDeck</strong><span className="text-sm">Dashboard access</span>
-      </header>
-      <main className="mx-auto w-full max-w-md px-6 py-16">
-        {phase === 'checking' ? <><h1 className="text-2xl font-semibold">Checking your session</h1><p role="status" className="mt-3">Connecting to InferDeck.</p></> :
-          phase === 'offline' ? <><h1 className="text-2xl font-semibold">Gateway unavailable</h1><p className="mt-3">Check that InferDeck is running and this device can reach it.</p><p className="mt-3">Your login has not been cleared.</p><button className="mt-6 min-h-11 border border-white px-4" onClick={() => setAttempt(value => value + 1)}>Retry connection</button></> :
-          <form onSubmit={event => { void signIn(event); }}>
-            <h1 className="text-2xl font-semibold">Sign in</h1>
-            <p className="mt-3">Access your InferDeck dashboard.</p>
-            {message && <p role="status" className="mt-4">{message}</p>}
-            <label className="mt-8 block" htmlFor="dashboard-token">Dashboard key</label>
-            <input id="dashboard-token" className="mt-2 min-h-11 w-full px-3" type="password" autoComplete="current-password" required value={token} onChange={event => setToken(event.target.value)} aria-describedby="dashboard-key-help" aria-invalid={!!error} disabled={busy} />
-            <p id="dashboard-key-help" className="mt-2 text-sm">Use your dashboard key, not an inference API key.</p>
-            <label className="mt-5 flex min-h-11 items-center gap-3"><input type="checkbox" checked={remember} onChange={event => setRemember(event.target.checked)} disabled={busy} />Remember this browser</label>
-            <button className="mt-3 min-h-11 w-full bg-white px-4 font-semibold text-black disabled:opacity-50" type="submit" disabled={busy || !token}>{busy ? 'Signing in...' : 'Sign in'}</button>
-            {error && <p className="mt-4 text-danger-rose" role="alert">{error}</p>}
-            <p className="mt-4 text-sm">On a shared device, leave this unchecked. Log out to remove access from this browser.</p>
-          </form>}
+    <div className="dashboard-access flex min-h-dvh items-center justify-center bg-void-black px-3 py-10 text-text-primary">
+      <main className="w-full max-w-[360px]">
+        <div className="flex items-center gap-2.5">
+          <img src={logoUrl} alt="" className="h-7 w-7 rounded object-cover" />
+          <span className="text-sm font-semibold">InferDeck</span>
+        </div>
+        {phase === 'checking' ? (
+          <div className="mt-8">
+            <h1 className="text-xl font-semibold">Checking your session</h1>
+            <p role="status" className="mt-1 flex items-center gap-2 text-sm text-text-muted">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-queue-blue border-t-transparent" aria-hidden="true" />
+              Connecting to InferDeck.
+            </p>
+          </div>
+        ) : phase === 'offline' ? (
+          <div className="mt-8">
+            <h1 className="text-xl font-semibold">Gateway unavailable</h1>
+            <p className="mt-1 text-sm text-text-muted">Check that InferDeck is running and this device can reach it.</p>
+            <p className="mt-1 text-sm text-text-muted">Your login has not been cleared.</p>
+            <button className="mt-6 min-h-10 w-full rounded-md bg-queue-blue px-4 text-sm font-semibold text-on-accent hover:bg-queue-blue/90" onClick={() => setAttempt(value => value + 1)}>Retry connection</button>
+          </div>
+        ) : (
+          <form className="mt-8" onSubmit={event => { void signIn(event); }}>
+            <h1 className="text-xl font-semibold">Sign in</h1>
+            <p className="mt-1 text-sm text-text-muted">Enter your dashboard key to continue.</p>
+            {message && <p role="status" className="mt-4 rounded-md border border-border-slate bg-panel-slate px-3 py-2 text-sm text-text-secondary">{message}</p>}
+            <label className="mt-6 block text-sm text-text-secondary" htmlFor="dashboard-token">Dashboard key</label>
+            <input id="dashboard-token" className="mt-1.5 h-10 w-full px-3 text-base" type="password" autoComplete="current-password" required value={token} onChange={event => setToken(event.target.value)} aria-describedby="dashboard-key-help" aria-invalid={!!error} disabled={busy} />
+            <p id="dashboard-key-help" className="mt-1.5 text-xs text-text-muted">Use your dashboard key, not an inference API key.</p>
+            <label className="mt-4 flex items-center gap-2 text-sm text-text-secondary">
+              <input type="checkbox" className="h-4 w-4" checked={remember} onChange={event => setRemember(event.target.checked)} disabled={busy} />
+              Remember this browser
+            </label>
+            <button className="mt-6 min-h-10 w-full rounded-md bg-queue-blue px-4 text-sm font-semibold text-on-accent hover:bg-queue-blue/90 disabled:opacity-40" type="submit" disabled={busy || !token}>{busy ? 'Signing in...' : 'Sign in'}</button>
+            {error && <p className="mt-3 text-sm text-danger-rose" role="alert">{error}</p>}
+            <p className="mt-4 text-xs text-text-muted">On a shared device, leave this unchecked. Log out to remove access from this browser.</p>
+          </form>
+        )}
       </main>
     </div>
   );

@@ -50,6 +50,25 @@ TEST_CASE("Configuration schema rejects unknown keys with precise paths",
           "unknown configuration key: anthropic");
 }
 
+TEST_CASE("Configuration accepts separate media model defaults",
+          "[config][media-defaults]") {
+    const auto valid = validate_config_text(
+        "schema_version: 1\n"
+        "default_models:\n"
+        "  image: stable-diffusion-xl-1.0-fp16\n"
+        "  music: ace-step-v1.5-xl-sft-bf16\n"
+        "  video: ltx-2.3\n");
+    REQUIRE(valid);
+
+    const auto unknown = validate_config_text(
+        "schema_version: 1\n"
+        "default_models:\n"
+        "  audio: ace-step-v1.5-xl-sft-bf16\n");
+    REQUIRE_FALSE(unknown);
+    CHECK(unknown.error().message ==
+          "unknown configuration key: default_models.audio");
+}
+
 TEST_CASE("Configuration schema versions extension ownership",
           "[config][schema][version]") {
     CHECK(validate_config_text(

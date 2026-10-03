@@ -15,6 +15,7 @@ struct GatewayConfig {
     std::string log_level{"info"};
     std::string log_file{};
     std::string default_model{};
+    std::map<std::string, std::string> media_default_models{};
     std::string state_file{};
     bool auth_required{false};
     std::string auth_token{};

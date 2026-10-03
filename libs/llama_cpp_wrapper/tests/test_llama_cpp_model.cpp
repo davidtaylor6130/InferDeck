@@ -8,6 +8,7 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -535,6 +536,60 @@ struct ScopedTestLogger {
   }
 };
 }  // namespace
+
+TEST_CASE("CPU model excludes GPU devices despite inherited offload settings",
+          "[llama][cpu][.][requires_model]") {
+  const std::string gguf = test_model_path();
+  if (gguf.empty()) SKIP("INFERDECK_TEST_MODEL not set");
+  ScopedTestLogger logger;
+  struct NativeLogs {
+    std::mutex mutex;
+    std::string text;
+    NativeLogs() {
+      llama_log_set([](ggml_log_level, const char* text, void* user) {
+        NativeLogs& logs = *static_cast<NativeLogs*>(user);
+        std::lock_guard<std::mutex> lock(logs.mutex);
+        logs.text += text;
+      }, this);
+    }
+    ~NativeLogs() { llama_log_set(nullptr, nullptr); }
+  } logs;
+
+  LlamaCppModel::init_backend();
+  for (const int inherited_layers : {0, -1}) {
+    ModelInfo info;
+    info.name = "cpu-helper-regression";
+    info.gguf_path = gguf;
+    info.compute = ModelCompute::Cpu;
+    info.n_slots = 1;
+    info.context_size = 4096;
+    LlamaCppConfig config;
+    config.n_gpu_layers = inherited_layers;
+    config.n_batch = 2048;
+    config.n_ubatch = 2048;
+    config.n_threads = 4;
+    config.cache_type_k = "q4_0";
+    config.cache_type_v = "q8_0";
+    LlamaCppModel model(info, config);
+    REQUIRE(model.load().has_value());
+    const foundation::Result<int> slot = model.acquire_slot();
+    REQUIRE(slot.has_value());
+    InferenceRequest request;
+    request.messages = {ChatMessage{"user", "Say OK."}};
+    request.max_output_tokens = 1;
+    const foundation::Result<InferenceResult> response = model.predict(*slot, request);
+    REQUIRE(response.has_value());
+    REQUIRE(response->completion_tokens == 1);
+    REQUIRE(model.release_slot(*slot).has_value());
+    REQUIRE(model.unload().has_value());
+  }
+  LlamaCppModel::shutdown_backend();
+  std::lock_guard<std::mutex> lock(logs.mutex);
+  REQUIRE(logs.text.find("CPU compute buffer") != std::string::npos);
+  REQUIRE(logs.text.find("using device Vulkan") == std::string::npos);
+  REQUIRE(logs.text.find("Vulkan0") == std::string::npos);
+  REQUIRE(logs.text.find("Vulkan_Host") == std::string::npos);
+}
 
 TEST_CASE("recurrent checkpoint: second predict on same slot reuses cache",
           "[llama][recurrent][.][requires_model]") {

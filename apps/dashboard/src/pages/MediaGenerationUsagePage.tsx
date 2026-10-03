@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { UsageLineChart, UsageRangeTabs } from '../components/UsageCharts';
-import { Badge, DetailItem, EmptyState, Panel, SectionTitle, Stat } from '../components/ui';
+import { USAGE_RANGE_PHRASE, UsageHeader, UsageLineChart } from '../components/UsageCharts';
+import { DetailItem, EmptyState, Panel, SectionTitle } from '../components/ui';
 import { TOKEN_RANGE_LABELS, type TokenRange } from '../cost';
 import {
   bucketUsageForSection,
@@ -126,24 +126,18 @@ export const MediaGenerationUsagePage: React.FC<{ section: MediaSection }> = ({
   const modalities = section === 'image' ? ['image'] : section === 'music' ? ['audio_generation'] : ['video_generation'];
 
   return (
-    <div className="space-y-4">
-      <Panel>
-        <SectionTitle title={`${label} usage`} aside={TOKEN_RANGE_LABELS[range]} />
-        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-6">
-          <Stat label="Requests" value={totals.requests.toLocaleString()} />
-          <Stat label="Successful" value={totals.successful.toLocaleString()} tone={totals.successful ? 'good' : 'idle'} />
-          <Stat label="Failed" value={failed.toLocaleString()} tone={failed ? 'critical' : 'idle'} />
-          {section === 'image'
-            ? <Stat label="Images generated" value={totals.outputImageCount.toLocaleString()} />
-            : section === 'music' ? <Stat label="Audio generated" value={formatAudio(totals.outputAudioSeconds)} /> : <Stat label="Videos generated" value={totals.successful.toLocaleString()} />}
-          <Stat label="Processing time" value={formatDuration(totals.durationMs)} />
-          <Stat label="Average request" value={formatDuration(averageMs)} />
-        </div>
-        <div className="mt-4"><UsageRangeTabs value={range} onChange={setRange} /></div>
-        <p className="mt-3 text-xs text-text-muted">
-          Requests, outputs, and processing time come from the persisted SQL ledger.
-        </p>
-      </Panel>
+    <div className="space-y-8">
+      <UsageHeader
+        label={`${label} usage`}
+        range={range}
+        onRange={setRange}
+        headline={section === 'image'
+          ? `${totals.outputImageCount.toLocaleString()} image${totals.outputImageCount === 1 ? '' : 's'} generated ${USAGE_RANGE_PHRASE[range]}`
+          : section === 'music'
+            ? `${formatAudio(totals.outputAudioSeconds)} of music generated ${USAGE_RANGE_PHRASE[range]}`
+            : `${totals.successful.toLocaleString()} video${totals.successful === 1 ? '' : 's'} generated ${USAGE_RANGE_PHRASE[range]}`}
+        detail={`${totals.requests.toLocaleString()} request${totals.requests === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}, averaging ${formatDuration(averageMs)} each. Totals come from the persisted SQL ledger.`}
+      />
 
       <Panel>
         <SectionTitle title="Request volume" aside={TOKEN_RANGE_LABELS[range]} />
@@ -151,7 +145,7 @@ export const MediaGenerationUsagePage: React.FC<{ section: MediaSection }> = ({
           labels={chart.labels}
           series={[{
             label,
-            color: section === 'image' ? '#60A5FA' : '#A78BFA',
+            color: 'rgb(var(--series-1))',
             values: chart.requests,
           }]}
           ariaLabel={`${label} generation requests for ${TOKEN_RANGE_LABELS[range]}`}
@@ -164,10 +158,10 @@ export const MediaGenerationUsagePage: React.FC<{ section: MediaSection }> = ({
           <div className="mt-3"><EmptyState title={`No persisted ${label.toLowerCase()} usage`} /></div>
         ) : (
           <>
-            <div className="mt-3 divide-y divide-white/10 md:hidden" aria-label={`Per-model ${label.toLowerCase()} usage cards`}>
+            <div className="mt-3 divide-y divide-border-slate md:hidden" aria-label={`Per-model ${label.toLowerCase()} usage cards`}>
               {perModel.map(row => (
                 <article key={row.model} className="py-4 first:pt-0 last:pb-0">
-                  <h3 className="break-words font-mono text-sm text-text-primary">{compactModel(row.model)}</h3>
+                  <h3 className="break-words text-sm font-semibold text-text-primary">{compactModel(row.model)}</h3>
                   <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3">
                     <DetailItem label="Requests">{row.requests.toLocaleString()}</DetailItem>
                     <DetailItem label="Success">{row.requests ? `${(row.successful / row.requests * 100).toFixed(1)}%` : 'N/A'}</DetailItem>
@@ -182,7 +176,7 @@ export const MediaGenerationUsagePage: React.FC<{ section: MediaSection }> = ({
             <div className="mt-3 hidden overflow-x-auto md:block" role="region" aria-label={`Per-model ${label.toLowerCase()} usage`} tabIndex={0}>
               <table className="w-full min-w-[720px] text-left text-sm">
                 <thead>
-                  <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-text-muted">
+                  <tr className="border-b border-border-slate text-xs text-text-muted">
                     <th className="py-2 pr-4 font-medium">Model</th>
                     <th className="py-2 pr-4 font-medium">Requests</th>
                     <th className="py-2 pr-4 font-medium">Success</th>
@@ -191,7 +185,7 @@ export const MediaGenerationUsagePage: React.FC<{ section: MediaSection }> = ({
                     <th className="py-2 font-medium">Last used</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-white/5">
+                <tbody className="divide-y divide-border-slate">
                   {perModel.map(row => {
                     const lifetimeRow = lifetime.find(item => item.model === row.model);
                     return (

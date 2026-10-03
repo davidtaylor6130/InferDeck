@@ -1,13 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { generateVideo, mediaOutputUrl } from '../api';
-import { Badge, Button } from '../components/ui';
+import { Badge, Button, GroupList, Notice, PageHeader } from '../components/ui';
 import { useGateway } from '../gateway';
 import type { ModelInfo } from '../types';
 import type { MediaJob } from '../api';
 import { MediaJobsPanel } from './MediaJobsPanel';
 
-const controlClass =
-  'mt-1 min-h-11 w-full border border-white/15 bg-[#07101d] px-3 py-2 text-sm text-text-primary focus:border-queue-blue focus:outline-none sm:min-h-10';
 
 export const VIDEO_JOB_MODALITIES = ['video_generation'] as const;
 
@@ -61,7 +59,11 @@ type VideoGenerationInput = {
 export const VideoPage: React.FC = () => {
   const { connection, models } = useGateway();
   const generators = useMemo(() => videoModels(models), [models]);
-  const [model, setModel] = useState('');
+  const [model, setModel] = useState(() =>
+    generators.find(entry => entry.personal_default &&
+      entry.runtime_available !== false)?.id ??
+    generators.find(entry => entry.runtime_available !== false)?.id ?? '',
+  );
   const [prompt, setPrompt] = useState('');
   const [negativePrompt, setNegativePrompt] = useState('');
   const [width, setWidth] = useState<number>(VIDEO_DEFAULTS.width);
@@ -87,6 +89,8 @@ export const VideoPage: React.FC = () => {
   useEffect(() => {
     if (generators.some(entry => entry.id === model)) return;
     setModel(
+      generators.find(entry => entry.personal_default &&
+        entry.runtime_available !== false)?.id ??
       generators.find(entry => entry.runtime_available !== false)?.id ??
       generators[0]?.id ??
       '',
@@ -134,32 +138,80 @@ export const VideoPage: React.FC = () => {
     }
   };
 
+  const numberRow = (label: string, value: number, set: (next: number) => void, props: React.InputHTMLAttributes<HTMLInputElement>, hint?: string) => (
+    <label className="flex min-h-11 items-center justify-between gap-4 px-3 py-2">
+      <span><span className="block text-sm">{label}</span>{hint && <span className="block text-xs text-text-muted">{hint}</span>}</span>
+      <input type="number" value={value} onChange={event => set(Number(event.target.value))} className="tabular h-8 w-28 px-2.5 text-right text-sm" {...props} />
+    </label>
+  );
+
   return (
-    <div className="space-y-5">
-      <div className="mb-1 text-xs text-text-muted">Video / Generate</div>
-      <div className="flex items-end justify-between border-b border-white/10 pb-5">
-        <div><h1 className="text-2xl font-medium text-text-primary">Generate video</h1><p className="mt-1 text-sm text-text-muted">Generate locally from a text prompt.</p></div>
-        <span className="hidden text-xs text-text-muted sm:block"><Badge label={state.label} tone={state.tone} /></span>
-      </div>
-      <div className="grid gap-6 lg:grid-cols-[minmax(400px,1.15fr)_minmax(320px,.85fr)]">
-        <section>
-          <div className="relative grid aspect-video place-items-center border border-white/10 bg-[#050505] text-center text-xs text-text-muted">{previewUrl ? <video controls preload="metadata" src={previewUrl} className="h-full w-full object-contain">Video playback is not supported by this browser.</video> : <><div className="pointer-events-none absolute inset-3 border border-dashed border-white/10" /><div className="relative"><strong className="mb-1 block font-normal text-text-secondary">No video preview yet</strong><span>Your generated video will appear here.</span></div></>}</div>
-          <div className="flex justify-between border-b border-white/10 py-3 text-xs text-text-muted"><span>Output</span><span className="text-text-secondary">MP4 preview when available · AVI download</span></div>
-          <div className="mt-5"><MediaJobsPanel modalities={[...VIDEO_JOB_MODALITIES]} title="Video history" onJobsChange={receiveSavedJobs} emptyTitle="No video attempts yet" emptyDetail="Your generated video will appear here." showEmpty refreshToken={refreshToken} /></div>
+    <div className="space-y-8">
+      <PageHeader
+        title="Generate video"
+        subtitle="Generate locally from a text prompt."
+        actions={<Badge label={state.label} tone={state.tone} />}
+      />
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+        <section className="min-w-0 space-y-5">
+          <div className="relative grid aspect-video place-items-center overflow-hidden rounded-md border border-border-slate bg-deck-navy text-center">
+            {previewUrl ? (
+              <video controls preload="metadata" src={previewUrl} className="h-full w-full object-contain">Video playback is not supported by this browser.</video>
+            ) : (
+              <div>
+                <strong className="block text-sm font-medium text-text-secondary">No video preview yet</strong>
+                <span className="mt-0.5 block text-sm text-text-muted">Your generated video will appear here.</span>
+              </div>
+            )}
+            {running && <div className="absolute inset-x-0 bottom-0 h-1 overflow-hidden bg-border-slate"><div className="h-full w-1/3 bg-queue-blue" /></div>}
+          </div>
+          <p className="text-xs text-text-muted">MP4 preview when available. AVI download.</p>
+          <MediaJobsPanel modalities={[...VIDEO_JOB_MODALITIES]} title="Video history" onJobsChange={receiveSavedJobs} emptyTitle="No video attempts yet" emptyDetail="Your generated video will appear here." showEmpty refreshToken={refreshToken} />
         </section>
-        <section className="border-t border-white/10 pt-4 lg:border-t-0 lg:pt-0"><h2 className="mb-4 text-sm font-medium text-text-primary">Generation</h2>
-          {generators.length === 0 ? <p className="mt-4 border-l-2 border-danger-rose pl-3 text-sm text-danger-rose" role="alert">No video generation model is configured in the active profile.</p> : (
-            <form className="grid gap-3" onSubmit={submit}>
-              <label className="block text-xs font-medium text-text-secondary" htmlFor="video-model">Model<select id="video-model" value={model} onChange={event => setModel(event.target.value)} className={controlClass}>{generators.map(entry => <option key={entry.id} value={entry.id}>{entry.id}{entry.runtime_available === false ? ' (runtime unavailable)' : ''}</option>)}</select></label>
-              <label className="block text-xs font-medium text-text-secondary" htmlFor="video-prompt">Prompt<textarea id="video-prompt" value={prompt} onChange={event => setPrompt(event.target.value)} maxLength={32_000} rows={4} placeholder="Describe the shot, movement, lighting, and subject" className={controlClass + ' resize-y'} /></label>
-              <label className="block text-xs font-medium text-text-secondary" htmlFor="video-negative-prompt">Negative prompt<textarea id="video-negative-prompt" value={negativePrompt} onChange={event => setNegativePrompt(event.target.value)} maxLength={32_000} rows={3} placeholder="Artifacts, flicker, warped motion" className={controlClass + ' resize-y'} /></label>
-              <div className="grid gap-3 sm:grid-cols-2"><label className="block text-xs font-medium text-text-secondary">Width<input type="number" min={64} max={1280} step={32} value={width} onChange={event => setWidth(Number(event.target.value))} className={controlClass} /></label><label className="block text-xs font-medium text-text-secondary">Height<input type="number" min={64} max={720} step={32} value={height} onChange={event => setHeight(Number(event.target.value))} className={controlClass} /></label><label className="block text-xs font-medium text-text-secondary">Frames<input type="number" min={9} max={121} step={8} value={frames} onChange={event => setFrames(Number(event.target.value))} className={controlClass} /></label><label className="block text-xs font-medium text-text-secondary">FPS<input type="number" min={1} max={60} value={fps} onChange={event => setFps(Number(event.target.value))} className={controlClass} /></label><label className="block text-xs font-medium text-text-secondary">Steps<input type="number" min={1} max={50} value={steps} onChange={event => setSteps(Number(event.target.value))} className={controlClass} /></label><label className="block text-xs font-medium text-text-secondary">Seed<input type="number" min={-1} max={4_294_967_295} value={seed} onChange={event => setSeed(Number(event.target.value))} className={controlClass} /></label></div>
-              <label className="block text-xs font-medium text-text-secondary">Guidance<input type="number" min={0} max={20} step={0.1} value={guidanceScale} onChange={event => setGuidanceScale(Number(event.target.value))} className={controlClass} /></label>
-              <div className="mt-3 flex flex-wrap gap-2"><Button type="submit" tone="blue" disabled={!canGenerate}>{running ? 'Generating video…' : 'Generate video'}</Button>{running && <Button type="button" tone="danger" onClick={() => controller.current?.abort()}>Cancel request</Button>}</div>
-              <p className="text-xs text-text-muted">InferDeck loads the selected model before generation. You can cancel the request at any time.</p>{connection !== 'connected' && <p className="text-sm text-warning-amber" role="status">The gateway must be connected before generation can start.</p>}{error && <p className="text-sm text-danger-rose" role="alert">{error}</p>}{result && <p className="text-sm text-success-green" role="status"><a href={result.url} download={result.filename} className="underline underline-offset-2">Download {result.filename}</a></p>}
+        <section className="min-w-0 lg:sticky lg:top-4" aria-label="Generation">
+          {generators.length === 0 ? <Notice tone="critical" role="alert">No video generation model is configured in the active profile.</Notice> : (
+            <form className="space-y-4" onSubmit={submit}>
+              <div className="rounded-md border border-border-slate bg-panel-slate p-4">
+                <label className="block text-xs font-medium text-text-muted" htmlFor="video-model">Model
+                  <select id="video-model" value={model} onChange={event => setModel(event.target.value)} className="mt-1.5 h-10 w-full px-3 text-sm text-text-primary">
+                    {generators.map(entry => <option key={entry.id} value={entry.id}>{entry.id}{entry.runtime_available === false ? ' (runtime unavailable)' : ''}</option>)}
+                  </select>
+                </label>
+                <label className="mt-3 block text-xs font-medium text-text-muted" htmlFor="video-prompt">Prompt
+                  <textarea id="video-prompt" value={prompt} onChange={event => setPrompt(event.target.value)} maxLength={32_000} rows={4} placeholder="Describe the shot, movement, lighting, and subject" className="mt-1.5 w-full resize-y p-3 text-base leading-relaxed text-text-primary" />
+                </label>
+                <label className="mt-3 block text-xs font-medium text-text-muted" htmlFor="video-negative-prompt">Negative prompt
+                  <textarea id="video-negative-prompt" value={negativePrompt} onChange={event => setNegativePrompt(event.target.value)} maxLength={32_000} rows={2} placeholder="Artifacts, flicker, warped motion" className="mt-1.5 w-full resize-y p-3 text-base text-text-primary" />
+                </label>
+                <button
+                  type="submit"
+                  disabled={!canGenerate}
+                  className="mt-4 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-queue-blue text-sm font-semibold text-on-accent hover:bg-queue-blue/90 disabled:opacity-40"
+                >
+                  {running && <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-on-accent border-t-transparent" aria-hidden="true" />}
+                  {running ? 'Generating video…' : 'Generate video'}
+                </button>
+                {running && <Button type="button" tone="danger" className="mt-2 w-full" onClick={() => controller.current?.abort()}>Cancel request</Button>}
+              </div>
+              <GroupList>
+                {numberRow('Width', width, setWidth, { min: 64, max: 1280, step: 32 }, 'Multiple of 32')}
+                {numberRow('Height', height, setHeight, { min: 64, max: 720, step: 32 }, 'Multiple of 32')}
+                {numberRow('Frames', frames, setFrames, { min: 9, max: 121, step: 8 }, `${(frames / Math.max(1, fps)).toFixed(1)} s at ${fps} fps`)}
+                {numberRow('FPS', fps, setFps, { min: 1, max: 60 })}
+                {numberRow('Steps', steps, setSteps, { min: 1, max: 50 })}
+                {numberRow('Seed', seed, setSeed, { min: -1, max: 4_294_967_295 }, '-1 chooses a random seed')}
+                {numberRow('Guidance', guidanceScale, setGuidanceScale, { min: 0, max: 20, step: 0.1 })}
+              </GroupList>
+              <div className="space-y-2">
+                <p className="px-1 text-xs text-text-muted">InferDeck loads the selected model before generation. You can cancel the request at any time.</p>
+                {connection !== 'connected' && <Notice tone="warn" role="status">The gateway must be connected before generation can start.</Notice>}
+                {error && <Notice tone="critical" role="alert">{error}</Notice>}
+                {result && <Notice tone="good" role="status"><a href={result.url} download={result.filename} className="underline underline-offset-2">Download {result.filename}</a></Notice>}
+              </div>
             </form>
           )}
         </section>
       </div>
     </div>
-  );};
+  );
+};

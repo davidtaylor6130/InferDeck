@@ -829,6 +829,7 @@ struct TestServer {
     std::thread th;
     int port{0};
     std::string voice_default_model;
+    std::map<std::string, std::string> media_default_models;
     int voice_session_grace_ms{15000};
     CompatibilityProfile compatibility_profile{
         CompatibilityProfile::StrictOpenAI};
@@ -896,6 +897,7 @@ struct TestServer {
         deps.stats_db = &stats_db;
         deps.swap_tracker = &swap_tracker;
         deps.default_model = voice_default_model;
+        deps.media_default_models = media_default_models;
         deps.voice_session_grace_ms = voice_session_grace_ms;
         deps.compatibility_profile = compatibility_profile;
         return deps;
@@ -2578,6 +2580,44 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     CHECK(rows[0].generation_duration_ms == Catch::Approx(12.0));
     CHECK_FALSE(rows[0].request_id.empty());
     ts.stop();
+}
+
+TEST_CASE("Media routes select personal defaults and preserve explicit model selection",
+          "[routes][media-defaults]") {
+    for (const std::string modality : {"image", "music", "video"}) {
+        CAPTURE(modality);
+        TestServer ts;
+        const std::string runtime = modality == "image" ? "stable_diffusion_cpp" :
+            modality == "music" ? "ace_step_cpp" : "ltx_video_cpp";
+        const std::string capability = modality == "image" ? "image_generation" :
+            modality == "music" ? "audio_generation" : "video_generation";
+        const std::string path = modality == "image" ? "/v1/images/generations" :
+            modality == "music" ? "/api/inferdeck/v1/audio/generations" :
+            "/api/inferdeck/v1/video/generations";
+        auto info = make_info("preferred-media");
+        info.runtime = runtime;
+        info.modality = capability;
+        info.capabilities = {capability};
+        ts.registry.register_model(info);
+        ts.media_default_models[modality] = info.name;
+        ts.voice_default_model = "chat-default";
+        REQUIRE(ts.coordinator.load(info.name));
+        REQUIRE(ts.start());
+        httplib::Client client("127.0.0.1", ts.port);
+        const auto response = client.Post(path,
+            nlohmann::json{{"prompt", "a quiet forest"}}.dump(), "application/json");
+        REQUIRE(response);
+        REQUIRE(response->status == 200);
+        const auto rows = ts.stats_db.recent_requests(1);
+        REQUIRE(rows.size() == 1);
+        CHECK(rows[0].model == info.name);
+        const auto explicit_model = client.Post(path,
+            nlohmann::json{{"model", "missing-explicit-model"},
+                           {"prompt", "a quiet forest"}}.dump(), "application/json");
+        REQUIRE(explicit_model);
+        CHECK(explicit_model->status == 404);
+        ts.stop();
+    }
 }
 
 TEST_CASE("Media history persists generated outputs and useful attempt details",

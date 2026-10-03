@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import sys
 import tempfile
@@ -15,6 +16,42 @@ import inferdeck_vllm_radiance_profile as profile
 
 
 class ProfileTests(unittest.TestCase):
+    def test_idle_vulkan_cleanup_uses_loaded_backend_and_propagates_failure(self):
+        from unittest.mock import Mock
+        get_module = Mock(return_value=123)
+        release = Mock(return_value=1)
+        kernel = NS(GetModuleHandleW=get_module)
+        backend = NS(inferdeck_ggml_vk_release_idle_cache=release)
+        with patch.object(profile.os, "name", "nt"), patch.object(profile.ctypes, "WinDLL", create=True, side_effect=[kernel, backend]) as load:
+            self.assertEqual(profile._release_idle_vulkan_cache(), 1)
+            get_module.assert_called_once_with("ggml-vulkan.dll")
+            self.assertEqual(load.call_args_list[1].kwargs, {"handle": 123})
+            release.assert_called_once_with()
+        release.return_value = -1
+        with patch.object(profile.os, "name", "nt"), patch.object(profile.ctypes, "WinDLL", create=True, side_effect=[kernel, backend]):
+            with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                profile._release_idle_vulkan_cache()
+
+    def test_idle_vulkan_cleanup_skips_missing_backend_or_older_export(self):
+        from unittest.mock import Mock
+        for handle, backend in ((None, None), (123, NS())):
+            with self.subTest(handle=handle), patch.object(profile.os, "name", "nt"), patch.object(profile.ctypes, "WinDLL", create=True, side_effect=[NS(GetModuleHandleW=Mock(return_value=handle)), backend]) as load:
+                self.assertEqual(profile._release_idle_vulkan_cache(), 0)
+                self.assertEqual(load.call_count, 1 if handle is None else 2)
+
+    def test_hillclimb_sampling_uses_greedy_temperature_and_keeps_request_controls(self):
+        request = {"reasoning_effort": "medium", "max_output_tokens": 16384,
+                   "sampling": {"temperature": 0.8, "top_p": 0.95, "top_k": 40, "seed": 42}}
+        selected = profile._request_sampling_profile({"hillclimb_sampling": True},request)
+        self.assertEqual(selected["sampling"]["temperature"], 0.0)
+        self.assertEqual(selected["sampling"]["top_p"], 1.0)
+        self.assertEqual(selected["sampling"]["top_k"], 20)
+        self.assertEqual(selected["sampling"]["seed"], 42)
+        self.assertEqual(selected["reasoning_effort"], "medium")
+        self.assertEqual(selected["max_output_tokens"], 16384)
+        self.assertEqual(request["sampling"]["top_p"], 0.95)
+        self.assertIs(profile._request_sampling_profile({},request),request)
+
     def test_template_messages_combine_instructions_before_conversation(self):
         messages = [
             {"role": "developer", "content": "developer rules"},
@@ -665,10 +702,11 @@ class ProfileTests(unittest.TestCase):
             empty_cache=lambda: calls.append("device_empty"),
             memory=NS(host_memory_stats=lambda: {"allocated_bytes.current": 0}),
             memory_allocated=lambda: 0, memory_reserved=lambda: 0),
-            accelerator=NS(memory=NS(empty_host_cache=lambda: calls.append("host_empty"))))
+            accelerator=NS(memory=NS(empty_host_cache=lambda: calls.append("host_empty"))),
+            compiler=NS(reset=lambda: calls.append("compiler_reset")))
         with patch.dict(sys.modules, {"torch": torch}), patch.object(profile, "_RELEASED_SNAPSHOT", None):
             profile.collect_released_resources()
-        self.assertEqual(calls, ["sync", "device_empty", "host_empty"])
+        self.assertEqual(calls, ["compiler_reset", "sync", "device_empty", "host_empty"])
 
     def test_cleanup_attempts_remaining_steps_after_failure(self):
         calls = []
@@ -809,14 +847,22 @@ class ProfileTests(unittest.TestCase):
         # rather than a load-time error.
         self.assertEqual(
             profile._compilation_config("int4_per_token_head", "r4d_int4", None, 2),
-            {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [3]})
+            {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [3, 12]})
         self.assertEqual(
             profile._compilation_config("int4_per_token_head", "r4d_int4", "3,6,12", 2),
-            {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [3, 6, 12]})
+            {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [3, 6, 12]})
         # Draft 4 forces a multiple of 5, so the same request rounds to 5.
         self.assertEqual(
             profile._compilation_config("int4_per_token_head", "r4d_int4", None, 4)["cudagraph_capture_sizes"],
-            [5])
+            [5, 20])
+
+    def test_mtp3_retains_single_and_four_request_graphs(self):
+        self.assertEqual(
+            profile._compilation_config("int4_per_token_head", "r4d_int4", None, 3),
+            {"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16]})
+        self.assertEqual(
+            profile._compilation_config("auto", "r4d", None, 3),
+            {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4]})
 
     def test_draft_acceptance_reports_per_position_acceptance(self):
         stats = NS(num_drafts=4, num_draft_tokens=8, num_accepted_tokens=5,
@@ -840,6 +886,46 @@ class ProfileTests(unittest.TestCase):
 
     def test_radiance_env_defaults_when_absent(self):
         self.assertEqual(profile._radiance_env({}), profile._RADIANCE_ENV_DEFAULTS)
+
+    def test_mtp_int4_decode_default_preserves_four_request_native_path(self):
+        config = {"prefill_attention": "r4d_int4", "speculative": "mtp"}
+        self.assertEqual(profile._radiance_env(config)["RADIANCE_MXFP4_DECODE_MAX_M"], "16")
+        config["radiance_env"] = json.dumps({"RADIANCE_MXFP4_DECODE_MAX_M": "8"})
+        self.assertEqual(profile._radiance_env(config)["RADIANCE_MXFP4_DECODE_MAX_M"], "8")
+
+    def test_compiler_cache_root_redirects_compiler_and_temporary_output(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ), patch.object(tempfile, "tempdir", None):
+            root = Path(directory) / "compiler-cache"
+            profile._configure_compiler_cache({"compiler_cache_root": str(root)})
+            for key,name in {"VLLM_CACHE_ROOT":"vllm", "TORCHINDUCTOR_CACHE_DIR":"inductor",
+                             "TRITON_CACHE_DIR":"triton", "TEMP":"tmp", "TMP":"tmp"}.items():
+                self.assertEqual(Path(os.environ[key]), root / name)
+                self.assertTrue((root / name).is_dir())
+            self.assertEqual(Path(tempfile.gettempdir()), root / "tmp")
+
+    def test_retained_memory_budget_preserves_four_by_100k_cache(self):
+        total = 34208743424
+        speculative = {"method": "mtp", "num_speculative_tokens": 3}
+        self.assertEqual(profile._engine_memory_config("r4d_int4", speculative, 4, total, total),
+                         {"gpu_memory_utilization": 0.991})
+        free = total - 868 * 1024 * 1024
+        options = profile._engine_memory_config("r4d_int4", speculative, 4, free, total)
+        self.assertEqual(options["num_gpu_blocks_override"], 192)
+        self.assertLess(math.ceil(total * options["gpu_memory_utilization"]), free)
+        self.assertGreaterEqual(options["gpu_memory_utilization"], 0.97)
+        with self.assertRaisesRegex(RuntimeError, "four-by-100K.*free=.*required=.*shortfall="):
+            profile._engine_memory_config("r4d_int4", speculative, 4, int(total * 0.96), total)
+        self.assertEqual(profile._engine_memory_config("r4d", None, 1, free, total),
+                         {"gpu_memory_utilization": 0.925})
+
+    def test_retained_memory_budget_admits_observed_qwen4b_swap_without_shrinking_cache(self):
+        total = 34208743424
+        free = 31634 * 1024 * 1024
+        options = profile._engine_memory_config("r4d_int4", {"method": "mtp", "num_speculative_tokens": 3}, 4, free, total)
+        self.assertEqual(options["num_gpu_blocks_override"], 192)
+        self.assertAlmostEqual(options["gpu_memory_utilization"], (free - 64 * 1024 * 1024) / total)
+        self.assertLess(options["gpu_memory_utilization"], 0.97)
+        self.assertGreaterEqual(options["gpu_memory_utilization"], 0.96)
 
     def test_radiance_env_overrides_only_named_knobs(self):
         merged = profile._radiance_env({"radiance_env": json.dumps({

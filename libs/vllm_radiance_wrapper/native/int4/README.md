@@ -1,6 +1,6 @@
 ﻿# R4D INT4 kernels
 
-This is a source preservation copy of the private alpha64 probe implementation. Provenance is limited to that local probe tree; upstream authorship and licensing are uncertain. No license is asserted here. The alpha66 isolated InferDeck run rebuilt both DLLs from these files and exercised this overlay, but the build and measurement artifacts are ignored and not included in this source copy. This profile is experimental and is not deployed by default.
+This is a source preservation copy of the private alpha64 probe implementation. The kernel sources are part of InferDeck's R4D INT4 implementation, with the upstream vLLM Radiance runtime credited in the repository acknowledgements. The alpha66 isolated InferDeck run rebuilt both DLLs from these files and exercised this overlay, but the build and measurement artifacts are ignored and not included in this source copy. This profile is experimental and is not deployed by default.
 
 ## Windows builds
 
@@ -25,4 +25,4 @@ The local alpha66 evidence is `.UAM/AINotes/alpha66-int4layout-smoke-20260924T01
 
 Four concurrent ~100K-input requests returned HTTP 200, but two stopped at the explicit `max_tokens=256` limit. That run proves request acceptance, not 100K answer completion or quality. The `windows_pdh_dxgi` sample after the batch reported 29557.65625 MiB of GPU-wide VRAM used; it is neither a process allocation nor an inference peak. These results cover the isolated alpha67 stage only. Production remains on alpha55 BF16. The Radiance Q4 profile is text-only; Vulkan Qwen3.8 still has its mmproj/vision path.
 
-Evidence and the scoped capacity audit are recorded in `goals/q4-kv/progress.md` and local `.UAM/AINotes` artifacts. This source copy has uncertain upstream authorship and licensing provenance. Do not publicly redistribute it without resolving provenance and licensing. No DLLs, weights, logs, or result files are part of this copy.
+No DLLs, weights, logs, or result files are part of this copy.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import importlib
 import copy
+import ctypes
 import faulthandler
 from contextlib import contextmanager
 import json
@@ -10,10 +11,11 @@ import gc
 import hashlib
 import math
 import re
-from inferdeck_vllm_radiance_lifecycle import release_language_model_cache, capture_lifecycle_refs, lifecycle_diagnostics, finalize_engine_caches
+from inferdeck_vllm_radiance_lifecycle import release_language_model_cache, capture_lifecycle_refs, lifecycle_diagnostics, finalize_engine_caches, release_model_compilation_hooks
 import os
 import sys
 import threading
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -41,10 +43,52 @@ _RADIANCE_ENV_DEFAULTS = {
     "RADIANCE_FUSE_RMS_QUANT": "1",
 }
 
+def _release_idle_vulkan_cache()->int:
+    if os.name != "nt":
+        return 0
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_module = kernel.GetModuleHandleW
+    get_module.argtypes = [ctypes.c_wchar_p]
+    get_module.restype = ctypes.c_void_p
+    handle = get_module("ggml-vulkan.dll")
+    if not handle:
+        return 0
+    backend = ctypes.WinDLL("ggml-vulkan.dll", handle=handle)
+    release = getattr(backend, "inferdeck_ggml_vk_release_idle_cache", None)
+    if release is None:
+        return 0
+    release.argtypes = []
+    release.restype = ctypes.c_int
+    released = release()
+    if released < 0:
+        raise RuntimeError("Vulkan idle GPU cache cleanup failed; see runtime log")
+    return released
+
+
 def _gpu_memory_utilization(prefill_attention:str, speculative:bool=False)->float:
     # Retained MTP3, batch-2048, 100k profile uses 0.991 memory utilization.
     if speculative: return 0.991
     return 0.925 if prefill_attention == "r4d" else 0.90
+
+def _engine_memory_config(prefill_attention:str, speculative_config:dict[str,Any]|None,
+                          n_slots:int, free_bytes:int, total_bytes:int)->dict[str,Any]:
+    if total_bytes <= 0 or free_bytes <= 0 or free_bytes > total_bytes:
+        raise RuntimeError("Radiance GPU memory snapshot is invalid")
+    desired = _gpu_memory_utilization(prefill_attention, speculative_config is not None)
+    options = {"gpu_memory_utilization": desired}
+    retained_profile = (prefill_attention == "r4d_int4" and n_slots == 4 and
+                        speculative_config is not None and speculative_config.get("num_speculative_tokens") == 3)
+    if not retained_profile or free_bytes >= math.ceil(total_bytes * desired):
+        return options
+    available = (free_bytes - 64 * 1024 * 1024) / total_bytes
+    if available < 0.96:
+        required = math.ceil(total_bytes * 0.96) + 64 * 1024 * 1024
+        raise RuntimeError("Insufficient free GPU memory to preserve Radiance four-by-100K capacity "
+                           f"(free={free_bytes / 1048576:.0f} MiB, required={required / 1048576:.0f} MiB, "
+                           f"shortfall={max(0, required-free_bytes) / 1048576:.0f} MiB)")
+    options["gpu_memory_utilization"] = min(desired, available)
+    options["num_gpu_blocks_override"] = 192
+    return options
 
 def _is_r4d_prefill(prefill_attention:str)->bool:
     return prefill_attention in ("r4d", "r4d_int4")
@@ -58,7 +102,7 @@ def _compilation_config(kv_cache_dtype:str, prefill_attention:str, capture_sizes
     elif isinstance(capture_sizes,list) and capture_sizes:
         sizes=[int(part) for part in capture_sizes]
     else:
-        sizes=[1]
+        sizes=[draft_tokens+1,4*(draft_tokens+1)] if draft_tokens and prefill_attention == "r4d_int4" else [1]
     if not sizes or any(size<1 for size in sizes): raise RuntimeError("cudagraph_capture_sizes must be positive integers")
     sizes=sorted(set(sizes))
     if draft_tokens:
@@ -71,7 +115,7 @@ def _compilation_config(kv_cache_dtype:str, prefill_attention:str, capture_sizes
         rounded=sorted({-(-size//step)*step for size in sizes})
         if not rounded or -(-min(sizes)//step)*step>max(rounded): raise RuntimeError("cudagraph_capture_sizes must admit a multiple of draft_tokens+1")
         sizes=rounded
-    return {"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":sizes}
+    return {"mode":3 if draft_tokens and prefill_attention == "r4d_int4" else 0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":sizes}
 
 def _kv_cache_token_capacity(kv_cache_config:Any)->int:
     num_blocks = int(kv_cache_config.num_blocks)
@@ -124,6 +168,8 @@ def _truthy(v:Any)->bool:
     return False
 def _radiance_env(c:dict[str,Any])->dict[str,str]:
     merged=dict(_RADIANCE_ENV_DEFAULTS)
+    if c.get("prefill_attention") == "r4d_int4" and c.get("speculative") == "mtp":
+        merged["RADIANCE_MXFP4_DECODE_MAX_M"] = "16"
     raw=c.get("radiance_env")
     if raw is None or raw=="":
         return merged
@@ -154,6 +200,8 @@ def validate_config(c:dict[str,Any])->None:
     if context_size != 106496:
         raise RuntimeError("requires 106496 context")
     _radiance_env(c)
+    if "hillclimb_sampling" in c and c["hillclimb_sampling"] not in (True, False, "true", "false"):
+        raise RuntimeError("hillclimb_sampling must be true or false")
     prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
     if not isinstance(prefill_attention, str) or prefill_attention not in _PREFILL_ATTENTION_OPTIONS:
         raise RuntimeError("prefill_attention must be one of: r4d, r4d_int4, upstream")
@@ -195,6 +243,19 @@ def _configure_native_compiler(python_site: str)->str:
     if not cc.is_file(): raise RuntimeError(f"pinned native compiler is unavailable: {cc}")
     os.environ["CC"]=str(cc)
     return str(cc)
+
+def _configure_compiler_cache(c:dict[str,Any])->None:
+    root = c.get("compiler_cache_root")
+    if not root:
+        return
+    root = Path(root).resolve()
+    directories = {"VLLM_CACHE_ROOT":"vllm", "TORCHINDUCTOR_CACHE_DIR":"inductor",
+                   "TRITON_CACHE_DIR":"triton", "TEMP":"tmp", "TMP":"tmp"}
+    for key,name in directories.items():
+        directory = root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        os.environ[key] = str(directory)
+    tempfile.tempdir = str(root / "tmp")
 def _speculative_config(c:dict[str,Any])->dict[str,Any]|None:
     # ponytail: MTP only honours draft_tokens here; the llama.cpp-only p_min and
     # max_active_requests knobs are not forwarded, so speculative decode runs on
@@ -378,12 +439,13 @@ def create(c:dict[str,Any])->dict[str,Any]:
 
 def _create(c:dict[str,Any])->dict[str,Any]:
     validate_config(c)
+    _configure_compiler_cache(c)
     faulthandler.enable(file=sys.stderr, all_threads=True)
     os.environ.setdefault("GPU_RESOURCE_CACHE_SIZE", "64")
     prefill_attention = c.get("prefill_attention", _PREFILL_ATTENTION_DEFAULT)
     for path in reversed([_need(c,key) for key in ("python_site","vllm_source","radiance_source","radiance_extension")]):
         if path not in sys.path:sys.path.insert(0,path)
-    os.environ.update({"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1","TOKENIZERS_PARALLELISM":"false","VLLM_TARGET_DEVICE":"rocm","VLLM_ENABLE_V1_MULTIPROCESSING":"0","VLLM_NO_USAGE_STATS":"1","VLLM_USE_RUST_FRONTEND":"0","ROCM_PATH":_need(c,"rocm"),"HIP_PATH":_need(c,"rocm"),**_radiance_env(c)})
+    os.environ.update({"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1","TOKENIZERS_PARALLELISM":"false","VLLM_TARGET_DEVICE":"rocm","VLLM_ENABLE_V1_MULTIPROCESSING":"0","VLLM_NO_USAGE_STATS":"1","VLLM_USE_AOT_COMPILE":"0","VLLM_USE_RUST_FRONTEND":"0","ROCM_PATH":_need(c,"rocm"),"HIP_PATH":_need(c,"rocm"),**_radiance_env(c)})
     dll_paths = [Path(c["python_root"]), Path(c["python_root"]) / "DLLs", Path(c["python_site"]),
                  Path(c["rocm"]), Path(c["radiance_extension"])]
     if not _DLL_HANDLES:
@@ -433,11 +495,15 @@ def _create(c:dict[str,Any])->dict[str,Any]:
         n_slots = int(c["n_slots"])
         draft_tokens = speculative_config["num_speculative_tokens"] if speculative_config else 0
         compilation_config = _compilation_config(kv_cache_dtype, prefill_attention, c.get("cudagraph_capture_sizes"), draft_tokens)
-        memory_utilization = _gpu_memory_utilization(prefill_attention, speculative_config is not None)
+        _release_idle_vulkan_cache()
+        free_before,total_before = torch.cuda.mem_get_info()
+        memory_options = _engine_memory_config(prefill_attention, speculative_config, n_slots, free_before, total_before)
+        memory_utilization = memory_options["gpu_memory_utilization"]
+        print("event=radiance_memory_budget " + json.dumps({"free_bytes":free_before,"total_bytes":total_before,**memory_options}), file=sys.stderr, flush=True)
         # The Quark target config must not be applied to the BF16 drafter; without
         # this the draft load dies on a column-parallel shape assert.
         hf_overrides = apply_mtp_bf16_exclusions if speculative_config else None
-        engine_args=EngineArgs(model=model,logits_processors=logits_processors,tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",kv_cache_dtype=kv_cache_dtype,max_model_len=100000,max_num_batched_tokens=2048,max_num_seqs=n_slots,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,gpu_memory_utilization=memory_utilization,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config=compilation_config,speculative_config=speculative_config,hf_overrides=hf_overrides,**scheduler_options)
+        engine_args=EngineArgs(model=model,logits_processors=logits_processors,tokenizer=model,tokenizer_mode=MODE,tokenizer_revision=tokenizer_revision,trust_remote_code=False,load_format="safetensors",quantization="quark",kv_cache_dtype=kv_cache_dtype,max_model_len=100000,max_num_batched_tokens=2048,max_num_seqs=n_slots,tensor_parallel_size=1,pipeline_parallel_size=1,enforce_eager=False,seed=1234,enable_prefix_caching=True,attention_backend="TRITON_ATTN",reasoning_parser="qwen3",compilation_config=compilation_config,speculative_config=speculative_config,hf_overrides=hf_overrides,**scheduler_options,**memory_options)
         with _r4d_cache_retention(prefill_attention):
             global _DRAFT_ACCEPTANCE
             stat_loggers=[]
@@ -470,7 +536,9 @@ def _create(c:dict[str,Any])->dict[str,Any]:
             _verify_upstream_prefill_attention()
         decode_kernel_enabled = prefill_attention == "r4d_int4" and "decode_dll" in c
         print(f"vllm_radiance prefill_attention={prefill_attention} kv_cache_dtype={kv_cache_dtype} gpu_memory_utilization={memory_utilization} int4_decode_kernel={str(decode_kernel_enabled).lower()} async_req={c.get('async_scheduling')!r} spec={json.dumps(speculative_config, sort_keys=True)} radiance_env={json.dumps(_radiance_env(c), sort_keys=True)}", file=sys.stderr, flush=True)
-        return {"engine":engine,"engine_lock":threading.RLock(),"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention,"int4_decode_kernel":decode_kernel_enabled,"speculative":speculative_config is not None,"radiance_env":_radiance_env(c)}
+        hillclimb_sampling = _truthy(c.get("hillclimb_sampling", False))
+        print(f"event=hillclimb_sampling_profile enabled={str(hillclimb_sampling).lower()} temperature=0 top_p=1 top_k=20 min_p=0 repeat_penalty=1", file=sys.stderr, flush=True)
+        return {"engine":engine,"engine_lock":threading.RLock(),"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention,"int4_decode_kernel":decode_kernel_enabled,"speculative":speculative_config is not None,"radiance_env":_radiance_env(c),"hillclimb_sampling":hillclimb_sampling}
     except Exception as load_error:
         try:
             shutdown({"engine": engine, "active": set(), "requests": {},
@@ -524,7 +592,15 @@ def _render_image_prompt(s:dict[str,Any], request:Any,
         raise RuntimeError("vLLM renderer did not produce multimodal image input")
     return ids,engine_input
 
+def _request_sampling_profile(s:dict[str,Any],r:dict[str,Any])->dict[str,Any]:
+    if not s.get("hillclimb_sampling"):
+        return r
+    return {**r, "repeat_last_n": 64, "sampling": {**r["sampling"],
+        "temperature": 0.0, "top_p": 1.0, "top_k": 20, "min_p": 0.0,
+        "repetition_penalty": 1.0, "frequency_penalty": 0.0, "presence_penalty": 0.0}}
+
 def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
+    r = _request_sampling_profile(s,r)
     if r.get("logprobs"):raise RuntimeError("logprobs are unsupported by vllm_radiance")
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.parser.qwen3 import Qwen3Parser
@@ -671,6 +747,11 @@ def shutdown(s: dict[str, Any]) -> None:
     if engine is not None:
         _RELEASED_SNAPSHOT = capture_lifecycle_refs(engine)
         try:
+            released = release_model_compilation_hooks(engine)
+            print(f"event=radiance_model_compilation_hooks_released count={released}", file=sys.stderr, flush=True)
+        except Exception as error:
+            errors.append(str(error))
+        try:
             removed = release_language_model_cache(engine)
             print(f"vllm_radiance cleanup: released_model_cache_entries={removed}", file=sys.stderr, flush=True)
         except Exception as error:
@@ -707,6 +788,11 @@ def collect_released_resources() -> None:
     gc.collect()
     torch = sys.modules.get("torch")
     if torch is not None:
+        compiler = getattr(torch, "compiler", None)
+        reset = getattr(compiler, "reset", None)
+        if callable(reset):
+            reset()
+            gc.collect()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         host_before = torch.cuda.memory.host_memory_stats()

@@ -30,7 +30,7 @@ describe('SubscriptionSavingsPanel', () => {
 
   it('renders persisted breakdown rows and reuses the portfolio target', () => {
     const now = new Date();
-    const sevenMonthsAgo = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 7, 1))
+    const sevenMonthsAgo = new Date(Date.UTC(now.getFullYear(), now.getMonth() - 7, 1))
       .toISOString().slice(0, 10);
     storage.set('inferdeck:subscription-savings', JSON.stringify([{ id: 'one', name: 'ChatGPT Plus', monthlyCents: 2000, startDate: sevenMonthsAgo }]));
     storage.set('inferdeck:model-token-costs', JSON.stringify({

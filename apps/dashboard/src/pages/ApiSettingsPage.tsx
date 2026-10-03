@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useFeedback } from '../components/Feedback';
 import {
   createApiKey,
   getApiKeys,
@@ -9,16 +10,12 @@ import {
   type ApiKeyRecord,
   type ApiSettingsDocument,
 } from '../api';
-import {
-  Badge,
-  Button,
-  EmptyState,
-  Panel,
-  SectionTitle,
-} from '../components/ui';
+import { Badge, Button, EmptyState, GroupHeader, GroupList, Notice, PageHeader, Switch } from '../components/ui';
 import { formatDate } from '../utils';
+import { ThemeSwitch } from '../components/ThemeSwitch';
 
 export const ApiSettingsPage: React.FC = () => {
+  const { confirm, toast } = useFeedback();
   const [settings, setSettings] =
     useState<ApiSettingsDocument | null>(null);
   const [allowPublicTraffic, setAllowPublicTraffic] = useState(false);
@@ -68,9 +65,12 @@ export const ApiSettingsPage: React.FC = () => {
     if (
       allowPublicTraffic &&
       !settings.allowPublicTraffic &&
-      !window.confirm(
-        'Allow unauthenticated API requests at priority -999999?',
-      )
+      !(await confirm({
+        title: 'Allow public API traffic?',
+        detail: 'Anyone who can reach this server can run requests without a key. They run at the lowest priority, -999999.',
+        confirmLabel: 'Allow public traffic',
+        destructive: true,
+      }))
     ) {
       return;
     }
@@ -135,7 +135,8 @@ export const ApiSettingsPage: React.FC = () => {
       );
       setApiKeys(current =>
         current.map(item => item.id === updated.id ? updated : item));
-      setMessage('API key settings saved.');
+      setMessage('');
+      toast('API key saved', { detail: key.name });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -144,14 +145,15 @@ export const ApiSettingsPage: React.FC = () => {
   };
 
   const revoke = async (key: ApiKeyRecord) => {
-    if (!window.confirm('Revoke API key ' + key.name + '?')) return;
+    if (!(await confirm({ title: `Revoke ${key.name}?`, detail: 'Clients using this key stop working immediately. This cannot be undone.', confirmLabel: 'Revoke key', destructive: true }))) return;
     setBusy(true);
     setError('');
     setMessage('');
     try {
       await revokeApiKey(key.id);
       setApiKeys(await getApiKeys());
-      setMessage('API key revoked.');
+      setMessage('');
+      toast('API key revoked', { detail: key.name });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -162,92 +164,78 @@ export const ApiSettingsPage: React.FC = () => {
   const activeKeys = apiKeys.filter(key => key.revokedAtUnixMs == null);
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold text-text-primary">
-          API Settings
-        </h2>
-        <p className="mt-1 text-sm text-text-secondary">
-          Control API access and client priorities.
-        </p>
-      </div>
+    <div className="max-w-3xl space-y-8">
+      <PageHeader
+        title="API Settings"
+        subtitle="Control API access and client priorities."
+      />
 
-      <Panel>
-        <SectionTitle
+      {message && <Notice tone="good" role="status">{message}</Notice>}
+      {error && <Notice tone="critical" role="alert">{error}</Notice>}
+
+      <section aria-label="Appearance">
+        <GroupHeader title="Appearance" />
+        <div className="max-w-sm"><ThemeSwitch showLabels /></div>
+      </section>
+
+      <section aria-label="Public API access">
+        <GroupHeader
           title="Public API access"
-          action={settings ? (
+          aside={settings ? (
             <Badge
-              label={
-                settings.runningAllowPublicTraffic
-                  ? 'Public traffic enabled'
-                  : 'Authentication required'
-              }
-              tone={
-                settings.runningAllowPublicTraffic ? 'warn' : 'good'
-              }
+              label={settings.runningAllowPublicTraffic ? 'Public traffic enabled' : 'Authentication required'}
+              tone={settings.runningAllowPublicTraffic ? 'warn' : 'good'}
             />
           ) : undefined}
         />
-        <label className="mt-4 flex min-h-11 max-w-3xl cursor-pointer items-start gap-3">
-          <input
-            type="checkbox"
-            checked={allowPublicTraffic}
-            disabled={busy || !settings}
-            onChange={event =>
-              setAllowPublicTraffic(event.target.checked)}
-            className="mt-1 h-5 w-5 accent-queue-blue"
-          />
-          <span>
-            <span className="block text-sm font-medium text-text-primary">
-              Allow public API traffic
+        <GroupList>
+          <div className="flex min-h-11 items-center justify-between gap-4 px-3 py-2.5">
+            <span className="min-w-0">
+              <span className="block text-base text-text-primary">Allow public API traffic</span>
+              <span className="mt-0.5 block text-xs text-text-muted">
+                Unauthenticated OpenAI API requests run at fixed priority
+                {' '}-999999. Dashboard, configuration, model control, API
+                keys, and background leases remain protected.
+              </span>
             </span>
-            <span className="mt-1 block text-xs text-text-muted">
-              Unauthenticated OpenAI API requests run at fixed priority
-              {' '}-999999. Dashboard, configuration, model control, API
-              keys, and background leases remain protected.
-            </span>
-          </span>
-        </label>
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <Button
-            tone="blue"
-            disabled={
-              busy ||
-              !settings ||
-              allowPublicTraffic === settings.allowPublicTraffic
-            }
-            onClick={() => { void savePublicAccess(); }}
-          >
-            Save API access
-          </Button>
-          {settings?.restartRequired && (
-            <span className="text-xs text-warning-amber">
-              A saved configuration is waiting to restart.
-            </span>
+            <Switch
+              label="Allow public API traffic"
+              checked={allowPublicTraffic}
+              disabled={busy || !settings}
+              onChange={setAllowPublicTraffic}
+            />
+          </div>
+          {settings && allowPublicTraffic !== settings.allowPublicTraffic && (
+            <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+              <span className="text-xs text-text-muted">Unsaved change</span>
+              <Button tone="blue" disabled={busy} onClick={() => { void savePublicAccess(); }}>Save API access</Button>
+            </div>
           )}
-        </div>
-      </Panel>
+        </GroupList>
+        {settings?.restartRequired && (
+          <p className="mt-1.5 text-xs text-warning-amber">A saved configuration is waiting to restart.</p>
+        )}
+      </section>
 
-      <Panel>
-        <SectionTitle title="Create API key" />
-        <p className="mt-2 max-w-3xl text-sm text-text-secondary">
-          Managed keys authenticate API clients. Their priority is owned by
-          InferDeck and cannot be raised by a request.
-        </p>
-        <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(180px,2fr)_minmax(120px,1fr)_auto]">
-          <label className="text-xs text-text-muted">
-            Name
+      <section aria-label="Create API key">
+        <GroupHeader title="Create API key" />
+        <GroupList>
+          <label className="flex min-h-11 items-center justify-between gap-4 px-3 py-1.5">
+            <span className="shrink-0 text-base">Name</span>
             <input
               aria-label="New API key name"
               value={newName}
               maxLength={80}
               onChange={event => setNewName(event.target.value)}
-              className="mt-1 min-h-11 w-full rounded border border-white/10 bg-[#07101d] px-3 text-sm text-text-primary sm:min-h-10"
+              className="h-8 w-56 min-w-0 px-2.5 text-sm"
               placeholder="Desktop client"
             />
           </label>
-          <label className="text-xs text-text-muted">
-            Priority
+          <label className="flex min-h-11 items-center justify-between gap-4 px-3 py-1.5">
+            <span className="shrink-0">
+              <span className="block text-base">Priority</span>
+              <span className="block text-xs text-text-muted">-100 to 100 · higher runs first</span>
+            </span>
             <input
               aria-label="New API key priority"
               type="number"
@@ -255,65 +243,65 @@ export const ApiSettingsPage: React.FC = () => {
               max="100"
               value={newPriority}
               onChange={event => setNewPriority(Number(event.target.value))}
-              className="mt-1 min-h-11 w-full rounded border border-white/10 bg-[#07101d] px-3 text-sm text-text-primary sm:min-h-10"
+              className="tabular h-8 w-24 px-2.5 text-right text-base"
             />
           </label>
-          <Button
-            tone="green"
-            className="self-end"
-            disabled={
-              busy ||
-              !newName.trim() ||
-              !Number.isInteger(newPriority) ||
-              newPriority < -100 ||
-              newPriority > 100
-            }
-            onClick={() => { void createKey(); }}
-          >
-            Create key
-          </Button>
-        </div>
+          <div className="flex justify-end px-3 py-2.5">
+            <Button
+              tone="blue"
+              disabled={
+                busy ||
+                !newName.trim() ||
+                !Number.isInteger(newPriority) ||
+                newPriority < -100 ||
+                newPriority > 100
+              }
+              onClick={() => { void createKey(); }}
+            >
+              Create key
+            </Button>
+          </div>
+        </GroupList>
+        <p className="mt-1.5 text-xs text-text-muted">
+          Managed keys authenticate API clients. Their priority is owned by InferDeck and cannot be raised by a request.
+        </p>
         {createdKey && (
-          <div className="mt-4 border-l-2 border-warning-amber bg-warning-amber/10 px-3 py-3">
-            <p className="text-xs font-medium text-warning-amber">
+          <div className="mt-3 rounded-md border border-border-slate border-l-warning-amber bg-panel-slate p-3 [border-left-width:2px]">
+            <p className="text-sm text-warning-amber">
               This key is shown once. Save it before leaving this page.
             </p>
-            <code className="mt-2 block break-all select-all text-sm text-text-primary">
-              {createdKey}
-            </code>
+            <div className="mt-2 flex items-center gap-2">
+              <code className="min-w-0 flex-1 select-all break-all rounded border border-line-strong bg-void-black px-3 py-2 font-mono text-sm text-text-primary">
+                {createdKey}
+              </code>
+              <Button onClick={() => { void navigator.clipboard?.writeText(createdKey); toast('API key copied'); }}>
+                Copy key
+              </Button>
+            </div>
           </div>
         )}
-      </Panel>
+      </section>
 
-      <Panel>
-        <SectionTitle
-          title="Managed API keys"
-          aside={activeKeys.length + ' active'}
-        />
+      <section aria-label="Managed API keys">
+        <GroupHeader title="Managed API keys" aside={`${activeKeys.length} active`} />
         {activeKeys.length === 0 ? (
-          <div className="mt-3">
-            <EmptyState title="No active API keys" />
-          </div>
+          <EmptyState title="No active API keys" detail="Create a key above to authenticate a client." />
         ) : (
-          <div className="mt-3 divide-y divide-white/10">
+          <GroupList>
             {activeKeys.map(key => (
-              <div
-                key={key.id}
-                className="grid gap-3 py-3 md:grid-cols-[minmax(180px,2fr)_minmax(110px,0.7fr)_minmax(150px,1fr)_auto_auto] md:items-end"
-              >
-                <label className="text-xs text-text-muted">
-                  Name
+              <div key={key.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2">
+                <div className="min-w-0 flex-1 basis-40">
                   <input
                     aria-label={'Name for ' + key.prefix}
                     value={key.name}
                     maxLength={80}
                     disabled={busy}
-                    onChange={event =>
-                      editKey(key.id, 'name', event.target.value)}
-                    className="mt-1 min-h-11 w-full rounded border border-white/10 bg-[#07101d] px-3 text-sm text-text-primary sm:min-h-10"
+                    onChange={event => editKey(key.id, 'name', event.target.value)}
+                    className="h-7 w-full !border-transparent !bg-transparent px-0 text-sm font-medium text-text-primary hover:!border-line-strong focus:px-2"
                   />
-                </label>
-                <label className="text-xs text-text-muted">
+                  <p className="text-xs text-text-muted"><span className="font-mono">{key.prefix}</span> · Created {formatDate(key.createdAtUnixMs)}</p>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-text-muted">
                   Priority
                   <input
                     aria-label={'Priority for ' + key.prefix}
@@ -322,23 +310,10 @@ export const ApiSettingsPage: React.FC = () => {
                     max="100"
                     value={key.priority}
                     disabled={busy}
-                    onChange={event =>
-                      editKey(
-                        key.id,
-                        'priority',
-                        Number(event.target.value),
-                      )}
-                    className="mt-1 min-h-11 w-full rounded border border-white/10 bg-[#07101d] px-3 text-sm text-text-primary sm:min-h-10"
+                    onChange={event => editKey(key.id, 'priority', Number(event.target.value))}
+                    className="tabular h-8 w-20 px-2.5 text-right text-sm"
                   />
                 </label>
-                <div className="text-xs text-text-muted">
-                  <span className="block font-mono text-text-secondary">
-                    {key.prefix}
-                  </span>
-                  <span className="mt-1 block">
-                    Created {formatDate(key.createdAtUnixMs)}
-                  </span>
-                </div>
                 <Button
                   disabled={
                     busy ||
@@ -351,29 +326,14 @@ export const ApiSettingsPage: React.FC = () => {
                 >
                   Save
                 </Button>
-                <Button
-                  tone="danger"
-                  disabled={busy}
-                  onClick={() => { void revoke(key); }}
-                >
+                <Button tone="danger" disabled={busy} onClick={() => { void revoke(key); }}>
                   Revoke
                 </Button>
               </div>
             ))}
-          </div>
+          </GroupList>
         )}
-      </Panel>
-
-      {message && (
-        <p className="text-sm text-success-green" role="status">
-          {message}
-        </p>
-      )}
-      {error && (
-        <p className="text-sm text-danger-rose" role="alert">
-          {error}
-        </p>
-      )}
+      </section>
     </div>
   );
 };

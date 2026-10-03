@@ -1,7 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { ChevronRightIcon } from '@heroicons/react/20/solid';
 import { getJobs, getStatus, getPricing } from '../api';
 import { UsageLineChart, UsageRangeTabs } from '../components/UsageCharts';
-import { Badge, Button, Panel, ProgressBar, SectionTitle, Sparkline, Stat } from '../components/ui';
+import { clientName, SlotStrip, SlotTable } from '../components/SlotGrid';
+import { Badge, Button, Dot, EmptyState, Meter, ProgressBar, Readout, SectionTitle, Sparkline, StatTile } from '../components/ui';
+import { modalityLabel } from '../dashboardSections';
+import { modelHref } from '../routes';
+import { stagger } from '../components/motion';
 import {
   ALL_MODELS,
   DEFAULT_COST_CONFIG,
@@ -24,7 +29,7 @@ import {
   loadIncludeApiCosts,
 } from '../subscriptionSavings';
 import { usePolling } from '../usePolling';
-import type { JobRecord, StatusPayload, LiveRequest } from '../types';
+import type { JobRecord, StatusPayload } from '../types';
 import {
   compactModel,
   formatCurrency,
@@ -35,12 +40,6 @@ import {
   temperatureTone,
   timeAgo,
 } from '../utils';
-
-const ClientChip: React.FC<{ request: LiveRequest }> = ({ request }) => <span className="inline-flex max-w-full items-center gap-1.5 rounded border border-white/15 bg-white/[0.04] px-2 py-0.5 text-xs font-medium text-text-secondary">
-  <span className={`h-2 w-2 shrink-0 rounded-full ${request.apiKeyId ? 'bg-queue-blue' : 'border border-dashed border-white/40'}`} />
-  <span className="truncate" title={request.apiKeyName || 'Shared / public API'}>{request.apiKeyName || 'Shared / public API'}</span>
-  <span className="shrink-0 text-[10px] text-text-muted">p{request.priority}</span>
-</span>;
 
 export function overviewStatus(current: StatusPayload | null, live: StatusPayload | null): StatusPayload | null {
   if (!live || !current?.dailyTokenUsageAllTime) return live ?? current;
@@ -153,7 +152,12 @@ export const OverviewPage: React.FC = () => {
           ? 'Ready'
           : 'No model';
   const runtimeTone = swap.swapping || queued > 0 ? 'info' : running > 0 || loadedName ? 'good' : 'warn';
-  const residentModels = models.filter(model => model.loaded && !model.alias);
+  const residentModels = models
+    .filter(model => model.loaded && !model.alias)
+    .sort((left, right) =>
+      Number(Boolean(right.primary)) - Number(Boolean(left.primary)) ||
+      Number(right.modality === 'text' || !right.modality) - Number(left.modality === 'text' || !left.modality) ||
+      right.n_slots - left.n_slots);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [jobsError, setJobsError] = useState('');
   const loadJobs = useCallback(async (signal: AbortSignal) => {
@@ -183,151 +187,189 @@ export const OverviewPage: React.FC = () => {
     if (error) setCancelError(error);
   };
 
+  const recent = [
+    ...jobs.slice(0, 5).map(job => ({
+      key: `${job.id}:${job.timestampUnixMs}`,
+      tone: job.status === 'succeeded' ? 'good' as const : job.httpStatus === 499 ? 'idle' as const : 'critical' as const,
+      headline: `${job.apiKeyName || (job.principalClass === 'managed_api_key' ? 'Legacy key' : 'Shared API')}: ${job.status === 'succeeded' ? 'completed' : job.httpStatus === 499 ? 'cancelled' : 'failed'} in ${formatDuration(job.durationMs)}`,
+      detail: `${job.resolvedModel || job.model} · ${job.endpoint || job.type}`,
+      at: job.timestampUnixMs,
+    })),
+    ...activity.filter(item => item.kind !== 'request').slice(0, Math.max(0, 5 - jobs.length)).map(item => ({
+      key: item.id,
+      tone: item.tone,
+      headline: item.label,
+      detail: item.detail,
+      at: item.timestampUnixMs,
+    })),
+  ];
+
+  const primary = residentModels.find(model => model.id === loadedName) ?? residentModels[0];
+  const headline = swap.swapping
+    ? `Switching to ${compactModel(swap.target)}`
+    : running > 0
+      ? `Serving ${running} request${running === 1 ? '' : 's'}`
+      : queued > 0
+        ? `${queued} request${queued === 1 ? '' : 's'} waiting`
+        : residentModels.length
+          ? 'Ready and idle'
+          : 'No model loaded';
+  const subline = [
+    running > 0 && primary ? `on ${primary.id}` : residentModels.length && !swap.swapping ? `${residentModels.length} model${residentModels.length === 1 ? '' : 's'} loaded` : '',
+    running > 0 && queued > 0 ? `${queued} waiting` : '',
+    stats ? `up ${formatUptime(stats.uptimeSeconds)}` : 'waiting for gateway',
+  ].filter(Boolean).join(' · ');
+  const vramPercent = gpu?.vramTotalMb ? gpu.vramUsedMb / gpu.vramTotalMb * 100 : 0;
+  const temperature = temperatureTone(gpu?.temperatureC);
+
   return (
-    <div className="mx-auto max-w-[1280px] space-y-5 mock-home">
-      <Panel className="border-t-0 pt-0">
-        <SectionTitle title="Runtime now" aside={stats ? `up ${formatUptime(stats.uptimeSeconds)}` : 'waiting for gateway'} action={<Badge label={runtimeLabel} tone={runtimeTone} />} />
-        <div className="mt-4 grid gap-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(340px,0.7fr)] lg:items-start">
-          <div className="min-w-0 border-l-2 border-queue-blue pl-4" aria-live="polite">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs font-medium text-text-muted">Resident models / {residentModels.length}</span>
-
+    <div className="space-y-10">
+      <section className="grid items-end gap-6 lg:grid-cols-[minmax(0,1fr)_320px]" aria-label="Runtime now">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-sm text-text-muted"><Dot tone={runtimeTone} /> {runtimeLabel}</p>
+          <h1 key={headline} className="mt-2 animate-item-in text-2xl font-semibold text-text-primary sm:text-[28px] sm:leading-9">{headline}</h1>
+          <p className="mt-1 truncate text-sm text-text-muted">{subline}</p>
+          {swap.swapping && (
+            <div className="mt-3 flex max-w-md items-center gap-3">
+              <div className="flex-1"><ProgressBar percent={0} tone="info" indeterminate /></div>
+              <Button tone="danger" onClick={() => { void cancel(); }}>Cancel switch</Button>
             </div>
-            <div className="divide-y divide-white/10">
-              {residentModels.map(model => {
-                const requests = live.filter(request => request.model === model.id && request.slotId >= 0);
-                return <div key={model.id} className="py-1">
-                  <details className="group">
-                    <summary className="-mx-1 flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 rounded px-1 py-2.5 text-left hover:bg-white/[0.02]">
-                      <span className="flex w-full min-w-0 max-w-full flex-wrap gap-1 sm:w-auto" aria-label={`${model.active_requests ?? 0} active, ${model.free_slots ?? 0} free slots`}>{Array.from({length: Math.min(model.n_slots, 32)}, (_, index) => <span key={index} className={`h-3 w-3 rounded-[3px] ${index < (model.active_requests ?? 0) ? 'bg-success-green shadow-[0_0_6px_rgba(82,183,136,0.55)]' : 'border border-dashed border-white/30'}`} />)}</span>
-                      <span className="min-w-0 flex-1 truncate font-mono text-sm font-semibold" title={model.id}>{model.id}</span>
-                      <Badge label={model.family || model.runtime || 'Model'} tone="idle" />
-                      {model.primary && <Badge label="Primary" tone="info" />}
-                      <span className="text-xs tabular-nums text-text-secondary">{model.active_requests ?? 0}/{model.n_slots} active{model.concurrency_auto ? ` | Auto | ${(model.context_pool_capacity ?? 0).toLocaleString()} shared tokens` : ''}</span>
-                      <span className="text-xs text-text-muted group-open:rotate-90" aria-hidden="true">&#8250;</span>
-                    </summary>
-                    <p className="pb-2 text-xs text-text-muted">{formatTokenCount(model.context_size)} context / {model.free_slots ?? 'Unknown'} slots free / {formatMb(model.vram_required_mb)} estimated memory</p>
-                  </details>
-                  <div className="overflow-x-auto">
-                    <table className="w-full table-fixed border-collapse text-left" aria-label={`${model.id} live slots`}>
-                      <colgroup><col className="w-6"/><col/><col className="w-14 sm:w-[72px]"/><col className="w-14 sm:w-[72px]"/><col className="w-14 sm:w-16"/></colgroup>
-                      <thead><tr className="border-t border-white/[0.07] text-[10px] font-medium uppercase tracking-wide text-text-muted"><th className="py-1.5 font-medium">#</th><th className="py-1.5 font-medium">Client (API key)</th><th className="text-right font-medium">PP tok/s</th><th className="text-right font-medium">TPS tok/s</th><th className="text-right font-medium">Elapsed</th></tr></thead>
-                      <tbody>{requests.map(request => <tr key={`${request.id}:${request.startedUnixMs}`} className="border-t border-white/[0.07]" title={`${request.phase} / ${request.endpoint} / ${request.id}`}>
-                        <td className="py-2 text-xs text-text-muted"><span className="sr-only">Slot </span>{request.slotId}</td>
-                        <td className="min-w-0 py-2 pr-2"><ClientChip request={request}/><span className="sr-only">{request.requestedModel}</span></td>
-                        <td className="py-2 text-right text-sm tabular-nums">{request.promptTokensPerSecond == null ? 'N/A' : request.promptTokensPerSecond.toFixed(0)}</td>
-                        <td className="py-2 text-right text-sm tabular-nums">{request.tokensPerSecond == null ? 'N/A' : request.tokensPerSecond.toFixed(1)}</td>
-                        <td className="py-2 text-right text-sm tabular-nums">{formatDuration(request.elapsedMs)}</td>
-                      </tr>)}</tbody>
-                    </table>
+          )}
+          {(cancelError || swap.lastError) && <p className="mt-2 line-clamp-2 text-sm text-danger-rose" role="alert">{cancelError || swap.lastError}</p>}
+        </div>
+        <div className="space-y-3" aria-label={gpu?.name || 'GPU'}>
+          <Meter label="GPU utilization" value={gpu ? `${Math.round(gpu.utilizationPct)}%` : 'N/A'} percent={gpu?.utilizationPct ?? 0} />
+          <Meter label="VRAM" value={gpu ? `${formatMb(gpu.vramUsedMb)}${gpu.vramTotalMb ? ` of ${formatMb(gpu.vramTotalMb)}` : ''}` : 'N/A'} percent={vramPercent} tone={vramPercent > 90 ? 'warn' : 'info'} />
+          <Meter label="Temperature" value={gpu && gpu.temperatureC > 0 ? `${Math.round(gpu.temperatureC)}°C` : 'N/A'} percent={gpu?.temperatureC ?? 0} tone={temperature === 'warn' || temperature === 'critical' ? temperature : 'info'} />
+        </div>
+      </section>
+
+      <section aria-label="Loaded models">
+        <SectionTitle title="Loaded models" aside={String(residentModels.length)} />
+        {residentModels.length === 0 ? (
+          <div className="mt-2">
+            <EmptyState
+              title="Nothing is loaded"
+              detail="Send a request and InferDeck loads the model on demand, or load one now."
+              action={<a className="inline-flex min-h-8 items-center rounded-md bg-queue-blue px-3 text-sm font-semibold text-on-accent" href="#models/llm">Choose a model</a>}
+            />
+          </div>
+        ) : (
+          <div className="mt-2 divide-y divide-border-slate rounded-lg border border-border-slate bg-panel-slate shadow-card">
+            {residentModels.map((model, index) => {
+              const slotted = live.filter(request => request.model === model.id && request.slotId >= 0);
+              return (
+                <div key={model.id} style={stagger(index)} className="animate-item-in px-3 py-3">
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-3 md:flex-nowrap">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <a href={modelHref(model.id)} className="truncate font-mono text-sm font-medium text-text-primary hover:underline" title={model.id}>{model.id}</a>
+                        {model.primary && <Badge label="Primary" tone="info" />}
+                      </div>
+                      <p className="mt-0.5 truncate text-xs text-text-muted">
+                        {[modalityLabel(model.modality), model.modality === 'text' || !model.modality ? `${formatTokenCount(model.context_size)} context` : '', formatMb(model.vram_required_mb)].filter(Boolean).join(' · ')}
+                      </p>
+                    </div>
+                    <div className="w-full md:w-[440px] md:shrink-0">
+                      <SlotStrip model={model} requests={slotted} />
+                    </div>
                   </div>
-                </div>;
-              })}
-              {residentModels.length === 0 && <p className="py-4 text-sm text-text-muted">No models resident.</p>}
-            </div>
-            <div className="mt-3 border-t border-border-slate pt-3">
-              <div className="flex justify-between gap-2"><h3 className="text-sm font-medium">Waiting</h3><span className="text-xs text-text-muted">{queued} queued</span></div>
-              {waiting.map(request => <details key={`${request.id}:${request.startedUnixMs}`} className="group border-b border-white/10">
-                <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 py-2 text-left hover:bg-white/[0.02]">
-                  <ClientChip request={request}/><span className="min-w-0 flex-1 truncate font-mono text-xs text-text-secondary">{request.model}</span><span className="text-xs tabular-nums text-text-muted">{formatDuration(request.elapsedMs)}</span><span className="text-text-muted group-open:rotate-90" aria-hidden="true">&#8250;</span>
-                </summary>
-                <p className="border-l border-queue-blue/40 py-2 pl-9 text-xs text-text-muted">{request.phase === 'loading' ? 'Waiting for model' : 'Waiting for an available slot'} / {request.endpoint} / {request.id}</p>
-              </details>)}
-              {queued === 0 && waiting.length === 0 && <p className="mt-2 text-xs text-text-muted">No waiting requests.</p>}
-              {status && !status.queue.liveRequests && <p role="status" className="mt-2 text-xs text-warning-amber">This gateway needs the matching dashboard telemetry build.</p>}
-            </div>
-            {swap.swapping ? (
-              <div className="mt-3 flex flex-wrap items-center gap-3">
-                <div className="min-w-[180px] flex-1"><ProgressBar percent={0} tone="info" indeterminate /></div>
-                <Button tone="danger" onClick={() => { void cancel(); }}>Cancel switch</Button>
-              </div>
-            ) : !loadedName ? (
-              <a className="mt-3 inline-flex min-h-11 items-center rounded bg-queue-blue px-3 text-sm font-medium text-[#08111f] sm:min-h-10" href="#llm/models">Find a model</a>
-            ) : null}
-            {(cancelError || swap.lastError) && <p className="mt-2 text-xs text-danger-rose" role="alert">{cancelError || swap.lastError}</p>}
+                  <SlotTable model={model} requests={slotted} />
+                </div>
+              );
+            })}
           </div>
-          <div className="min-w-0 space-y-4">
-            <div className="grid grid-cols-2 gap-5">
-              <Stat label="Processing" value={String(running)} tone={running ? 'good' : 'idle'} sub="active requests" />
-              <Stat label="Queued" value={String(queued)} tone={queued ? 'info' : 'idle'} sub="waiting requests" />
-            </div>
-            <div className="mock-telemetry grid grid-cols-2 gap-x-5 gap-y-4 border-t border-border-slate pt-4">
-          <Sparkline
-            label="GPU utilization"
-            sub={gpu?.name}
-            display={gpu ? `${Math.round(gpu.utilizationPct)}%` : 'N/A'}
-            values={history.map(item => item.gpu.utilizationPct)}
-            tone="info"
-            yMax={100}
-          />
-          <Sparkline
-            label="VRAM used"
-            display={gpu ? formatMb(gpu.vramUsedMb) : 'N/A'}
-            values={history.map(item => item.gpu.vramUsedMb)}
-            tone="violet"
-            sub={gpu?.vramTotalMb ? `of ${formatMb(gpu.vramTotalMb)}` : undefined}
-          />
-          <Sparkline
-            label="GPU temperature"
-            display={gpu && gpu.temperatureC > 0 ? `${Math.round(gpu.temperatureC)}°C` : 'N/A'}
-            values={history.map(item => item.gpu.temperatureC)}
-            tone={temperatureTone(gpu?.temperatureC)}
-            yMax={100}
-            statusLabel
-          />
-          <Sparkline
-            label="Average generation speed"
-            display={`${(stats?.avgTokensPerSecond ?? 0).toFixed(1)} t/s`}
-            values={history.map(item => item.avgTokensPerSecond)}
-            tone="good"
-          />
-            </div>
-            <section className="border-t border-border-slate pt-4" aria-label="Recent requests">
-              <SectionTitle title="Recent activity" aside="latest 3" />
-              {jobsError && <p role="status" className="mt-2 text-xs text-warning-amber">{jobsError}</p>}
-              <div className="divide-y divide-white/10">{jobs.slice(0, 3).map(job => <div key={`${job.id}:${job.timestampUnixMs}`} className="py-3">
-                <div className="flex flex-wrap justify-between gap-2"><Badge label={job.status === 'succeeded' ? 'Completed' : job.httpStatus === 499 ? 'Cancelled' : 'Failed'} tone={job.status === 'succeeded' ? 'good' : 'critical'} /><span className="text-xs text-text-muted">{timeAgo(job.timestampUnixMs)}</span></div>
-                <p className="mt-1 break-words font-mono text-sm">{job.resolvedModel || job.model}</p>
-                <p className="mt-1 break-words text-xs text-text-muted">{job.endpoint || job.type} / {formatDuration(job.durationMs)}</p>
-                <p className="mt-1 text-xs text-text-secondary">API: {job.apiKeyName || (job.principalClass === 'managed_api_key' ? 'Legacy key (name not recorded)' : 'Shared / public API')}</p>
-              </div>)}</div>
-              {activity.filter(item => item.kind !== 'request').slice(0, Math.max(0, 3 - jobs.length)).map(item => <div key={item.id} className="border-t border-white/10 py-3">
-                <div className="flex justify-between gap-2"><Badge label="Model" tone={item.tone} /><span className="text-xs text-text-muted">{timeAgo(item.timestampUnixMs)}</span></div>
-                <p className="mt-1 break-words text-sm">{item.label}</p>
-                {item.detail && <p className="mt-1 break-words text-xs text-text-muted">{item.detail}</p>}
-              </div>)}
-              {!jobs.length && !activity.length && !jobsError && <p className="py-3 text-xs text-text-muted">No activity yet.</p>}
-            </section>
+        )}
+      </section>
 
+      {(waiting.length > 0 || queued > 0) && (
+        <section aria-label="Waiting requests">
+          <SectionTitle title="Waiting" aside={`${queued} in queue`} />
+          <div className="mt-2 divide-y divide-border-slate rounded-lg border border-border-slate bg-panel-slate shadow-card">
+            {waiting.map(request => (
+              <div key={`${request.id}:${request.startedUnixMs}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+                <span className="text-sm text-text-primary">{clientName(request)} <span className="text-2xs text-text-muted">p{request.priority}</span></span>
+                <span className="min-w-0 flex-1 truncate text-xs text-text-muted">{request.phase === 'loading' ? 'Waiting for its model to load' : 'Waiting for a free slot'} on <span className="font-mono">{request.model}</span></span>
+                <span className="tabular text-xs text-text-secondary">{formatDuration(request.elapsedMs)}</span>
+              </div>
+            ))}
           </div>
-        </div>
-        {status?.queue.resourceDecision && (
-          <p className="mt-4 border-t border-border-slate pt-3 text-xs text-text-muted">Scheduler: {status.queue.resourceDecision}</p>
-        )}
-        <div className="mt-4 grid grid-cols-2 gap-4 border-t border-border-slate pt-4 sm:grid-cols-3">
-          <Stat label="Lifetime requests" value={(summary?.totalRequests ?? stats?.totalRequests ?? 0).toLocaleString()} />
-          <Stat label="Lifetime tokens" value={formatTokenCount(totalLifetimeTokens)} />
-          <Stat label="API-equivalent value" value={formatCurrency(totalCost)} tone="good" />
-        </div>
-        {portfolio.breakEvenTarget > 0 && (
-          <div className="mt-4">
-            <div className="mb-1 flex justify-between gap-3 text-xs text-text-muted">
-              <span>Break-even progress · {formatCurrency(totalSaved)} saved</span>
-              <span>{formatCurrency(roiRemaining)} remaining</span>
+        </section>
+      )}
+
+      <div className="grid gap-10 xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
+        <section className="min-w-0">
+          <SectionTitle title="Combined usage" aside={`${TOKEN_RANGE_LABELS[usageRange]}, all services`} action={<UsageRangeTabs value={usageRange} onChange={setUsageRange} />} />
+          <UsageLineChart
+            labels={usageSeries.months}
+            series={[{ label: 'All services', color: 'rgb(var(--series-1))', values: usageSeries.requests }]}
+            ariaLabel={`Combined requests across all services for ${TOKEN_RANGE_LABELS[usageRange]}`}
+            height={140}
+          />
+          <p className="mt-3 text-sm text-text-secondary">
+            Worth <span className="font-medium text-text-primary">{formatCurrency(totalCost)}</span> at hosted API prices
+            {portfolio.breakEvenTarget > 0 ? `, ${formatCurrency(roiRemaining)} to break even.` : '.'}
+          </p>
+        </section>
+
+        <section className="min-w-0" aria-label="Recent requests">
+          <div className="flex min-h-8 items-center justify-between pb-2">
+            <SectionTitle title="Recent activity" />
+            <a href="#requests" className="text-sm text-queue-blue hover:underline">All requests</a>
+          </div>
+          {jobsError && <p role="status" className="pb-2 text-xs text-warning-amber">{jobsError}</p>}
+          {recent.length > 0 && (
+            <div className="divide-y divide-border-slate rounded-lg border border-border-slate bg-panel-slate px-3 shadow-card">
+              {recent.map((item, index) => (
+                <div key={item.key} style={stagger(index, 40)} className="animate-item-in flex items-center gap-3 py-2">
+                  <Dot tone={item.tone} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm text-text-primary">{item.headline}</p>
+                    <p className="truncate text-xs text-text-muted">{item.detail}</p>
+                  </div>
+                  <span className="shrink-0 text-xs text-text-muted">{timeAgo(item.at)}</span>
+                </div>
+              ))}
             </div>
-            <ProgressBar percent={roiProgress} tone="good" />
-            <p className="mt-1 text-xs text-text-muted">
-              {formatCurrency(savings.subscriptionCents / 100)} from cancelled subscriptions
-              {' · '}{savings.includedApiCosts ? 'API-equivalent value included' : 'API-equivalent value excluded'}
-            </p>
+          )}
+          {!recent.length && !jobsError && <p className="text-sm text-text-muted">No activity yet.</p>}
+        </section>
+      </div>
+
+      <details className="group border-t border-border-slate pt-4">
+        <summary className="flex cursor-pointer list-none items-center gap-2 text-sm text-text-secondary hover:text-text-primary">
+          <ChevronRightIcon className="h-4 w-4 text-text-muted transition-transform group-open:rotate-90" aria-hidden="true" />
+          Runtime details
+        </summary>
+        <div className="mt-4 space-y-6">
+          <Readout aria-label="Runtime totals">
+            <StatTile label="Processing" value={String(running)} sub="active requests" />
+            <StatTile label="Waiting" value={String(queued)} sub="queued requests" />
+            <StatTile label="Lifetime requests" value={(summary?.totalRequests ?? stats?.totalRequests ?? 0).toLocaleString()} />
+            <StatTile label="Lifetime tokens" value={formatTokenCount(totalLifetimeTokens)} />
+            <div className="col-span-2 -ml-px -mt-px min-w-0 border-l border-t border-border-slate px-4 py-3 sm:col-span-1">
+              <p className="truncate text-xs text-text-muted">API-equivalent value</p>
+              <p className="tabular mt-1 text-xl font-semibold text-text-primary">{formatCurrency(totalCost)}</p>
+              {portfolio.breakEvenTarget > 0 ? (
+                <div className="mt-1.5">
+                  <ProgressBar percent={roiProgress} tone="good" />
+                  <p className="mt-1 truncate text-xs text-text-muted">{formatCurrency(roiRemaining)} to break even</p>
+                </div>
+              ) : <p className="mt-0.5 text-xs text-text-muted">vs. hosted APIs</p>}
+            </div>
+          </Readout>
+          <div className="grid grid-cols-2 overflow-hidden rounded-lg border border-border-slate bg-panel-slate shadow-card lg:grid-cols-4 [&>*]:-ml-px [&>*]:-mt-px [&>*]:border-l [&>*]:border-t [&>*]:border-border-slate">
+            <Sparkline label="GPU utilization" display={gpu ? `${Math.round(gpu.utilizationPct)}%` : 'N/A'} values={history.map(item => item.gpu.utilizationPct)} tone="info" yMax={100} />
+            <Sparkline label="VRAM used" display={gpu ? formatMb(gpu.vramUsedMb) : 'N/A'} values={history.map(item => item.gpu.vramUsedMb)} tone="info" />
+            <Sparkline label="GPU temperature" display={gpu && gpu.temperatureC > 0 ? `${Math.round(gpu.temperatureC)}°C` : 'N/A'} values={history.map(item => item.gpu.temperatureC)} tone={temperature} yMax={100} statusLabel />
+            <Sparkline label="Average generation speed" display={`${(stats?.avgTokensPerSecond ?? 0).toFixed(1)} t/s`} values={history.map(item => item.avgTokensPerSecond)} tone="info" />
           </div>
-        )}
-        <details className="mt-3 border-t border-border-slate pt-3">
-          <summary className="cursor-pointer text-xs font-medium text-text-secondary">Cost assumption</summary>
-          <label className="mt-3 block max-w-xs text-xs text-text-muted">
+          {status?.queue.resourceDecision && <p className="text-xs text-text-muted">Scheduler: {status.queue.resourceDecision}</p>}
+          {status && !status.queue.liveRequests && <p role="status" className="text-xs text-warning-amber">This gateway needs the matching dashboard telemetry build.</p>}
+          <label className="flex max-w-sm items-center justify-between gap-3 text-sm text-text-secondary">
             Break-even target (USD)
             <input
-              className="mt-1 min-h-10 w-full border-white/10 bg-[#07101d] px-2 text-sm text-text-primary"
+              className="tabular h-8 w-28 px-2 text-right text-sm"
               type="number"
               min="0"
               step="1"
@@ -335,23 +377,9 @@ export const OverviewPage: React.FC = () => {
               onChange={event => persistBreakEvenTarget(Number(event.target.value) || 0)}
             />
           </label>
-        </details>
-      </Panel>
-
-
-      <section className="grid gap-5 ">
-        <Panel>
-          <SectionTitle title="Combined usage" aside={`${TOKEN_RANGE_LABELS[usageRange]} · all services`} />
-          <div className="mt-3"><UsageRangeTabs value={usageRange} onChange={setUsageRange} /></div>
-          <UsageLineChart
-            labels={usageSeries.months}
-            series={[{ label: 'All services', color: '#72A7D8', values: usageSeries.requests }]}
-            ariaLabel={`Combined requests across all services for ${TOKEN_RANGE_LABELS[usageRange]}`}
-          />
-        </Panel>
-
-
-      </section>
+          <p className="text-xs text-text-muted">{formatCurrency(totalSaved)} saved so far: {formatCurrency(savings.subscriptionCents / 100)} from cancelled subscriptions, API-equivalent value {savings.includedApiCosts ? 'included' : 'excluded'}.</p>
+        </div>
+      </details>
     </div>
   );
 };

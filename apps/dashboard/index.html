@@ -2,9 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#f2f2f5" />
   <link rel="icon" type="image/png" href="../../Assets/Logo.png" />
   <title>InferDeck</title>
+  <script>
+    (function () {
+      var preference = 'light';
+      try { preference = localStorage.getItem('inferdeck:theme') || 'light'; } catch (error) {}
+      var dark = preference === 'dark' || (preference === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    })();
+  </script>
 </head>
 <body>
   <div id="root"></div>

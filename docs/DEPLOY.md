@@ -21,6 +21,34 @@ this state because boot configuration can drift independently of files.
 
 With `-c config\gateway.yml`, startup prefers `config\gateway.active.yml` when it exists and loads successfully. Dashboard configuration edits persist in that active profile. Back up both files and update the active profile when applying settings; changing only the bootstrap file may have no effect.
 
+## Crash recovery
+
+The automatic startup type handles boot, not application crashes. The NSSM
+`Parameters\AppExit` default must be `Restart`, with `AppRestartDelay=5000`.
+Windows service recovery must also restart the service after 10, 30, and 60
+seconds, reset its failure count after one day, and cover non-crash failures.
+An explicit `Stop-Service InferDeck` still leaves the service stopped.
+
+Apply or repair these settings from an elevated PowerShell session:
+
+```powershell
+.\scripts\Set-WindowsServiceRecovery.ps1
+sc.exe qfailure InferDeck
+sc.exe qfailureflag InferDeck
+```
+
+The repair verifies the NSSM service executable, exports its previous registry
+configuration, and changes recovery settings without restarting the gateway.
+After a changed restart delay, restart the service during an authorized idle
+window so NSSM reloads that setting. Validate automatic restart with an isolated
+NSSM test service; do not terminate production merely to test recovery.
+
+`scripts\Install-WindowsService.ps1` installs or repairs the authoritative
+service and applies the same recovery policy. Keep it beside
+`Set-WindowsServiceRecovery.ps1` in a deployed installation. Use
+`scripts\Start-WindowsService.ps1` to start and health-check the service; it
+never launches a second gateway or stops unrelated model processes.
+
 ## Matched artifacts
 
 Build both artifacts from one source revision:

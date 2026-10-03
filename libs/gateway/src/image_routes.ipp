@@ -153,7 +153,8 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     }
     const std::string model_name =
         body.contains("model") && !body["model"].is_null()
-            ? body["model"].get<std::string>() : deps.default_model;
+            ? body["model"].get<std::string>()
+            : media_default_model(deps, "image");
     model::ImageGenerationRequest request;
     request.prompt = body["prompt"].get<std::string>();
     request.negative_prompt = body.value("negative_prompt", "");
