@@ -6,6 +6,7 @@ import copy
 import ctypes
 import faulthandler
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import json
 import gc
 import hashlib
@@ -23,6 +24,13 @@ from typing import Any
 
 _DLL_HANDLES = []
 _RELEASED_SNAPSHOT = None
+_ENGINE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="radiance-engine")
+_ENGINE_THREAD = threading.local()
+_CUDA_STREAM_CACHE:dict[tuple[Any,...],list[Any]] = {}
+_CUDA_STREAM_ORDINALS:dict[tuple[Any,...],int] = {}
+_RETAINED_ENGINE_BUDGET_MIB = 30000
+_MIN_FREE_GPU_BYTES = 1024 * 1024 * 1024
+_MEMORY_SNAPSHOT_ALLOWANCE_BYTES = 64 * 1024 * 1024
 _EXTENSION_SHA256 = "64124749ed12f72c3d13544b313dcdcff33582e3bd7e001b519a2c5bb1f2ed4d"
 _CAPTURE_MARKER_PATH = Path(__file__).with_name("capture-next-request.json")
 _CAPTURE_OUTPUT_PATH = Path(__file__).with_name("captured-request.json")
@@ -78,15 +86,14 @@ def _engine_memory_config(prefill_attention:str, speculative_config:dict[str,Any
     options = {"gpu_memory_utilization": desired}
     retained_profile = (prefill_attention == "r4d_int4" and n_slots == 4 and
                         speculative_config is not None and speculative_config.get("num_speculative_tokens") == 3)
-    if not retained_profile or free_bytes >= math.ceil(total_bytes * desired):
+    if not retained_profile:
         return options
-    available = (free_bytes - 64 * 1024 * 1024) / total_bytes
-    if available < 0.96:
-        required = math.ceil(total_bytes * 0.96) + 64 * 1024 * 1024
+    required = _RETAINED_ENGINE_BUDGET_MIB * 1048576 + _MIN_FREE_GPU_BYTES + _MEMORY_SNAPSHOT_ALLOWANCE_BYTES
+    if free_bytes < required:
         raise RuntimeError("Insufficient free GPU memory to preserve Radiance four-by-100K capacity "
                            f"(free={free_bytes / 1048576:.0f} MiB, required={required / 1048576:.0f} MiB, "
                            f"shortfall={max(0, required-free_bytes) / 1048576:.0f} MiB)")
-    options["gpu_memory_utilization"] = min(desired, available)
+    options["gpu_memory_utilization"] = min(desired, (free_bytes - _MEMORY_SNAPSHOT_ALLOWANCE_BYTES) / total_bytes)
     options["num_gpu_blocks_override"] = 192
     return options
 
@@ -434,7 +441,43 @@ def draft_acceptance_snapshot()->dict[str,Any]:
     return _DRAFT_ACCEPTANCE.snapshot()
 
 def create(c:dict[str,Any])->dict[str,Any]:
-    return _create(c)
+    return _on_engine_thread(_create, c)
+
+
+def _on_engine_thread(function:Any, *args:Any)->Any:
+    if getattr(_ENGINE_THREAD, "active", False):
+        return function(*args)
+    return _ENGINE_EXECUTOR.submit(_engine_thread_call, function, args).result()
+
+
+def _engine_thread_call(function:Any, args:tuple[Any,...])->Any:
+    _ENGINE_THREAD.active = True
+    try:
+        return function(*args)
+    finally:
+        _ENGINE_THREAD.active = False
+
+
+def _install_stream_reuse(torch:Any)->None:
+    _CUDA_STREAM_ORDINALS.clear()
+    stream_type = torch.cuda.Stream
+    if getattr(stream_type, "_inferdeck_reuse_installed", False):
+        return
+    original_new = stream_type.__new__
+    def reuse_new(cls:Any, device:Any=None, priority:int=0, **kwargs:Any)->Any:
+        if cls is not stream_type or kwargs or not getattr(_ENGINE_THREAD, "active", False):
+            return original_new(cls, device=device, priority=priority, **kwargs)
+        caller = sys._getframe(1)
+        site = (cls, caller.f_code.co_filename, caller.f_lineno,
+                torch.cuda._get_device_index(device, optional=True), priority)
+        index = _CUDA_STREAM_ORDINALS.get(site, 0)
+        _CUDA_STREAM_ORDINALS[site] = index + 1
+        streams = _CUDA_STREAM_CACHE.setdefault(site, [])
+        if index == len(streams):
+            streams.append(original_new(cls, device=device, priority=priority))
+        return streams[index]
+    stream_type.__new__ = staticmethod(reuse_new)
+    stream_type._inferdeck_reuse_installed = True
 
 
 def _create(c:dict[str,Any])->dict[str,Any]:
@@ -468,6 +511,7 @@ def _create(c:dict[str,Any])->dict[str,Any]:
     if not has_quark():raise RuntimeError("amd-quark is required")
     import torch
     if not torch.cuda.is_available() or torch.version.hip is None:raise RuntimeError("vllm_radiance requires an available ROCm/HIP device")
+    _install_stream_reuse(torch)
     import radiance_mxfp4_fp8
     if Path(radiance_mxfp4_fp8.__file__).resolve() != extension_path.resolve():
         raise RuntimeError("A different Radiance extension is already loaded")
@@ -515,6 +559,8 @@ def _create(c:dict[str,Any])->dict[str,Any]:
             raise RuntimeError("effective KV cache dtype differs from requested profile")
         if _is_r4d_prefill(prefill_attention):
             cache_manager=engine.engine_core.engine_core.scheduler.kv_cache_manager
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
             free_bytes,total_bytes=torch.cuda.mem_get_info()
             kv_token_capacity = _kv_cache_token_capacity(cache_manager.kv_cache_config)
             kv_max_concurrency = _kv_cache_max_concurrency(cache_manager.kv_cache_config, engine.vllm_config)
@@ -526,7 +572,7 @@ def _create(c:dict[str,Any])->dict[str,Any]:
             capacity_valid = kv_max_concurrency >= n_slots if prefill_attention == "r4d_int4" else actual["blocks"] >= minimum_blocks
             async_requested = bool(scheduler_options.get("async_scheduling", False))
             spec_requested = speculative_config["method"] if speculative_config else "none"
-            if (actual["async"] and not async_requested) or actual["spec"] != spec_requested or actual["long_prefill_token_threshold"] != scheduler_options.get("long_prefill_token_threshold", 0) or actual["retention"] != 0 or actual["context"] != 100000 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < 1073741824:
+            if (actual["async"] and not async_requested) or actual["spec"] != spec_requested or actual["long_prefill_token_threshold"] != scheduler_options.get("long_prefill_token_threshold", 0) or actual["retention"] != 0 or actual["context"] != 100000 or actual["memory_utilization"] != expected_memory_utilization or not capacity_valid or free_bytes < _MIN_FREE_GPU_BYTES:
                 raise RuntimeError("R4D cache profile or free-memory guard failed")
         tokenizer=cached_tokenizer_from_config(engine.vllm_config.model_config)
         if engine.vllm_config.model_config.enable_prompt_embeds:raise RuntimeError("native pooled tokenizer does not support prompt embeds")
@@ -551,6 +597,9 @@ def _create(c:dict[str,Any])->dict[str,Any]:
 
 
 def begin(s:dict[str,Any],r:dict[str,Any])->str:
+    return _on_engine_thread(_begin, s, r)
+
+def _begin(s:dict[str,Any],r:dict[str,Any])->str:
     with s["engine_lock"]:
         return _begin_locked(s,r)
 
@@ -687,6 +736,9 @@ def _begin_locked(s:dict[str,Any],r:dict[str,Any])->str:
     s["requests"][rid]=state
     return rid
 def step(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
+    return _on_engine_thread(_step, s, rid, r)
+
+def _step(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
     with s["engine_lock"]:
         return _step_locked(s,rid,r)
 def _step_locked(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
@@ -731,11 +783,20 @@ def _step_locked(s:dict[str,Any],rid:str,r:dict[str,Any])->list[dict[str,Any]]:
         if done:s["active"].discard(rid);s["requests"].pop(rid,None)
     return result
 def abort(s:dict[str,Any],rid:str)->None:
+    return _on_engine_thread(_abort, s, rid)
+
+def _abort(s:dict[str,Any],rid:str)->None:
     with s["engine_lock"]:
         if rid in s["active"]:s["engine"].abort_request([rid]);s["active"].discard(rid);s["requests"].pop(rid,None)
 def active_count(s:dict[str,Any])->int:
+    return _on_engine_thread(_active_count, s)
+
+def _active_count(s:dict[str,Any])->int:
     with s["engine_lock"]:return len(s["active"])
 def shutdown(s: dict[str, Any]) -> None:
+    return _on_engine_thread(_shutdown, s)
+
+def _shutdown(s: dict[str, Any]) -> None:
     global _RELEASED_SNAPSHOT
     errors = []
     for rid in tuple(s["active"]):
@@ -784,6 +845,9 @@ def shutdown(s: dict[str, Any]) -> None:
 
 
 def collect_released_resources() -> None:
+    return _on_engine_thread(_collect_released_resources)
+
+def _collect_released_resources() -> None:
     global _RELEASED_SNAPSHOT
     gc.collect()
     torch = sys.modules.get("torch")
@@ -794,6 +858,10 @@ def collect_released_resources() -> None:
             reset()
             gc.collect()
         torch.cuda.synchronize()
+        clear_blas = getattr(getattr(torch, "_C", None), "_cuda_clearCublasWorkspaces", None)
+        if callable(clear_blas):
+            clear_blas()
+            print("event=radiance_blas_workspaces_released", file=sys.stderr, flush=True)
         torch.cuda.empty_cache()
         host_before = torch.cuda.memory.host_memory_stats()
         torch.accelerator.memory.empty_host_cache()
