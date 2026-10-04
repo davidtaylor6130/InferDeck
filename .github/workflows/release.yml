@@ -87,6 +87,10 @@ jobs:
           python -m pip install --disable-pip-version-check -r Testing/requirements-openai-contract.txt
           python -m unittest -v Testing.openai_sdk_contract_test
           pnpm --filter dashboard build
+          git diff --exit-code -- apps/inferdeck-gateway/static
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Committed dashboard assets do not match this release. Rebuild and commit the static directory before tagging.'
+          }
 
       - name: Provision Whisper runtime source
         shell: pwsh
