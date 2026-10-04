@@ -8,6 +8,16 @@
 
 ---
 
+## [1.0.1] - 2026-10-04
+
+### Fixed
+- Prevented Radiance GPU memory from accumulating across Vulkan/Radiance model
+  reloads by reusing drained engine streams and clearing cached CUDA workspaces.
+- Preserved four 100K Radiance contexts at the previously failing 106 MiB
+  shortfall and verified repeated swaps and concurrent requests.
+
+---
+
 ## [0.9.0] - 2026-08-31
 
 ### Added

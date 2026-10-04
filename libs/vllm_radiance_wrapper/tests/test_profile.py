@@ -16,6 +16,39 @@ import inferdeck_vllm_radiance_profile as profile
 
 
 class ProfileTests(unittest.TestCase):
+    def test_stream_reuse_preserves_distinct_roles_and_skips_external_callers(self):
+        created = []
+        class Stream:
+            def __new__(cls, device=None, priority=0, **kwargs):
+                stream = object.__new__(cls)
+                created.append(stream)
+                return stream
+        torch = NS(cuda=NS(Stream=Stream, _get_device_index=lambda device, optional: device or 0))
+        def load():
+            profile._install_stream_reuse(torch)
+            return [torch.cuda.Stream() for _ in range(5)]
+        with patch.object(profile, "_CUDA_STREAM_CACHE", {}), patch.object(profile, "_CUDA_STREAM_ORDINALS", {}):
+            first = profile._on_engine_thread(load)
+            for _ in range(20):
+                self.assertEqual(profile._on_engine_thread(load), first)
+            self.assertEqual(len(set(first)), 5)
+            self.assertTrue(all(isinstance(stream, Stream) for stream in first))
+            self.assertNotEqual(torch.cuda.Stream(), torch.cuda.Stream())
+            self.assertNotEqual(profile._on_engine_thread(lambda: torch.cuda.Stream(stream_id=7)), first[0])
+            self.assertEqual(len(created), 8)
+
+    def test_engine_thread_is_reused_across_callers_and_nested_cleanup(self):
+        caller = threading.get_ident()
+        def nested():
+            return profile._on_engine_thread(threading.get_ident)
+        with ThreadPoolExecutor(max_workers=4) as callers:
+            ids = list(callers.map(lambda _: profile._on_engine_thread(nested), range(20)))
+        self.assertEqual(len(set(ids)), 1)
+        self.assertNotEqual(ids[0], caller)
+        with self.assertRaisesRegex(RuntimeError, "engine failure"):
+            profile._on_engine_thread(lambda: (_ for _ in ()).throw(RuntimeError("engine failure")))
+        self.assertEqual(profile._on_engine_thread(threading.get_ident), ids[0])
+
     def test_idle_vulkan_cleanup_uses_loaded_backend_and_propagates_failure(self):
         from unittest.mock import Mock
         get_module = Mock(return_value=123)
@@ -703,7 +736,13 @@ class ProfileTests(unittest.TestCase):
             memory=NS(host_memory_stats=lambda: {"allocated_bytes.current": 0}),
             memory_allocated=lambda: 0, memory_reserved=lambda: 0),
             accelerator=NS(memory=NS(empty_host_cache=lambda: calls.append("host_empty"))),
-            compiler=NS(reset=lambda: calls.append("compiler_reset")))
+            compiler=NS(reset=lambda: calls.append("compiler_reset")),
+            _C=NS(_cuda_clearCublasWorkspaces=lambda: calls.append("blas_clear")))
+        with patch.dict(sys.modules, {"torch": torch}), patch.object(profile, "_RELEASED_SNAPSHOT", None):
+            profile.collect_released_resources()
+        self.assertEqual(calls, ["compiler_reset", "sync", "blas_clear", "device_empty", "host_empty"])
+        calls.clear()
+        del torch._C
         with patch.dict(sys.modules, {"torch": torch}), patch.object(profile, "_RELEASED_SNAPSHOT", None):
             profile.collect_released_resources()
         self.assertEqual(calls, ["compiler_reset", "sync", "device_empty", "host_empty"])
@@ -907,14 +946,14 @@ class ProfileTests(unittest.TestCase):
         total = 34208743424
         speculative = {"method": "mtp", "num_speculative_tokens": 3}
         self.assertEqual(profile._engine_memory_config("r4d_int4", speculative, 4, total, total),
-                         {"gpu_memory_utilization": 0.991})
+                         {"gpu_memory_utilization": 0.991, "num_gpu_blocks_override": 192})
         free = total - 868 * 1024 * 1024
         options = profile._engine_memory_config("r4d_int4", speculative, 4, free, total)
         self.assertEqual(options["num_gpu_blocks_override"], 192)
         self.assertLess(math.ceil(total * options["gpu_memory_utilization"]), free)
         self.assertGreaterEqual(options["gpu_memory_utilization"], 0.97)
         with self.assertRaisesRegex(RuntimeError, "four-by-100K.*free=.*required=.*shortfall="):
-            profile._engine_memory_config("r4d_int4", speculative, 4, int(total * 0.96), total)
+            profile._engine_memory_config("r4d_int4", speculative, 4, 31087 * 1024 * 1024, total)
         self.assertEqual(profile._engine_memory_config("r4d", None, 1, free, total),
                          {"gpu_memory_utilization": 0.925})
 
@@ -926,6 +965,17 @@ class ProfileTests(unittest.TestCase):
         self.assertAlmostEqual(options["gpu_memory_utilization"], (free - 64 * 1024 * 1024) / total)
         self.assertLess(options["gpu_memory_utilization"], 0.97)
         self.assertGreaterEqual(options["gpu_memory_utilization"], 0.96)
+
+    def test_retained_memory_budget_uses_fixed_allocation_and_preserves_headroom(self):
+        speculative = {"method": "mtp", "num_speculative_tokens": 3}
+        for free_mib in (31277, 31088):
+            options = profile._engine_memory_config("r4d_int4", speculative, 4,
+                                                   free_mib * 1048576, 34208743424)
+            self.assertEqual(options["num_gpu_blocks_override"], 192)
+            self.assertAlmostEqual(options["gpu_memory_utilization"],
+                                   (free_mib - 64) * 1048576 / 34208743424)
+        with self.assertRaisesRegex(RuntimeError, "required=31088 MiB"):
+            profile._engine_memory_config("r4d_int4", speculative, 4, 24 * 1024 ** 3, 24 * 1024 ** 3)
 
     def test_radiance_env_overrides_only_named_knobs(self):
         merged = profile._radiance_env({"radiance_env": json.dumps({
