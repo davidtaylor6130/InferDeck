@@ -142,10 +142,7 @@ int run_gateway(const fs::path& config_path) {
     LOG_INFO("factory_set", "LlamaCppModel factory installed");
 
     model::BackendCoordinator coordinator(registry);
-    coordinator.set_max_queue_size(static_cast<std::size_t>(std::max(1, cfg.max_queue_size)));
-    if (cfg.vram_budget_mb > 0) {
-        coordinator.set_vram_budget(cfg.vram_budget_mb, cfg.vram_safety_margin_mb);
-    }
+    configure_coordinator(coordinator, cfg);
     std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     ModelStore model_store(cfg.model_store_root, cfg.model_store_archive_root,
                            cfg.model_store_hf_token, coordinator, {}, {},

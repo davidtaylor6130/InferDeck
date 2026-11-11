@@ -142,6 +142,8 @@ foundation::Result<void> BackendCoordinator::load_with_lock_deadline(
         if (is_primary_model(instance->info())) {
             current_loaded_ = name;
         }
+        const auto loaded_at = clock::now();
+        model_use_[name] = ModelUse{loaded_at, loaded_at, 0};
         if (instance->estimate_vram_mb(instance->n_slots()) > 0) {
             invalidate_vram_observation_locked();
             ++resource_generation_;
@@ -236,7 +238,10 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
             instances_[name] = std::move(instance);
             if (was_primary) current_loaded_ = name;
         }
-        if (r) active_requests_by_model_.erase(name);
+        if (r) {
+            active_requests_by_model_.erase(name);
+            model_use_.erase(name);
+        }
         draining_models_.erase(name);
         if (r && released_vram > 0) {
             invalidate_vram_observation_locked();

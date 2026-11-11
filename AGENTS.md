@@ -175,6 +175,10 @@ Concurrency invariants:
 - CPU STT/TTS native runtimes bypass GPU preparation. A successful STT request
   reserves the default chat model for that client through TTS; the bounded
   grace is configured by `gateway.voice_session_grace_ms`.
+- Swap hysteresis (`gateway.swap_hold_ms`/`swap_quantum_ms`): a queued request
+  whose load would evict a model used within the hold is not actionable until
+  that model is cold or a quantum has passed since max(enqueue, warm model
+  load). Without it, two agents on different large models swap on every turn.
 
 ## Design rules learned the hard way (do not regress)
 

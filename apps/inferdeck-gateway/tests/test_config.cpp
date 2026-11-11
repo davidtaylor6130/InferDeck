@@ -573,6 +573,11 @@ model_registry:
         "gateway:\n  background_idle_after_seconds: 86401\n"));
     CHECK(validate_config_text(
         "gateway:\n  background_idle_after_seconds: 900\n"));
+    CHECK(validate_config_text("gateway:\n  swap_hold_ms: 0\n"));
+    CHECK(validate_config_text("gateway:\n  swap_hold_ms: 20000\n  swap_quantum_ms: 180000\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  swap_hold_ms: -1\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  swap_hold_ms: 90000\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  swap_quantum_ms: 300001\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\nauth:\n  required: true\n  token: secret\n"));
     CHECK_FALSE(validate_config_text("control:\n  allow_remote: true\n"));
