@@ -190,6 +190,13 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     foundation::ErrorCode::InvalidArgument,
                     "gateway.background_idle_after_seconds must be between 60 and 86400");
             }
+            const int swap_hold = gateway["swap_hold_ms"] ? gateway["swap_hold_ms"].as<int>() : 15000;
+            const int swap_quantum = gateway["swap_quantum_ms"] ? gateway["swap_quantum_ms"].as<int>() : 180000;
+            if (swap_hold < 0 || swap_quantum < swap_hold || swap_quantum > 300000) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "gateway.swap_hold_ms and gateway.swap_quantum_ms must satisfy 0 <= hold <= quantum <= 300000");
+            }
             if (gateway["n_batch"] && gateway["n_ubatch"] &&
                 gateway["n_ubatch"].as<int>() > gateway["n_batch"].as<int>()) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,

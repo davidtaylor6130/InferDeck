@@ -112,6 +112,12 @@ public:
     foundation::Result<void> release_slot(
         const std::string& name, int slot_id);
     void set_max_queue_size(std::size_t size);
+    /// <summary>Keeps a recently used model resident across agentic tool-call gaps.
+    /// A swap that would evict a model used within <c>hold</c> is deferred until that
+    /// model goes cold or <c>quantum</c> has passed since the later of the waiter's
+    /// enqueue and the warm model's load. Zero <c>hold</c> disables deferral.</summary>
+    void set_swap_hysteresis(std::chrono::milliseconds hold,
+                             std::chrono::milliseconds quantum);
     [[nodiscard]] std::size_t queued_request_count() const;
     [[nodiscard]] std::vector<QueueInfo> queue() const;
     std::uint64_t reserve_priority_session(const std::string& key,
@@ -230,6 +236,7 @@ private:
         const std::string& name, const std::string& reservation_key) const;
     bool waiter_is_actionable_locked(const SlotWaiter& waiter) const;
     bool waiter_is_resource_barrier_locked(const SlotWaiter& waiter) const;
+    bool swap_deferred_locked(const SlotWaiter& waiter, time_point now) const;
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
     foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot, const RequestDemand* demand = nullptr,
@@ -276,6 +283,14 @@ private:
     std::uint64_t next_waiter_id_{1};
     std::uint64_t resource_generation_{0};
     std::size_t max_queue_size_{128};
+    struct ModelUse {
+        time_point loaded{};
+        time_point last_used{};
+        int priority{0};
+    };
+    std::unordered_map<std::string, ModelUse> model_use_;
+    std::chrono::milliseconds swap_hold_{0};
+    std::chrono::milliseconds swap_quantum_{0};
     struct PrioritySession {
         std::string model;
         time_point deadline{};

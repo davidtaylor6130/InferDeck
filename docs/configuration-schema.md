@@ -89,6 +89,16 @@ seconds and defaults to 900. Lease records use the managed-key database and
 survive gateway restarts. See
 [Background availability and leases](background-leases.md).
 
+`gateway.swap_hold_ms` (default 15000) and `gateway.swap_quantum_ms` (default
+180000) stop agentic clients from swapping large models on every turn. If a
+queued request needs a model that would evict one used within the hold, it
+waits until that model goes idle. A loaded model keeps this protection for at
+least the quantum after it loads, so each swap buys one quantum of work before
+the next. Higher-priority requests and voice media skip the wait. Set
+`swap_hold_ms: 0` to disable it. Both values must satisfy
+`0 <= hold <= quantum <= 300000`. The setting only applies when `auto_swap` is
+enabled.
+
 ## Atomicity and recovery
 
 Persistence writes a sibling temporary file, flushes it, and atomically replaces

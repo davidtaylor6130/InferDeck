@@ -2089,6 +2089,117 @@ TEST_CASE("BackendCoordinator: runnable voice bypasses a busy loaded waiter",
     REQUIRE(coordinator.release_slot("chat", *queued));
 }
 
+namespace {
+
+/// <summary>Registers two 5000 MB single-slot models "a" and "b" that cannot co-reside
+/// under a 5000 MB budget, which is the agentic ping-pong setup.</summary>
+void register_competing_models(ModelRegistry& reg) {
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    for (const char* name : {"a", "b"}) {
+        auto info = make_info(name);
+        info.vram_required_mb = 5000;
+        info.n_slots = 1;
+        info.min_slots = 1;
+        reg.register_model(info);
+    }
+}
+
+/// <summary>Acquires and releases one turn on "a" through the queue.</summary>
+void run_turn_on_a(BackendCoordinator& coordinator) {
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::seconds{2};
+    options.prepare = [&] { return coordinator.swap_to("a"); };
+    auto slot = coordinator.acquire_slot("a", options);
+    REQUIRE(slot);
+    REQUIRE(coordinator.release_slot("a", *slot));
+}
+
+} // namespace
+
+TEST_CASE("BackendCoordinator: swap hysteresis keeps a warm model across a tool-call gap",
+          "[model][coordinator][queue][residency]") {
+    ModelRegistry reg;
+    register_competing_models(reg);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(5000, 0);
+    coordinator.set_swap_hysteresis(std::chrono::milliseconds{300},
+                                    std::chrono::seconds{5});
+    run_turn_on_a(coordinator);
+
+    const auto b_started = std::chrono::steady_clock::now();
+    Result<int> b_slot = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread other_agent([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{5};
+        options.prepare = [&] { return coordinator.swap_to("b"); };
+        b_slot = coordinator.acquire_slot("b", options);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    run_turn_on_a(coordinator);
+    CHECK(coordinator.is_loaded("a"));
+    CHECK_FALSE(coordinator.is_loaded("b"));
+
+    other_agent.join();
+    REQUIRE(b_slot);
+    CHECK(coordinator.is_loaded("b"));
+    CHECK(std::chrono::steady_clock::now() - b_started >= std::chrono::milliseconds{350});
+    REQUIRE(coordinator.release_slot("b", *b_slot));
+}
+
+TEST_CASE("BackendCoordinator: swap hysteresis is bounded and bypassable",
+          "[model][coordinator][queue][residency]") {
+    ModelRegistry reg;
+    register_competing_models(reg);
+    BackendCoordinator coordinator(reg);
+    int budget = 5000;
+    int priority = 0;
+    auto hold = std::chrono::milliseconds{10000};
+    auto quantum = std::chrono::milliseconds{10000};
+    auto max_wait = std::chrono::milliseconds{1000};
+    bool a_keeps_working = false;
+    SECTION("quantum ends deferral while the other agent keeps the model warm") {
+        hold = std::chrono::milliseconds{300};
+        quantum = std::chrono::milliseconds{800};
+        max_wait = std::chrono::milliseconds{3000};
+        a_keeps_working = true;
+    }
+    SECTION("higher priority skips deferral") { priority = 10; }
+    SECTION("co-resident fit skips deferral") { budget = 10000; }
+    coordinator.set_vram_budget(budget, 0);
+    coordinator.set_swap_hysteresis(hold, quantum);
+    run_turn_on_a(coordinator);
+
+    std::jthread agent_a([&](std::stop_token stop) {
+        while (a_keeps_working && !stop.stop_requested()) {
+            AcquireSlotOptions options;
+            options.timeout = std::chrono::seconds{5};
+            options.prepare = [&] { return coordinator.swap_to("a"); };
+            auto slot = coordinator.acquire_slot("a", options);
+            if (slot) (void)coordinator.release_slot("a", *slot);
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+    });
+    const auto started = std::chrono::steady_clock::now();
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::seconds{5};
+    options.priority = priority;
+    options.prepare = [&] { return coordinator.swap_to("b"); };
+    auto b_slot = coordinator.acquire_slot("b", options);
+    REQUIRE(b_slot);
+    const auto waited = std::chrono::steady_clock::now() - started;
+    CHECK(waited < max_wait);
+    if (a_keeps_working) CHECK(waited >= std::chrono::milliseconds{700});
+    CHECK(coordinator.is_loaded("b"));
+    CHECK(coordinator.is_loaded("a") == (budget == 10000));
+    REQUIRE(coordinator.release_slot("b", *b_slot));
+}
+
 TEST_CASE("BackendCoordinator: one cold prepare completes before another can swap",
           "[model][coordinator][queue][residency]") {
     ModelRegistry reg;
