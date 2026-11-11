@@ -50,6 +50,8 @@ struct GatewayConfig {
     int transcription_max_body_mb{200};
     int transcription_decoded_budget_mb{1024};
     int transcription_upload_timeout_ms{600000};
+    int swap_hold_ms{15000};
+    int swap_quantum_ms{60000};
     int background_idle_after_seconds{900};
     model::SamplingConfig sampling{};
     bool openai_derivative_compatibility_enabled{false};
