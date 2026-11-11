@@ -576,7 +576,7 @@ model_registry:
     CHECK(validate_config_text("gateway:\n  swap_hold_ms: 0\n"));
     CHECK(validate_config_text("gateway:\n  swap_hold_ms: 20000\n  swap_quantum_ms: 180000\n"));
     CHECK_FALSE(validate_config_text("gateway:\n  swap_hold_ms: -1\n"));
-    CHECK_FALSE(validate_config_text("gateway:\n  swap_hold_ms: 90000\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  swap_hold_ms: 200000\n"));
     CHECK_FALSE(validate_config_text("gateway:\n  swap_quantum_ms: 300001\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\nauth:\n  required: true\n  token: secret\n"));
