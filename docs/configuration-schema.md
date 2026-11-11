@@ -90,7 +90,7 @@ survive gateway restarts. See
 [Background availability and leases](background-leases.md).
 
 `gateway.swap_hold_ms` (default 15000) and `gateway.swap_quantum_ms` (default
-60000) stop agentic clients from swapping large models on every turn. If a
+180000) stop agentic clients from swapping large models on every turn. If a
 queued request needs a model that would evict one used within the hold, it
 waits until that model goes idle. A loaded model keeps this protection for at
 least the quantum after it loads, so each swap buys one quantum of work before

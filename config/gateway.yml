@@ -62,7 +62,7 @@ gateway:
   # Keep a recently used model resident across agent tool-call gaps instead of
   # swapping on every turn. 0 hold disables. quantum = minimum residency per swap.
   swap_hold_ms: 15000
-  swap_quantum_ms: 60000
+  swap_quantum_ms: 180000
   background_idle_after_seconds: 900
 
   # Server-side sampler defaults (issue #42). These mirror stock llama-server:

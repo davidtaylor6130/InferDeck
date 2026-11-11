@@ -47,7 +47,7 @@ struct GatewayConfig {
     int max_queue_size{128};
     int voice_session_grace_ms{15000};
     int swap_hold_ms{15000};
-    int swap_quantum_ms{60000};
+    int swap_quantum_ms{180000};
     int background_idle_after_seconds{900};
     model::SamplingConfig sampling{};
     bool openai_derivative_compatibility_enabled{false};
