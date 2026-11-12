@@ -164,8 +164,8 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     request.count = body.contains("n") && !body["n"].is_null()
         ? body["n"].get<int>() : 1;
     request.seed = body.value("seed", std::int64_t{-1});
-    request.steps = body.value("steps", 20);
-    request.guidance_scale = body.value("guidance_scale", 7.0f);
+    request.steps = body.value("steps", 0);
+    request.guidance_scale = body.value("guidance_scale", -1.0f);
     if (body.contains("reference_images") && !body["reference_images"].is_null()) {
         const auto& references = body["reference_images"];
         if (!inferdeck_route || !references.is_array() || references.size() > 4) {
@@ -196,8 +196,10 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         model_name.empty() || request.prompt.empty() || request.prompt.size() > 32000 ||
         request.negative_prompt.size() > 32768 || request.count < 1 || request.count > 10 ||
         request.width < 256 || request.height < 256 || request.width > 2048 || request.height > 2048 ||
-        request.width % 64 != 0 || request.height % 64 != 0 || request.steps < 1 || request.steps > 200 ||
-        !std::isfinite(request.guidance_scale) || request.guidance_scale < 0.0f || request.guidance_scale > 50.0f) {
+        request.width % 64 != 0 || request.height % 64 != 0 || request.steps < 0 || request.steps > 200 ||
+        (body.contains("steps") && request.steps < 1) ||
+        !std::isfinite(request.guidance_scale) || request.guidance_scale > 50.0f ||
+        (body.contains("guidance_scale") && request.guidance_scale < 0.0f)) {
         write_error(resp, 400, "invalid_image_request", "invalid model, prompt, size, count, seed, steps, or guidance scale");
         return;
     }

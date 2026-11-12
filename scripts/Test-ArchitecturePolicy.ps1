@@ -115,7 +115,7 @@ function Test-ImageBuildDefinition(
     $valid =
         $RootCmake -match [regex]::Escape('libs/third_party/stable-diffusion.cpp') -and
         $RootCmake -match [regex]::Escape('INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP') -and
-        $RootCmake -match [regex]::Escape('add_compile_definitions(GGML_MAX_NAME=128)') -and
+        $RootCmake -match [regex]::Escape('add_compile_definitions(GGML_MAX_NAME=160)') -and
         $NativeCmake -match [regex]::Escape('set(SD_WEBP OFF CACHE BOOL "" FORCE)') -and
         $NativeCmake -match [regex]::Escape('set(SD_WEBM OFF CACHE BOOL "" FORCE)') -and
         $NativeCmake -match [regex]::Escape('target_include_directories(stable-diffusion BEFORE PRIVATE') -and

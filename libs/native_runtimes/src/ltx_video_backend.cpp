@@ -124,6 +124,7 @@ foundation::Result<void> LTXVideoBackend::load() {
         return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                      "LTX video model artifacts are incomplete");
     }
+    install_diffusion_logging();
     sd_ctx_params_t params;
     sd_ctx_params_init(&params);
     params.diffusion_model_path = diffusion_model_path_.c_str();

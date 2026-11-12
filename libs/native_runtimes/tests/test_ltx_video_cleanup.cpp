@@ -16,6 +16,7 @@ std::string observed_backend{};
 }
 
 extern "C" {
+void sd_set_log_callback(sd_log_cb_t, void*) {}
 void sd_set_progress_callback(sd_progress_cb_t cb, void* data) { callback = cb; callback_data = data; }
 void sd_ctx_params_init(sd_ctx_params_t* params) { *params = {}; }
 void sd_vid_gen_params_init(sd_vid_gen_params_t* params) { *params = {}; }

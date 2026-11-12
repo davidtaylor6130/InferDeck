@@ -70,9 +70,11 @@ struct ImageGenerationRequest {
     int width{1024};
     int height{1024};
     int count{1};
-    int steps{20};
+    /// <summary>Sampling steps. Zero lets the backend use the model's default.</summary>
+    int steps{0};
     std::int64_t seed{-1};
-    float guidance_scale{7.0f};
+    /// <summary>Guidance scale. Negative lets the backend use the model's default.</summary>
+    float guidance_scale{-1.0f};
     /// <summary>Encoded PNG/JPEG reference images. Non-empty turns the request into an edit.</summary>
     std::vector<std::vector<std::byte>> reference_images;
 };

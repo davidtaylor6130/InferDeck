@@ -9,8 +9,10 @@
 - Model discovery (`GET /api/inferdeck/v1/models`) reports token `limits` for
   every entry, and `resolved_model` plus `alias_contract` for aliases (#195).
 - Qwen-Image-2.1 runtime support and reference-image editing through
-  `reference_images` on the InferDeck image routes (#189). Hardware validation
-  is pending; see `docs/qwen-image-2.1.md`.
+  `reference_images` on the InferDeck image routes and in the dashboard
+  (#189). Validated on the R9700; see `docs/qwen-image-2.1.md`.
+- Image models can set default `steps` and `guidance_scale` artifacts.
+- stable-diffusion.cpp warnings and errors now reach the gateway log.
 
 ### Changed
 - stable-diffusion.cpp is pinned to `master-924-f8890b9` and shares llama.cpp's

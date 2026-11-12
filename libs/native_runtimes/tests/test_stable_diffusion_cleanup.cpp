@@ -22,9 +22,12 @@ int g_context{};
 bool g_auto_fit{};
 int g_reference_count{};
 uint32_t g_reference_width{};
+int g_steps{};
+float g_guidance{};
 }
 
 extern "C" {
+void sd_set_log_callback(sd_log_cb_t, void*) {}
 void sd_set_progress_callback(sd_progress_cb_t callback, void* data) {
     g_callback = callback;
     g_callback_data = data;
@@ -45,6 +48,8 @@ void free_sd_images(sd_image_t* images, int count) {
     ++g_free_count;
 }
 bool generate_image(sd_ctx_t*, const sd_img_gen_params_t* params, sd_image_t** images, int* count) {
+    g_steps = params->sample_params.sample_steps;
+    g_guidance = params->sample_params.guidance.txt_cfg;
     g_reference_count = params->ref_images_count;
     g_reference_width = params->ref_images_count > 0 ? params->ref_images[0].width : 0;
     g_images = new sd_image_t[1]{};
@@ -139,6 +144,7 @@ TEST_CASE("Reference images reach the native edit call and bad ones are rejected
     model::ModelInfo info;
     info.name = "edit-image";
     info.artifacts["diffusion_model"] = "fake-diffusion.gguf";
+    info.artifacts["guidance_scale"] = "6.0";
     std::unique_ptr<model::IBackend> backend = native_runtimes::make_stable_diffusion_backend(info);
     REQUIRE(backend->load());
     model::IImageBackend* images = dynamic_cast<model::IImageBackend*>(backend.get());
@@ -149,6 +155,13 @@ TEST_CASE("Reference images reach the native edit call and bad ones are rejected
     REQUIRE(images->generate_images(0, request, {}));
     CHECK(g_reference_count == 2);
     CHECK(g_reference_width == 4);
+    CHECK(g_steps == 20);
+    CHECK(g_guidance == 6.0f);
+    request.steps = 8;
+    request.guidance_scale = 1.0f;
+    REQUIRE(images->generate_images(0, request, {}));
+    CHECK(g_steps == 8);
+    CHECK(g_guidance == 1.0f);
     request.reference_images = {{std::byte{1}}};
     const auto rejected = images->generate_images(0, request, {});
     REQUIRE_FALSE(rejected);

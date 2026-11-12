@@ -314,6 +314,9 @@ Request:
  "reference_image_count": 0}
 ```
 
+`steps` of `0` and a negative `guidance_scale` mean "use the model's
+default".
+
 When `reference_image_count` is above zero the request is an edit: the first
 that many blobs are encoded reference images (PNG or JPEG), in order. Declare
 the `image_editing` capability to receive them.

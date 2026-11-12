@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -84,6 +85,8 @@ public:
           diffusion_model_path_(artifact(info_, "diffusion_model")),
           llm_path_(artifact(info_, "llm")), llm_vision_path_(artifact(info_, "llm_vision")),
           model_args_(artifact(info_, "model_args")),
+          default_steps_(std::max(1, std::atoi(artifact(info_, "steps", "20").c_str()))),
+          default_guidance_scale_(std::max(0.0f, static_cast<float>(std::atof(artifact(info_, "guidance_scale", "7.0").c_str())))),
           vae_path_(artifact(info_, "vae")), clip_l_path_(artifact(info_, "clip_l")),
           clip_g_path_(artifact(info_, "clip_g")), t5xxl_path_(artifact(info_, "t5xxl")),
           backend_(artifact(info_, "backend", "vulkan")), max_vram_(artifact(info_, "max_vram")) {}
@@ -99,6 +102,7 @@ public:
         release_context();
         if (model_path_.empty() && diffusion_model_path_.empty()) return foundation::Err<void>(foundation::ErrorCode::InvalidArgument, "stable-diffusion.cpp model or diffusion_model artifact is missing");
         const auto optional_path = [](const std::string& path) { return path.empty() ? nullptr : path.c_str(); };
+        install_diffusion_logging();
         sd_ctx_params_t params;
         sd_ctx_params_init(&params);
         params.model_path = optional_path(model_path_);
@@ -154,8 +158,9 @@ public:
             params.height = request.height;
             params.seed = request.seed;
             params.batch_count = request.count;
-            params.sample_params.sample_steps = request.steps;
-            params.sample_params.guidance.txt_cfg = request.guidance_scale;
+            params.sample_params.sample_steps = request.steps > 0 ? request.steps : default_steps_;
+            params.sample_params.guidance.txt_cfg =
+                request.guidance_scale >= 0.0f ? request.guidance_scale : default_guidance_scale_;
             const int vae_tile_size = image_vae_tile_size(request.width, request.height);
             params.vae_tiling_params.enabled = vae_tile_size > 0;
             params.vae_tiling_params.tile_size_w = vae_tile_size;
@@ -217,6 +222,8 @@ private:
     std::string llm_path_;
     std::string llm_vision_path_;
     std::string model_args_;
+    int default_steps_;
+    float default_guidance_scale_;
     std::string vae_path_;
     std::string clip_l_path_;
     std::string clip_g_path_;

@@ -4,9 +4,8 @@ InferDeck runs Qwen-Image-2.1 in-process through the `stable_diffusion_cpp`
 runtime. It supports text-to-image generation and editing from up to four
 reference images.
 
-Status: the runtime builds and the request path is covered by unit tests.
-Generation on the R9700 has not been measured yet; see
-[Validation](#validation).
+Status: validated on the R9700 on 2026-11-12. See [Validation](#validation)
+for the measurements and two known limits.
 
 ## License
 
@@ -26,7 +25,9 @@ pinned llama.cpp (`73a43d1f`). Later revisions call `ggml_prec_set_acc`, which
 that ggml does not have.
 
 stable-diffusion.cpp is built with `SD_USE_UPSTREAM_GGML=ON` so it shares
-llama.cpp's ggml. Consequences:
+llama.cpp's ggml. The whole build uses `GGML_MAX_NAME=160` to match this
+stable-diffusion.cpp revision; a mismatch corrupts tensor lookups and aborts
+the process on the first generation. Consequences:
 
 - INT8 `convrot` safetensors are not supported. Use GGUF or BF16 weights.
 - FP8 weights are converted to F16 at load time.
@@ -60,12 +61,13 @@ model_registry:
     capabilities: [image_generation, image_editing]
     n_slots: 1
     min_slots: 1
-    vram_required_mb: 20000   # starting estimate; replace with the measured value
+    vram_required_mb: 20000   # measured edit peak 18.4 GB plus margin
     artifacts:
       diffusion_model: "F:/InferDeck/models/image/qwen-image-2.1/qwen_image_2.1-Q8_0.gguf"
       vae: "F:/InferDeck/models/image/qwen-image-2.1/qwen_image_2.1_vae_bf16.safetensors"
       llm: "F:/InferDeck/models/image/qwen-image-2.1/Qwen3VL-8B-Instruct-Q8_0.gguf"
       llm_vision: "F:/InferDeck/models/image/qwen-image-2.1/mmproj-Qwen3VL-8B-Instruct-F16.gguf"
+      guidance_scale: "6.0"
       backend: vulkan
 ```
 
@@ -79,6 +81,8 @@ Image artifact keys for `stable_diffusion_cpp`:
 | `llm` | LLM text encoder. |
 | `llm_vision` | Vision projector for the LLM text encoder. Required for editing with GGUF encoders. |
 | `model_args` | Passed to stable-diffusion.cpp unchanged, for example `qwen_image_2_1_prefix_cache_type=q8_0`. |
+| `steps` | Sampling steps when the request sets none. Default 20. |
+| `guidance_scale` | Guidance when the request sets none. Default 7.0. Use 6.0 for Qwen-Image-2.1. |
 | `backend` | `vulkan` (default) or `cpu`. |
 | `max_vram` | Optional GiB budget for managed weights. |
 
@@ -87,7 +91,9 @@ Declare `image_editing` only on models that accept reference images.
 ## API
 
 Text to image works on every image route. Use a width and height divisible
-by 64 and a guidance scale near 6.
+by 64. Strict routes cannot send steps or guidance, so set the model's
+`guidance_scale` artifact to 6.0; at the generic default of 7.0 the output
+shows a woven texture.
 
 Editing is an InferDeck extension on
 `POST /api/inferdeck/v1/media/images/generations` and
@@ -109,17 +115,45 @@ Editing is an InferDeck extension on
 - The model must declare `image_editing`, otherwise the request fails with
   `unsupported_image_model`.
 
+With curl, add `-H "Expect:"`. curl sends `Expect: 100-continue` for large
+bodies and the gateway answers 417.
+
 Strict `POST /v1/images/generations` rejects `reference_images` with
 `unsupported_parameter`. The strict OpenAI surface is unchanged.
 
 ## Validation
 
-Not yet run on hardware. To complete issue #189, record on the R9700:
+Run on 2026-11-12 against a test gateway on port 11499, beside the live
+service, which held 8.2 GB of VRAM throughout.
 
-1. Device, driver, and Vulkan SDK version.
-2. Quantisation of each artifact.
-3. Peak VRAM for one 1024x1024 generation and one single-reference edit.
-4. Wall time and step count for both.
-5. That an existing SD 1.5 or SDXL model still generates on the new pin.
+| Item | Value |
+|---|---|
+| GPU | AMD Radeon AI PRO R9700, 32 GB, driver 32.0.23002.1006 |
+| Vulkan SDK | 1.4.309.0 |
+| Weights | diffusion Q8_0, text encoder Q8_0, vision projector F16, VAE BF16 |
+| Settings | 1024x1024, 20 steps, Vulkan, 256 px VAE tiling |
 
-Then replace `vram_required_mb` above with the measured peak plus margin.
+| Request | Wall time | Peak VRAM above the live baseline |
+|---|---|---|
+| SD 1.5, 512x512 (regression check) | 13.4 s including load | 2.8 GB |
+| Qwen text to image, guidance 7.0 | 131.6 s including a 28 s load | 16.2 GB |
+| Qwen text to image, guidance 6.0 | 104.2 s | not comparable, see below |
+| Qwen edit, one 1024x1024 reference, guidance 6.0 | 257.3 s | 18.4 GB |
+
+VRAM is the system-wide DXGI figure sampled every 0.5 s, so it is an upper
+bound for the model. Outputs were checked by eye: text rendering was correct
+in all Qwen images, and the edit changed the sign text and background as asked.
+
+Known limits:
+
+- **Edits run without the prefix cache when VRAM is tight.** With 8.2 GB held
+  by the live service, stable-diffusion.cpp could not fit the cache, logged
+  `insufficient memory for prefix caching`, and retried without it. The edit
+  still completed, in about twice the time of a generation. `model_args: "qwen_image_2_1_prefix_cache_type=q8_0"` halves the
+  cache and may avoid the retry; it was not measured.
+- **Edit quality is below generation quality.** The edited image kept the
+  subject but showed a visible woven texture at guidance 6.0, and lost the
+  subject's face at 7.0. Not investigated further.
+
+An untiled VAE decode at 1024x1024 ran out of VRAM in this setup;
+stable-diffusion.cpp fell back to 256 px tiling on its own.

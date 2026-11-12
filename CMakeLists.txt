@@ -30,7 +30,7 @@ option(INFERDECK_REQUIRE_ACESTEP_CPP
 
 if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" OR
    EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
-    add_compile_definitions(GGML_MAX_NAME=128)
+    add_compile_definitions(GGML_MAX_NAME=160)
 endif()
 if(NOT EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" AND
    INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP)
