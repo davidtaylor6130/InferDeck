@@ -32,6 +32,18 @@ if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" OR
    EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
     add_compile_definitions(GGML_MAX_NAME=160)
 endif()
+# llama.cpp, stable-diffusion.cpp, and ACE-Step share one ggml, so they must
+# agree on GGML_MAX_NAME. A mismatch compiles and links, then corrupts tensor
+# lookups and aborts on the first generation. Fail here instead.
+if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
+    file(STRINGS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" _sd_ggml_max_name
+         REGEX "GGML_MAX_NAME=[0-9]+")
+    if(_sd_ggml_max_name AND NOT _sd_ggml_max_name MATCHES "GGML_MAX_NAME=160")
+        message(FATAL_ERROR
+                "stable-diffusion.cpp sets ${_sd_ggml_max_name}, but InferDeck builds ggml with "
+                "GGML_MAX_NAME=160. Change both values together.")
+    endif()
+endif()
 if(NOT EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" AND
    INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP)
     message(FATAL_ERROR
@@ -190,6 +202,7 @@ if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests/parity)
 endif()
 add_subdirectory(libs/llama_cpp_wrapper)
+add_subdirectory(libs/decision_runtime)
 if(INFERDECK_VLLM_RADIANCE_ENABLE)
     add_subdirectory(libs/vllm_radiance_wrapper)
 endif()

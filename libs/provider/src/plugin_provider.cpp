@@ -326,7 +326,8 @@ class PluginBackend final : public model::IModel,
                             public model::IAudioGenerationBackend,
                             public model::IVideoBackend,
                             public model::ISpeechBackend,
-                            public model::ITranscriptionBackend
+                            public model::ITranscriptionBackend,
+                            public model::IDecisionBackend
 {
 public:
     PluginBackend(const inferdeck_provider* api, void* instance, model::ModelInfo info)
@@ -625,6 +626,42 @@ public:
             result.segments.push_back(std::move(parsed));
         }
         result.inference_ms = elapsed_ms(started);
+        return foundation::Ok(std::move(result));
+    }
+
+    foundation::Result<model::DecisionResult> decide(
+        int slot_id, const model::DecisionRequest& request,
+        const std::function<bool()>& cancelled) override
+    {
+        static constexpr const char* kinds[] = {"predicate", "choice", "score"};
+        json questions = json::array();
+        for (const model::DecisionQuestion& question : request.questions)
+        {
+            json options = json::array();
+            for (const model::DecisionOption& option : question.options)
+            {
+                options.push_back({{"label", option.label}, {"description", option.description}});
+            }
+            questions.push_back({{"type", kinds[static_cast<int>(question.kind)]},
+                                 {"instructions", question.instructions},
+                                 {"options", std::move(options)}});
+        }
+        const json body = {{"slot", slot_id}, {"input", request.input}, {"questions", std::move(questions)}};
+        CallState state;
+        state.cancelled = [this, &cancelled] { return cancel_all_.load() || (cancelled && cancelled()); };
+        const Clock::time_point started = Clock::now();
+        const foundation::Result<void> ran = invoke("decide", body, {}, state);
+        if (!ran)
+        {
+            return forward_error<model::DecisionResult>(ran);
+        }
+        model::DecisionResult result;
+        for (const json& answer : state.reply.value("answers", json::array()))
+        {
+            result.answers.push_back({answer.value("probabilities", std::vector<double>{})});
+        }
+        result.input_tokens = state.reply.value("input_tokens", 0);
+        result.duration_ms = elapsed_ms(started);
         return foundation::Ok(std::move(result));
     }
 

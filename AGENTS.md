@@ -35,7 +35,8 @@ libs/gateway/                 HTTP routes (routes.cpp), dashboard /api routes
 libs/observability/           GPU telemetry (PDH/DXGI), Metrics, SQLite StatsDb
 libs/optimize/                In-house search (random + greedy) for inferdeck-bench
 libs/provider/                Provider plugin C ABI (provider_abi.h), loader/adapter,
-                              echo reference provider
+                              echo reference provider, inferdeck-provider-check
+libs/decision_runtime/        Jev-Style decision models (POST /v1/decisions)
 libs/third_party/llama.cpp    Vendored, Vulkan build (gitignored — cloned, not committed)
 
 config/gateway.yml            Active config (only this one is read)
@@ -118,6 +119,8 @@ current `index-*.js`/`index-*.css` remain.
 OpenAI-compatible (`/v1`):
 - `POST /v1/chat/completions` — streaming + non-streaming, tool calls,
   with SSE chunks ending in `data: [DONE]`.
+- `POST /v1/decisions` — typed questions with calibrated probabilities
+  (`docs/decisions.md`).
 - `GET /v1/models`, `GET /api/inferdeck/v1/health`, `GET /api/inferdeck/v1/metrics`, `GET /api/inferdeck/v1/stats/history`
 
 The OpenAI-derivative compatibility profile is default-off. Its chat,
@@ -186,7 +189,11 @@ is a `model::ProviderDescriptor`. Built-ins are listed only in
 `<exe dir>/providers/` are loaded in-process at startup through the C ABI in
 `libs/provider/include/inferdeck/provider_abi.h`. A model selects its provider
 with `runtime:`. Do not name a concrete provider type anywhere else in the
-gateway.
+gateway. `GET /api/inferdeck/v1/providers` reports what loaded and why a
+plugin was rejected; `inferdeck-provider-check <library>` validates a plugin
+before install. To bump a vendored runtime, follow "Upgrading a built-in
+runtime" in `docs/providers.md`: unit tests cannot see a ggml ABI mismatch,
+so one real GPU request per modality is mandatory.
 
 ## Design rules learned the hard way (do not regress)
 

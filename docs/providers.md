@@ -61,8 +61,12 @@ Check the gateway log:
 - `provider_plugin_rejected <path>: <reason>`: not loaded, with the reason.
 - `provider_overridden runtime=<name>`: replaced a provider of the same name.
 
-`GET /api/inferdeck/v1/models` reports `runtime` and `runtime_available` for
-every model.
+`GET /api/inferdeck/v1/providers` returns the same information without log
+access: every provider with its `runtime`, `origin`, `version`, `modalities`,
+and `state` (`active`, `overridden`, `not_linked`, or `init_failed` with an
+`error`), plus `rejected_plugins` with the reason for each library that was
+skipped. `GET /api/inferdeck/v1/models` reports `runtime` and
+`runtime_available` for every model.
 
 To remove a plugin, delete its file and restart.
 
@@ -154,6 +158,7 @@ Known modalities and capabilities:
 | `video` | `video_generation` | `video` |
 | `audio_speech` | `audio_speech` | `speech` |
 | `audio_transcription` | `audio_transcription` | `transcribe` |
+| `decision` | `decisions` | `decide` |
 
 ### The call object
 
@@ -368,6 +373,26 @@ Reply:
  "segments": [{"id": 0, "start_seconds": 0.0, "end_seconds": 1.9, "text": "hello world"}]}
 ```
 
+#### `decide`
+
+Request:
+
+```json
+{"slot": 0, "input": "The parcel arrived broken.",
+ "questions": [
+   {"type": "predicate", "instructions": "The item is damaged.", "options": []},
+   {"type": "choice", "instructions": "Which team?",
+    "options": [{"label": "billing", "description": "payments"}, {"label": "support", "description": ""}]}
+ ]}
+```
+
+`type` is `predicate`, `choice`, or `score`. A score's options are its levels,
+lowest first.
+
+Reply: `{"answers": [{"probabilities": [0.1, 0.9]}, {"probabilities": [0.8, 0.2]}], "input_tokens": 120}`.
+One answer per question, in order. Probabilities follow the option order and
+sum to 1. A predicate has two: false, then true.
+
 ## Building a plugin
 
 The reference provider builds with the rest of InferDeck:
@@ -392,11 +417,28 @@ that returns a pointer to a struct laid out as `inferdeck_provider`. In Rust
 that is `#[no_mangle] pub extern "C" fn` with `#[repr(C)]` structs. In Swift it
 is `@_cdecl("inferdeck_provider_v1")`.
 
-## Testing a plugin
+## Checking a plugin
 
-`libs/provider/tests/test_plugin_provider.cpp` loads the echo provider and
-drives it through the same adapter the gateway uses. Point a copy of that test
-at your library to check it before a full gateway run.
+Run the checker before installing a library. It loads the library the same way
+the gateway does, then for every modality in the manifest creates an instance,
+loads it, sends one small request, unloads it, and loads it again.
+
+```bash
+inferdeck-provider-check my-provider.dll --model C:/models/model.gguf --artifact key=value
+```
+
+| Option | Meaning |
+|---|---|
+| `--model <path>` | Sets the model's `model_path`. |
+| `--artifact key=value` | Adds one `artifacts` entry. Repeatable. |
+| `--modality <name>` | Check only this modality. Repeatable. |
+| `--skip-invoke` | Lifecycle only; send no request. Use for slow media models. |
+
+It prints one `PASS` or `FAIL` line per step, with the provider's own error
+text on a failure, and exits with 0 only when everything passed.
+
+`libs/provider/tests/test_plugin_provider.cpp` drives the echo provider through
+the same adapter and is the place to add a regression test.
 
 For a live check, start a gateway on a spare port with a config that contains
 only your model, then call `POST /v1/chat/completions` (or the media route for
@@ -413,6 +455,28 @@ your modality).
    `native_runtimes::providers()` for a media runtime.
 
 Nothing else in the gateway needs to change.
+
+## Upgrading a built-in runtime
+
+Most built-in runtimes are pinned git submodules that share one ggml with
+llama.cpp. An upgrade is a pin change plus proof that nothing else moved.
+
+1. Change one pin per pull request and record the old and new revisions.
+2. Configure. The build stops if stable-diffusion.cpp and InferDeck disagree
+   on `GGML_MAX_NAME`. Change the value in the root `CMakeLists.txt` and in
+   `scripts/Test-ArchitecturePolicy.ps1` together.
+3. Build everything, not only the runtime you touched. A new stable-diffusion.cpp
+   can need ggml functions the pinned llama.cpp does not have; that shows up
+   as a compile error in stable-diffusion.cpp. Either pick an older revision or
+   move llama.cpp as well.
+4. Run `ctest -L "unit|integration"` and `scripts/Test-ArchitecturePolicy.ps1`.
+5. Run one real request per affected modality on the GPU, on a test gateway
+   with a spare port, not on the live service. Unit tests stub the native
+   libraries and cannot see an ABI mismatch: the 2026-11 stable-diffusion.cpp
+   upgrade passed every test and aborted on its first real image.
+6. Read the gateway log for `diffusion_runtime` warnings and errors. The
+   native runtime reports memory fallbacks and failed stages there.
+7. Update `docs/release-reproducibility.md` with the new revision.
 
 ## What the plugin ABI does not cover
 

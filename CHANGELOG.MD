@@ -12,6 +12,12 @@
   `reference_images` on the InferDeck image routes and in the dashboard
   (#189). Validated on the R9700; see `docs/qwen-image-2.1.md`.
 - Image models can set default `steps` and `guidance_scale` artifacts.
+- `POST /v1/decisions` in the OpenAI Decisions shape, served by the new
+  `jev_style` runtime for Jev-Style decision models (`docs/decisions.md`).
+- `GET /api/inferdeck/v1/providers` and the `inferdeck-provider-check` tool for
+  validating provider libraries.
+- The build fails at configure time when stable-diffusion.cpp and InferDeck
+  disagree on `GGML_MAX_NAME`.
 - stable-diffusion.cpp warnings and errors now reach the gateway log.
 
 ### Changed

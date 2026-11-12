@@ -26,6 +26,14 @@ set_target_properties(inferdeck-provider-echo PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/provider-examples"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/provider-examples")
 
+# Validates a provider library before it is installed. See docs/providers.md.
+add_executable(inferdeck-provider-check tools/provider_check.cpp)
+target_link_libraries(inferdeck-provider-check PRIVATE provider model foundation)
+target_compile_features(inferdeck-provider-check PRIVATE cxx_std_23)
+if(MSVC)
+    target_compile_options(inferdeck-provider-check PRIVATE /W4 /utf-8 /FS)
+endif()
+
 if(INFERDECK_BUILD_TESTS)
     add_executable(provider_tests tests/test_plugin_provider.cpp)
     target_link_libraries(provider_tests PRIVATE
@@ -38,5 +46,8 @@ if(INFERDECK_BUILD_TESTS)
         target_compile_options(provider_tests PRIVATE /W4 /utf-8 /FS)
     endif()
     add_test(NAME provider_tests COMMAND provider_tests)
-    set_tests_properties(provider_tests PROPERTIES LABELS "unit")
+    add_test(NAME provider_check_echo COMMAND inferdeck-provider-check
+             $<TARGET_FILE:inferdeck-provider-echo>
+             --artifact image=$<TARGET_FILE:inferdeck-provider-echo>)
+    set_tests_properties(provider_tests provider_check_echo PROPERTIES LABELS "unit")
 endif()

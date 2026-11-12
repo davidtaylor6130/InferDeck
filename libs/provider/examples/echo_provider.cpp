@@ -1,8 +1,9 @@
 // Minimal InferDeck provider. Copy this file to start a new provider.
 //
-// It registers the runtime "echo" with two operations:
-//   chat   echoes the last user message back, streaming one word at a time
-//   image  returns the bytes of the artifact named "image" as the PNG result
+// It registers the runtime "echo" with three operations:
+//   chat    echoes the last user message back, streaming one word at a time
+//   image   returns the bytes of the artifact named "image" as the PNG result
+//   decide  gives every option of every question the same probability
 //
 // Build it as a shared library, drop it into the gateway's providers/
 // directory, and select it per model with `runtime: echo`.
@@ -136,6 +137,18 @@ int32_t echo_image(const EchoModel& model, const inferdeck_call* call)
     return INFERDECK_OK;
 }
 
+int32_t echo_decide(const json& request, const inferdeck_call* call)
+{
+    json answers = json::array();
+    for (const json& question : request["questions"])
+    {
+        const size_t options = question["type"] == "predicate" ? 2 : question["options"].size();
+        answers.push_back({{"probabilities", std::vector<double>(options, 1.0 / static_cast<double>(options))}});
+    }
+    call->reply(call->context, json{{"answers", answers}, {"input_tokens", 0}}.dump().c_str(), nullptr, 0);
+    return INFERDECK_OK;
+}
+
 int32_t echo_invoke(void* instance, const char* operation, const char* request_json,
                     const inferdeck_blob*, size_t, const inferdeck_call* call)
 {
@@ -156,6 +169,10 @@ int32_t echo_invoke(void* instance, const char* operation, const char* request_j
         {
             return echo_image(*model, call);
         }
+        if (name == "decide")
+        {
+            return echo_decide(request, call);
+        }
         return fail(call, INFERDECK_UNAVAILABLE, "echo provider does not implement " + name);
     }
     catch (const std::exception& error)
@@ -171,7 +188,8 @@ const inferdeck_provider echo_provider = {
         "version": "1.0.0",
         "modalities": {
             "text": ["chat_completions", "responses"],
-            "image": ["image_generation"]
+            "image": ["image_generation"],
+            "decision": ["decisions"]
         },
         "model_source": "none"
     })",
