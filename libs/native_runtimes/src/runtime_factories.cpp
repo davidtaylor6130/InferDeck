@@ -33,48 +33,44 @@ std::unique_ptr<model::IBackend> make_sherpa_backend(const model::ModelInfo& inf
 std::unique_ptr<model::IBackend> make_windows_sapi_backend(const model::ModelInfo& info);
 #endif
 
-void register_factories(model::ModelRegistry& registry) {
-    (void)registry;
+std::vector<model::ProviderDescriptor> providers() {
+    std::vector<model::ProviderDescriptor> result;
+    const model::RuntimeContractRegistry contracts = model::standard_runtime_contracts();
+    [[maybe_unused]] const auto add = [&](const char* runtime, model::ModelRegistry::BackendFactory factory) {
+        result.push_back({*contracts.find(runtime), std::move(factory)});
+    };
 #ifdef INFERDECK_HAS_STABLE_DIFFUSION_CPP
-    registry.register_factory("stable_diffusion_cpp", make_stable_diffusion_backend);
+    add("stable_diffusion_cpp", make_stable_diffusion_backend);
 #endif
 #ifdef INFERDECK_HAS_ACESTEP_CPP
-    registry.register_factory("ace_step_cpp", make_ace_step_backend);
+    add("ace_step_cpp", make_ace_step_backend);
 #endif
 #ifdef INFERDECK_HAS_LTX_VIDEO_CPP
-    registry.register_factory("ltx_video_cpp", make_ltx_video_backend);
+    add("ltx_video_cpp", make_ltx_video_backend);
 #endif
 #ifdef INFERDECK_HAS_WHISPER_CPP
-    registry.register_factory("whisper_cpp", make_whisper_backend);
+    add("whisper_cpp", make_whisper_backend);
 #endif
 #ifdef INFERDECK_HAS_SHERPA_ONNX
-    registry.register_factory("sherpa_onnx", make_sherpa_backend);
+    add("sherpa_onnx", make_sherpa_backend);
 #endif
 #ifdef INFERDECK_HAS_WINDOWS_SAPI
-    registry.register_factory("windows_sapi", make_windows_sapi_backend);
+    add("windows_sapi", make_windows_sapi_backend);
 #endif
+    return result;
+}
+
+void register_factories(model::ModelRegistry& registry) {
+    for (model::ProviderDescriptor& provider : providers()) {
+        registry.register_factory(provider.contract.name, std::move(provider.factory));
+    }
 }
 
 std::vector<std::string> available_runtimes() {
     std::vector<std::string> result{"llama_cpp"};
-#ifdef INFERDECK_HAS_STABLE_DIFFUSION_CPP
-    result.push_back("stable_diffusion_cpp");
-#endif
-#ifdef INFERDECK_HAS_ACESTEP_CPP
-    result.push_back("ace_step_cpp");
-#endif
-#ifdef INFERDECK_HAS_LTX_VIDEO_CPP
-    result.push_back("ltx_video_cpp");
-#endif
-#ifdef INFERDECK_HAS_WHISPER_CPP
-    result.push_back("whisper_cpp");
-#endif
-#ifdef INFERDECK_HAS_SHERPA_ONNX
-    result.push_back("sherpa_onnx");
-#endif
-#ifdef INFERDECK_HAS_WINDOWS_SAPI
-    result.push_back("windows_sapi");
-#endif
+    for (const model::ProviderDescriptor& provider : providers()) {
+        result.push_back(provider.contract.name);
+    }
     return result;
 }
 

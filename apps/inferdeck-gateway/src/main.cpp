@@ -59,7 +59,12 @@
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
-#include "optional_runtime_factories.hpp"
+#include "model/provider.hpp"
+#include "native_runtimes/runtime_factories.hpp"
+#include "provider/plugin_provider.hpp"
+#ifdef INFERDECK_VLLM_RADIANCE_ENABLE
+#include "vllm_radiance_wrapper/vllm_radiance_model.hpp"
+#endif
 #include "observability/gpu_telemetry.hpp"
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
@@ -76,12 +81,13 @@ std::atomic<bool> g_stop{false};
 std::atomic<bool> g_reload{false};
 std::atomic<bool> g_default_model_loading{false};
 httplib::Server* g_server = nullptr;
-std::once_flag g_llama_init_once;
+inferdeck::provider::PluginLoadReport g_plugins;
 constexpr int runtime_reload_result = 75;
 
 #include "process_runtime.ipp"
 #include "dashboard_static.ipp"
 #include "profile_benchmark_runtime.ipp"
+#include "builtin_providers.ipp"
 #include "media_control_routes.ipp"
 int run_gateway(const fs::path& config_path) {
     using namespace inferdeck;
@@ -110,22 +116,8 @@ int run_gateway(const fs::path& config_path) {
                   config_selection.fallback_reason,
                   config_path.string());
     }
-    initialize_optional_runtimes(cfg.models);
-    std::call_once(g_llama_init_once, [] {
-        LOG_INFO("vulkan_test", "About to initialize llama backend");
-        llama_backend_init();
-        const char* sys_info = llama_print_system_info();
-        if (sys_info) {
-            LOG_INFO("llama_system_info", "{}", sys_info);
-        }
-    });
-
     model::ModelRegistry registry;
-    registry.register_factory("llama_cpp", [cfg](const model::ModelInfo& info) -> std::unique_ptr<model::IBackend> {
-        return std::make_unique<llama_wrapper::LlamaCppModel>(
-            info, make_llama_config(cfg, info));
-    });
-    register_optional_runtime_factories(registry);
+    install_gateway_providers(cfg, registry);
     for (const auto& m : cfg.models) {
         registry.register_model(m);
         LOG_INFO("model_registered", "name={} vram_mb={} n_slots={}",
@@ -139,7 +131,6 @@ int run_gateway(const fs::path& config_path) {
         }
         LOG_INFO("model_alias_registered", "alias={} target={}", alias.name, alias.target);
     }
-    LOG_INFO("factory_set", "LlamaCppModel factory installed");
 
     model::BackendCoordinator coordinator(registry);
     coordinator.set_max_queue_size(static_cast<std::size_t>(std::max(1, cfg.max_queue_size)));
@@ -773,12 +764,15 @@ int run_gateway(const fs::path& config_path) {
 
 int main(int argc, char** argv) {
     fs::path config_path = inferdeck::gateway::default_config_path();
+    fs::path provider_dir = executable_dir() / "providers";
     for (int i = 1; i < argc; ++i) {
         std::string argument = argv[i];
         if (argument == "-c" || argument == "--config") {
             if (i + 1 < argc) config_path = argv[++i];
+        } else if (argument == "--providers") {
+            if (i + 1 < argc) provider_dir = argv[++i];
         } else if (argument == "-h" || argument == "--help") {
-            std::cout << "Usage: " << argv[0] << " [-c config.yml]\n";
+            std::cout << "Usage: " << argv[0] << " [-c config.yml] [--providers directory]\n";
             return 0;
         } else if (argument == "-v" || argument == "--version") {
             std::cout << inferdeck::app::build_identity() << "\n";
@@ -793,6 +787,7 @@ int main(int argc, char** argv) {
 #endif
     std::signal(SIGINT, signal_handler); std::signal(SIGTERM, signal_handler);
 
+    g_plugins = inferdeck::provider::load_plugin_providers(provider_dir);
     while (true) {
         const int result = run_gateway(config_path);
         if (result != runtime_reload_result) return result;

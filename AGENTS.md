@@ -34,6 +34,8 @@ libs/gateway/                 HTTP routes (routes.cpp), dashboard /api routes
                               SwapTracker, auth, CORS, metrics builder
 libs/observability/           GPU telemetry (PDH/DXGI), Metrics, SQLite StatsDb
 libs/optimize/                In-house search (random + greedy) for inferdeck-bench
+libs/provider/                Provider plugin C ABI (provider_abi.h), loader/adapter,
+                              echo reference provider
 libs/third_party/llama.cpp    Vendored, Vulkan build (gitignored — cloned, not committed)
 
 config/gateway.yml            Active config (only this one is read)
@@ -175,6 +177,16 @@ Concurrency invariants:
 - CPU STT/TTS native runtimes bypass GPU preparation. A successful STT request
   reserves the default chat model for that client through TTS; the bounded
   grace is configured by `gateway.voice_session_grace_ms`.
+
+## Providers
+
+Read `docs/providers.md` before adding or swapping a runtime. Every runtime
+is a `model::ProviderDescriptor`. Built-ins are listed only in
+`apps/inferdeck-gateway/src/builtin_providers.ipp`; plugin libraries in
+`<exe dir>/providers/` are loaded in-process at startup through the C ABI in
+`libs/provider/include/inferdeck/provider_abi.h`. A model selects its provider
+with `runtime:`. Do not name a concrete provider type anywhere else in the
+gateway.
 
 ## Design rules learned the hard way (do not regress)
 

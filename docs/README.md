@@ -9,6 +9,7 @@
 - [`migration-0.8.md`](migration-0.8.md) - breaking routes, consumers, backups, activation, and rollback
 - [`release-reproducibility.md`](release-reproducibility.md) - pinned inputs, manifests, checksums, SBOM, and signing
 - [`architecture-change-checklist.md`](architecture-change-checklist.md) - required review gates for architecture changes
+- [`providers.md`](providers.md) - how runtimes plug in, and the C ABI for provider libraries in any language
 - [`architecture.md`](architecture.md) — system architecture, layer by layer
 - [`DEPLOY.md`](DEPLOY.md) — unattended Windows deployment (scheduled tasks + watchdog)
 - [`opencode-setup-guide.md`](opencode-setup-guide.md) — pointing opencode at InferDeck

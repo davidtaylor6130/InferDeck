@@ -211,4 +211,17 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
     return registry;
 }
 
+/// <summary>
+/// Process-wide contract registry: the standard runtimes plus any provider
+/// registered at startup. Config validation reads it.
+/// </summary>
+/// <remarks>
+/// Register contracts before the HTTP server starts. Later access is read-only
+/// and therefore unsynchronised.
+/// </remarks>
+inline RuntimeContractRegistry& runtime_contracts() {
+    static RuntimeContractRegistry registry = standard_runtime_contracts();
+    return registry;
+}
+
 }

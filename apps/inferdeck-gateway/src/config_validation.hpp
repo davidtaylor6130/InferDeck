@@ -62,7 +62,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
     try {
         auto schema = validate_config_schema(root);
         if (!schema) return schema;
-        const auto runtime_contracts = model::standard_runtime_contracts();
+        const auto& runtime_contracts = model::runtime_contracts();
         if (root["server"] && root["server"]["port"]) {
             const int port = root["server"]["port"].as<int>();
             if (port < 1 || port > 65535) {
