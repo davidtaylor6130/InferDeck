@@ -1058,6 +1058,58 @@ TEST_CASE("Control model inventory retains InferDeck runtime fields",
     CHECK(body["models"][0]["loaded"] == false);
 }
 
+TEST_CASE("Model discovery reports an alias's resolved target and its limits",
+          "[gateway][dashboard][models][aliases]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    inferdeck::model::ModelInfo large;
+    large.name = "large-target";
+    large.context_size = 106496;
+    large.default_max_output_tokens = 16384;
+    large.has_vision = true;
+    large.capabilities = {"chat_completions", "responses"};
+    routes.registry.register_model(large);
+    inferdeck::model::ModelInfo compact = large;
+    compact.name = "small-target";
+    compact.context_size = 32768;
+    compact.default_max_output_tokens = 0;
+    compact.has_vision = false;
+    routes.registry.register_model(compact);
+    REQUIRE(routes.registry.set_alias({"normal", "large-target", 32768, {"chat_completions"}}));
+
+    auto client = routes.client();
+    const auto find_entry = [&](const std::string& id) {
+        const auto response = client.Get("/api/inferdeck/v1/models");
+        REQUIRE(response);
+        REQUIRE(response->status == 200);
+        for (const auto& entry : nlohmann::json::parse(response->body)["models"]) {
+            if (entry["id"] == id) return entry;
+        }
+        FAIL("missing discovery entry " << id);
+        return nlohmann::json{};
+    };
+
+    const auto alias = find_entry("normal");
+    CHECK(alias["alias"] == true);
+    CHECK(alias["resolved_model"] == "large-target");
+    CHECK(alias["limits"] == find_entry("large-target")["limits"]);
+    CHECK(alias["limits"]["context_tokens"] == 106496);
+    CHECK(alias["limits"]["max_output_tokens"] == 106495);
+    CHECK(alias["limits"]["default_output_tokens"] == 16384);
+    CHECK(alias["has_vision"] == true);
+    CHECK(alias["alias_contract"]["required_context_tokens"] == 32768);
+    CHECK(alias["alias_contract"]["required_capabilities"] ==
+          nlohmann::json::array({"chat_completions"}));
+
+    REQUIRE(routes.registry.set_alias({"normal", "small-target", 32768, {"chat_completions"}}));
+    const auto retargeted = find_entry("normal");
+    CHECK(retargeted["resolved_model"] == "small-target");
+    CHECK(retargeted["limits"]["context_tokens"] == 32768);
+    CHECK(retargeted["limits"]["default_output_tokens"].is_null());
+    CHECK(retargeted["has_vision"] == false);
+    CHECK(retargeted["alias_contract"]["required_context_tokens"] == 32768);
+}
+
 TEST_CASE("Configured external models can be unregistered without rewriting unrelated config",
           "[gateway][dashboard][models]") {
     TempConfig config;

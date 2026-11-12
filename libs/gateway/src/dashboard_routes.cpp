@@ -175,6 +175,81 @@ nlohmann::json system_hardware_json() {
     return out;
 }
 
+/// <summary>
+/// Configured token limits for one concrete model, shared by model and alias
+/// discovery entries so an alias always reports its current target's limits.
+/// </summary>
+/// <remarks>
+/// <c>context_tokens</c> is the per-request window (prompt plus output).
+/// <c>max_input_tokens</c> and <c>max_output_tokens</c> are hard ceilings; a
+/// request's real output ceiling is the context left after its prompt.
+/// <c>default_output_tokens</c> is applied when a request omits a limit; null
+/// means generation may fill the remaining context.
+/// </remarks>
+nlohmann::json model_limits_json(const model::ModelInfo& info) {
+    const int context = std::max(0, info.context_size);
+    const int ceiling = std::max(0, context - 1);
+    return {
+        {"context_tokens", context},
+        {"max_input_tokens", ceiling},
+        {"max_output_tokens", ceiling},
+        {"default_output_tokens", info.default_max_output_tokens > 0
+            ? nlohmann::json(info.default_max_output_tokens)
+            : nlohmann::json(nullptr)},
+    };
+}
+
+nlohmann::json optional_price_json(const std::optional<double>& price) {
+    return price ? nlohmann::json(*price) : nlohmann::json(nullptr);
+}
+
+/// <summary>
+/// Builds the discovery fields shared by a concrete model and any alias that
+/// targets it. <paramref name="id"/> is the client-facing identifier.
+/// </summary>
+nlohmann::json dashboard_model_entry(
+    const std::string& id, const model::ModelInfo& info,
+    const model::ResidencyInfo* resident, bool runtime_available) {
+    return {
+        {"id", id},
+        {"name", id},
+        {"family", info.family},
+        {"runtime", info.runtime},
+        {"runtime_available", runtime_available},
+        {"modality", info.modality},
+        {"role", model::to_string(info.role)},
+        {"compute", model::to_string(info.compute)},
+        {"residency_policy", model::to_string(info.residency)},
+        {"admission_pool", info.admission_pool},
+        {"concurrency_limit", resident ? resident->concurrency_limit : info.concurrency_limit},
+        {"memory_required_mb", info.memory_required_mb},
+        {"eviction_eligible", info.eviction_eligible},
+        {"capabilities", info.capabilities},
+        {"prompt_price_per_million", optional_price_json(info.prompt_price_per_million)},
+        {"cached_prompt_price_per_million", optional_price_json(info.cached_prompt_price_per_million)},
+        {"completion_price_per_million", optional_price_json(info.completion_price_per_million)},
+        {"loaded", resident != nullptr},
+        {"primary", resident && resident->primary},
+        {"context_size", info.context_size},
+        {"limits", model_limits_json(info)},
+        {"concurrency_auto", info.concurrency_auto},
+        {"context_pool_capacity", resident ? resident->context_pool_capacity : 0},
+        {"vram_required_mb", info.vram_required_mb},
+        {"n_slots", resident ? resident->slots : info.n_slots},
+        {"free_slots", resident ? resident->free_slots : 0},
+        {"active_requests", resident ? resident->active_requests : 0},
+        {"resizing", resident && resident->resizing},
+        {"has_vision", info.has_vision},
+        {"reasoning", {
+            {"supported", info.reasoning.supported},
+            {"efforts", info.reasoning.efforts},
+            {"default", info.reasoning.default_effort},
+            {"none_disables", info.reasoning.none_disables},
+            {"aliases", info.reasoning.aliases},
+        }},
+    };
+}
+
 nlohmann::json build_dashboard_models(
     model::BackendCoordinator& coordinator,
     const std::map<std::string, std::string>& media_defaults) {
@@ -182,106 +257,48 @@ nlohmann::json build_dashboard_models(
     auto loaded = coordinator.get_loaded_model();
     std::unordered_map<std::string, model::ResidencyInfo> residency;
     for (const auto& resident : coordinator.residency()) residency.emplace(resident.name, resident);
+    const auto find_resident = [&](const std::string& name) -> const model::ResidencyInfo* {
+        const auto found = residency.find(name);
+        return found == residency.end() ? nullptr : &found->second;
+    };
     for (const auto& name : coordinator.registry().list()) {
         const auto& info = coordinator.registry().get_info(name);
-        const auto resident = residency.find(name);
         std::string default_key;
         if (info.supports("image_generation")) default_key = "image";
         else if (info.supports("audio_generation")) default_key = "music";
         else if (info.supports("video_generation")) default_key = "video";
         const auto default_model = media_defaults.find(default_key);
-        models.push_back({
-            {"id", name},
-            {"name", name},
-            {"family", info.family},
-            {"runtime", info.runtime},
-            {"runtime_available", coordinator.registry().has_factory(info.runtime)},
-            {"modality", info.modality},
-            {"personal_default", default_model != media_defaults.end() &&
-                                     default_model->second == name},
-            {"role", model::to_string(info.role)},
-            {"compute", model::to_string(info.compute)},
-            {"residency_policy", model::to_string(info.residency)},
-            {"admission_pool", info.admission_pool},
-            {"concurrency_limit", resident == residency.end() ? info.concurrency_limit : resident->second.concurrency_limit},
-            {"memory_required_mb", info.memory_required_mb},
-            {"eviction_eligible", info.eviction_eligible},
-            {"capabilities", info.capabilities},
-            {"prompt_price_per_million", info.prompt_price_per_million
-                ? nlohmann::json(*info.prompt_price_per_million) : nlohmann::json(nullptr)},
-            {"cached_prompt_price_per_million", info.cached_prompt_price_per_million
-                ? nlohmann::json(*info.cached_prompt_price_per_million) : nlohmann::json(nullptr)},
-            {"completion_price_per_million", info.completion_price_per_million
-                ? nlohmann::json(*info.completion_price_per_million) : nlohmann::json(nullptr)},
-            {"loaded", resident != residency.end()},
-            {"primary", resident != residency.end() && resident->second.primary},
-            {"context_size", info.context_size},
-            {"concurrency_auto", info.concurrency_auto},
-            {"context_pool_capacity", resident == residency.end() ? 0 : resident->second.context_pool_capacity},
-            {"vram_required_mb", info.vram_required_mb},
-            {"n_slots", resident == residency.end() ? info.n_slots : resident->second.slots},
-            {"free_slots", resident == residency.end() ? 0 : resident->second.free_slots},
-            {"active_requests", resident == residency.end() ? 0 : resident->second.active_requests},
-            {"resizing", resident != residency.end() && resident->second.resizing},
-            {"has_vision", info.has_vision},
-            {"reasoning", {
-                {"supported", info.reasoning.supported},
-                {"efforts", info.reasoning.efforts},
-                {"default", info.reasoning.default_effort},
-                {"none_disables", info.reasoning.none_disables},
-                {"aliases", info.reasoning.aliases},
-            }},
-            {"optimization", {
-                {"status", info.optimization.status},
-                {"measured_at", info.optimization.measured_at},
-                {"quality_passes", info.optimization.quality_passes},
-                {"quality_total", info.optimization.quality_total},
-                {"single_tokens_per_second", info.optimization.single_tokens_per_second},
-                {"parallel_tokens_per_second", info.optimization.parallel_tokens_per_second},
-            }},
-        });
+        auto entry = dashboard_model_entry(
+            name, info, find_resident(name),
+            coordinator.registry().has_factory(info.runtime));
+        entry["personal_default"] = default_model != media_defaults.end() &&
+                                    default_model->second == name;
+        entry["optimization"] = {
+            {"status", info.optimization.status},
+            {"measured_at", info.optimization.measured_at},
+            {"quality_passes", info.optimization.quality_passes},
+            {"quality_total", info.optimization.quality_total},
+            {"single_tokens_per_second", info.optimization.single_tokens_per_second},
+            {"parallel_tokens_per_second", info.optimization.parallel_tokens_per_second},
+        };
+        models.push_back(std::move(entry));
     }
     for (const auto& alias : coordinator.registry().aliases()) {
         const auto info = coordinator.registry().get_info_result(alias.target);
         if (!info) continue;
-        const auto resident = residency.find(alias.target);
-        models.push_back({
-            {"id", alias.name},
-            {"name", alias.name},
-            {"family", info->family},
-            {"runtime", info->runtime},
-            {"runtime_available", coordinator.registry().has_factory(info->runtime)},
-            {"modality", info->modality},
-            {"role", model::to_string(info->role)},
-            {"compute", model::to_string(info->compute)},
-            {"residency_policy", model::to_string(info->residency)},
-            {"admission_pool", info->admission_pool},
-            {"concurrency_limit", resident == residency.end() ? info->concurrency_limit : resident->second.concurrency_limit},
-            {"memory_required_mb", info->memory_required_mb},
-            {"eviction_eligible", info->eviction_eligible},
-            {"capabilities", info->capabilities},
-            {"loaded", resident != residency.end()},
-            {"primary", resident != residency.end() && resident->second.primary},
-            {"context_size", info->context_size},
-            {"concurrency_auto", info->concurrency_auto},
-            {"context_pool_capacity", resident == residency.end() ? 0 : resident->second.context_pool_capacity},
-            {"vram_required_mb", info->vram_required_mb},
-            {"n_slots", resident == residency.end() ? info->n_slots : resident->second.slots},
-            {"free_slots", resident == residency.end() ? 0 : resident->second.free_slots},
-            {"active_requests", resident == residency.end() ? 0 : resident->second.active_requests},
-            {"has_vision", info->has_vision},
-            {"reasoning", {
-                {"supported", info->reasoning.supported},
-                {"efforts", info->reasoning.efforts},
-                {"default", info->reasoning.default_effort},
-                {"none_disables", info->reasoning.none_disables},
-                {"aliases", info->reasoning.aliases},
-            }},
-            {"alias", true},
-            {"alias_target", alias.target},
-            {"required_context_size", alias.required_context_size},
+        auto entry = dashboard_model_entry(
+            alias.name, *info, find_resident(alias.target),
+            coordinator.registry().has_factory(info->runtime));
+        entry["alias"] = true;
+        entry["alias_target"] = alias.target;
+        entry["resolved_model"] = alias.target;
+        entry["required_context_size"] = alias.required_context_size;
+        entry["required_capabilities"] = alias.required_capabilities;
+        entry["alias_contract"] = {
+            {"required_context_tokens", alias.required_context_size},
             {"required_capabilities", alias.required_capabilities},
-        });
+        };
+        models.push_back(std::move(entry));
     }
     nlohmann::json running = nlohmann::json::array();
     for (const auto& resident : coordinator.residency()) {

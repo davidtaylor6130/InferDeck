@@ -10,15 +10,17 @@ const DEFAULT_OUTPUT_BUDGET = Object.freeze({ normal: 16384, small: 8192 });
 const textResult = (value) => ({ content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value });
 const asArray = (value) => Array.isArray(value) ? value : [];
 const supportsChat = (model) => asArray(model.capabilities).includes('chat_completions') || asArray(model.capabilities).includes('responses');
-const hasContext = (model) => Number.isSafeInteger(model.context_size) && model.context_size > 0;
+const contextTokens = (model) => model.limits?.context_tokens ?? model.context_size;
+const hasContext = (model) => Number.isSafeInteger(contextTokens(model)) && contextTokens(model) > 0;
 
 function modelConfig(model, requestedOutputBudget) {
-  const outputBudget = Math.min(requestedOutputBudget, Math.floor(model.context_size / 2));
+  const context = contextTokens(model);
+  const outputBudget = Math.min(requestedOutputBudget, Math.floor(context / 2));
   const input = ['text'];
   if (model.has_vision) input.push('image');
   return {
     name: model.name ?? model.id,
-    limit: { context: model.context_size, output: outputBudget },
+    limit: { context, output: outputBudget },
     modalities: { input, output: ['text'] },
   };
 }
@@ -81,7 +83,7 @@ export function registerOpenCodeConfigTool(server, client) {
     const models = asArray(discovery?.models ?? discovery?.data);
     const { config, normal, small, usable } = buildConfig(models, outputBudget);
     const warnings = [
-      'The context limit is copied from live InferDeck context_size. Output limits are conservative OpenCode client budgets, not server-measured limits; adjust output_budget when generating the config. Utility, compact-coder, and small-model use the 8192 policy; other models use 16384.',
+      'The context limit is copied from live InferDeck limits.context_tokens (the resolved target for aliases). Output limits are conservative OpenCode client budgets, not server-measured limits; adjust output_budget when generating the config. Utility, compact-coder, and small-model use the 8192 policy; other models use 16384.',
       'Each output budget is capped at floor(context_size / 2) to leave prompt room; the emitted limit.output may therefore be lower than the requested policy.',
       'Models without a valid positive context_size are omitted so the generated OpenCode limit objects remain valid.',
       'OpenCode versions may differ on compaction.tail_turns, compaction.preserve_recent_tokens, compaction.reserved, and tool_output; verify these custom fields against the installed version.',

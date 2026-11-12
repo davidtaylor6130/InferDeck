@@ -75,3 +75,15 @@ test('warns and omits defaults when exact aliases are absent', async () => {
 
 
 
+
+test('alias limits match the resolved target limits', async () => {
+  const limits = { context_tokens: 106496, max_input_tokens: 106495, max_output_tokens: 106495, default_output_tokens: 16384 };
+  const tool = toolFor({ models: [
+    { id: 'qwen-radiance', alias: false, capabilities: ['chat_completions'], context_size: 106496, limits, has_vision: false },
+    { id: 'normal', alias: true, resolved_model: 'qwen-radiance', capabilities: ['chat_completions'], context_size: 106496, limits, has_vision: false },
+  ] });
+  const value = JSON.parse((await tool.invoke({})).content[0].text);
+  const models = value.config.provider.inferdeck.models;
+  assert.deepEqual(models.normal.limit, models['qwen-radiance'].limit);
+  assert.equal(models.normal.limit.context, 106496);
+});
