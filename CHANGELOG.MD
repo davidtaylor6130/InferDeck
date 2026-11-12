@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+- Provider plugins: runtimes can be added or swapped by dropping a shared
+  library into `providers/`. The C ABI and every payload are documented in
+  `docs/providers.md`, with a reference provider under `libs/provider/examples`.
+- Model discovery (`GET /api/inferdeck/v1/models`) reports token `limits` for
+  every entry, and `resolved_model` plus `alias_contract` for aliases (#195).
+
+### Changed
+- Built-in runtimes register through one provider descriptor list instead of
+  being wired individually in the gateway entry point.
+- The MCP OpenCode config tool reads context limits from discovery `limits`.
+
 ### Removed
 - The standalone OpenCode config exporter and its dedicated CI test. OpenCode
   continues to use the stable model aliases published by InferDeck.
