@@ -31,12 +31,28 @@ struct ProviderDescriptor {
     std::string version;
 };
 
+/// <summary>What happened to one descriptor during <see cref="install_providers"/>.</summary>
+struct ProviderStatus {
+    std::string runtime;
+    std::string origin;
+    std::string version;
+    /// <summary>
+    /// "active": serving its runtime name. "overridden": replaced by a later
+    /// descriptor. "not_linked": known contract, no factory in this build.
+    /// "init_failed": setup returned an error (see <c>error</c>).
+    /// </summary>
+    std::string state;
+    std::string error;
+    RuntimeContract contract;
+};
+
 /// <summary>
 /// Publishes contracts, runs each provider's setup, and registers its factory.
 /// A later descriptor replaces an earlier one with the same runtime name, so
-/// plugins listed after built-ins override them.
+/// plugins listed after built-ins override them. Returns one status per
+/// descriptor, in order.
 /// </summary>
-void install_providers(std::span<const ProviderDescriptor> providers,
+std::vector<ProviderStatus> install_providers(std::span<const ProviderDescriptor> providers,
                        ModelRegistry& registry,
                        const std::vector<ModelInfo>& models);
 

@@ -68,7 +68,8 @@ function Test-StrictPath([string]$Path) {
         '/v1/embeddings',
         '/v1/images/generations',
         '/v1/audio/speech',
-        '/v1/audio/transcriptions'
+        '/v1/audio/transcriptions',
+        '/v1/decisions'
     )
     if ($Path.StartsWith('/v1/') -and $Path -notin $allowed) {
         Add-Failure "${Path}: non-OpenAI route in strict Core"
@@ -151,7 +152,7 @@ foreach ($relativeRoot in $scanRoots) {
 
 $manifest = Get-Content -LiteralPath (Join-Path $repoRoot 'tests/fixtures/openai_route_manifest.json') -Raw | ConvertFrom-Json
 foreach ($route in $manifest.routes) { Test-StrictPath $route.path }
-if ($manifest.profile -ne 'strict_openai' -or $manifest.routes.Count -ne 7) {
+if ($manifest.profile -ne 'strict_openai' -or $manifest.routes.Count -ne 8) {
     Add-Failure 'strict route manifest identity or count changed'
 }
 

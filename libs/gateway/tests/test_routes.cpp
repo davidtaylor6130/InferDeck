@@ -321,8 +321,25 @@ namespace {
 
 class IModelMock : public IModel, public IEmbeddingBackend, public IImageBackend,
                    public IAudioGenerationBackend, public IVideoBackend, public ISpeechBackend,
-                   public ITranscriptionBackend {
+                   public ITranscriptionBackend, public IDecisionBackend {
 public:
+    DecisionRequest last_decision_request;
+
+    // Gives the first option 0.7 and splits the rest evenly, so answers are predictable.
+    Result<DecisionResult> decide(int, const DecisionRequest& request,
+                                  const std::function<bool()>& = {}) override {
+        last_decision_request = request;
+        DecisionResult result;
+        result.input_tokens = 42;
+        for (const auto& question : request.questions) {
+            const std::size_t count = question.kind == DecisionKind::Predicate ? 2 : question.options.size();
+            std::vector<double> probabilities(count, 0.3 / static_cast<double>(count - 1));
+            probabilities[0] = 0.7;
+            result.answers.push_back({std::move(probabilities)});
+        }
+        return Ok(std::move(result));
+    }
+
     ModelInfo model_info{};
     std::atomic<bool> loaded{false};
     std::atomic<int> vram_mb{4096};
@@ -860,6 +877,10 @@ struct TestServer {
         server.Post("/v1/chat/completions",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_chat_completions(req, resp, make_deps());
+                    });
+        server.Post("/v1/decisions",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_decisions(req, resp, make_deps());
                     });
         server.Post("/v1/embeddings",
                     [this](const httplib::Request& req, httplib::Response& resp) {
@@ -2582,6 +2603,76 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     CHECK(rows[0].output_image_count == 2);
     CHECK(rows[0].generation_duration_ms == Catch::Approx(12.0));
     CHECK_FALSE(rows[0].request_id.empty());
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/decisions answers typed questions in the OpenAI shape",
+          "[routes][decisions]") {
+    TestServer ts;
+    auto info = make_info("decision-model");
+    info.runtime = "jev_style";
+    info.modality = "decision";
+    info.capabilities = {"decisions"};
+    ts.registry.register_factory("jev_style", [](const ModelInfo& model) {
+        return std::make_unique<IModelMock>(model);
+    });
+    ts.registry.register_model(info);
+    ts.registry.register_model(make_info("chat-only"));
+    REQUIRE(ts.coordinator.load("decision-model"));
+    REQUIRE(ts.coordinator.load("chat-only"));
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto post = [&](const nlohmann::json& body) {
+        auto response = client.Post("/v1/decisions", body.dump(), "application/json");
+        REQUIRE(response);
+        return *response;
+    };
+    const nlohmann::json questions = nlohmann::json::array({
+        {{"type", "predicate"}, {"name", "damaged"}, {"instructions", "Is the item damaged?"}},
+        {{"type", "choice"}, {"name", "team"}, {"instructions", "Which team?"},
+         {"choices", {{{"value", "billing"}, {"description", "payments"}}, {{"value", true}}, {{"value", "other"}}}}},
+        {{"type", "score"}, {"instructions", "How severe?"},
+         {"levels", {{{"label", "Cosmetic"}}, {{"label", "Blocking"}, {"description", "cannot work"}}}}},
+    });
+    const auto ok = post({{"model", "decision-model"},
+                          {"input", {{{"role", "user"}, {"content", "The screen arrived cracked."}}}},
+                          {"questions", questions}, {"prompt_cache_key", "k"}});
+    REQUIRE(ok.status == 200);
+    const auto body = nlohmann::json::parse(ok.body);
+    CHECK(body["model"] == "decision-model");
+    REQUIRE(body["answers"].size() == 3);
+    CHECK(body["answers"][0] == nlohmann::json{{"type", "predicate"}, {"name", "damaged"},
+                                               {"probability", 0.3}});
+    const auto& choice = body["answers"][1];
+    CHECK(choice["choice"] == "billing");
+    CHECK(choice["confidence"].get<double>() == Catch::Approx(0.55));
+    CHECK(choice["probabilities"][1] == nlohmann::json{{"value", true}, {"probability", 0.15}});
+    const auto& score = body["answers"][2];
+    CHECK(score["name"].is_null());
+    CHECK(score["score"].get<double>() == Catch::Approx(0.3));
+    CHECK(score["probabilities"][1]["label"] == "Blocking");
+    CHECK(score["probabilities"][1]["value"] == 1);
+    CHECK(body["usage"]["input_tokens"] == 42);
+    CHECK(body["usage"]["output_tokens"] == 0);
+    CHECK(body["usage"]["total_tokens"] == 42);
+    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("decision-model"));
+    REQUIRE(backend != nullptr);
+    CHECK(backend->last_decision_request.input == "user: The screen arrived cracked.");
+    CHECK(backend->last_decision_request.questions[1].options[1].label == "true");
+    CHECK(backend->last_decision_request.questions[2].options[1].description == "cannot work");
+
+    const auto single = nlohmann::json::array({questions[0]});
+    CHECK(post({{"model", "chat-only"}, {"input", "x"}, {"questions", single}}).status == 400);
+    CHECK(post({{"model", "missing"}, {"input", "x"}, {"questions", single}}).status == 404);
+    CHECK(post({{"model", "decision-model"}, {"input", "x"}, {"questions", nlohmann::json::array()}}).status == 400);
+    CHECK(post({{"model", "decision-model"}, {"input", "x"}, {"questions", single}, {"stream", true}}).status == 400);
+    CHECK(post({{"model", "decision-model"}, {"input", "x"},
+                {"questions", {{{"type", "choice"}, {"instructions", "?"},
+                                {"choices", {{{"value", "a"}}, {{"value", "a"}}}}}}}}).status == 400);
+    CHECK(post({{"model", "decision-model"},
+                {"input", {{{"role", "user"}, {"content", {{{"type", "input_image"}, {"image_url", "data:,"}}}}}}},
+                {"questions", single}}).status == 400);
+    CHECK(ts.coordinator.active_request_count() == 0);
     ts.stop();
 }
 

@@ -47,6 +47,10 @@ slot once, and does not retain response state.
 Runtime availability, residency, VRAM, slots, pricing, aliases, and optimization
 metadata belong to authenticated control routes.
 
+`POST /v1/decisions` follows the OpenAI Decisions API, which postdates the
+pinned SDK versions, so it has no SDK contract coverage. Its supported subset
+and differences are listed in [decisions.md](decisions.md).
+
 `POST /v1/embeddings` accepts a string, string array, token-ID array, or
 token-ID matrix. Float output and little-endian base64 float encoding are
 supported. Unsupported dimensions, encoding formats, extra fields, and input

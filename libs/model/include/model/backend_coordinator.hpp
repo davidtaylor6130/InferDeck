@@ -147,6 +147,9 @@ public:
     foundation::Result<EmbeddingResult> embed(
         const std::string& name, int slot_id, const EmbeddingRequest& request,
         const std::function<bool()>& cancelled = {});
+    foundation::Result<DecisionResult> decide(
+        const std::string& name, int slot_id, const DecisionRequest& request,
+        const std::function<bool()>& cancelled = {});
     foundation::Result<ImageGenerationResult> generate_images(
         const std::string& name, int slot_id, const ImageGenerationRequest& request,
         const std::function<bool(int)>& progress = {});

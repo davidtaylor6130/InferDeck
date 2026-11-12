@@ -159,6 +159,55 @@ struct TranscriptionResult {
     std::vector<TranscriptionSegment> segments;
 };
 
+enum class DecisionKind {
+    Predicate,
+    Choice,
+    Score,
+};
+
+/// <summary>One choice, or one score level, of a decision question.</summary>
+struct DecisionOption {
+    std::string label;
+    std::string description;
+};
+
+/// <summary>
+/// A typed question about the request input. Predicate has no options, choice
+/// has 2..255, score has 2..10 levels ordered low to high.
+/// </summary>
+struct DecisionQuestion {
+    DecisionKind kind{DecisionKind::Predicate};
+    std::string instructions;
+    std::vector<DecisionOption> options;
+};
+
+struct DecisionRequest {
+    std::string input;
+    std::vector<DecisionQuestion> questions;
+};
+
+/// <summary>
+/// Calibrated probabilities for one question, in option order. A predicate
+/// yields two entries: false, then true.
+/// </summary>
+struct DecisionAnswer {
+    std::vector<double> probabilities;
+};
+
+struct DecisionResult {
+    std::vector<DecisionAnswer> answers;
+    int input_tokens{0};
+    float duration_ms{0.0f};
+};
+
+class IDecisionBackend {
+public:
+    virtual ~IDecisionBackend() = default;
+    virtual foundation::Result<DecisionResult> decide(
+        int slot_id, const DecisionRequest& request,
+        const std::function<bool()>& cancelled = {}) = 0;
+};
+
 class IImageBackend {
 public:
     virtual ~IImageBackend() = default;

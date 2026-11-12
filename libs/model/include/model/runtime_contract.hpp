@@ -176,6 +176,11 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         true,
     });
     registry.register_runtime(RuntimeContract{
+        "jev_style",
+        {{"decision", {"decisions"}}},
+        RuntimeArtifactPolicy::Gguf,
+    });
+    registry.register_runtime(RuntimeContract{
         "stable_diffusion_cpp",
         {{"image", {"image_generation", "image_editing"}}},
         RuntimeArtifactPolicy::ArtifactMap,

@@ -155,6 +155,32 @@ foundation::Result<EmbeddingResult> BackendCoordinator::embed(
     return backend->embed(backend_slot, request, cancelled);
 }
 
+foundation::Result<DecisionResult> BackendCoordinator::decide(
+    const std::string& name, int lease_id, const DecisionRequest& request,
+    const std::function<bool()>& cancelled) {
+    IDecisionBackend* backend = nullptr;
+    int backend_slot = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = instances_.find(name);
+        if (it == instances_.end() || !it->second) {
+            return foundation::Err<DecisionResult>(foundation::ErrorCode::NotFound,
+                                                   "model not loaded: " + name);
+        }
+        backend = dynamic_cast<IDecisionBackend*>(it->second.get());
+        if (!backend || !it->second->info().supports("decisions")) {
+            return foundation::Err<DecisionResult>(foundation::ErrorCode::InvalidArgument,
+                                                   "backend does not support decisions: " + name);
+        }
+        auto slot = backend_slot_for_lease_locked(name, lease_id);
+        if (!slot) {
+            return foundation::Err<DecisionResult>(slot.error().code, slot.error().message);
+        }
+        backend_slot = *slot;
+    }
+    return backend->decide(backend_slot, request, cancelled);
+}
+
 foundation::Result<ImageGenerationResult> BackendCoordinator::generate_images(
     const std::string& name, int lease_id, const ImageGenerationRequest& request,
     const std::function<bool(int)>& progress) {

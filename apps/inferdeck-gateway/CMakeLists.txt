@@ -33,6 +33,7 @@ target_link_libraries(inferdeck-gateway PRIVATE
     foundation
     llama_cpp_wrapper
     native_runtimes
+    decision_runtime
     provider
     llama
     yaml-cpp::yaml-cpp

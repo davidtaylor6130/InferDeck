@@ -61,6 +61,7 @@
 #include "model/model_registry.hpp"
 #include "model/provider.hpp"
 #include "native_runtimes/runtime_factories.hpp"
+#include "decision_runtime/jev_style.hpp"
 #include "provider/plugin_provider.hpp"
 #ifdef INFERDECK_VLLM_RADIANCE_ENABLE
 #include "vllm_radiance_wrapper/vllm_radiance_model.hpp"
@@ -89,6 +90,7 @@ constexpr int runtime_reload_result = 75;
 #include "profile_benchmark_runtime.ipp"
 #include "builtin_providers.ipp"
 #include "media_control_routes.ipp"
+#include "decision_routes.ipp"
 int run_gateway(const fs::path& config_path) {
     using namespace inferdeck;
     using namespace inferdeck::foundation;
@@ -578,6 +580,7 @@ int run_gateway(const fs::path& config_path) {
         handle_audio_generations(req, resp, deps);
     }));
     register_media_control_routes(server, wrap, deps);
+    register_decision_routes(server, wrap, deps);
     if (cfg.openai_derivative_compatibility_enabled) {
         server.Post(std::string(openai_derivative_route(
                         OpenAIDerivativeRoute::ChatCompletions).pattern),

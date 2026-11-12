@@ -56,6 +56,9 @@ std::vector<model::ProviderDescriptor> builtin_providers(const inferdeck::gatewa
 #endif
     providers.push_back(std::move(radiance));
 
+    // Shares the llama backend that the llama_cpp provider above initialises.
+    providers.push_back({*contracts.find("jev_style"), inferdeck::decision_runtime::make_jev_style_backend});
+
     for (model::ProviderDescriptor& native : inferdeck::native_runtimes::providers())
     {
         providers.push_back(std::move(native));
@@ -63,9 +66,13 @@ std::vector<model::ProviderDescriptor> builtin_providers(const inferdeck::gatewa
     return providers;
 }
 
+/// <summary>Provider status served by GET /api/inferdeck/v1/providers; rebuilt on every gateway start.</summary>
+nlohmann::json g_provider_report = nlohmann::json::object();
+
 /// <summary>
 /// Registers built-in providers, then plugin providers so a plugin can
-/// replace a built-in runtime of the same name. Called once per gateway start.
+/// replace a built-in runtime of the same name, and records the outcome for
+/// the providers endpoint. Called once per gateway start.
 /// </summary>
 void install_gateway_providers(const inferdeck::gateway::GatewayConfig& cfg,
                                model::ModelRegistry& registry)
@@ -76,5 +83,20 @@ void install_gateway_providers(const inferdeck::gateway::GatewayConfig& cfg,
     }
     std::vector<model::ProviderDescriptor> providers = builtin_providers(cfg);
     providers.insert(providers.end(), g_plugins.providers.begin(), g_plugins.providers.end());
-    model::install_providers(providers, registry, cfg.models);
+    nlohmann::json listed = nlohmann::json::array();
+    for (const model::ProviderStatus& status : model::install_providers(providers, registry, cfg.models))
+    {
+        nlohmann::json modalities = nlohmann::json::object();
+        for (const auto& [modality, capabilities] : status.contract.modality_capabilities)
+        {
+            std::vector<std::string> sorted(capabilities.begin(), capabilities.end());
+            std::sort(sorted.begin(), sorted.end());
+            modalities[modality] = std::move(sorted);
+        }
+        listed.push_back({{"runtime", status.runtime}, {"origin", status.origin},
+                          {"version", status.version}, {"state", status.state},
+                          {"error", status.error}, {"modalities", std::move(modalities)}});
+    }
+    g_provider_report = {{"abi_version", 1}, {"providers", std::move(listed)},
+                         {"rejected_plugins", g_plugins.rejected}};
 }

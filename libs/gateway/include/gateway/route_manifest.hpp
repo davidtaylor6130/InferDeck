@@ -26,6 +26,7 @@ enum class StrictOpenAIRoute : std::size_t {
     ImageGenerations,
     AudioSpeech,
     AudioTranscriptions,
+    Decisions,
 };
 
 enum class InferDeckRoute : std::size_t {
@@ -46,7 +47,7 @@ struct RouteManifestEntry {
     std::string_view pattern;
 };
 
-inline constexpr std::array<RouteManifestEntry, 7> kStrictOpenAIRoutes{{
+inline constexpr std::array<RouteManifestEntry, 8> kStrictOpenAIRoutes{{
     {"GET", "/v1/models", R"(^/v1/models$)"},
     {"POST", "/v1/chat/completions", R"(^/v1/chat/completions$)"},
     {"POST", "/v1/responses", R"(^/v1/responses$)"},
@@ -55,6 +56,7 @@ inline constexpr std::array<RouteManifestEntry, 7> kStrictOpenAIRoutes{{
     {"POST", "/v1/audio/speech", R"(^/v1/audio/speech$)"},
     {"POST", "/v1/audio/transcriptions",
      R"(^/v1/audio/transcriptions$)"},
+    {"POST", "/v1/decisions", R"(^/v1/decisions$)"},
 }};
 
 inline constexpr std::array<RouteManifestEntry, 4> kOpenAIDerivativeRoutes{{
