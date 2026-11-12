@@ -32,7 +32,7 @@ void free_sd_images(sd_image_t* images, int count) {
     ++freed_images;
 }
 void free_sd_audio(sd_audio_t* audio) { delete[] audio->data; delete audio; ++freed_audio; }
-bool generate_video(sd_ctx_t*, const sd_vid_gen_params_t*, sd_image_t** frames, int* count, sd_audio_t** audio) {
+bool generate_video(sd_ctx_t*, const sd_vid_gen_params_t*, sd_image_t** frames, int* count, sd_audio_t** audio, int*) {
     auto* result = new sd_image_t[1]{};
     result[0] = {512, 320, 3, new uint8_t[512 * 320 * 3]{}};
     *frames = result; *count = 1;

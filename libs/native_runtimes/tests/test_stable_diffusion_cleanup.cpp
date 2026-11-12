@@ -20,6 +20,8 @@ sd_image_t* g_images{};
 int g_free_count{};
 int g_context{};
 bool g_auto_fit{};
+int g_reference_count{};
+uint32_t g_reference_width{};
 }
 
 extern "C" {
@@ -42,7 +44,9 @@ void free_sd_images(sd_image_t* images, int count) {
     g_images = nullptr;
     ++g_free_count;
 }
-bool generate_image(sd_ctx_t*, const sd_img_gen_params_t*, sd_image_t** images, int* count) {
+bool generate_image(sd_ctx_t*, const sd_img_gen_params_t* params, sd_image_t** images, int* count) {
+    g_reference_count = params->ref_images_count;
+    g_reference_width = params->ref_images_count > 0 ? params->ref_images[0].width : 0;
     g_images = new sd_image_t[1]{};
     g_images[0].width = 2;
     g_images[0].height = 2;
@@ -63,6 +67,12 @@ foundation::Result<std::vector<std::byte>> encode_png(const std::uint8_t*, int, 
         return foundation::Err<std::vector<std::byte>>(foundation::ErrorCode::InvalidArgument, "injected invalid pixels");
     }
     return foundation::Ok(std::vector<std::byte>{std::byte{1}});
+}
+foundation::Result<DecodedImage> decode_image_rgb(std::span<const std::byte> encoded) {
+    if (encoded.size() < 2) {
+        return foundation::Err<DecodedImage>(foundation::ErrorCode::InvalidArgument, "injected unreadable image");
+    }
+    return foundation::Ok(DecodedImage{4, 2, std::vector<std::uint8_t>(24)});
 }
 }
 
@@ -120,5 +130,31 @@ TEST_CASE("Explicit CPU image backend disables GPU auto-fit", "[native][image-cp
     std::unique_ptr<model::IBackend> backend = native_runtimes::make_stable_diffusion_backend(info);
     REQUIRE(backend->load());
     CHECK_FALSE(g_auto_fit);
+    REQUIRE(backend->unload());
+}
+
+TEST_CASE("Reference images reach the native edit call and bad ones are rejected",
+          "[native][image-edit]") {
+    using namespace inferdeck;
+    model::ModelInfo info;
+    info.name = "edit-image";
+    info.artifacts["diffusion_model"] = "fake-diffusion.gguf";
+    std::unique_ptr<model::IBackend> backend = native_runtimes::make_stable_diffusion_backend(info);
+    REQUIRE(backend->load());
+    model::IImageBackend* images = dynamic_cast<model::IImageBackend*>(backend.get());
+    REQUIRE(images);
+    model::ImageGenerationRequest request;
+    request.prompt = "make it red";
+    request.reference_images = {{std::byte{1}, std::byte{2}}, {std::byte{3}, std::byte{4}}};
+    REQUIRE(images->generate_images(0, request, {}));
+    CHECK(g_reference_count == 2);
+    CHECK(g_reference_width == 4);
+    request.reference_images = {{std::byte{1}}};
+    const auto rejected = images->generate_images(0, request, {});
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == foundation::ErrorCode::InvalidArgument);
+    request.reference_images.clear();
+    REQUIRE(images->generate_images(0, request, {}));
+    CHECK(g_reference_count == 0);
     REQUIRE(backend->unload());
 }

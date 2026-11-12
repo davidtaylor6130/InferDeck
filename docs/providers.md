@@ -149,7 +149,7 @@ Known modalities and capabilities:
 |---|---|---|
 | `text` | `chat_completions`, `responses` | `chat` |
 | `embedding` | `embeddings` | `embed` |
-| `image` | `image_generation` | `image` |
+| `image` | `image_generation`, `image_editing` | `image` |
 | `audio_generation` | `audio_generation` | `audio_generation` |
 | `video` | `video_generation` | `video` |
 | `audio_speech` | `audio_speech` | `speech` |
@@ -310,8 +310,13 @@ Request:
 
 ```json
 {"slot": 0, "prompt": "a red bicycle", "negative_prompt": "", "width": 1024,
- "height": 1024, "count": 1, "steps": 20, "seed": -1, "guidance_scale": 7.0}
+ "height": 1024, "count": 1, "steps": 20, "seed": -1, "guidance_scale": 7.0,
+ "reference_image_count": 0}
 ```
+
+When `reference_image_count` is above zero the request is an edit: the first
+that many blobs are encoded reference images (PNG or JPEG), in order. Declare
+the `image_editing` capability to receive them.
 
 Progress events: `{"type": "progress", "percent": 40}`.
 

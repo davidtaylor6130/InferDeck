@@ -13,4 +13,11 @@ foundation::Result<model::InferenceRequest> parse_openai_chat_request(
 foundation::Result<inference::Message> parse_openai_message(
     const nlohmann::json& value, bool allow_extensions = false);
 
+/// <summary>
+/// Decodes a <c>data:image/...;base64,</c> URL. Shared by chat image input
+/// and image-edit reference images.
+/// </summary>
+foundation::Result<inference::ImageContent> parse_data_image_url(
+    const std::string& url);
+
 }

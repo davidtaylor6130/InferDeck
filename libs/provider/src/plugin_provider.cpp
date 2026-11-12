@@ -485,10 +485,16 @@ public:
             {"width", request.width}, {"height", request.height}, {"count", request.count},
             {"steps", request.steps}, {"seed", request.seed},
             {"guidance_scale", request.guidance_scale},
+            {"reference_image_count", request.reference_images.size()},
         };
+        std::vector<inferdeck_blob> blobs;
+        for (const std::vector<std::byte>& reference : request.reference_images)
+        {
+            add_blob(blobs, reference);
+        }
         CallState state = progress_state(progress);
         const Clock::time_point started = Clock::now();
-        const foundation::Result<void> ran = invoke("image", body, {}, state);
+        const foundation::Result<void> ran = invoke("image", body, blobs, state);
         if (!ran)
         {
             return forward_error<model::ImageGenerationResult>(ran);

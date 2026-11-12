@@ -8,8 +8,13 @@
   `docs/providers.md`, with a reference provider under `libs/provider/examples`.
 - Model discovery (`GET /api/inferdeck/v1/models`) reports token `limits` for
   every entry, and `resolved_model` plus `alias_contract` for aliases (#195).
+- Qwen-Image-2.1 runtime support and reference-image editing through
+  `reference_images` on the InferDeck image routes (#189). Hardware validation
+  is pending; see `docs/qwen-image-2.1.md`.
 
 ### Changed
+- stable-diffusion.cpp is pinned to `master-924-f8890b9` and shares llama.cpp's
+  ggml.
 - Built-in runtimes register through one provider descriptor list instead of
   being wired individually in the gateway entry point.
 - The MCP OpenCode config tool reads context limits from discovery `limits`.

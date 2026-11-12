@@ -8,6 +8,8 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     catch (const std::exception& error) { write_error(resp, 400, "invalid_json", error.what()); return; }
     const bool derivative =
         deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative;
+    const bool inferdeck_route =
+        derivative || req.path.starts_with("/api/inferdeck/v1/media/");
     if (!derivative) {
         static constexpr std::array<std::string_view, 14> supported_fields{
             "model", "prompt", "background", "moderation", "n",
@@ -21,7 +23,8 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         }
         for (const auto& field : body.items()) {
             if (std::find(supported_fields.begin(), supported_fields.end(),
-                          field.key()) == supported_fields.end()) {
+                          field.key()) == supported_fields.end() &&
+                !(inferdeck_route && field.key() == "reference_images")) {
                 write_error(resp, 400, "unsupported_parameter",
                             "unsupported Images parameter: " +
                                 field.key(),
@@ -163,6 +166,28 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     request.seed = body.value("seed", std::int64_t{-1});
     request.steps = body.value("steps", 20);
     request.guidance_scale = body.value("guidance_scale", 7.0f);
+    if (body.contains("reference_images") && !body["reference_images"].is_null()) {
+        const auto& references = body["reference_images"];
+        if (!inferdeck_route || !references.is_array() || references.size() > 4) {
+            write_error(resp, 400, "invalid_image_request",
+                        "reference_images must be an array of at most 4 base64 data:image URLs",
+                        "reference_images");
+            return;
+        }
+        for (const auto& reference : references) {
+            auto image = reference.is_string()
+                ? parse_data_image_url(reference.get<std::string>())
+                : foundation::Err<inference::ImageContent>(
+                      foundation::ErrorCode::InvalidArgument,
+                      "reference_images entries must be strings");
+            if (!image) {
+                write_error(resp, 400, "invalid_image_request",
+                            image.error().message, "reference_images");
+                return;
+            }
+            request.reference_images.push_back(std::move(image->bytes));
+        }
+    }
     const std::string size =
         body.contains("size") && !body["size"].is_null()
             ? body["size"].get<std::string>() : "1024x1024";
@@ -187,6 +212,11 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
                     "model does not support image generation", "model");
         return;
     }
+    if (!request.reference_images.empty() && !info->supports("image_editing")) {
+        write_error(resp, 400, "unsupported_image_model",
+                    "model does not support image editing", "model");
+        return;
+    }
     auto job = begin_job(
         model_name, "image", request.prompt,
         nlohmann::json{
@@ -195,6 +225,7 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
             {"seed", request.seed},
             {"steps", request.steps},
             {"guidance_scale", request.guidance_scale},
+            {"reference_images", request.reference_images.size()},
         });
     if (derivative ||
         req.path.starts_with("/api/inferdeck/v1/media/")) {

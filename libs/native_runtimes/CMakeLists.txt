@@ -28,6 +28,7 @@ if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
     set(SD_WEBP OFF CACHE BOOL "" FORCE)
     set(SD_WEBM OFF CACHE BOOL "" FORCE)
     set(SD_VULKAN ON CACHE BOOL "" FORCE)
+    set(SD_USE_UPSTREAM_GGML ON CACHE BOOL "" FORCE)
     set(SD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     add_subdirectory("${INFERDECK_STABLE_DIFFUSION_ROOT}"
                      "${CMAKE_BINARY_DIR}/native/stable-diffusion" EXCLUDE_FROM_ALL)
@@ -42,9 +43,8 @@ if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
         PRIVATE "${INFERDECK_STABLE_DIFFUSION_ROOT}/thirdparty")
     target_compile_features(inferdeck-video-encoding PUBLIC cxx_std_17)
     target_sources(native_runtimes PRIVATE
-        src/stable_diffusion_backend.cpp
-        src/ltx_video_backend.cpp
-        src/ltx_video_encoder.cpp)
+        src/stable_diffusion_backend.cpp src/image_decode.cpp
+        src/ltx_video_backend.cpp src/ltx_video_encoder.cpp)
     target_link_libraries(native_runtimes PRIVATE inferdeck-video-encoding)
     if(MSVC)
         set_property(SOURCE src/ltx_video_backend.cpp APPEND PROPERTY COMPILE_OPTIONS /EHsc-)

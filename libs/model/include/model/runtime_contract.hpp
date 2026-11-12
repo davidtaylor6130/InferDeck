@@ -177,7 +177,7 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
     });
     registry.register_runtime(RuntimeContract{
         "stable_diffusion_cpp",
-        {{"image", {"image_generation"}}},
+        {{"image", {"image_generation", "image_editing"}}},
         RuntimeArtifactPolicy::ArtifactMap,
     });
     registry.register_runtime(RuntimeContract{

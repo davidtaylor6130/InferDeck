@@ -10,6 +10,7 @@
 - [`release-reproducibility.md`](release-reproducibility.md) - pinned inputs, manifests, checksums, SBOM, and signing
 - [`architecture-change-checklist.md`](architecture-change-checklist.md) - required review gates for architecture changes
 - [`providers.md`](providers.md) - how runtimes plug in, and the C ABI for provider libraries in any language
+- [`qwen-image-2.1.md`](qwen-image-2.1.md) - Qwen-Image-2.1 weights, configuration, image-edit API, and runtime pin
 - [`architecture.md`](architecture.md) — system architecture, layer by layer
 - [`DEPLOY.md`](DEPLOY.md) — unattended Windows deployment (scheduled tasks + watchdog)
 - [`opencode-setup-guide.md`](opencode-setup-guide.md) — pointing opencode at InferDeck

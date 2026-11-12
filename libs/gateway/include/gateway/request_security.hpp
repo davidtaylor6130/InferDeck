@@ -55,6 +55,9 @@ inline RequestPolicy request_policy(std::string_view method,
     if (path == "/api/inferdeck/v1/video/generations") {
         return {json_body_limit, ContentPolicy::Json, false};
     }
+    if (path == "/api/inferdeck/v1/media/images/generations") {
+        return {json_body_limit, ContentPolicy::Json, control_write};
+    }
     if (path.starts_with("/api/")) {
         return {control_body_limit, ContentPolicy::Json, control_write};
     }

@@ -198,8 +198,9 @@ foundation::Result<model::VideoGenerationResult> LTXVideoBackend::generate_video
     const auto started = std::chrono::steady_clock::now();
     bool success = false;
     try {
+        int native_fps = 0;
         success = ::generate_video(context_, &params, &generated.frames,
-                                   &generated.count, &generated.audio);
+                                   &generated.count, &generated.audio, &native_fps);
     } catch (const std::exception& error) {
         return foundation::Err<model::VideoGenerationResult>(
             foundation::ErrorCode::Internal,

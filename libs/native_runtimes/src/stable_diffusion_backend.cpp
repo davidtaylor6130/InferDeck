@@ -16,6 +16,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace inferdeck::native_runtimes {
 
@@ -80,6 +81,9 @@ public:
     explicit StableDiffusionBackend(model::ModelInfo info)
         : FixedBackend(image_info(std::move(info))),
           model_path_(artifact(info_, "model", info_.gguf_path)),
+          diffusion_model_path_(artifact(info_, "diffusion_model")),
+          llm_path_(artifact(info_, "llm")), llm_vision_path_(artifact(info_, "llm_vision")),
+          model_args_(artifact(info_, "model_args")),
           vae_path_(artifact(info_, "vae")), clip_l_path_(artifact(info_, "clip_l")),
           clip_g_path_(artifact(info_, "clip_g")), t5xxl_path_(artifact(info_, "t5xxl")),
           backend_(artifact(info_, "backend", "vulkan")), max_vram_(artifact(info_, "max_vram")) {}
@@ -93,10 +97,15 @@ public:
         std::lock_guard generation_lock(generation_mutex);
         set_loaded(false);
         release_context();
-        if (model_path_.empty()) return foundation::Err<void>(foundation::ErrorCode::InvalidArgument, "stable-diffusion.cpp model artifact is missing");
+        if (model_path_.empty() && diffusion_model_path_.empty()) return foundation::Err<void>(foundation::ErrorCode::InvalidArgument, "stable-diffusion.cpp model or diffusion_model artifact is missing");
+        const auto optional_path = [](const std::string& path) { return path.empty() ? nullptr : path.c_str(); };
         sd_ctx_params_t params;
         sd_ctx_params_init(&params);
-        params.model_path = model_path_.c_str();
+        params.model_path = optional_path(model_path_);
+        params.diffusion_model_path = optional_path(diffusion_model_path_);
+        params.llm_path = optional_path(llm_path_);
+        params.llm_vision_path = optional_path(llm_vision_path_);
+        params.model_args = optional_path(model_args_);
         params.vae_path = vae_path_.empty() ? nullptr : vae_path_.c_str();
         params.clip_l_path = clip_l_path_.empty() ? nullptr : clip_l_path_.c_str();
         params.clip_g_path = clip_g_path_.empty() ? nullptr : clip_g_path_.c_str();
@@ -149,8 +158,23 @@ public:
             params.sample_params.guidance.txt_cfg = request.guidance_scale;
             const int vae_tile_size = image_vae_tile_size(request.width, request.height);
             params.vae_tiling_params.enabled = vae_tile_size > 0;
-            params.vae_tiling_params.tile_size_x = vae_tile_size;
-            params.vae_tiling_params.tile_size_y = vae_tile_size;
+            params.vae_tiling_params.tile_size_w = vae_tile_size;
+            params.vae_tiling_params.tile_size_h = vae_tile_size;
+            std::vector<DecodedImage> references;
+            for (const std::vector<std::byte>& encoded : request.reference_images) {
+                auto decoded = decode_image_rgb(encoded);
+                if (!decoded) {
+                    return foundation::Err<model::ImageGenerationResult>(decoded.error().code, decoded.error().message);
+                }
+                references.push_back(std::move(*decoded));
+            }
+            std::vector<sd_image_t> reference_views;
+            for (DecodedImage& reference : references) {
+                reference_views.push_back({static_cast<uint32_t>(reference.width),
+                                           static_cast<uint32_t>(reference.height), 3, reference.rgb.data()});
+            }
+            params.ref_images = reference_views.empty() ? nullptr : reference_views.data();
+            params.ref_images_count = static_cast<int>(reference_views.size());
             const auto started = std::chrono::steady_clock::now();
             const bool generated = generate_image(context_, &params, &resources.images, &resources.count);
             if (state.cancelled.load() || !generated || !resources.images || resources.count < 1) {
@@ -189,6 +213,10 @@ private:
 
     sd_ctx_t* context_{nullptr};
     std::string model_path_;
+    std::string diffusion_model_path_;
+    std::string llm_path_;
+    std::string llm_vision_path_;
+    std::string model_args_;
     std::string vae_path_;
     std::string clip_l_path_;
     std::string clip_g_path_;

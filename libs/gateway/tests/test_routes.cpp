@@ -607,9 +607,12 @@ public:
         return Ok(std::move(result));
     }
 
+    ImageGenerationRequest last_image_request;
+
     Result<ImageGenerationResult> generate_images(
         int, const ImageGenerationRequest& request,
         const std::function<bool(int)>& progress = {}) override {
+        last_image_request = request;
         if (block_media_until_cancel.load()) {
             while (!progress || progress(50)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
             return inferdeck::foundation::Err<ImageGenerationResult>(ErrorCode::Cancelled, "cancelled");
@@ -2580,6 +2583,58 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     CHECK(rows[0].generation_duration_ms == Catch::Approx(12.0));
     CHECK_FALSE(rows[0].request_id.empty());
     ts.stop();
+}
+
+TEST_CASE("Image editing accepts reference images only on InferDeck routes for capable models",
+          "[routes][images][edit]") {
+    TestServer ts;
+    auto editor = make_info("edit-model");
+    editor.runtime = "stable_diffusion_cpp";
+    editor.modality = "image";
+    editor.capabilities = {"image_generation", "image_editing"};
+    ts.registry.register_model(editor);
+    auto generator = editor;
+    generator.name = "generate-only";
+    generator.capabilities = {"image_generation"};
+    ts.registry.register_model(generator);
+    REQUIRE(ts.coordinator.load("edit-model"));
+    REQUIRE(ts.coordinator.load("generate-only"));
+
+    const auto post = [&](const std::string& path, const std::string& model,
+                          nlohmann::json references) {
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        request.path = path;
+        request.body = nlohmann::json{{"model", model}, {"prompt", "make the sign red"},
+                                      {"size", "512x512"},
+                                      {"reference_images", std::move(references)}}.dump();
+        httplib::Response response;
+        handle_image_generations(request, response, ts.make_deps());
+        return response;
+    };
+    const std::string control = "/api/inferdeck/v1/media/images/generations";
+    const nlohmann::json one = nlohmann::json::array({"data:image/png;base64,AQID"});
+
+    const auto edited = post(control, "edit-model", one);
+    REQUIRE(edited.status == 200);
+    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("edit-model"));
+    REQUIRE(backend != nullptr);
+    REQUIRE(backend->last_image_request.reference_images.size() == 1);
+    CHECK(backend->last_image_request.reference_images[0] ==
+          std::vector<std::byte>{std::byte{1}, std::byte{2}, std::byte{3}});
+
+    const auto strict = post("/v1/images/generations", "edit-model", one);
+    CHECK(strict.status == 400);
+    CHECK(nlohmann::json::parse(strict.body)["error"]["code"] == "unsupported_parameter");
+
+    const auto incapable = post(control, "generate-only", one);
+    CHECK(incapable.status == 400);
+    CHECK(nlohmann::json::parse(incapable.body)["error"]["message"] ==
+          "model does not support image editing");
+
+    CHECK(post(control, "edit-model", nlohmann::json::array({"not-a-data-url"})).status == 400);
+    CHECK(post(control, "edit-model", nlohmann::json::array({one[0], one[0], one[0], one[0], one[0]})).status == 400);
+    CHECK(ts.coordinator.active_request_count() == 0);
 }
 
 TEST_CASE("Media routes select personal defaults and preserve explicit model selection",

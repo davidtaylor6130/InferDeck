@@ -1,5 +1,7 @@
 #include "gateway/media_routes.hpp"
 
+#include "gateway/openai_adapter.hpp"
+
 #include "gateway/auth.hpp"
 #include "audio_decoder.hpp"
 #include "foundation/json_utils.hpp"

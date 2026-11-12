@@ -305,6 +305,11 @@ TEST_CASE("Request policies enforce endpoint body and media constraints",
               "POST", "/api/inferdeck/v1/video/generations")) ==
           RequestValidationStatus::Allowed);
 
+    CHECK(request_policy("POST", "/api/inferdeck/v1/media/images/generations")
+              .max_body_bytes == inferdeck::gateway::json_body_limit);
+    CHECK(request_policy("POST", "/api/inferdeck/v1/media/audio/generations")
+              .max_body_bytes == inferdeck::gateway::control_body_limit);
+
     request.headers.clear();
     request.headers.emplace("Content-Type", "text/plain");
     CHECK(validate_request(request, request_policy(
