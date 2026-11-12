@@ -349,6 +349,8 @@ export interface ImageGenerationInput {
   prompt: string;
   size: string;
   n: number;
+  /** Base64 data:image URLs. Present only for edits; the server accepts at most four. */
+  reference_images?: string[];
 }
 
 export interface ImageGenerationResult {

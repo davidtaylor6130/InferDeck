@@ -23,6 +23,49 @@ function readiness(model: ModelInfo | undefined): {
   return { label: 'Loads on request', tone: 'info' };
 }
 
+const MAX_REFERENCES = 4;
+// The image route accepts a 16 MiB body; leave room for the prompt and JSON framing.
+const MAX_REFERENCE_CHARS = 15 * 1024 * 1024;
+
+interface ReferenceImage {
+  name: string;
+  dataUrl: string;
+}
+
+async function readReference(file: File): Promise<ReferenceImage> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return { name: file.name, dataUrl: `data:${file.type};base64,${btoa(binary)}` };
+}
+
+/**
+ * Adds PNG and JPEG files to the current references, enforcing the count and
+ * request-size limits. Returns the new list and a message when files were dropped.
+ */
+export async function mergeReferences(
+  current: ReferenceImage[],
+  files: File[],
+): Promise<{ references: ReferenceImage[]; error: string }> {
+  const accepted = files.filter(file => file.type === 'image/png' || file.type === 'image/jpeg');
+  const room = MAX_REFERENCES - current.length;
+  const added = await Promise.all(accepted.slice(0, room).map(readReference));
+  const references = [...current, ...added];
+  const size = references.reduce((total, entry) => total + entry.dataUrl.length, 0);
+  if (size > MAX_REFERENCE_CHARS) {
+    return { references: current, error: 'Reference images are limited to 15 MB in total.' };
+  }
+  if (accepted.length < files.length) {
+    return { references, error: 'Only PNG and JPEG images can be used as references.' };
+  }
+  if (accepted.length > room) {
+    return { references, error: `Up to ${MAX_REFERENCES} reference images can be used.` };
+  }
+  return { references, error: '' };
+}
+
 function preferredImageModel(models: ModelInfo[]): string {
   return models.find(entry => entry.personal_default &&
     entry.runtime_available !== false)?.id ??
@@ -43,7 +86,10 @@ export const ImagePage: React.FC = () => {
   const [error, setError] = useState('');
   const [result, setResult] = useState('');
   const [refreshToken, setRefreshToken] = useState(0);
+  const [references, setReferences] = useState<ReferenceImage[]>([]);
+  const [dropTarget, setDropTarget] = useState(false);
   const controller = useRef<AbortController | null>(null);
+  const filePicker = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (generators.some(entry => entry.id === model)) return;
@@ -57,6 +103,24 @@ export const ImagePage: React.FC = () => {
 
   const selected = generators.find(entry => entry.id === model);
   const state = readiness(selected);
+  const canEdit = Boolean(selected?.capabilities?.includes('image_editing'));
+  const editing = canEdit && references.length > 0;
+  const action = editing ? 'Edit image' : 'Generate image';
+
+  useEffect(() => {
+    if (!canEdit) setReferences([]);
+  }, [canEdit]);
+
+  const addReferences = async (files: FileList | null) => {
+    if (!canEdit || !files?.length) return;
+    try {
+      const merged = await mergeReferences(references, Array.from(files));
+      setReferences(merged.references);
+      setError(merged.error);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The image could not be read.');
+    }
+  };
   const canGenerate =
     connection === 'connected' &&
     Boolean(selected) &&
@@ -77,7 +141,10 @@ export const ImagePage: React.FC = () => {
     setResult('');
     try {
       const generated = await generateImages(
-        { model, prompt: prompt.trim(), size, n: count },
+        {
+          model, prompt: prompt.trim(), size, n: count,
+          ...(editing ? { reference_images: references.map(entry => entry.dataUrl) } : {}),
+        },
         activeController.signal,
       );
       setResult(
@@ -108,7 +175,7 @@ export const ImagePage: React.FC = () => {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Generate image"
+        title={action}
         subtitle={generators.length ? `${generators.length} model${generators.length === 1 ? '' : 's'} available. InferDeck loads the selected GPU model before generation.` : 'No image model is configured.'}
         actions={<Badge label={state.label} tone={state.tone} />}
       />
@@ -117,18 +184,72 @@ export const ImagePage: React.FC = () => {
       ) : (
         <form onSubmit={submit}>
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_18rem]">
-            <label className="block min-w-0" htmlFor="image-prompt">
-              <span className="sr-only">Prompt</span>
-              <textarea
-                id="image-prompt"
-                value={prompt}
-                onChange={event => setPrompt(event.target.value)}
-                maxLength={32_000}
-                rows={7}
-                placeholder="Describe the image to generate"
-                className="h-full min-h-[180px] w-full resize-y p-3 text-base leading-relaxed"
-              />
-            </label>
+            <div
+              className={`flex min-w-0 flex-col rounded-md border bg-panel-slate transition-[border-color,box-shadow] focus-within:border-queue-blue focus-within:shadow-[0_0_0_3px_rgb(var(--accent)/0.2)] ${dropTarget ? 'border-queue-blue shadow-[0_0_0_3px_rgb(var(--accent)/0.2)]' : 'border-line-strong'}`}
+              onDragOver={event => {
+                if (!canEdit) return;
+                event.preventDefault();
+                setDropTarget(true);
+              }}
+              onDragLeave={() => setDropTarget(false)}
+              onDrop={event => {
+                if (!canEdit) return;
+                event.preventDefault();
+                setDropTarget(false);
+                void addReferences(event.dataTransfer.files);
+              }}
+            >
+              <label className="flex min-h-0 flex-1" htmlFor="image-prompt">
+                <span className="sr-only">Prompt</span>
+                <textarea
+                  id="image-prompt"
+                  value={prompt}
+                  onChange={event => setPrompt(event.target.value)}
+                  maxLength={32_000}
+                  rows={6}
+                  placeholder={editing ? 'Describe the change' : 'Describe the image to generate'}
+                  className="min-h-[150px] w-full flex-1 resize-y !border-0 !bg-transparent p-3 text-base leading-relaxed !shadow-none"
+                />
+              </label>
+              <div className="flex min-h-[60px] items-center gap-2 border-t border-border-slate p-2">
+                {references.map((entry, index) => (
+                  <div key={`${entry.name}-${index}`} className="relative h-11 w-11 shrink-0 animate-item-in overflow-hidden rounded-md bg-elevated-slate">
+                    <img src={entry.dataUrl} alt={`Reference ${index + 1}: ${entry.name}`} className="h-full w-full object-cover" />
+                    <span className="tabular absolute bottom-0.5 left-0.5 min-w-[16px] rounded bg-black/60 px-1 text-center text-2xs text-white">{index + 1}</span>
+                    <button
+                      type="button"
+                      aria-label={`Remove reference ${index + 1}`}
+                      onClick={() => setReferences(current => current.filter((_, position) => position !== index))}
+                      className="absolute right-0.5 top-0.5 h-[18px] w-[18px] rounded-full bg-black/60 text-xs leading-[18px] text-white"
+                    >×</button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  disabled={!canEdit || references.length >= MAX_REFERENCES}
+                  onClick={() => filePicker.current?.click()}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line-strong px-2.5 text-xs font-medium text-text-secondary hover:bg-elevated-slate disabled:cursor-not-allowed disabled:opacity-45"
+                >+ Reference image</button>
+                <input
+                  ref={filePicker}
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  multiple
+                  hidden
+                  onChange={event => {
+                    void addReferences(event.target.files);
+                    event.target.value = '';
+                  }}
+                />
+                <span className="tabular ml-auto text-xs text-text-muted">
+                  {!canEdit
+                    ? 'This model cannot edit images'
+                    : references.length
+                      ? `${references.length} of ${MAX_REFERENCES}`
+                      : 'Drop an image to edit it'}
+                </span>
+              </div>
+            </div>
             <div className="flex flex-col gap-4">
               <label className="block text-xs font-medium text-text-muted">
                 Model
@@ -178,7 +299,7 @@ export const ImagePage: React.FC = () => {
                   className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-queue-blue text-sm font-semibold text-on-accent hover:bg-queue-blue/90 disabled:opacity-40"
                 >
                   {running && <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-on-accent border-t-transparent" aria-hidden="true" />}
-                  {running ? 'Generating image…' : 'Generate image'}
+                  {running ? (editing ? 'Editing image…' : 'Generating image…') : action}
                 </button>
                 {running && <Button tone="danger" className="w-full" onClick={() => controller.current?.abort()}>Cancel request</Button>}
               </div>

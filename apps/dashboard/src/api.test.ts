@@ -307,6 +307,13 @@ describe('dashboard media generation', () => {
       guidance_scale: 0,
     });
 
+const edited = await generateImages({
+      model: 'qwen-image', prompt: 'make it red', size: '512x512', n: 1,
+      reference_images: ['data:image/png;base64,AQID'],
+    }).catch(() => null);
+    expect(edited).toBeNull();
+    expect(JSON.parse(fetchMock.mock.calls.at(-1)?.[1]?.body as string).reference_images)
+      .toEqual(['data:image/png;base64,AQID']);
     expect(image.jobId).toBe(41);
     expect(music.jobId).toBe(42);
     expect(music.seed).toBe(1234);
