@@ -52,6 +52,20 @@
         }
         write_json(resp, 200, std::move(*result));
     }));
+    server.Get(R"(^/api/inferdeck/v1/model-store/bundles$)", wrap([deps](const httplib::Request&,
+                                                             httplib::Response& resp) {
+        if (!deps.model_store) {
+            write_error(resp, 503, "model_store_unavailable", "model store is unavailable");
+            return;
+        }
+        auto result = deps.model_store->bundles();
+        if (!result) {
+            LOG_WARN("model_bundles_invalid", "error={}", result.error().message);
+            write_error(resp, 500, "model_bundles_invalid", result.error().message);
+            return;
+        }
+        write_json(resp, 200, {{"bundles", std::move(*result)}});
+    }));
 
     server.Get(R"(^/api/inferdeck/v1/model-store/downloads$)", wrap([deps](const httplib::Request&,
                                                                httplib::Response& resp) {
@@ -74,10 +88,12 @@
         }
         try {
             const auto body = nlohmann::json::parse(req.body);
-            auto result = deps.model_store->install(
-                body.value("repo", ""), body.value("filename", ""),
-                body.value("runtime", ""), body.value("modality", ""),
-                body.value("modelName", ""));
+            auto result = body.contains("bundle")
+                ? deps.model_store->install_bundle(body.value("bundle", ""), body.value("modelName", ""))
+                : deps.model_store->install(
+                      body.value("repo", ""), body.value("filename", ""),
+                      body.value("runtime", ""), body.value("modality", ""),
+                      body.value("modelName", ""));
             if (!result) {
                 const int status = result.error().code == foundation::ErrorCode::AlreadyExists ? 409 : 400;
                 write_error(resp, status, "model_install_failed", result.error().message);

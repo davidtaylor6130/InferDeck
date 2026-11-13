@@ -1639,3 +1639,208 @@ TEST_CASE("Model store installs complete LTX bundle artifacts",
     }
     std::filesystem::remove_all(root);
 }
+namespace {
+
+class MultiRepoTransport final : public FakeTransport {
+public:
+    foundation::Result<nlohmann::json> get_json(
+        const std::string& url, const std::string&) override {
+        urls.push_back(url);
+        const std::string checksum = "9f86d081884c7d659a2feaa0c55ad015"
+                                     "a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        const auto file = [&checksum](const char* name) {
+            return nlohmann::json{{"rfilename", name}, {"lfs", {{"size", 4}, {"sha256", checksum}}}};
+        };
+        if (url.find("/api/models/owner/diffusion-GGUF") != std::string::npos) {
+            return foundation::Ok(nlohmann::json{{"sha", "pinned-diffusion"},
+                {"siblings", nlohmann::json::array({file("diffusion-Q8_0.gguf")})}});
+        }
+        if (url.find("/api/models/other/encoder-GGUF") != std::string::npos) {
+            return foundation::Ok(nlohmann::json{{"sha", "pinned-encoder"},
+                {"siblings", nlohmann::json::array({file("encoder-Q8_0.gguf"),
+                                                    file("vae/model_vae.safetensors")})}});
+        }
+        return foundation::Err<nlohmann::json>(foundation::ErrorCode::NotFound, "repository not found");
+    }
+
+    std::vector<std::string> urls;
+};
+
+nlohmann::json bundle_recipe() {
+    return {
+        {"id", "two-repo-image"}, {"family", "two-repo"},
+        {"runtime", "stable_diffusion_cpp"}, {"modality", "image"},
+        {"capabilities", {"image_generation", "image_editing"}},
+        {"license", "Research License"}, {"licenseUrl", "https://example.invalid/license"},
+        {"vramRequiredMb", 20000},
+        {"artifacts", {{"guidance_scale", "6.0"}, {"backend", "vulkan"}}},
+        {"components", nlohmann::json::array({
+            {{"key", "diffusion_model"}, {"repo", "owner/diffusion-GGUF"},
+             {"file", "diffusion-Q8_0.gguf"}, {"revision", "abc123"}},
+            {{"key", "vae"}, {"repo", "other/encoder-GGUF"},
+             {"file", "vae/model_vae.safetensors"}},
+            {{"key", "llm"}, {"repo", "other/encoder-GGUF"}, {"file", "encoder-Q8_0.gguf"}},
+            {{"key", "llm_vision"}, {"repo", "other/encoder-GGUF"},
+             {"file", "mmproj-missing.gguf"}, {"required", false}}
+        })}
+    };
+}
+
+std::filesystem::path write_bundles(const std::filesystem::path& root, const std::string& text) {
+    std::filesystem::create_directories(root);
+    const auto path = root / "model-bundles.json";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+    return path;
+}
+
+}
+
+TEST_CASE("Model store lists multi-repo bundle recipes with their license",
+          "[model-store][bundle]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::make_unique<MultiRepoTransport>());
+        store.set_bundle_recipes(root / "absent.json");
+        const auto empty = store.bundles();
+        REQUIRE(empty);
+        CHECK(empty->empty());
+        store.set_bundle_recipes(write_bundles(
+            root, nlohmann::json{{"bundles", {bundle_recipe()}}}.dump()));
+        const auto listed = store.bundles();
+        REQUIRE(listed);
+        REQUIRE(listed->size() == 1);
+        const auto& bundle = (*listed)[0];
+        CHECK(bundle["id"] == "two-repo-image");
+        CHECK(bundle["license"] == "Research License");
+        CHECK(bundle["capabilities"] == nlohmann::json({"image_generation", "image_editing"}));
+        CHECK(bundle["artifacts"]["guidance_scale"] == "6.0");
+        REQUIRE(bundle["components"].size() == 4);
+        CHECK(bundle["components"][1]["repo"] == "other/encoder-GGUF");
+        CHECK(bundle["components"][1]["revision"] == "main");
+        CHECK(bundle["components"][3]["required"] == false);
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store rejects invalid bundle recipes", "[model-store][bundle]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::make_unique<MultiRepoTransport>());
+        const auto rejects = [&](const std::string& text, const std::string& reason) {
+            store.set_bundle_recipes(write_bundles(root, text));
+            const auto listed = store.bundles();
+            REQUIRE_FALSE(listed);
+            CHECK(listed.error().code == foundation::ErrorCode::ParseError);
+            CHECK(listed.error().message.find(reason) != std::string::npos);
+            CHECK_FALSE(store.install_bundle("two-repo-image", "rejected"));
+        };
+        const auto with_component = [](std::size_t index, const char* key, nlohmann::json value) {
+            auto recipe = bundle_recipe();
+            recipe["components"][index][key] = std::move(value);
+            return nlohmann::json{{"bundles", {recipe}}}.dump();
+        };
+        rejects("{\"bundles\": [", "not valid JSON");
+        rejects(with_component(0, "file", "../escape.gguf"), "relative path");
+        rejects(with_component(0, "file", "/rooted.gguf"), "relative path");
+        rejects(with_component(0, "file", "C:evil.gguf"), "relative path");
+        rejects(with_component(1, "key", "diffusion_model"), "unique");
+        rejects(with_component(2, "file", "vae/model_vae.safetensors"), "collides");
+        rejects(with_component(0, "file", "notes.txt"), "not supported");
+        auto optional_only = bundle_recipe();
+        for (auto& component : optional_only["components"]) component["required"] = false;
+        rejects(nlohmann::json{{"bundles", {optional_only}}}.dump(), "required component");
+        auto unlicensed = bundle_recipe();
+        unlicensed.erase("license");
+        rejects(nlohmann::json{{"bundles", {unlicensed}}}.dump(), "license");
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Model store installs a multi-repo bundle under recipe artifact keys",
+          "[model-store][bundle][install]") {
+    const auto root = test_root();
+    std::string diffusion_path;
+    {
+        model::ModelRegistry registry;
+        model::BackendCoordinator coordinator(registry);
+        auto transport = std::make_unique<MultiRepoTransport>();
+        auto* urls = &transport->urls;
+        gateway::ModelStore store(root, "", coordinator, std::move(transport));
+        auto missing = bundle_recipe();
+        missing["id"] = "missing-required";
+        missing["components"][2]["file"] = "absent-Q8_0.gguf";
+        store.set_bundle_recipes(write_bundles(
+            root, nlohmann::json{{"bundles", {bundle_recipe(), missing}}}.dump()));
+        const auto absent = store.install_bundle("missing-required", "missing");
+        REQUIRE_FALSE(absent);
+        CHECK(absent.error().code == foundation::ErrorCode::NotFound);
+        const auto unknown = store.install_bundle("unknown", "unknown");
+        REQUIRE_FALSE(unknown);
+        CHECK(unknown.error().code == foundation::ErrorCode::NotFound);
+
+        urls->clear();
+        const auto installed = store.install_bundle("two-repo-image", "two-repo");
+        REQUIRE(installed);
+        CHECK(urls->size() == 2);
+        CHECK(urls->front().find("/api/models/owner/diffusion-GGUF/revision/abc123?blobs=true") !=
+              std::string::npos);
+        const auto job = wait_for_terminal(store, *installed);
+        REQUIRE(job);
+        REQUIRE(job->state == "installed");
+        CHECK(job->artifacts.size() == 3);
+        CHECK(job->artifacts[0].revision == "pinned-diffusion");
+        const auto info = registry.get_info_result("two-repo");
+        REQUIRE(info);
+        CHECK(info->family == "two-repo");
+        CHECK(info->runtime == "stable_diffusion_cpp");
+        CHECK(info->capabilities == std::vector<std::string>{"image_generation", "image_editing"});
+        CHECK(info->vram_required_mb == 20000);
+        CHECK(info->artifacts.size() == 5);
+        CHECK_FALSE(info->artifacts.contains("llm_vision"));
+        CHECK(info->artifacts.at("guidance_scale") == "6.0");
+        CHECK(info->artifacts.at("backend") == "vulkan");
+        CHECK(std::filesystem::path(info->artifacts.at("vae")).filename() == "model_vae.safetensors");
+        CHECK(std::filesystem::path(info->artifacts.at("vae")).parent_path().filename() == "vae");
+        CHECK(std::filesystem::is_regular_file(info->artifacts.at("llm")));
+        diffusion_path = info->artifacts.at("diffusion_model");
+        CHECK(std::filesystem::is_regular_file(diffusion_path));
+        CHECK(store.installed()["two-repo"]["bundle"] == "two-repo-image");
+    }
+    {
+        model::ModelRegistry registry;
+        model::BackendCoordinator coordinator(registry);
+        gateway::ModelStore store(root, "", coordinator, std::make_unique<MultiRepoTransport>());
+        const auto info = registry.get_info_result("two-repo");
+        REQUIRE(info);
+        CHECK(info->artifacts.at("guidance_scale") == "6.0");
+        CHECK(info->artifacts.at("backend") == "vulkan");
+        CHECK(std::filesystem::equivalent(info->artifacts.at("diffusion_model"), diffusion_path));
+    }
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("Shipped model bundle recipes are valid", "[model-store][bundle]") {
+    model::ModelRegistry registry;
+    model::BackendCoordinator coordinator(registry);
+    const auto root = test_root();
+    {
+        gateway::ModelStore store(root, "", coordinator, std::make_unique<MultiRepoTransport>());
+        store.set_bundle_recipes(std::filesystem::path(INFERDECK_SOURCE_DIR) / "data" / "model-bundles.json");
+        const auto listed = store.bundles();
+        REQUIRE(listed);
+        const auto qwen = std::find_if(listed->begin(), listed->end(), [](const nlohmann::json& bundle) {
+            return bundle["id"] == "qwen-image-2.1-q8";
+        });
+        REQUIRE(qwen != listed->end());
+        CHECK((*qwen)["license"].get<std::string>().find("Qwen Research License") != std::string::npos);
+        CHECK((*qwen)["artifacts"]["guidance_scale"] == "6.0");
+        std::vector<std::string> keys;
+        for (const auto& component : (*qwen)["components"]) keys.push_back(component["key"]);
+        CHECK(keys == std::vector<std::string>{"diffusion_model", "vae", "llm", "llm_vision"});
+    }
+    std::filesystem::remove_all(root);
+}

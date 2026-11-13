@@ -321,6 +321,11 @@ void ModelStore::load_manifest() {
                 }
             }
             if (std::filesystem::is_directory(path, error) && info.artifacts.empty()) continue;
+            if (item.value().contains("settings") && item.value()["settings"].is_object()) {
+                for (const auto& [key, value] : item.value()["settings"].items()) {
+                    if (value.is_string()) info.artifacts.try_emplace(key, value.get<std::string>());
+                }
+            }
             info.vram_required_mb = item.value().value("vramRequiredMb", 0);
             if (!coordinator_.registry().has(info.name)) coordinator_.registry().register_model(info);
             installed_[item.key()] = item.value();
