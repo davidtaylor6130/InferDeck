@@ -70,9 +70,11 @@ Any other field is rejected with `unsupported_parameter`.
   with `invalid_input`. The supported models are text only.
 - There are no refusal answers.
 - Nothing is cached, so the cached token counts are always 0.
-- Limits are the model's, not OpenAI's: the whole rendered input must fit in
-  25,600 tokens and one question with its options in 2,048. Nothing is
-  truncated; an input over a limit fails with `context_length_exceeded`.
+- Limits are the model's, not OpenAI's. 0.8B v3: the whole rendered input
+  must fit in 25,600 tokens and one question with its options in 2,048.
+  2B v4: the whole rendered input must fit in 32,768 tokens, with no separate
+  question limit. Nothing is truncated; an input over a limit fails with
+  `context_length_exceeded`.
 - The route was added on 2026-11-12 from the OpenAI Decisions reference. It is
   not covered by the pinned SDK contract suites in
   [openai-compatibility.md](openai-compatibility.md), whose SDK versions
@@ -80,8 +82,13 @@ Any other field is rejected with `unsupported_parameter`.
 
 ## Model setup
 
-Weights: `chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF` (Apache-2.0). Download
-one GGUF and `readout_config.json` into the same folder.
+Two models are supported (Apache-2.0). For each, download one GGUF and
+`readout_config.json` into the same folder.
+
+| Model | Repository | Revision |
+|---|---|---|
+| 0.8B v3 | `chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF` | |
+| 2B v4 | `chaoliangUNSW/Jev-Style-2B-Decision-v4-GGUF` | `9111d5d232d21d52593c4c10f1e8cfa6561669f6` |
 
 ```yaml
 model_registry:
@@ -93,16 +100,29 @@ model_registry:
     gguf_path: "F:/InferDeck/models/decision/jev-style-0.8b-v3/Jev-Style-0.8B-Decision-v3-Q8_0.gguf"
     n_slots: 1
     vram_required_mb: 2000
+  - name: jev-style-2b
+    family: jev-style
+    runtime: jev_style
+    modality: decision
+    capabilities: [decisions]
+    gguf_path: "F:/InferDeck/models/decision/jev-style-2b-v4/Jev-Style-2B-Decision-v4-Q8_0.gguf"
+    n_slots: 1
+    vram_required_mb: 3000   # estimate, not measured
 ```
 
 `readout_config.json` is read from beside the GGUF. Set the `readout_config`
-artifact to use another path. The file names the answer tokens and the
-calibration temperatures; loading fails if the model's tokenizer does not
-produce those tokens.
+artifact to use another path. Its `format`, `template`, and `readout` fields
+choose the layout below; any other template fails the load. The file also
+names the answer tokens and the calibration temperatures. Loading fails if the
+model's tokenizer does not produce those tokens, and, for 2B v4, if the GGUF's
+`general.name` differs from the config's `model_name` (the 0.8B and 2B models
+share a tokenizer, so a mismatched GGUF would otherwise load and answer
+wrongly).
 
 ## How it works
 
-The model does not generate. The request is rendered as plain text:
+The model does not generate. 0.8B v3 (`macjev-render-v1`) renders the request
+as plain text:
 
 ```
 State:
@@ -117,10 +137,37 @@ Judge each option:
 <option 2> ->
 ```
 
-One forward pass reads the logits at each ` ->`. An option's score is
+One causal forward pass reads the logits at each ` ->`. An option's score is
 `logit(" yes") - logit(" no")` there, and the probabilities are
 `softmax(scores / T)` with the temperature fitted for that question type and
 option count.
+
+2B v4 (`macjev-render-v2-long-options`) drops the "Judge each option" section
+and puts the slot on each option line:
+
+```
+State:
+<input>
+
+Question [choice]: <instructions>
+Options:
+- <option 1> ->
+- <option 2> ->
+```
+
+If the question and its option lines exceed 2,048 tokens, it lists the options
+as `Option k: <text>` lines, then `Judge each numbered option in the complete
+catalogue above:` and one `Option k ->` line per option.
+
+The input is cut into blocks of at most 2,048 tokens: the state, then one
+question block (or catalogue blocks and rubric blocks). The model attends
+block-causally: each block sees all earlier tokens and all of itself. The
+runtime gets this from stock llama.cpp with a `NON_CAUSAL` context,
+`n_batch = n_ubatch = 2048`, and one `llama_decode` per block. The state is
+decoded once per request into sequence 0. Each question is decoded into
+sequence 1 on a copy of it. Probabilities are `softmax(scores / T)`, where `T`
+is the fitted temperature for the question type (`choice`, `noul` for
+predicates, `score`).
 
 ## Measured
 
@@ -142,5 +189,9 @@ VRAM use is about 1.5 GB.
   bit-level agreement on arbitrary text is untested.
 - One request at a time per model. Each question re-reads the input; shared
   input caching across questions is not implemented.
-- Only the 0.8B v3 layout (`macjev-render-v1`). The 2B v4 model uses a
-  different attention layout and is not supported yet.
+- **2B v4 is experimental.** Its renderer and block scorer are implemented
+  and unit-tested, and a previous review found them consistent with the
+  reference source. On 2026-11-16 the model loaded and returned HTTP 200 for a
+  set of test requests, but the answers, latency, and VRAM were not recorded
+  before that run was cut short, so its accuracy on the GPU is unverified.
+  Use 0.8B v3 for anything that matters until that check is repeated.

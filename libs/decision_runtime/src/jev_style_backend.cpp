@@ -1,6 +1,10 @@
+// Ports the Jev-Style scorers jev-score (0.8B v3) and jev-score-v2 (2B v4)
+// onto in-process libllama (chaoliangUNSW, Apache-2.0).
+
 #include "decision_runtime/jev_style.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -21,8 +25,20 @@ namespace {
 using foundation::ErrorCode;
 using json = nlohmann::json;
 
-/// <summary>Context size the reference scorer uses: the 25,600-token input limit plus headroom.</summary>
+/// <summary>Context size the reference scorers use: the largest input limit (25,600 or 32,768 tokens) fits.</summary>
 constexpr int context_tokens = 32768;
+
+/// <summary>Most verdict slots render v2 can put in one block: every slot line is at least 4 tokens.</summary>
+constexpr int v2_outputs_max = 512;
+
+/// <summary>Input layout and scoring protocol named by readout_config.json.</summary>
+enum class Layout
+{
+    /// <summary>macjev-render-v1: one causal decode per question (0.8B v3).</summary>
+    RenderV1,
+    /// <summary>macjev-render-v2-long-options: block-causal decodes on a shared state (2B v4).</summary>
+    RenderV2,
+};
 
 model::ModelInfo decision_info(model::ModelInfo info)
 {
@@ -36,9 +52,11 @@ model::ModelInfo decision_info(model::ModelInfo info)
 }
 
 /// <summary>
-/// Scores Jev-Style questions on one llama.cpp context. Every question is
-/// decoded from scratch with logits requested only at its verdict slots,
-/// which is the reference scorer's exact (unshared) path.
+/// Scores Jev-Style questions on one llama.cpp context. Render v1 decodes every
+/// question from scratch in one causal batch. Render v2 uses a NON_CAUSAL context
+/// with n_batch = n_ubatch = 2048 and one llama_decode per renderer block, which
+/// gives block-causal attention: the state blocks go into sequence 0 once per
+/// request, and each question is decoded into sequence 1 on a copy of it.
 /// </summary>
 class JevStyleBackend final : public model::FixedBackend, public model::IDecisionBackend
 {
@@ -82,21 +100,56 @@ public:
                     std::string("tokenizer does not match readout_config.json for \"") + text + "\"");
             }
         }
+        // The 0.8B and 2B GGUFs share a tokenizer, so only the name tells a wrong pairing apart.
+        if (layout_ == Layout::RenderV2)
+        {
+            std::array<char, 256> name{};
+            llama_model_meta_val_str(model_, "general.name", name.data(), name.size());
+            if (model_name_ != name.data())
+            {
+                release();
+                return foundation::Err<void>(
+                    ErrorCode::InvalidArgument,
+                    "GGUF general.name is \"" + std::string(name.data()) + "\" but readout_config.json is for \"" +
+                        model_name_ + "\"; other models give plausible but wrong probabilities");
+            }
+        }
         llama_context_params context_params = llama_context_default_params();
         context_params.n_ctx = context_tokens;
-        context_params.n_batch = context_tokens;
-        context_params.n_ubatch = 1024;
-        context_params.n_seq_max = 1;
-        context_params.n_outputs_max = 256;
         context_params.kv_unified = true;
         context_params.no_perf = true;
         context_params.n_threads = static_cast<int>(std::max(1U, std::thread::hardware_concurrency() / 2));
         context_params.n_threads_batch = context_params.n_threads;
+        if (layout_ == Layout::RenderV1)
+        {
+            context_params.n_batch = context_tokens;
+            context_params.n_ubatch = 1024;
+            context_params.n_seq_max = 1;
+            context_params.n_outputs_max = 256;
+        }
+        else
+        {
+            context_params.n_batch = static_cast<std::uint32_t>(render_v2_block_tokens);
+            context_params.n_ubatch = static_cast<std::uint32_t>(render_v2_block_tokens);
+            context_params.n_seq_max = 2;
+            context_params.n_outputs_max = v2_outputs_max;
+            context_params.attention_type = LLAMA_ATTENTION_TYPE_NON_CAUSAL;
+            // As the reference: flash attention auto on a GPU, off on the CPU fallback (precision).
+            context_params.flash_attn_type = model_params.n_gpu_layers > 0 && llama_supports_gpu_offload()
+                ? LLAMA_FLASH_ATTN_TYPE_AUTO : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        }
         context_ = llama_init_from_model(model_, context_params);
         if (!context_)
         {
             release();
             return foundation::Err<void>(ErrorCode::OutOfMemory, "decision context could not be created");
+        }
+        if (layout_ == Layout::RenderV2 &&
+            (llama_n_batch(context_) != render_v2_block_tokens || llama_n_ubatch(context_) != render_v2_block_tokens))
+        {
+            release();
+            return foundation::Err<void>(ErrorCode::Internal,
+                                         "decision context did not keep n_batch = n_ubatch = 2048");
         }
         set_loaded(true);
         return foundation::Ok();
@@ -125,8 +178,9 @@ public:
         std::vector<RenderedQuestion> rendered;
         for (const model::DecisionQuestion& question : request.questions)
         {
-            foundation::Result<RenderedQuestion> one =
-                render_question(encoder, slot_token_, request.input, question, limits_);
+            foundation::Result<RenderedQuestion> one = layout_ == Layout::RenderV1
+                ? render_question(encoder, slot_token_, request.input, question, limits_)
+                : render_question_v2(encoder, slot_token_, request.input, question, limits_.max_tokens);
             if (!one)
             {
                 return foundation::Err<model::DecisionResult>(one.error().code, one.error().message);
@@ -138,6 +192,14 @@ public:
             }
             rendered.push_back(std::move(*one));
         }
+        if (layout_ == Layout::RenderV2 && !rendered.empty())
+        {
+            const foundation::Result<void> state = decode_state(rendered.front());
+            if (!state)
+            {
+                return foundation::Err<model::DecisionResult>(state.error().code, state.error().message);
+            }
+        }
         model::DecisionResult result;
         for (std::size_t index = 0; index < rendered.size(); ++index)
         {
@@ -145,7 +207,8 @@ public:
             {
                 return foundation::Err<model::DecisionResult>(ErrorCode::Cancelled, "decision request cancelled");
             }
-            foundation::Result<std::vector<double>> scores = score(rendered[index]);
+            foundation::Result<std::vector<double>> scores =
+                layout_ == Layout::RenderV1 ? score(rendered[index]) : score_on_state(rendered[index]);
             if (!scores)
             {
                 return foundation::Err<model::DecisionResult>(scores.error().code, scores.error().message);
@@ -166,6 +229,10 @@ public:
     }
 
 private:
+    /// <summary>
+    /// Reads readout_config.json and selects the layout from its format,
+    /// template, and readout fields. Anything else fails the load.
+    /// </summary>
     foundation::Result<void> read_readout_config()
     {
         const auto configured = info_.artifacts.find("readout_config");
@@ -174,12 +241,31 @@ private:
             : std::filesystem::path(info_.gguf_path).parent_path() / "readout_config.json";
         std::ifstream file(path);
         const json config = json::parse(file, nullptr, false);
-        if (!config.is_object() || config.value("format", "") != "macjev-readout-v1" ||
-            config.value("template", "") != "macjev-render-v1" || config.value("readout", "") != "verdict")
+        if (!config.is_object())
+        {
+            return foundation::Err<void>(ErrorCode::InvalidArgument,
+                                         "readout config is missing or is not JSON: " + path.string());
+        }
+        const std::string format = config.value("format", "");
+        const std::string layout_name = config.value("template", "");
+        if (format == "macjev-readout-v1" && layout_name == "macjev-render-v1" &&
+            config.value("readout", "") == "verdict")
+        {
+            layout_ = Layout::RenderV1;
+        }
+        else if (format == "macjev-readout-v2" && layout_name == "macjev-render-v2-long-options" &&
+                 config.value("readout", "") == "verdict" && config.value("layout", "") == "sb" &&
+                 config.value("block_size", 0) == static_cast<int>(render_v2_block_tokens) &&
+                 config.value("total_context_limit", 0) == context_tokens)
+        {
+            layout_ = Layout::RenderV2;
+        }
+        else
         {
             return foundation::Err<void>(
                 ErrorCode::InvalidArgument,
-                "readout config is missing or is not macjev-readout-v1 / macjev-render-v1: " + path.string());
+                "unsupported decision template \"" + layout_name + "\" (format \"" + format +
+                    "\") in " + path.string() + "; supported: macjev-render-v1, macjev-render-v2-long-options");
         }
         try
         {
@@ -188,10 +274,26 @@ private:
             no_token_ = tokens.at("no").at("id").get<std::int32_t>();
             slot_token_ = tokens.at("verdict_slot").at("id").get<std::int32_t>();
             temperatures_ = config.at("temperatures");
+            model_name_ = config.value("model_name", "");
+            limits_ = {};
             if (config.contains("budgets"))
             {
                 limits_.max_tokens = config["budgets"].value("max_len", limits_.max_tokens);
                 limits_.head_tokens = config["budgets"].value("head_max", limits_.head_tokens);
+            }
+            if (layout_ == Layout::RenderV2)
+            {
+                limits_.max_tokens = std::min<std::size_t>(limits_.max_tokens, context_tokens);
+                for (const char* type : {"choice", "noul", "score"})
+                {
+                    const double value = temperatures_.at("by_qtype").at(type).get<double>();
+                    if (!std::isfinite(value) || value <= 0.0)
+                    {
+                        return foundation::Err<void>(ErrorCode::InvalidArgument,
+                                                     std::string("readout config temperature for ") + type +
+                                                         " must be finite and positive");
+                    }
+                }
             }
         }
         catch (const json::exception& error)
@@ -203,12 +305,19 @@ private:
     }
 
     /// <summary>
-    /// Fitted temperature for free-form typed questions ("typed" family) of
-    /// this kind and option count, or the global temperature when that group
-    /// was not fitted. This is the category the reference server applies.
+    /// Render v2: the fitted temperature of the question type
+    /// (temperatures.by_qtype), unclamped as the reference applies it.
+    /// Render v1: the temperature of free-form typed questions ("typed"
+    /// family) of this kind and option count, or the global temperature when
+    /// that group was not fitted, clamped to temperatures.clamp. Both are what
+    /// the reference runtimes apply.
     /// </summary>
     double temperature(model::DecisionKind kind, std::size_t option_count) const
     {
+        if (layout_ == Layout::RenderV2)
+        {
+            return temperatures_["by_qtype"][std::string(template_type(kind))].get<double>();
+        }
         const std::string group = "typed|" + std::string(template_type(kind)) + "|" +
                                   std::string(option_bucket(option_count));
         double value = temperatures_.value("global", 1.0);
@@ -230,41 +339,120 @@ private:
         return tokens;
     }
 
-    /// <summary>logit(" yes") - logit(" no") at every verdict slot of one rendered question.</summary>
-    foundation::Result<std::vector<double>> score(const RenderedQuestion& question)
+    /// <summary>
+    /// Decodes ids[block.start, block.stop) at those positions into one sequence
+    /// with one llama_decode, requesting logits only at <paramref name="slots"/>
+    /// inside the block, and appends logit(" yes") - logit(" no") for each of
+    /// them to <paramref name="scores"/> (read now: the next decode overwrites them).
+    /// </summary>
+    foundation::Result<void> decode(const std::vector<std::int32_t>& ids, TokenBlock block, llama_seq_id sequence,
+                                    const std::vector<std::size_t>& slots, std::vector<double>& scores)
     {
-        llama_memory_clear(llama_get_memory(context_), true);
-        const int count = static_cast<int>(question.ids.size());
+        const int count = static_cast<int>(block.stop - block.start);
         llama_batch batch = llama_batch_init(count, 0, 1);
         batch.n_tokens = count;
         for (int index = 0; index < count; ++index)
         {
-            batch.token[index] = question.ids[static_cast<std::size_t>(index)];
-            batch.pos[index] = index;
+            batch.token[index] = ids[block.start + static_cast<std::size_t>(index)];
+            batch.pos[index] = static_cast<llama_pos>(block.start) + index;
             batch.n_seq_id[index] = 1;
-            batch.seq_id[index][0] = 0;
+            batch.seq_id[index][0] = sequence;
             batch.logits[index] = 0;
         }
-        for (const std::size_t slot : question.slots)
+        std::vector<int> outputs;
+        for (const std::size_t slot : slots)
         {
-            batch.logits[slot] = 1;
+            if (slot >= block.start && slot < block.stop)
+            {
+                outputs.push_back(static_cast<int>(slot - block.start));
+                batch.logits[outputs.back()] = 1;
+            }
         }
         const int status = llama_decode(context_, batch);
         llama_batch_free(batch);
         if (status != 0)
         {
-            return foundation::Err<std::vector<double>>(
-                ErrorCode::Internal, "llama_decode failed with code " + std::to_string(status));
+            return foundation::Err<void>(ErrorCode::Internal,
+                                         "llama_decode failed with code " + std::to_string(status));
         }
-        std::vector<double> scores;
-        for (const std::size_t slot : question.slots)
+        for (const int output : outputs)
         {
-            const float* logits = llama_get_logits_ith(context_, static_cast<int>(slot));
+            const float* logits = llama_get_logits_ith(context_, output);
             if (!logits)
             {
-                return foundation::Err<std::vector<double>>(ErrorCode::Internal, "no logits at a verdict slot");
+                return foundation::Err<void>(ErrorCode::Internal, "no logits at a verdict slot");
             }
             scores.push_back(static_cast<double>(logits[yes_token_]) - static_cast<double>(logits[no_token_]));
+        }
+        return foundation::Ok();
+    }
+
+    /// <summary>Render v1: logit(" yes") - logit(" no") at every verdict slot, decoded from scratch.</summary>
+    foundation::Result<std::vector<double>> score(const RenderedQuestion& question)
+    {
+        llama_memory_clear(llama_get_memory(context_), true);
+        std::vector<double> scores;
+        const foundation::Result<void> decoded =
+            decode(question.ids, {0, question.ids.size()}, 0, question.slots, scores);
+        if (!decoded)
+        {
+            return foundation::Err<std::vector<double>>(decoded.error().code, decoded.error().message);
+        }
+        return foundation::Ok(std::move(scores));
+    }
+
+    /// <summary>
+    /// Render v2: clears the memory and decodes the state blocks into sequence 0,
+    /// one llama_decode per block. Every question of a request shares this state.
+    /// </summary>
+    foundation::Result<void> decode_state(const RenderedQuestion& question)
+    {
+        llama_memory_clear(llama_get_memory(context_), true);
+        std::vector<double> unused;
+        for (const TokenBlock& block : question.blocks)
+        {
+            if (block.stop > question.prefix_tokens)
+            {
+                break;
+            }
+            const foundation::Result<void> decoded = decode(question.ids, block, 0, {}, unused);
+            if (!decoded)
+            {
+                llama_memory_clear(llama_get_memory(context_), true);
+                return decoded;
+            }
+        }
+        return foundation::Ok();
+    }
+
+    /// <summary>
+    /// Render v2: copies the state (sequence 0) to sequence 1, decodes the
+    /// question blocks into it one llama_decode each, reads the slot scores,
+    /// and removes sequence 1 again.
+    /// </summary>
+    foundation::Result<std::vector<double>> score_on_state(const RenderedQuestion& question)
+    {
+        llama_memory_t memory = llama_get_memory(context_);
+        llama_memory_seq_rm(memory, 1, -1, -1);
+        llama_memory_seq_cp(memory, 0, 1, -1, -1);
+        std::vector<double> scores;
+        for (const TokenBlock& block : question.blocks)
+        {
+            if (block.start < question.prefix_tokens)
+            {
+                continue;
+            }
+            const foundation::Result<void> decoded = decode(question.ids, block, 1, question.slots, scores);
+            if (!decoded)
+            {
+                llama_memory_seq_rm(memory, 1, -1, -1);
+                return foundation::Err<std::vector<double>>(decoded.error().code, decoded.error().message);
+            }
+        }
+        llama_memory_seq_rm(memory, 1, -1, -1);
+        if (scores.size() != question.slots.size())
+        {
+            return foundation::Err<std::vector<double>>(ErrorCode::Internal, "a verdict slot was not decoded");
         }
         return foundation::Ok(std::move(scores));
     }
@@ -282,6 +470,8 @@ private:
     llama_model* model_{nullptr};
     llama_context* context_{nullptr};
     const llama_vocab* vocab_{nullptr};
+    Layout layout_{Layout::RenderV1};
+    std::string model_name_;
     std::int32_t yes_token_{-1};
     std::int32_t no_token_{-1};
     std::int32_t slot_token_{-1};
