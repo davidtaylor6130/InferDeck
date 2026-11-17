@@ -38,7 +38,7 @@ model::ModelInfo image_info(model::ModelInfo info) {
     return info;
 }
 
-std::mutex& generation_mutex = diffusion_runtime_mutex();
+auto& generation_mutex = diffusion_runtime_mutex();
 
 struct ProgressState {
     sd_ctx_t* context{};

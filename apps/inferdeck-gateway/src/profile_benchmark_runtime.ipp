@@ -1,49 +1,5 @@
-inferdeck::llama_wrapper::LlamaCppConfig make_llama_config(
-    const inferdeck::gateway::GatewayConfig& cfg,
-    const model::ModelInfo& info,
-    const inferdeck::optimize::ProfileCandidate* candidate = nullptr) {
-    inferdeck::llama_wrapper::LlamaCppConfig result;
-    result.kv_unified = info.kv_unified;
-    result.vram_safety_margin_mb = cfg.vram_safety_margin_mb;
-    result.n_batch = candidate
-        ? candidate->n_batch
-        : info.n_batch.value_or(cfg.n_batch);
-    result.n_ubatch = candidate
-        ? candidate->n_ubatch
-        : info.n_ubatch.value_or(cfg.n_ubatch);
-    result.use_mmap = cfg.use_mmap;
-    result.use_mlock = cfg.use_mlock;
-    result.n_gpu_layers =
-        info.n_gpu_layers.has_value() ? info.n_gpu_layers : cfg.n_gpu_layers;
-    result.flash_attn =
-        candidate ? candidate->flash_attention : cfg.flash_attn;
-    result.kv_offload = cfg.kv_offload;
-    result.op_offload = cfg.op_offload;
-    result.cache_type_k =
-        candidate
-            ? candidate->cache_type_k
-            : (info.cache_type_k.empty() ? cfg.cache_type_k : info.cache_type_k);
-    result.cache_type_v =
-        candidate
-            ? candidate->cache_type_v
-            : (info.cache_type_v.empty() ? cfg.cache_type_v : info.cache_type_v);
-    result.mtp_enabled = info.mtp_enabled;
-    result.mtp_draft_tokens = info.mtp_draft_tokens;
-    result.mtp_p_min = info.mtp_p_min;
-    result.mtp_max_active_requests = candidate
-        ? candidate->mtp_max_active_requests
-        : info.mtp_max_active_requests;
-    result.swa_full = cfg.swa_full;
-    result.truncate_prompt = cfg.truncate_prompt;
-    result.reasoning_format =
-        info.reasoning_format.empty() ? "auto" : info.reasoning_format;
-    result.sampling = info.sampling;
-    if (!info.chat_template_path.empty()) {
-        result.chat_template =
-            inferdeck::gateway::read_text_file(info.chat_template_path);
-    }
-    return result;
-}
+/// <summary>Backend factory of every active provider by runtime name; filled by install_gateway_providers.</summary>
+std::map<std::string, model::ModelRegistry::BackendFactory> g_runtime_factories;
 
 std::string normalized_answer(std::string text) {
     std::string normalized;
@@ -72,8 +28,22 @@ run_profile_benchmark_trial(
     info.context_size = candidate.context_per_slot;
     info.n_slots = candidate.slots;
     info.mtp_max_active_requests = candidate.mtp_max_active_requests;
-    auto runtime = std::make_unique<inferdeck::llama_wrapper::LlamaCppModel>(
-        info, make_llama_config(cfg, info, &candidate));
+    info.n_batch = candidate.n_batch;
+    info.n_ubatch = candidate.n_ubatch;
+    info.cache_type_k = candidate.cache_type_k;
+    info.cache_type_v = candidate.cache_type_v;
+    info.artifacts["flash_attn"] = candidate.flash_attention;
+    (void)cfg;
+    const auto factory = g_runtime_factories.find("llama_cpp");
+    std::unique_ptr<model::IBackend> created =
+        factory == g_runtime_factories.end() ? nullptr : factory->second(info);
+    auto* text = dynamic_cast<model::IModel*>(created.get());
+    if (!text) {
+        return foundation::Err<Metrics>(foundation::ErrorCode::Unavailable,
+                                        "profile benchmarks need an installed llama_cpp provider");
+    }
+    std::unique_ptr<model::IModel> runtime(text);
+    (void)created.release();
     const double baseline_vram = gpu.latest().vram_mb;
     std::atomic<double> peak_vram{baseline_vram};
     const auto sample_vram = [&] {
@@ -261,7 +231,7 @@ run_profile_benchmark_trial(
                         }
                     }
                     struct SlotGuard {
-                        inferdeck::llama_wrapper::LlamaCppModel* runtime;
+                        model::IModel* runtime;
                         std::counting_semaphore<>* available;
                         int slot{-1};
                         ~SlotGuard() {

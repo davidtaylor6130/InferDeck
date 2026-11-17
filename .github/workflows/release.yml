@@ -145,10 +145,14 @@ jobs:
           Copy-Item config\templates\* dist\config\templates\
           Copy-Item data\pricing.json dist\data\
 
-          # llama.cpp + ggml DLLs built from source (live alongside the exe)
+          # vcpkg DLLs the exe imports; every runtime is a provider DLL in providers\
           Get-ChildItem build\bin\Release\*.dll |
             Where-Object Name -NotIn @('fmtd.dll', 'spdlogd.dll') |
             Copy-Item -Destination dist\
+          Copy-Item -Recurse build\bin\Release\providers dist\
+          Get-ChildItem dist\providers\*.dll |
+            Where-Object Name -In @('fmtd.dll', 'spdlogd.dll') |
+            Remove-Item
 
           # vcpkg runtime DLLs (x64-windows is a dynamic triplet) - already
           # included above since vcpkg copies them to bin\Release\ on Windows,
@@ -158,8 +162,11 @@ jobs:
             Copy-Item "$vcpkgBin\*.dll" dist\ -ErrorAction SilentlyContinue
           }
 
-          foreach ($runtimeDll in @('sherpa-onnx-c-api.dll', 'onnxruntime.dll', 'onnxruntime_providers_shared.dll')) {
-            if (!(Test-Path "dist\$runtimeDll" -PathType Leaf)) {
+          foreach ($runtimeDll in @('llama_cpp.provider.dll', 'jev_style.provider.dll', 'stable_diffusion_cpp.provider.dll',
+                                    'ltx_video_cpp.provider.dll', 'ace_step_cpp.provider.dll', 'whisper_cpp.provider.dll',
+                                    'sherpa_onnx.provider.dll', 'windows_sapi.provider.dll',
+                                    'sherpa-onnx-c-api.dll', 'onnxruntime.dll', 'onnxruntime_providers_shared.dll')) {
+            if (!(Test-Path "dist\providers\$runtimeDll" -PathType Leaf)) {
               throw "Required native speech runtime is missing from the package: $runtimeDll"
             }
           }

@@ -16,9 +16,11 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -55,17 +57,10 @@
 #include "gateway/shutdown_state.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "httplib.h"
-#include "llama.h"
-#include "llama_cpp_wrapper/llama_cpp_model.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
 #include "model/provider.hpp"
-#include "native_runtimes/runtime_factories.hpp"
-#include "decision_runtime/jev_style.hpp"
 #include "provider/plugin_provider.hpp"
-#ifdef INFERDECK_VLLM_RADIANCE_ENABLE
-#include "vllm_radiance_wrapper/vllm_radiance_model.hpp"
-#endif
 #include "observability/gpu_telemetry.hpp"
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
@@ -89,7 +84,7 @@ constexpr int runtime_reload_result = 75;
 #include "process_runtime.ipp"
 #include "dashboard_static.ipp"
 #include "profile_benchmark_runtime.ipp"
-#include "builtin_providers.ipp"
+#include "provider_runtime.ipp"
 #include "media_control_routes.ipp"
 #include "decision_routes.ipp"
 int run_gateway(const fs::path& config_path) {

@@ -1,78 +1,11 @@
-/// <summary>
-/// Describes every runtime compiled into the gateway. This is the only place
-/// the gateway names a built-in provider type; everything downstream sees
-/// <see cref="model::ProviderDescriptor"/> and the backend interfaces.
-/// Plugin providers (docs/providers.md) are appended after these by the caller.
-/// </summary>
-std::vector<model::ProviderDescriptor> builtin_providers(const inferdeck::gateway::GatewayConfig& cfg)
-{
-    const model::RuntimeContractRegistry contracts = model::standard_runtime_contracts();
-    std::vector<model::ProviderDescriptor> providers;
-
-    model::ProviderDescriptor llama{*contracts.find("llama_cpp")};
-    llama.initialize = [](const std::vector<model::ModelInfo>&) -> foundation::Result<void>
-    {
-        static std::once_flag initialized;
-        std::call_once(initialized, []
-        {
-            llama_backend_init();
-            if (const char* system_info = llama_print_system_info())
-            {
-                foundation::LOG_INFO("llama_system_info", "{}", system_info);
-            }
-        });
-        return foundation::Ok();
-    };
-    llama.factory = [cfg](const model::ModelInfo& info) -> std::unique_ptr<model::IBackend>
-    {
-        return std::make_unique<inferdeck::llama_wrapper::LlamaCppModel>(info, make_llama_config(cfg, info));
-    };
-    providers.push_back(std::move(llama));
-
-    model::ProviderDescriptor radiance{*contracts.find("vllm_radiance")};
-#ifdef INFERDECK_VLLM_RADIANCE_ENABLE
-    radiance.initialize = [](const std::vector<model::ModelInfo>& models) -> foundation::Result<void>
-    {
-        const auto configured = std::find_if(models.begin(), models.end(), [](const model::ModelInfo& info)
-        {
-            return info.runtime == "vllm_radiance";
-        });
-        if (configured == models.end())
-        {
-            return foundation::Ok();
-        }
-        const auto python_root = configured->artifacts.find("python_root");
-        if (python_root == configured->artifacts.end())
-        {
-            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
-                                         "model " + configured->name + " has no python_root artifact");
-        }
-        return inferdeck::vllm_radiance_wrapper::initialize_python_runtime(python_root->second);
-    };
-    radiance.factory = [](const model::ModelInfo& info) -> std::unique_ptr<model::IBackend>
-    {
-        return std::make_unique<inferdeck::vllm_radiance_wrapper::VllmRadianceModel>(info);
-    };
-#endif
-    providers.push_back(std::move(radiance));
-
-    // Shares the llama backend that the llama_cpp provider above initialises.
-    providers.push_back({*contracts.find("jev_style"), inferdeck::decision_runtime::make_jev_style_backend});
-
-    for (model::ProviderDescriptor& native : inferdeck::native_runtimes::providers())
-    {
-        providers.push_back(std::move(native));
-    }
-    return providers;
-}
-
 /// <summary>Provider status served by GET /api/inferdeck/v1/providers; rebuilt on every gateway start.</summary>
 nlohmann::json g_provider_report = nlohmann::json::object();
 
 /// <summary>
-/// Registers built-in providers, then plugin providers so a plugin can
-/// replace a built-in runtime of the same name, and records the outcome for
-/// the providers endpoint. Called once per gateway start.
+/// Installs the provider DLLs loaded at process start. The gateway links no
+/// runtime: every runtime, for every modality, is a *.provider.dll (see
+/// docs/providers.md). Standard runtimes without a DLL are reported as
+/// "not_installed". Called once per gateway start.
 /// </summary>
 void install_gateway_providers(const inferdeck::gateway::GatewayConfig& cfg,
                                model::ModelRegistry& registry)
@@ -92,10 +25,11 @@ void install_gateway_providers(const inferdeck::gateway::GatewayConfig& cfg,
         gateway["n_gpu_layers"] = *cfg.n_gpu_layers;
     }
     inferdeck::provider::set_plugin_host_settings(gateway.dump());
-    std::vector<model::ProviderDescriptor> providers = builtin_providers(cfg);
-    providers.insert(providers.end(), g_plugins.providers.begin(), g_plugins.providers.end());
+    const std::vector<model::ProviderStatus> statuses =
+        model::install_providers(g_plugins.providers, registry, cfg.models);
+    g_runtime_factories.clear();
     nlohmann::json listed = nlohmann::json::array();
-    for (const model::ProviderStatus& status : model::install_providers(providers, registry, cfg.models))
+    const auto list = [&listed](const model::ProviderStatus& status)
     {
         nlohmann::json modalities = nlohmann::json::object();
         for (const auto& [modality, capabilities] : status.contract.modality_capabilities)
@@ -107,6 +41,27 @@ void install_gateway_providers(const inferdeck::gateway::GatewayConfig& cfg,
         listed.push_back({{"runtime", status.runtime}, {"origin", status.origin},
                           {"version", status.version}, {"state", status.state},
                           {"error", status.error}, {"modalities", std::move(modalities)}});
+    };
+    std::set<std::string> installed;
+    for (std::size_t index = 0; index < statuses.size(); ++index)
+    {
+        list(statuses[index]);
+        installed.insert(statuses[index].runtime);
+        if (statuses[index].state == "active")
+        {
+            g_runtime_factories[statuses[index].runtime] = g_plugins.providers[index].factory;
+        }
+    }
+    for (const std::string runtime : {"llama_cpp", "vllm_radiance", "jev_style", "stable_diffusion_cpp",
+                                      "ace_step_cpp", "ltx_video_cpp", "whisper_cpp", "sherpa_onnx",
+                                      "windows_sapi"})
+    {
+        const model::RuntimeContract* contract = model::runtime_contracts().find(runtime);
+        if (!installed.contains(runtime) && contract)
+        {
+            list({runtime, "", "", "not_installed", runtime + ".provider.dll is not in the providers folder",
+                  *contract});
+        }
     }
     g_provider_report = {{"abi_version", 2}, {"abi_versions", {1, 2}}, {"providers", std::move(listed)},
                          {"rejected_plugins", g_plugins.rejected}};

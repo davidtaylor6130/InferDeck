@@ -31,13 +31,17 @@ foreach(target IN ITEMS provider_codec provider provider_sdk)
 endforeach()
 
 # inferdeck_add_provider(<target> RUNTIME <name> SOURCES ... [LIBRARIES ...])
-# Builds <name>.provider.dll from SDK sources; the result drops into providers/.
+# Builds <name>.provider.dll from SDK sources into bin/<config>/providers, next to the gateway.
 function(inferdeck_add_provider target)
     cmake_parse_arguments(ARG "" "RUNTIME;OUTPUT_DIRECTORY" "SOURCES;LIBRARIES" ${ARGN})
     if(NOT ARG_OUTPUT_DIRECTORY)
-        set(ARG_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/providers")
+        set(ARG_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>/providers")
+        set(ARG_INSTALL ON)
     endif()
     add_library(${target} MODULE ${ARG_SOURCES})
+    if(ARG_INSTALL)
+        install(TARGETS ${target} LIBRARY DESTINATION providers RUNTIME DESTINATION providers)
+    endif()
     target_link_libraries(${target} PRIVATE provider_sdk ${ARG_LIBRARIES})
     set_target_properties(${target} PROPERTIES
         PREFIX ""

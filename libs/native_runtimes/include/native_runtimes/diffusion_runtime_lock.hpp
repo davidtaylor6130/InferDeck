@@ -1,7 +1,18 @@
 #pragma once
 
 #include <mutex>
+#include <string>
 #include <string_view>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include <stable-diffusion.h>
 
@@ -9,10 +20,38 @@
 
 namespace inferdeck::native_runtimes {
 
+#ifdef _WIN32
+/// <summary>
+/// One lock per process shared by every copy of this code: stable-diffusion.cpp
+/// and LTX ship as separate provider DLLs, each with its own statics, but must
+/// still take turns on the GPU. A named kernel mutex keyed by process id is
+/// the same object in every module.
+/// </summary>
+class DiffusionRuntimeMutex {
+public:
+    DiffusionRuntimeMutex()
+        : handle_(CreateMutexW(nullptr, FALSE,
+                               (L"Local\\InferDeck.diffusion." + std::to_wstring(GetCurrentProcessId())).c_str())) {}
+    DiffusionRuntimeMutex(const DiffusionRuntimeMutex&) = delete;
+    DiffusionRuntimeMutex& operator=(const DiffusionRuntimeMutex&) = delete;
+    ~DiffusionRuntimeMutex() { if (handle_) CloseHandle(handle_); }
+    void lock() { if (handle_) WaitForSingleObject(handle_, INFINITE); }
+    void unlock() { if (handle_) ReleaseMutex(handle_); }
+
+private:
+    HANDLE handle_;
+};
+
+inline DiffusionRuntimeMutex& diffusion_runtime_mutex() {
+    static DiffusionRuntimeMutex mutex;
+    return mutex;
+}
+#else
 inline std::mutex& diffusion_runtime_mutex() {
     static std::mutex mutex;
     return mutex;
 }
+#endif
 
 /// <summary>
 /// Routes stable-diffusion.cpp messages into the gateway log. Warnings and

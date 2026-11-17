@@ -145,6 +145,9 @@ endif()
 
 endif()
 
+# The gateway links no runtime: every runtime is a provider DLL with its own
+# static llama.cpp/ggml (libs/provider/runtimes, docs/providers.md).
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Runtimes link ggml statically into their provider DLLs" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_AVX2 ON CACHE BOOL "" FORCE)
 set(GGML_AVX512 OFF CACHE BOOL "" FORCE)
@@ -206,8 +209,8 @@ add_subdirectory(libs/decision_runtime)
 if(INFERDECK_VLLM_RADIANCE_ENABLE)
     add_subdirectory(libs/vllm_radiance_wrapper)
 endif()
-add_subdirectory(libs/provider/runtimes)
 add_subdirectory(apps/inferdeck-gateway)
+add_subdirectory(libs/provider/runtimes)
 add_subdirectory(apps/model-tester)
 
 install(TARGETS inferdeck-gateway

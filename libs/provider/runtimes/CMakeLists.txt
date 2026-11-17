@@ -1,17 +1,12 @@
-# InferDeck's own runtimes packaged as v2 provider DLLs (docs/providers.md).
+# Every InferDeck runtime is a v2 provider DLL (docs/providers.md); the gateway
+# links none of them. Each DLL carries a private static llama.cpp/ggml (the
+# root CMakeLists forces BUILD_SHARED_LIBS=OFF) and lands in
+# bin/<config>/providers next to inferdeck-gateway.exe, together with the
+# non-ggml libraries it imports (CPython, sherpa-onnx, ONNX Runtime, LAME).
 #
-# Main (shared-ggml) build:
-#   - windows_sapi and vllm_radiance, which do not use ggml, build as real DLLs
-#     into ${CMAKE_BINARY_DIR}/providers.
-#   - With INFERDECK_BUILD_TESTS, every ggml runtime also builds against a stub
-#     of its C API into ${CMAKE_BINARY_DIR}/provider-stubs, and ctest runs
-#     inferdeck-provider-check on each DLL. No GPU is touched.
-# Static-ggml build (INFERDECK_BUILD_RUNTIME_PROVIDERS=ON, BUILD_SHARED_LIBS=OFF):
-#   - every ggml runtime builds as a real DLL with a private, static
-#     llama.cpp/ggml inside, so it can be upgraded without touching the gateway.
-
-option(INFERDECK_BUILD_RUNTIME_PROVIDERS
-       "Build the ggml runtimes as provider DLLs with static ggml (needs BUILD_SHARED_LIBS=OFF)" OFF)
+# With INFERDECK_BUILD_TESTS, every ggml runtime is also built against a stub
+# of its native C API into ${CMAKE_BINARY_DIR}/provider-stubs, and ctest runs
+# inferdeck-provider-check on each DLL without a GPU.
 
 set(_native "${CMAKE_SOURCE_DIR}/libs/native_runtimes")
 
@@ -39,37 +34,54 @@ function(inferdeck_provider_check_test name target)
     endif()
 endfunction()
 
-if(INFERDECK_BUILD_RUNTIME_PROVIDERS)
-    if(BUILD_SHARED_LIBS)
-        message(FATAL_ERROR
-            "INFERDECK_BUILD_RUNTIME_PROVIDERS needs BUILD_SHARED_LIBS=OFF so llama.cpp/ggml is linked "
-            "statically into each provider DLL. Windows resolves a second ggml.dll to the gateway's copy.")
+if(BUILD_SHARED_LIBS)
+    message(FATAL_ERROR
+        "Provider DLLs need BUILD_SHARED_LIBS=OFF so llama.cpp/ggml is linked statically into each one. "
+        "Windows resolves a second ggml.dll to the copy already loaded.")
+endif()
+
+set(_runtime_targets "")
+
+inferdeck_add_provider(inferdeck-provider-llama_cpp RUNTIME llama_cpp
+    SOURCES llama_cpp_provider.cpp LIBRARIES llama_cpp_wrapper)
+target_compile_definitions(inferdeck-provider-llama_cpp PRIVATE INFERDECK_PROVIDER_VERSION="${PROJECT_VERSION}")
+list(APPEND _runtime_targets inferdeck-provider-llama_cpp)
+inferdeck_add_provider(inferdeck-provider-jev_style RUNTIME jev_style
+    SOURCES jev_style_provider.cpp LIBRARIES decision_runtime llama)
+target_include_directories(inferdeck-provider-jev_style PRIVATE "${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/include")
+target_compile_definitions(inferdeck-provider-jev_style PRIVATE INFERDECK_PROVIDER_VERSION="${PROJECT_VERSION}")
+list(APPEND _runtime_targets inferdeck-provider-jev_style)
+
+get_target_property(_defines native_runtimes INTERFACE_COMPILE_DEFINITIONS)
+foreach(entry IN ITEMS
+        "stable_diffusion_cpp;make_stable_diffusion_backend;INFERDECK_HAS_STABLE_DIFFUSION_CPP"
+        "ltx_video_cpp;make_ltx_video_backend;INFERDECK_HAS_LTX_VIDEO_CPP"
+        "ace_step_cpp;make_ace_step_backend;INFERDECK_HAS_ACESTEP_CPP"
+        "whisper_cpp;make_whisper_backend;INFERDECK_HAS_WHISPER_CPP")
+    list(GET entry 0 runtime)
+    list(GET entry 1 factory)
+    list(GET entry 2 marker)
+    if("${_defines}" MATCHES "${marker}")
+        inferdeck_native_provider(inferdeck-provider-${runtime} ${runtime} ${factory} LIBRARIES native_runtimes)
+        list(APPEND _runtime_targets inferdeck-provider-${runtime})
     endif()
-    set(_runtime_targets "")
-    inferdeck_add_provider(inferdeck-provider-llama_cpp RUNTIME llama_cpp
-        SOURCES llama_cpp_provider.cpp LIBRARIES llama_cpp_wrapper)
-    target_compile_definitions(inferdeck-provider-llama_cpp PRIVATE INFERDECK_PROVIDER_VERSION="${PROJECT_VERSION}")
-    list(APPEND _runtime_targets inferdeck-provider-llama_cpp)
-    inferdeck_add_provider(inferdeck-provider-jev_style RUNTIME jev_style
-        SOURCES jev_style_provider.cpp LIBRARIES decision_runtime llama)
-    target_include_directories(inferdeck-provider-jev_style PRIVATE "${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/include")
-    target_compile_definitions(inferdeck-provider-jev_style PRIVATE INFERDECK_PROVIDER_VERSION="${PROJECT_VERSION}")
-    list(APPEND _runtime_targets inferdeck-provider-jev_style)
-    get_target_property(_defines native_runtimes INTERFACE_COMPILE_DEFINITIONS)
-    foreach(entry IN ITEMS
-            "stable_diffusion_cpp;make_stable_diffusion_backend;INFERDECK_HAS_STABLE_DIFFUSION_CPP"
-            "ltx_video_cpp;make_ltx_video_backend;INFERDECK_HAS_LTX_VIDEO_CPP"
-            "ace_step_cpp;make_ace_step_backend;INFERDECK_HAS_ACESTEP_CPP"
-            "whisper_cpp;make_whisper_backend;INFERDECK_HAS_WHISPER_CPP")
-        list(GET entry 0 runtime)
-        list(GET entry 1 factory)
-        list(GET entry 2 marker)
-        if("${_defines}" MATCHES "${marker}")
-            inferdeck_native_provider(inferdeck-provider-${runtime} ${runtime} ${factory} LIBRARIES native_runtimes)
-            list(APPEND _runtime_targets inferdeck-provider-${runtime})
-        endif()
-    endforeach()
-    add_custom_target(inferdeck-runtime-providers DEPENDS ${_runtime_targets})
+endforeach()
+
+if("${_defines}" MATCHES "INFERDECK_HAS_SHERPA_ONNX")
+    inferdeck_add_provider(inferdeck-provider-sherpa_onnx RUNTIME sherpa_onnx
+        SOURCES sherpa_onnx_provider.cpp LIBRARIES native_runtimes)
+    target_compile_definitions(inferdeck-provider-sherpa_onnx PRIVATE INFERDECK_PROVIDER_VERSION="${PROJECT_VERSION}")
+    set(_sherpa_runtime
+        "${INFERDECK_SHERPA_ONNX_RUNTIME_DIR}/sherpa-onnx-c-api.dll"
+        "${INFERDECK_SHERPA_ONNX_RUNTIME_DIR}/onnxruntime.dll"
+        "${INFERDECK_SHERPA_ONNX_RUNTIME_DIR}/onnxruntime_providers_shared.dll"
+        "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/libmp3lame.DLL")
+    add_custom_command(TARGET inferdeck-provider-sherpa_onnx POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_sherpa_runtime}
+                "$<TARGET_FILE_DIR:inferdeck-provider-sherpa_onnx>"
+        COMMENT "Copying sherpa-onnx runtime libraries next to the provider")
+    install(FILES ${_sherpa_runtime} DESTINATION providers)
+    list(APPEND _runtime_targets inferdeck-provider-sherpa_onnx)
 endif()
 
 if(WIN32)
@@ -78,17 +90,27 @@ if(WIN32)
         LIBRARIES sapi ole32 windowscodecs mfplat mfreadwrite mfuuid)
     target_compile_definitions(inferdeck-provider-windows_sapi PRIVATE INFERDECK_HAS_WINDOWS_SAPI=1)
     inferdeck_provider_check_test(provider_dll_windows_sapi inferdeck-provider-windows_sapi)
+    list(APPEND _runtime_targets inferdeck-provider-windows_sapi)
 endif()
 
 if(TARGET vllm_radiance_wrapper)
     inferdeck_add_provider(inferdeck-provider-vllm_radiance RUNTIME vllm_radiance
         SOURCES vllm_radiance_provider.cpp LIBRARIES vllm_radiance_wrapper)
     target_compile_definitions(inferdeck-provider-vllm_radiance PRIVATE INFERDECK_PROVIDER_VERSION="${PROJECT_VERSION}")
+    add_custom_command(TARGET inferdeck-provider-vllm_radiance POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${INFERDECK_PYTHON312_ROOT}/python312.dll"
+                "$<TARGET_FILE_DIR:inferdeck-provider-vllm_radiance>"
+        COMMENT "Copying CPython next to the Radiance provider")
     inferdeck_provider_check_test(provider_dll_vllm_radiance inferdeck-provider-vllm_radiance --no-load
         --artifact python_root=${INFERDECK_PYTHON312_ROOT})
+    list(APPEND _runtime_targets inferdeck-provider-vllm_radiance)
 endif()
 
-if(NOT INFERDECK_BUILD_TESTS OR INFERDECK_BUILD_RUNTIME_PROVIDERS)
+# Building the gateway builds every runtime DLL beside it.
+add_custom_target(inferdeck-runtime-providers DEPENDS ${_runtime_targets})
+add_dependencies(inferdeck-gateway inferdeck-runtime-providers)
+
+if(NOT INFERDECK_BUILD_TESTS)
     return()
 endif()
 
