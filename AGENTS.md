@@ -34,8 +34,9 @@ libs/gateway/                 HTTP routes (routes.cpp), dashboard /api routes
                               SwapTracker, auth, CORS, metrics builder
 libs/observability/           GPU telemetry (PDH/DXGI), Metrics, SQLite StatsDb
 libs/optimize/                In-house search (random + greedy) for inferdeck-bench
-libs/provider/                Provider plugin C ABI (provider_abi.h), loader/adapter,
-                              echo reference provider, inferdeck-provider-check
+libs/provider/                Provider C ABI v1/v2 (provider_abi.h), shared codec, C++ SDK,
+                              loader/adapter, echo examples, inferdeck-provider-check,
+                              runtimes/ (InferDeck runtimes packaged as provider DLLs)
 libs/decision_runtime/        Jev-Style decision models (POST /v1/decisions)
 libs/third_party/llama.cpp    Vendored, Vulkan build (gitignored — cloned, not committed)
 
@@ -183,17 +184,23 @@ Concurrency invariants:
 
 ## Providers
 
-Read `docs/providers.md` before adding or swapping a runtime. Every runtime
-is a `model::ProviderDescriptor`. Built-ins are listed only in
-`apps/inferdeck-gateway/src/builtin_providers.ipp`; plugin libraries in
-`<exe dir>/providers/` are loaded in-process at startup through the C ABI in
-`libs/provider/include/inferdeck/provider_abi.h`. A model selects its provider
-with `runtime:`. Do not name a concrete provider type anywhere else in the
-gateway. `GET /api/inferdeck/v1/providers` reports what loaded and why a
-plugin was rejected; `inferdeck-provider-check <library>` validates a plugin
-before install. To bump a vendored runtime, follow "Upgrading a built-in
-runtime" in `docs/providers.md`: unit tests cannot see a ggml ABI mismatch,
-so one real GPU request per modality is mandatory.
+Read `docs/providers.md` before adding, upgrading, or swapping a runtime; it
+has copy-paste recipes. Every runtime is a `model::ProviderDescriptor`.
+Built-ins are listed only in `apps/inferdeck-gateway/src/builtin_providers.ipp`.
+Provider DLLs named `<runtime>.provider.dll` in `<exe dir>/providers/` load
+in-process at startup through the C ABI in
+`libs/provider/include/inferdeck/provider_abi.h` (v2 mirrors every
+`IBackend`/`IModel`/media virtual; v1 still loads). A DLL with a built-in's
+runtime name replaces it; deleting the DLL rolls back. Wrap a C++ backend with
+the SDK (`provider/sdk.hpp`, `INFERDECK_PROVIDER_SDK`); the JSON wire format
+lives only in `libs/provider/src/codec.cpp`. A ggml runtime DLL must link ggml
+statically (`-DBUILD_SHARED_LIBS=OFF -DINFERDECK_BUILD_RUNTIME_PROVIDERS=ON` in
+a second build dir), because Windows reuses the gateway's already-loaded
+`ggml.dll`. Status queries (`query`, slots, `request_cancel`) are called under
+the coordinator's global lock and must never block. Validate every DLL with
+`inferdeck-provider-check`; `GET /api/inferdeck/v1/providers` reports what
+loaded. Unit tests stub native libraries and cannot see a ggml ABI mismatch,
+so one real GPU request per modality is mandatory after an upgrade.
 
 ## Design rules learned the hard way (do not regress)
 
