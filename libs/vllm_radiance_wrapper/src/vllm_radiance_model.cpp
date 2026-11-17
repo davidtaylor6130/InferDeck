@@ -1,4 +1,5 @@
 #include "vllm_radiance_wrapper/vllm_radiance_model.hpp"
+#include "foundation/logging.hpp"
 
 #include <Python.h>
 #ifndef NOMINMAX
@@ -11,6 +12,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <condition_variable>
 #include <mutex>
 #include <map>
@@ -23,6 +25,36 @@ namespace inferdeck::vllm_radiance_wrapper {
 namespace {
 
 std::mutex g_python_interpreter_mutex;
+
+class LifecycleWatchdog {
+public:
+    LifecycleWatchdog(const char* stage, std::chrono::seconds limit)
+        : thread_([this, stage, limit] {
+              std::unique_lock lock(mutex_);
+              if (cv_.wait_for(lock, limit, [this] { return done_; })) return;
+              foundation::LOG_FATAL("radiance_lifecycle_hung",
+                  "stage={} limit_s={} exiting so the service manager restarts a clean process",
+                  stage, limit.count());
+              foundation::Logger::instance().shutdown();
+              std::quick_exit(3);
+          }) {}
+    ~LifecycleWatchdog() {
+        {
+            std::lock_guard lock(mutex_);
+            done_ = true;
+        }
+        cv_.notify_all();
+        thread_.join();
+    }
+    LifecycleWatchdog(const LifecycleWatchdog&) = delete;
+    LifecycleWatchdog& operator=(const LifecycleWatchdog&) = delete;
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool done_{false};
+    std::thread thread_;
+};
 
 foundation::Result<void> fail(const std::string& message) {
     return foundation::Err<void>(foundation::ErrorCode::Unavailable, message);
@@ -294,7 +326,11 @@ foundation::Result<void> VllmRadianceModel::load()
         set_owned(config.get(), "context_size", owned(PyLong_FromLong(state_->info.context_size)));
         set_owned(config.get(), "n_slots", owned(PyLong_FromLong(state_->info.n_slots)));
         set_owned(config.get(), "min_slots", owned(PyLong_FromLong(state_->info.min_slots)));
-        PyPtr created = owned(PyObject_CallMethod(module.get(), "create", "O", config.get()));
+        PyPtr created(nullptr, &Py_DecRef);
+        {
+            LifecycleWatchdog watchdog("load", std::chrono::seconds{1200});
+            created = owned(PyObject_CallMethod(module.get(), "create", "O", config.get()));
+        }
         if (!created) return fail(python_error());
         std::lock_guard lock(state_->mutex);
         state_->module = module.release();
@@ -349,6 +385,7 @@ foundation::Result<void> VllmRadianceModel::unload(const model::LifecycleControl
     lock.unlock();
     std::string error;
     {
+        LifecycleWatchdog watchdog("unload", std::chrono::seconds{180});
         GIL gil;
         if (state_->engine)
         {
