@@ -941,3 +941,55 @@ model_registry:
     CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: automatic\n"));
     CHECK_FALSE(validate_config_text(prefix + "      prefill_attention: ''\n"));
 }
+
+TEST_CASE("DFlash speculative decoding requires an existing draft model",
+          "[config][dflash]") {
+    const auto draft = std::filesystem::temp_directory_path() / "inferdeck-dflash-draft.gguf";
+    { std::ofstream output(draft); output << "GGUF"; }
+    const std::string draft_path = draft.generic_string();
+    const std::string prefix = R"(
+model_registry:
+  - name: dflash-model
+    runtime: llama_cpp
+    modality: text
+    capabilities: [chat_completions, responses]
+    gguf_path: C:/models/target.gguf
+    n_slots: 2
+    speculative:
+)";
+    CHECK(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path + "\n"));
+    CHECK(validate_config_text(prefix + "      type: dflash\n      draft_model: " + draft_path +
+                               "\n      draft_tokens: 16\n      p_min: 0.2\n      max_active_requests: 2\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: C:/missing/draft.gguf\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path +
+                                     "\n      draft_tokens: 17\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path +
+                                     "\n      draft_tokens: 0\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      type: mtp\n      draft_model: " + draft_path + "\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      type: dspark\n      draft_model: " + draft_path + "\n"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: radiance-dflash
+    runtime: vllm_radiance
+    modality: text
+    capabilities: [chat_completions, responses]
+    artifacts:
+      model: C:/models/qwen
+    speculative:
+      type: dflash2
+      draft_model: )" + draft_path + "\n"));
+
+    const auto path = std::filesystem::temp_directory_path() / "inferdeck-dflash-config.yml";
+    { std::ofstream output(path); output << prefix << "      type: dflash2\n      draft_model: " << draft_path << "\n"; }
+    const auto config = load_config(path);
+    REQUIRE(config.models.size() == 1);
+    const auto& model = config.models.front();
+    CHECK(model.speculative_type == "dflash2");
+    CHECK(model.draft_model_path == draft_path);
+    CHECK(model.mtp_draft_tokens == 7);
+    CHECK_FALSE(model.mtp_enabled);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    std::filesystem::remove(draft, error);
+}

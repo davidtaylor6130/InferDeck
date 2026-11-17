@@ -116,6 +116,8 @@ struct ModelInfo {
     int mtp_draft_tokens{2};
     float mtp_p_min{0.0f};
     int mtp_max_active_requests{1};
+    std::string speculative_type{};
+    std::string draft_model_path{};
     bool has_vision{false};
     std::string reasoning_format{};
     std::string chat_template_path{};

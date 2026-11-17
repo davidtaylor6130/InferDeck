@@ -96,7 +96,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ModelInfo, name, family, runtime
     continuation_grace_ms, request_queue_timeout_seconds, vram_required_mb, vram_fixed_mb,
     vram_per_slot_mb, context_size, default_max_output_tokens, kv_unified, context_pool_size,
     context_pool_auto, concurrency_auto, n_batch, n_ubatch, cache_type_k, cache_type_v, n_gpu_layers,
-    mtp_enabled, mtp_draft_tokens, mtp_p_min, mtp_max_active_requests, has_vision, reasoning_format,
+    mtp_enabled, mtp_draft_tokens, mtp_p_min, mtp_max_active_requests, speculative_type, draft_model_path,
+    has_vision, reasoning_format,
     chat_template_path, prompt_price_per_million, cached_prompt_price_per_million,
     completion_price_per_million, artifacts, sampling, reasoning, optimization)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(RequestDemand, prompt_positions, output_tokens,

@@ -242,12 +242,18 @@ TEST_CASE("The codec round-trips model settings and requests", "[provider][codec
     model::ModelInfo info = echo_model("echo", {{"key", "value"}});
     info.n_batch = 64;
     info.mtp_enabled = true;
+    info.speculative_type = "dflash2";
+    info.draft_model_path = "E:/models/draft.gguf";
+    info.mtp_draft_tokens = 7;
     info.sampling.dry_multiplier = 0.5f;
     info.compute = model::ModelCompute::Cpu;
     const auto decoded = provider::codec::decode_model_info(provider::codec::encode(info));
     REQUIRE(decoded);
     CHECK(decoded->n_batch == 64);
     CHECK(decoded->mtp_enabled);
+    CHECK(decoded->speculative_type == "dflash2");
+    CHECK(decoded->draft_model_path == "E:/models/draft.gguf");
+    CHECK(decoded->mtp_draft_tokens == 7);
     CHECK(decoded->sampling.dry_multiplier == 0.5f);
     CHECK(decoded->compute == model::ModelCompute::Cpu);
     CHECK(decoded->artifacts.at("key") == "value");

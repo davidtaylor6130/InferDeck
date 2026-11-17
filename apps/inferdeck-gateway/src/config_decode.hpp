@@ -213,11 +213,15 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             }
             if (m["speculative"] && m["speculative"].IsMap()) {
                 const auto speculative = m["speculative"];
-                info.mtp_enabled =
-                    speculative["type"] &&
-                    speculative["type"].as<std::string>() == "mtp";
+                info.speculative_type = speculative["type"]
+                    ? speculative["type"].as<std::string>() : "";
+                if (info.speculative_type == "none") info.speculative_type.clear();
+                info.mtp_enabled = info.speculative_type == "mtp";
+                info.draft_model_path = speculative["draft_model"]
+                    ? speculative["draft_model"].as<std::string>() : "";
                 info.mtp_draft_tokens = speculative["draft_tokens"]
-                    ? speculative["draft_tokens"].as<int>() : 2;
+                    ? speculative["draft_tokens"].as<int>()
+                    : (info.speculative_type.starts_with("dflash") ? 7 : 2);
                 info.mtp_p_min = speculative["p_min"]
                     ? speculative["p_min"].as<float>() : 0.0f;
                 info.mtp_max_active_requests =

@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -401,15 +402,16 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                         ? entry["context_size"].as<int>() : 65536;
                     const bool unified = entry["kv_unified"] && entry["kv_unified"].as<bool>();
                     const YAML::Node speculative = entry["speculative"];
-                    const bool mtp = speculative && speculative.IsMap() && speculative["type"] &&
-                        speculative["type"].as<std::string>() == "mtp";
-                    const int draft_margin = mtp
-                        ? (speculative["draft_tokens"] ? speculative["draft_tokens"].as<int>() : 2) : 0;
+                    const std::string speculative_type = speculative && speculative.IsMap() && speculative["type"]
+                        ? speculative["type"].as<std::string>() : "none";
+                    const int draft_margin = speculative_type == "none" ? 0
+                        : (speculative["draft_tokens"] ? speculative["draft_tokens"].as<int>()
+                                                       : (speculative_type == "mtp" ? 2 : 7));
                     if (pool_size < 0 || (pool_size > 0 &&
                         (!unified || static_cast<std::int64_t>(pool_size) <
                             static_cast<std::int64_t>(std::max(512, context_size)) + draft_margin))) {
                         return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
-                            "context_pool_size requires unified KV and capacity for one full request plus MTP draft tokens: " + name);
+                            "context_pool_size requires unified KV and capacity for one full request plus speculative draft tokens: " + name);
                     }
                 }
                 const int model_batch = entry["n_batch"]
@@ -555,36 +557,52 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     }
                     const std::string type = speculative["type"]
                         ? speculative["type"].as<std::string>() : "none";
-                    if (type != "none" && type != "mtp") {
+                    const bool dflash = type == "dflash" || type == "dflash2";
+                    if (type != "none" && type != "mtp" && !dflash) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
                             "unsupported speculative type for model: " + name);
                     }
-                    if (type == "mtp" && !runtime_contract->speculative) {
+                    if ((type != "none" && !runtime_contract->speculative) ||
+                        (dflash && runtime != "llama_cpp")) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP requires a runtime with speculative support: " + name);
+                            "speculative decoding requires a runtime with speculative support: " + name);
                     }
-                    const int draft_tokens = speculative["draft_tokens"]
-                        ? speculative["draft_tokens"].as<int>() : 2;
-                    if (draft_tokens < 1 || draft_tokens > 4) {
+                    const std::string draft_model = speculative["draft_model"]
+                        ? speculative["draft_model"].as<std::string>() : "";
+                    if (dflash && (draft_model.empty() || !std::filesystem::is_regular_file(draft_model))) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP draft_tokens must be between 1 and 4: " + name);
+                            "DFlash requires an existing draft_model GGUF: " + name);
+                    }
+                    if (!dflash && !draft_model.empty()) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "draft_model is only used by dflash and dflash2: " + name);
+                    }
+                    const int max_draft_tokens = dflash ? 16 : 4;
+                    const int draft_tokens = speculative["draft_tokens"]
+                        ? speculative["draft_tokens"].as<int>() : (dflash ? 7 : 2);
+                    if (draft_tokens < 1 || draft_tokens > max_draft_tokens) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "speculative draft_tokens must be between 1 and " +
+                                std::to_string(max_draft_tokens) + ": " + name);
                     }
                     const float p_min = speculative["p_min"]
                         ? speculative["p_min"].as<float>() : 0.0f;
                     if (!std::isfinite(p_min) || p_min < 0.0f || p_min > 1.0f) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP p_min must be between 0 and 1: " + name);
+                            "speculative p_min must be between 0 and 1: " + name);
                     }
                     const int max_active = speculative["max_active_requests"]
                         ? speculative["max_active_requests"].as<int>() : 1;
                     if (max_active < 1 || max_active > slots) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP max_active_requests exceeds slot bounds: " + name);
+                            "speculative max_active_requests exceeds slot bounds: " + name);
                     }
                 }
                 auto sampling = validate_sampling_node(

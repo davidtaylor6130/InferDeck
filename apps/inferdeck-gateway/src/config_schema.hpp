@@ -137,7 +137,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
                     "sampling"}))) return result;
             if (!(result = reject_unknown_config_keys(
                     model["speculative"], path + ".speculative", {
-                        "type", "draft_tokens", "p_min",
+                        "type", "draft_model", "draft_tokens", "p_min",
                         "max_active_requests"}))) return result;
             if (!(result = reject_unknown_config_keys(
                     model["reasoning"], path + ".reasoning", {
