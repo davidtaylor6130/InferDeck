@@ -38,6 +38,9 @@ struct Definition
     std::function<foundation::Result<void>(const nlohmann::json& host)> init{};
     /// <summary>Optional. Runs once at process exit.</summary>
     std::function<void()> shutdown{};
+    /// <summary>Optional process-level operations (no model instance), e.g. "quantize". Reply JSON or an error.</summary>
+    std::function<foundation::Result<nlohmann::json>(const std::string& operation, const nlohmann::json& request)>
+        operation{};
 };
 
 /// <summary>

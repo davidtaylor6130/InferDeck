@@ -32,7 +32,6 @@ target_include_directories(gateway
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE
         ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/vendor
-        ${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp/ggml/include
 )
 
 target_link_libraries(gateway
@@ -44,7 +43,6 @@ target_link_libraries(gateway
         nlohmann_json::nlohmann_json
         httplib::httplib
     PRIVATE
-        llama
         yaml-cpp::yaml-cpp
         unofficial::sqlite3::sqlite3
 )

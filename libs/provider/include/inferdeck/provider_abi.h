@@ -233,6 +233,12 @@ typedef struct inferdeck_provider_v2 {
                       const char* request_json,
                       const inferdeck_blob* blobs, size_t blob_count,
                       const inferdeck_call_v2* call);
+
+    /* Optional. A process-level operation that needs no model instance, such
+     * as "quantize" or "devices" for llama_cpp. Called after init. */
+    int32_t (*provider_invoke)(const char* operation, const char* request_json,
+                               const inferdeck_blob* blobs, size_t blob_count,
+                               const inferdeck_call_v2* call);
 } inferdeck_provider_v2;
 
 typedef const inferdeck_provider_v2* (*inferdeck_provider_entry_v2)(void);

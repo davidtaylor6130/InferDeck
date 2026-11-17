@@ -1,8 +1,41 @@
 #include "model/provider.hpp"
 
+#include <map>
+#include <mutex>
+
 #include "foundation/logging.hpp"
 
 namespace inferdeck::model {
+
+namespace {
+
+using Operation = decltype(ProviderDescriptor::operation);
+
+std::mutex g_operations_mutex;
+std::map<std::string, Operation> g_operations;
+
+}
+
+foundation::Result<std::string> invoke_provider_operation(const std::string& runtime,
+                                                          const std::string& operation,
+                                                          const std::string& request_json)
+{
+    Operation found;
+    {
+        std::lock_guard lock(g_operations_mutex);
+        const auto entry = g_operations.find(runtime);
+        if (entry != g_operations.end())
+        {
+            found = entry->second;
+        }
+    }
+    if (!found)
+    {
+        return foundation::Err<std::string>(foundation::ErrorCode::Unavailable,
+                                            "no installed " + runtime + " provider offers " + operation);
+    }
+    return found(operation, request_json);
+}
 
 std::vector<ProviderStatus> install_providers(std::span<const ProviderDescriptor> providers,
                                               ModelRegistry& registry,
@@ -43,6 +76,10 @@ std::vector<ProviderStatus> install_providers(std::span<const ProviderDescriptor
             }
         }
         registry.register_factory(name, provider.factory);
+        {
+            std::lock_guard lock(g_operations_mutex);
+            g_operations[name] = provider.operation;
+        }
         foundation::LOG_INFO("provider_registered", "runtime={} origin={} version={}",
                              name, provider.origin, provider.version);
         statuses.push_back(std::move(status));

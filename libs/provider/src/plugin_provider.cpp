@@ -1119,6 +1119,23 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(const std::fi
     {
         return create_backend(library, info);
     };
+    if (library->v2 && library->v2->provider_invoke)
+    {
+        descriptor.operation = [library](const std::string& operation, const std::string& request_json)
+            -> foundation::Result<std::string>
+        {
+            CallState state;
+            const foundation::Result<void> ran = to_result(guard([&]
+            {
+                return library->v2->provider_invoke(operation.c_str(), request_json.c_str(), nullptr, 0, &state.v2);
+            }), state, operation);
+            if (!ran)
+            {
+                return foundation::Err<std::string>(ran.error().code, ran.error().message);
+            }
+            return dump(state.reply);
+        };
+    }
     if (library->v2 && library->v2->init)
     {
         descriptor.initialize = [library](const std::vector<model::ModelInfo>& models)

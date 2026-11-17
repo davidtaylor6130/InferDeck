@@ -497,6 +497,25 @@ int32_t sdk_invoke(void* instance, const char* operation, const char* request_js
     });
 }
 
+int32_t sdk_provider_invoke(const char* operation, const char* request_json, const inferdeck_blob*, size_t,
+                            const inferdeck_call_v2* call)
+{
+    return shielded(call, [&]
+    {
+        if (!g_definition->operation)
+        {
+            return int32_t{INFERDECK_NOT_IMPLEMENTED};
+        }
+        const foundation::Result<json> request = codec::parse(request_json);
+        if (!request)
+        {
+            return reply_error(call, request);
+        }
+        const foundation::Result<json> result = g_definition->operation(operation ? operation : "", *request);
+        return result ? reply(call, *result) : reply_error(call, result);
+    });
+}
+
 }
 
 std::string contract_manifest(const std::string& runtime, const std::string& version)
@@ -529,7 +548,7 @@ const inferdeck_provider_v2* provider_table(Definition (*define)())
             sizeof(inferdeck_provider_v2), INFERDECK_PROVIDER_ABI_VERSION_2, definition.manifest_json.c_str(),
             sdk_init, sdk_shutdown, sdk_create, sdk_destroy, sdk_load, sdk_unload, sdk_query,
             sdk_acquire_slot, sdk_release_slot, sdk_request_cancel, sdk_reset_all_slots, sdk_resize_slots,
-            sdk_reclaim_idle_context, sdk_invoke};
+            sdk_reclaim_idle_context, sdk_invoke, sdk_provider_invoke};
     }();
     return &table;
 }

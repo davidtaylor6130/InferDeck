@@ -29,6 +29,8 @@ struct ProviderDescriptor {
     /// <summary>"builtin" or the path of the plugin library.</summary>
     std::string origin{"builtin"};
     std::string version;
+    /// <summary>Optional process-level operation (JSON in, JSON out) that needs no model, e.g. llama_cpp "quantize".</summary>
+    std::function<foundation::Result<std::string>(const std::string& operation, const std::string& request_json)> operation;
 };
 
 /// <summary>What happened to one descriptor during <see cref="install_providers"/>.</summary>
@@ -52,6 +54,14 @@ struct ProviderStatus {
 /// plugins listed after built-ins override them. Returns one status per
 /// descriptor, in order.
 /// </summary>
+/// <summary>
+/// Runs a process-level operation on the active provider for <paramref name="runtime"/>.
+/// Unavailable when no installed provider of that name offers operations.
+/// </summary>
+foundation::Result<std::string> invoke_provider_operation(const std::string& runtime,
+                                                          const std::string& operation,
+                                                          const std::string& request_json);
+
 std::vector<ProviderStatus> install_providers(std::span<const ProviderDescriptor> providers,
                        ModelRegistry& registry,
                        const std::vector<ModelInfo>& models);
