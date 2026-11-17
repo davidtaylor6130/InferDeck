@@ -187,6 +187,9 @@ TEST_CASE("A v2 SDK provider is indistinguishable from a built-in backend", "[pr
         message.content.emplace_back(inference::TextContent{"look"});
         message.content.emplace_back(inference::ImageContent{std::vector<std::byte>(5), "image/png", "auto"});
         vision.messages.push_back(std::move(message));
+        const auto vision_demand = text->estimate_request_demand(vision);
+        REQUIRE(vision_demand);
+        CHECK(vision_demand->prompt_positions == 4);
         const auto seen = text->predict(*slot, vision);
         REQUIRE(seen);
         CHECK(seen->text == "look [image 5 bytes]");

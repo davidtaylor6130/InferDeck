@@ -479,8 +479,8 @@ public:
         }
         std::vector<inferdeck_blob> blobs;
         CallState state;
-        const int32_t status = invoke("estimate_request_demand", codec::encode(request, -1, false, blobs),
-                                      blobs, state);
+        const json body = codec::encode(request, -1, false, blobs);
+        const int32_t status = invoke("estimate_request_demand", body, blobs, state);
         if (status == INFERDECK_NOT_IMPLEMENTED)
         {
             return model::RequestDemand{};

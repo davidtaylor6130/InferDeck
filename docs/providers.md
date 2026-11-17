@@ -328,6 +328,21 @@ Proven in `ctest -L unit` without a GPU:
 | `provider_dll_ace_step_cpp` | stub build | real backend source, stubbed ACE-Step pipeline |
 | `provider_dll_whisper_cpp` | stub build | real backend source, stubbed whisper.cpp |
 
+Validated on the GPU (2026-11-17, AMD Radeon AI PRO R9700, Vulkan) through a
+test gateway running only from `bin/Release` + `providers/`, every runtime
+reported with its DLL as `origin`:
+
+| Modality | Model (runtime DLL) | Result |
+|---|---|---|
+| chat, stream, tools, reasoning, logprobs, vision | qwen3.5-4b, Qwen3.8-27B IQ4_XS + MTP at 32k (`llama_cpp`) | all pass; 27B: 58.6 t/s decode, 556 t/s prefill, TTFT 1.4 s (`bench.mjs C`, 784-token prompt) |
+| embeddings | qwen2.5-0.5b (`llama_cpp`) | 896-d vectors, cos(cat, kitten) 0.74 > cos(cat, GPU) 0.45 |
+| decisions | Jev-Style 0.8B v3 (`jev_style`) | predicate 0.97, choice billing 0.99 |
+| image | SD 1.5 512², SDXL 1024² (`stable_diffusion_cpp`) | 14 s and 41 s via `Testing/Test-ImageGeneration.ps1` |
+| music | ACE-Step 1.5 turbo q4 (`ace_step_cpp`) | 10 s stereo 48 kHz WAV in 41 s |
+| video | LTX-2.3 22B q4, 512x320, 9 frames (`ltx_video_cpp`) | MP4 in 109 s including load |
+| speech | Supertonic 3 (`sherpa_onnx`), Windows SAPI (`windows_sapi`) | WAV; voice validation answered by the DLL |
+| transcription | Parakeet TDT 0.6B (`sherpa_onnx`), whisper base.en (`whisper_cpp`) | exact text; whisper segments carry tokens, avg_logprob, no_speech_prob |
+
 ## Installing, verifying, and rolling back
 
 1. A full install is `inferdeck-gateway.exe`, the DLLs beside it, `static/`,
