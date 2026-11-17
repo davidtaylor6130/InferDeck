@@ -228,6 +228,10 @@ std::optional<AcquiredChatSlot> acquire_chat_slot(
         code = "model_not_loaded";
     } else if (slot.error().code == foundation::ErrorCode::NotLoaded) {
         code = "model_not_loaded";
+    } else if (slot.error().code == foundation::ErrorCode::InvalidArgument ||
+               slot.error().code == foundation::ErrorCode::ParseError) {
+        status = 400;
+        code = "invalid_request";
     }
     resp.set_header("Retry-After",
         slot.error().code == foundation::ErrorCode::NotLoaded

@@ -789,7 +789,12 @@ int main(int argc, char** argv) {
 
     g_plugins = inferdeck::provider::load_plugin_providers(provider_dir);
     while (true) {
-        const int result = run_gateway(config_path);
+        int result = 1;
+        try { result = run_gateway(config_path); } catch (const std::exception& error) {
+            std::cerr << "fatal: " << error.what() << '\n';
+            if (FILE* f = open_crash_log()) { fprintf(f, "fatal: %s\n", error.what()); fclose(f); }
+            return 1;
+        }
         if (result != runtime_reload_result || g_stop.load()) return result;
     }
 }

@@ -2,6 +2,7 @@
 #include "foundation/logging.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -257,13 +258,16 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
             const auto deadline = std::min(control.deadline, clock::now() + std::chrono::seconds{30});
             auto last_sample = observed_vram_at_;
             int last_used = -1;
+            int stable_samples = 0;
             bool settled = false;
             while (!settled && !shutting_down_.load() && clock::now() < deadline) {
                 cv_.wait_for(lock, std::chrono::milliseconds{250});
                 if (!live_vram_observation_fresh_locked() || observed_vram_at_ == last_sample) continue;
                 last_sample = observed_vram_at_;
-                settled = observed_vram_used_mb_ <= released_target && last_used >= 0 &&
-                    last_used - observed_vram_used_mb_ < 256;
+                stable_samples = last_used >= 0 && std::abs(last_used - observed_vram_used_mb_) < 256
+                    ? stable_samples + 1 : 0;
+                settled = stable_samples >= 1 &&
+                    (observed_vram_used_mb_ <= released_target || stable_samples >= 3);
                 last_used = observed_vram_used_mb_;
             }
             foundation::LOG_INFO("gpu_release_settled", "model={} settled={} used_before_mb={} used_now_mb={}",
