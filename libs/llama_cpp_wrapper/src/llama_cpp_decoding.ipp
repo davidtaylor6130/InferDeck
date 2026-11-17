@@ -350,7 +350,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   if (out.completion_tokens >= setup.max_tokens)
     out.finish_reason = "length";
 
-  if (callback_aborted) return Result<InferenceResult>(std::move(out));
+  if (callback_aborted) return Result<InferenceResult>(std::unexpect, make_error(ErrorCode::Cancelled, "client stopped reading the stream"));
 
   bool fallback_tool_calls_used = false;
   try {
@@ -360,7 +360,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       auto delta = to_delta(diff);
       if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty())
         continue;
-      if (!callback(delta)) return Result<InferenceResult>(std::move(out));
+      if (!callback(delta)) return Result<InferenceResult>(std::unexpect, make_error(ErrorCode::Cancelled, "client stopped reading the stream"));
       tool_call_stream_state.observe(delta);
     }
     auto msg = parse_final_message_with_ids(generated, setup.parser_params);
@@ -387,7 +387,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       tcd.function_name = tc.function_name;
       tcd.function_arguments = tc.function_arguments;
       delta.tool_calls.push_back(std::move(tcd));
-      if (!callback(delta)) break;
+      if (!callback(delta)) return Result<InferenceResult>(std::unexpect, make_error(ErrorCode::Cancelled, "client stopped reading the stream"));
     }
   }
   out.reasoning_tokens = count_output_tokens(vocab_, out.reasoning_text);
