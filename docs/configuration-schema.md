@@ -54,7 +54,7 @@ A `llama_cpp` text model may set `speculative`:
 speculative:
   type: dflash2            # none | mtp | dflash | dflash2
   draft_model: E:/InferDeck/models/z-lab/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q8_0.gguf
-  draft_tokens: 3          # mtp: 1-4 (default 2); dflash/dflash2: 1-16 (default 7)
+  draft_tokens: 3          # mtp: 1-4 (default 2); dflash/dflash2: 1-16 (default 3; above 4 is slower on Vulkan, see below)
   p_min: 0.0               # 0-1; DFlash2 truncates the draft at a lower selector probability
   max_active_requests: 1   # speculation runs only while this many requests or fewer are runnable
 ```

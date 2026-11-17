@@ -987,7 +987,7 @@ model_registry:
     const auto& model = config.models.front();
     CHECK(model.speculative_type == "dflash2");
     CHECK(model.draft_model_path == draft_path);
-    CHECK(model.mtp_draft_tokens == 7);
+    CHECK(model.mtp_draft_tokens == 3);
     CHECK_FALSE(model.mtp_enabled);
     std::error_code error;
     std::filesystem::remove(path, error);

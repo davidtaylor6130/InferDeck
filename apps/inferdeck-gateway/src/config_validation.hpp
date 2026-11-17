@@ -583,7 +583,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     }
                     const int max_draft_tokens = dflash ? 16 : 4;
                     const int draft_tokens = speculative["draft_tokens"]
-                        ? speculative["draft_tokens"].as<int>() : (dflash ? 7 : 2);
+                        ? speculative["draft_tokens"].as<int>() : (dflash ? 3 : 2);
                     if (draft_tokens < 1 || draft_tokens > max_draft_tokens) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
