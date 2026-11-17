@@ -29,7 +29,7 @@ modality, is a provider DLL loaded from `providers/` next to
 
 | Runtime | DLL | Modalities |
 |---|---|---|
-| `llama_cpp` | `llama_cpp.provider.dll` | text (chat, tools, reasoning, vision via mmproj, MTP), embeddings; also GGUF quantisation and GPU device listing |
+| `llama_cpp` | `llama_cpp.provider.dll` | text (chat, tools, reasoning, vision via mmproj, MTP and DFlash/DFlash2 speculative decoding), embeddings; also GGUF quantisation and GPU device listing |
 | `jev_style` | `jev_style.provider.dll` | decisions |
 | `stable_diffusion_cpp` | `stable_diffusion_cpp.provider.dll` | images (SD 1.5, SDXL, Qwen-Image, edits) |
 | `ltx_video_cpp` | `ltx_video_cpp.provider.dll` | video |
@@ -290,7 +290,7 @@ unloads, and loads again.
 
 ```bash
 $BUILD/bin/Release/inferdeck-provider-check <library> [--model <path>] [--artifact key=value]... \
-    [--modality <name>]... [--skip-invoke] [--no-load]
+    [--modality <name>]... [--skip-invoke] [--no-load] [--context <tokens>]     [--speculative mtp|dflash|dflash2] [--draft-model <path>] [--draft-tokens <n>]
 ```
 
 | Option | Meaning |
@@ -300,6 +300,8 @@ $BUILD/bin/Release/inferdeck-provider-check <library> [--model <path>] [--artifa
 | `--modality <name>` | Check only this modality. Repeatable. |
 | `--skip-invoke` | Lifecycle and slots only; send no request. Use for slow media models. |
 | `--no-load` | Stop after `init` and `create`. Use where weights or a GPU are unavailable. |
+| `--context <tokens>` | Sets `context_size` (default 65536). |
+| `--speculative <type>`, `--draft-model <path>`, `--draft-tokens <n>` | Sets the model's speculative decoding (`speculative_type`, `draft_model_path`, `mtp_draft_tokens`). |
 
 What each request checks:
 
@@ -569,10 +571,16 @@ field of `model::ModelInfo` under its C++ name (`name`, `runtime`,
 `n_slots`, `min_slots`, `context_size`, `vram_required_mb`, `kv_unified`,
 `context_pool_size`, `context_pool_auto`, `concurrency_auto`, `n_batch`,
 `n_ubatch`, `cache_type_k`, `cache_type_v`, `n_gpu_layers`, `mtp_*`,
+`speculative_type`, `draft_model_path`,
 `reasoning_format`, `continuation_grace_ms`, `artifacts`, `sampling` including
 the `dry_*` keys, `reasoning`, ...), plus `model_path` (= `gguf_path`) for v1
 compatibility. Unset optionals are `null`. Put anything runtime-specific in
 `artifacts`.
+
+`speculative_type` (`mtp`, `dflash`, `dflash2`, or empty) and
+`draft_model_path` carry DFlash settings to the `llama_cpp` DLL. They were
+added to the codec without an ABI version change: a DLL built before them
+ignores both keys and loads the model without DFlash.
 
 **`chat`** (text). Request: `prompt`, `messages[]` (`role`; `content[]` of
 `{"type":"text","text"}`, `{"type":"image","blob","media_type","detail"}`,

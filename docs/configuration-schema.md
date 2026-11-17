@@ -46,6 +46,48 @@ select their configured default when its runtime is available. These settings
 do not download models or add runtime support. Without a media default, image
 and video retain the existing `default_model` fallback; music requires `model`.
 
+## Speculative decoding
+
+A `llama_cpp` text model may set `speculative`:
+
+```yaml
+speculative:
+  type: dflash2            # none | mtp | dflash | dflash2
+  draft_model: E:/InferDeck/models/z-lab/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q8_0.gguf
+  draft_tokens: 3          # mtp: 1-4 (default 2); dflash/dflash2: 1-16 (default 7)
+  p_min: 0.0               # 0-1; DFlash2 truncates the draft at a lower selector probability
+  max_active_requests: 1   # speculation runs only while this many requests or fewer are runnable
+```
+
+- `mtp` drafts from the target GGUF's own MTP head; `draft_model` is rejected.
+- `dflash` and `dflash2` load a separate block-diffusion drafter trained for
+  the target. `draft_model` is required and must exist. The runtime clamps
+  `draft_tokens` to the drafter's trained block size (block 8 drafts at most 7).
+  `dflash` accepts any DFlash-family drafter; `dflash2` requires a DFlash2
+  candidate selector.
+- The runtime contract must declare speculative support, and DFlash is accepted
+  only for `runtime: llama_cpp`.
+- Both modes share the adaptive window: at more than `max_active_requests`
+  runnable requests the model decodes without drafting, and a request that lost
+  its draft cache resynchronises before drafting again. Image requests always
+  bypass speculation.
+- With `context_pool_auto`, the drafter's file size is reserved from the fitted
+  pool; its KV cache is covered by the allocation retry.
+
+Measured on an AMD Radeon AI PRO R9700 (Vulkan), Qwen3.8-27B UD-IQ4_XS, one
+slot, 48K context, greedy, 512 output tokens:
+
+| Mode | Short essay | ~38K-token essay | Short code | ~38K-token code |
+|---|---|---|---|---|
+| plain | 35.7 t/s | 32.7 t/s | 35.9 t/s | 32.9 t/s |
+| `mtp`, 2 tokens | 57.5 t/s | 44.9 t/s | 71.8 t/s | 55.9 t/s |
+| `dflash2`, 3 tokens | 55.8 t/s | 46.6 t/s | 76.1 t/s | 61.1 t/s |
+| `dflash2`, 7 tokens | 30.7 t/s | 24.2 t/s | 52.9 t/s | 41.5 t/s |
+
+On this GPU a target verification batch of five or more tokens costs about
+twice a four-token batch, so `draft_tokens: 3` is fastest here even though the
+drafter's upstream recommendation is 7. Measure before raising it.
+
 ## Files and selection
 
 - The stable base is the requested `gateway.yml`.
