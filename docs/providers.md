@@ -12,27 +12,45 @@ rest of the codebase. Follow the recipes in order; every command is copy-paste.
 ## Contents
 
 1. [Concepts](#concepts)
-2. [Recipe A: add a new runtime as a provider DLL](#recipe-a-add-a-new-runtime-as-a-provider-dll)
-3. [Recipe B: upgrade a runtime by dropping in a new DLL](#recipe-b-upgrade-a-runtime-by-dropping-in-a-new-dll)
-4. [Recipe C: check a provider](#recipe-c-check-a-provider)
-5. [Installing, verifying, and rolling back](#installing-verifying-and-rolling-back)
-6. [ABI v2 reference](#abi-v2-reference)
-7. [Upgrading a built-in runtime in the gateway itself](#upgrading-a-built-in-runtime-in-the-gateway-itself)
-8. [Limits and known gaps](#limits-and-known-gaps)
+2. [Building](#building)
+3. [Recipe A: add a new runtime as a provider DLL](#recipe-a-add-a-new-runtime-as-a-provider-dll)
+4. [Recipe B: upgrade a runtime by dropping in a new DLL](#recipe-b-upgrade-a-runtime-by-dropping-in-a-new-dll)
+5. [Recipe C: check a provider](#recipe-c-check-a-provider)
+6. [Installing, verifying, and rolling back](#installing-verifying-and-rolling-back)
+7. [ABI v2 reference](#abi-v2-reference)
+8. [Moving a vendored runtime pin](#moving-a-vendored-runtime-pin)
+9. [Limits and known gaps](#limits-and-known-gaps)
 
 ## Concepts
 
-| Kind | Lives in | Use it when |
-|---|---|---|
-| Built-in | Compiled into `inferdeck-gateway.exe` | The runtime ships with InferDeck |
-| Provider DLL | `providers/<runtime>.provider.dll` next to the exe | You want a different build, a newer runtime, a vendor runtime, or another language, without rebuilding InferDeck |
+The gateway executable contains no runtime. Every runtime, for every
+modality, is a provider DLL loaded from `providers/` next to
+`inferdeck-gateway.exe`:
 
-Both become a `ProviderDescriptor` (`libs/model/include/model/provider.hpp`): a
-runtime name, what it can do (its contract), and a factory that creates one
-backend per configured model. A provider DLL is wrapped by `PluginBackend`
-(`libs/provider/src/plugin_provider.cpp`), which implements every backend
-interface the coordinator uses, so the scheduler cannot tell a DLL from a
-built-in.
+| Runtime | DLL | Modalities |
+|---|---|---|
+| `llama_cpp` | `llama_cpp.provider.dll` | text (chat, tools, reasoning, vision via mmproj, MTP), embeddings; also GGUF quantisation and GPU device listing |
+| `jev_style` | `jev_style.provider.dll` | decisions |
+| `stable_diffusion_cpp` | `stable_diffusion_cpp.provider.dll` | images (SD 1.5, SDXL, Qwen-Image, edits) |
+| `ltx_video_cpp` | `ltx_video_cpp.provider.dll` | video |
+| `ace_step_cpp` | `ace_step_cpp.provider.dll` | music |
+| `whisper_cpp` | `whisper_cpp.provider.dll` | transcription |
+| `sherpa_onnx` | `sherpa_onnx.provider.dll` (+ `sherpa-onnx-c-api.dll`, `onnxruntime*.dll`, `libmp3lame.DLL`) | speech, transcription |
+| `windows_sapi` | `windows_sapi.provider.dll` | speech |
+| `vllm_radiance` | `vllm_radiance.provider.dll` (+ `python312.dll`) | text (embedded CPython vLLM/Radiance) |
+
+Each ggml runtime links its own static llama.cpp/ggml, so any one DLL can be
+rebuilt from a newer upstream and swapped without touching the gateway or the
+other runtimes. A runtime whose DLL is missing is reported as
+`not_installed` by `GET /api/inferdeck/v1/providers`, and its models report
+`runtime_available: false`.
+
+Inside the gateway each DLL becomes a `ProviderDescriptor`
+(`libs/model/include/model/provider.hpp`): a runtime name, its contract, and a
+factory that creates one backend per configured model. `PluginBackend`
+(`libs/provider/src/plugin_provider.cpp`) implements every backend interface
+the coordinator uses, so the scheduler sees exactly what it saw when runtimes
+were compiled in.
 
 Each model in `gateway.yml` selects its runtime by name:
 
@@ -42,10 +60,9 @@ model_registry:
     runtime: "llama_cpp"        # the provider that runs this model
 ```
 
-Provider DLLs are registered after built-ins. A DLL that declares a built-in
-name (`llama_cpp`) replaces the built-in for every model using that name; the
-log says `provider_overridden`. To run both side by side, give the DLL its own
-name (`llama_cpp_next`) and point individual models at it.
+When two DLLs declare the same runtime name, the later file name (sorted)
+wins and the log says `provider_overridden`. To run two builds side by side,
+give one its own name (`llama_cpp_next`) and point individual models at it.
 
 Pieces you will touch:
 
@@ -56,9 +73,35 @@ Pieces you will touch:
 | `libs/provider/src/codec.cpp` | The JSON + blob wire format for every request and result. Compiled into the gateway and every SDK DLL. Authoritative for field names. |
 | `libs/provider/examples/echo_provider_v2.cpp` | Reference SDK provider. Copy it to start. |
 | `libs/provider/examples/echo_provider.cpp` | Raw-C v1 provider, kept for compatibility tests. |
-| `libs/provider/runtimes/` | InferDeck's own runtimes packaged as DLLs, and the CMake that builds them. |
+| `libs/provider/runtimes/` | The entry point of every InferDeck runtime DLL, the CMake that builds them, and the native-API stubs used by tests. |
 | `libs/provider/tools/provider_check.cpp` | `inferdeck-provider-check`, the validator. |
 | `libs/model/include/model/imodel.hpp`, `ibackend.hpp` | The C++ interfaces ABI v2 mirrors. |
+
+## Building
+
+One build produces the gateway and every runtime DLL:
+
+```bash
+export TEMP='F:\InferDeck-build\tmp' TMP='F:\InferDeck-build\tmp'
+BUILD=F:/InferDeck-build/qwen4
+cmake -S . -B $BUILD -G "Visual Studio 18 2026" -A x64 -DINFERDECK_BUILD_TESTS=ON
+cmake --build $BUILD --config Release -j 8 --target inferdeck-gateway
+```
+
+Building `inferdeck-gateway` builds the `inferdeck-runtime-providers` target
+too. The result is ready to copy:
+
+```
+$BUILD/bin/Release/inferdeck-gateway.exe   + spdlog.dll, fmt.dll, ...  (core only)
+$BUILD/bin/Release/static/                 dashboard
+$BUILD/bin/Release/python/                 Radiance's Python modules
+$BUILD/bin/Release/providers/*.provider.dll + the libraries they import
+```
+
+The root `CMakeLists.txt` forces `BUILD_SHARED_LIBS=OFF`: every runtime links
+llama.cpp/ggml statically into its own DLL. Windows reuses an already-loaded
+module with the same base name, so a shared `ggml.dll` could never be
+upgraded per runtime.
 
 ## Recipe A: add a new runtime as a provider DLL
 
@@ -138,11 +181,13 @@ BUILD=F:/InferDeck-build/qwen4        # the main build directory
        LIBRARIES <your runtime's libraries>)
    ```
 
-   This produces `${BUILD}/providers/my_runtime.provider.dll`. If your runtime
-   uses ggml (llama.cpp, stable-diffusion.cpp, whisper.cpp, ...) it must link
-   ggml **statically** and be built in the static build of Recipe B, step 2:
-   Windows reuses an already-loaded module with the same base name, so a
-   `ggml.dll` shipped next to your DLL would silently resolve to the gateway's.
+   This produces `${BUILD}/bin/Release/providers/my_runtime.provider.dll`. If
+   your runtime uses ggml (llama.cpp, stable-diffusion.cpp, whisper.cpp, ...)
+   link it **statically**, as every target in this build does: Windows reuses
+   an already-loaded module with the same base name, so a `ggml.dll` shipped
+   next to your DLL would silently resolve to another runtime's copy. Copy any
+   non-ggml DLL your runtime imports next to the provider with a `POST_BUILD`
+   step (see `sherpa_onnx` in `libs/provider/runtimes/CMakeLists.txt`).
 
 5. **Add a test.** In the same CMake file:
 
@@ -169,10 +214,10 @@ BUILD=F:/InferDeck-build/qwen4        # the main build directory
 
 ## Recipe B: upgrade a runtime by dropping in a new DLL
 
-Example: Qwen4 needs a newer llama.cpp than the gateway was built with. Instead
-of rebuilding the gateway, build `llama_cpp.provider.dll` from the newer
-llama.cpp and drop it into `providers/`. It replaces the built-in `llama_cpp`
-for every model; deleting it rolls back.
+Example: Qwen4 needs a newer llama.cpp than the installed
+`llama_cpp.provider.dll` was built with. Build a new `llama_cpp.provider.dll`
+from the newer llama.cpp and replace the old one in `providers/`. The gateway
+and every other runtime stay as they are; putting the old DLL back rolls back.
 
 1. **Move the runtime.** In a separate worktree or branch, check out the new
    revision of the vendored runtime:
@@ -185,42 +230,31 @@ for every model; deleting it rolls back.
    Record the old and new revisions. If `llama_cpp_wrapper` no longer compiles
    against the new API, fix it in this worktree; the fix ships inside the DLL.
 
-2. **Configure a static-ggml build directory** (once). It reuses the main
-   build's vcpkg packages, so nothing is downloaded:
+2. **Build only that runtime's DLL** in the worktree's build directory:
 
    ```bash
-   PROVIDERS=F:/InferDeck-build/qwen4-providers
-   cmake -S . -B $PROVIDERS -G "Visual Studio 18 2026" -A x64 \
-     -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake \
-     -DVCPKG_TARGET_TRIPLET=x64-windows \
-     -DVCPKG_INSTALLED_DIR=$BUILD/vcpkg_installed -DVCPKG_MANIFEST_INSTALL=OFF \
-     -DBUILD_SHARED_LIBS=OFF -DINFERDECK_BUILD_RUNTIME_PROVIDERS=ON \
-     -DINFERDECK_BUILD_TESTS=OFF
+   cmake -S . -B $BUILD -G "Visual Studio 18 2026" -A x64
+   cmake --build $BUILD --config Release -j 8 --target inferdeck-provider-llama_cpp
    ```
 
-   `INFERDECK_BUILD_RUNTIME_PROVIDERS` refuses to configure with shared libs on
-   purpose (see Recipe A, step 4). Pass the same `INFERDECK_*_ROOT` cache
-   values as the main build if your runtimes live outside the repository.
-
-3. **Build the provider DLL.**
-
-   ```bash
-   cmake --build $PROVIDERS --config Release -j 8 --target inferdeck-provider-llama_cpp
-   ```
-
-   Other targets: `inferdeck-provider-jev_style`,
+   Targets: `inferdeck-provider-llama_cpp`, `inferdeck-provider-jev_style`,
    `inferdeck-provider-stable_diffusion_cpp`, `inferdeck-provider-ltx_video_cpp`,
-   `inferdeck-provider-ace_step_cpp`, `inferdeck-provider-whisper_cpp`, or
-   `inferdeck-runtime-providers` for all of them. Output:
-   `$PROVIDERS/providers/<runtime>.provider.dll`. The first build compiles
-   llama.cpp and the Vulkan shaders and takes a while; later builds are
+   `inferdeck-provider-ace_step_cpp`, `inferdeck-provider-whisper_cpp`,
+   `inferdeck-provider-sherpa_onnx`, `inferdeck-provider-windows_sapi`,
+   `inferdeck-provider-vllm_radiance`, or `inferdeck-runtime-providers` for all.
+   Output: `$BUILD/bin/Release/providers/<runtime>.provider.dll`. The first
+   build compiles llama.cpp and the Vulkan shaders; later builds are
    incremental.
+
+3. **Keep the old DLL** for rollback: copy the running gateway's
+   `providers/llama_cpp.provider.dll` to `llama_cpp.provider.dll.previous`
+   (any name not ending in `.provider.dll` is ignored by the loader).
 
 4. **Check that ggml is private.** The DLL must not import `ggml*.dll` or
    `llama*.dll`:
 
    ```bash
-   dumpbin /dependents $PROVIDERS/providers/llama_cpp.provider.dll
+   dumpbin /dependents $BUILD/bin/Release/providers/llama_cpp.provider.dll
    ```
 
    Expected: Windows system DLLs, `vulkan-1.dll`, the MSVC runtime,
@@ -230,21 +264,21 @@ for every model; deleting it rolls back.
    creates an instance per modality):
 
    ```bash
-   $BUILD/bin/Release/inferdeck-provider-check $PROVIDERS/providers/llama_cpp.provider.dll --no-load
+   $BUILD/bin/Release/inferdeck-provider-check $BUILD/bin/Release/providers/llama_cpp.provider.dll --no-load
    ```
 
 6. **Check it with the model**, where GPU work is allowed:
 
    ```bash
-   $BUILD/bin/Release/inferdeck-provider-check $PROVIDERS/providers/llama_cpp.provider.dll \
+   $BUILD/bin/Release/inferdeck-provider-check $BUILD/bin/Release/providers/llama_cpp.provider.dll \
      --model C:/models/<model>.gguf --modality text
    ```
 
 7. **Install it** next to a test gateway, run one real request per affected
    modality, then roll it out: [Installing, verifying, and rolling back](#installing-verifying-and-rolling-back).
 
-When the gateway's own shared llama.cpp/ggml must move instead, follow
-[Upgrading a built-in runtime in the gateway itself](#upgrading-a-built-in-runtime-in-the-gateway-itself).
+To move the pin for every runtime at once, follow
+[Moving a vendored runtime pin](#moving-a-vendored-runtime-pin).
 
 ## Recipe C: check a provider
 
@@ -296,12 +330,14 @@ Proven in `ctest -L unit` without a GPU:
 
 ## Installing, verifying, and rolling back
 
-1. Copy the DLL into `providers/` next to `inferdeck-gateway.exe`, plus any
-   non-ggml libraries it needs that are not already next to the gateway:
+1. A full install is `inferdeck-gateway.exe`, the DLLs beside it, `static/`,
+   `python/` and `providers/` from `$BUILD/bin/Release`, all from the same
+   build. To swap one runtime, copy only its DLL (and any library it imports)
+   into `providers/`:
 
    ```bash
    mkdir -p <gateway dir>/providers
-   cp $PROVIDERS/providers/llama_cpp.provider.dll <gateway dir>/providers/
+   cp $BUILD/bin/Release/providers/llama_cpp.provider.dll <gateway dir>/providers/
    ```
 
    For a test gateway, point it at a staging folder instead of touching the
@@ -311,19 +347,18 @@ Proven in `ctest -L unit` without a GPU:
 2. Restart the gateway. Providers load once, at process start.
 
 3. Verify:
-   - Log: `provider_registered runtime=llama_cpp origin=<path> version=<v>` and,
-     when it replaced a built-in, `provider_overridden runtime=llama_cpp`.
+   - Log: `provider_registered runtime=llama_cpp origin=<path> version=<v>`.
      Rejected libraries log `provider_plugin_rejected <path>: <reason>`.
    - `GET /api/inferdeck/v1/providers`: each provider's `runtime`, `origin`,
-     `version`, `modalities`, `state` (`active`, `overridden`, `not_linked`,
-     `init_failed` with `error`), plus `rejected_plugins`.
+     `version`, `modalities`, `state` (`active`, `overridden`, `not_installed`,
+     `init_failed` with `error`), plus `rejected_plugins`. `origin` is the DLL
+     path.
    - `GET /api/inferdeck/v1/models`: `runtime` and `runtime_available` per model.
    - One real request per modality the DLL serves.
 
-4. Roll back: delete the DLL from `providers/` and restart. The built-in (or
-   the previous DLL) takes over. Keep the previous DLL beside the new one under
-   a name that does not end in `.provider.dll` (for example
-   `llama_cpp.provider.dll.previous`), so rollback is a rename.
+4. Roll back: rename `llama_cpp.provider.dll.previous` back to
+   `llama_cpp.provider.dll` and restart. Deleting a runtime's DLL leaves its
+   models unavailable (`not_installed`), not served by some fallback.
 
 On the live Windows service the folder is `C:\InferDeck\providers`; restarting
 the `InferDeck` service needs the owner's authorization (see `AGENTS.md`,
@@ -380,6 +415,7 @@ The returned table must stay valid for the life of the process.
 | `resize_slots(instance, slots, call)` | no | may block | `Unavailable` "backend capacity is fixed" |
 | `reclaim_idle_context(instance, reserve_mb, call)` | no | may block | nothing reclaimed |
 | `invoke(instance, operation, json, blobs, count, call)` | yes | may block | |
+| `provider_invoke(operation, json, blobs, count, call)` | no | may block | operation unavailable |
 
 **Never-blocking members** are called by the scheduler while it holds its
 global lock. Answer from state you already have: no I/O, no waiting on a
@@ -608,6 +644,17 @@ no_speech_probability}]}`.
 
 Return `INFERDECK_NOT_IMPLEMENTED` for an operation you do not serve.
 
+### Process-level operations
+
+`provider_invoke` runs an operation that needs no model instance; the gateway
+calls it through `model::invoke_provider_operation(runtime, operation, json)`.
+With the SDK, set `Definition::operation`. `llama_cpp` implements:
+
+| Operation | Request | Reply | Used by |
+|---|---|---|---|
+| `quantize` | `{source, destination, quantization: q4_k_m|q5_k_m|q6_k|q8_0, threads}` | `{}` | model store GGUF quantisation |
+| `devices` | `{}` | `{devices: [{index, name, description, type}]}` | `gpuBackend` in status and metrics |
+
 ### Version 1
 
 Version 1 (`inferdeck_provider_v1`, `inferdeck_call` without `struct_size`)
@@ -627,10 +674,11 @@ set `struct_size`, and implement the required members. The JSON shapes above
 are the whole wire format. Name the file `<runtime>.provider.dll` (`.so` or
 `.dylib` elsewhere).
 
-## Upgrading a built-in runtime in the gateway itself
+## Moving a vendored runtime pin
 
-Built-in runtimes are pinned git submodules that share one ggml with
-llama.cpp. When the gateway's own copy must move:
+The vendored runtimes are pinned git submodules. stable-diffusion.cpp and
+ACE-Step compile against the vendored llama.cpp/ggml tree (each DLL still gets
+its own static copy). To move a pin for every runtime DLL:
 
 1. Change one pin per pull request and record the old and new revisions.
 2. Configure. The build stops if stable-diffusion.cpp and InferDeck disagree
@@ -649,14 +697,11 @@ llama.cpp. When the gateway's own copy must move:
 
 ## Limits and known gaps
 
-- **One runtime per DLL.** Runtimes that share process-wide state inside the
-  gateway lose it when split: the built-in stable-diffusion.cpp and LTX share
-  one diffusion lock, but two DLLs each have their own, so an image job and a
-  video job can run at the same time and need VRAM for both.
-- **Built-in setup still runs.** When a DLL overrides a built-in name, the
-  built-in's own setup (for example `llama_backend_init` on the gateway's
-  ggml) still runs, because other built-ins such as `jev_style` rely on it.
+- **Shared diffusion lock.** stable-diffusion.cpp and LTX run in separate
+  DLLs but still take turns on the GPU: the lock in
+  `native_runtimes/diffusion_runtime_lock.hpp` is a named kernel mutex keyed by
+  the process id, which is the same object in every module.
 - **Voice listing** has no method in `ISpeechBackend`, so there is no ABI
   operation for it; `speech_validate` is how a provider rejects a voice.
-- **Profile benchmarking and GGUF quantisation** in the dashboard use the
-  gateway's built-in llama.cpp, not a `llama_cpp` DLL.
+- **Profile benchmarks** create candidates through the installed `llama_cpp`
+  provider; per-candidate `flash_attn` travels as the `flash_attn` artifact.

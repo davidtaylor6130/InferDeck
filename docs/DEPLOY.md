@@ -1,6 +1,6 @@
 # InferDeck Windows deployment
 
-InferDeck deploys as one native executable, its runtime DLLs and a matched static dashboard.
+InferDeck deploys as one native executable (core only), its `providers\` folder with every runtime DLL, and a matched static dashboard. See [providers.md](providers.md).
 The live installation is outside the repository at `C:\InferDeck`.
 
 ## Authoritative boot target
@@ -58,7 +58,7 @@ cmake --build build --target inferdeck-gateway --config Release --parallel
 pnpm --filter dashboard build
 ```
 
-Activate the executable, all runtime DLLs and the complete static directory from the same build. Preserve the installation's settings and validate any configuration changes before activation.
+Activate the executable, the DLLs beside it, the complete `providers\` directory and the complete static directory from the same build. A single runtime can later be replaced on its own by swapping its `<runtime>.provider.dll` (providers.md, Recipe B). Preserve the installation's settings and validate any configuration changes before activation.
 
 The gateway resolves `static` relative to its executable. Copy `apps\inferdeck-gateway\static\` to `C:\InferDeck\static\` with the matching executable and DLLs. Remove stale hashed bundles from the staged directory before the directory swap. `Testing/Test-PackagedGateway.ps1` verifies an isolated package's health endpoint and served dashboard bytes.
 
