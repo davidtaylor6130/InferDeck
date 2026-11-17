@@ -811,13 +811,21 @@ foundation::Result<inferdeck_provider_entry> open_library(const std::filesystem:
     using EntryResult = foundation::Result<inferdeck_provider_entry>;
     const std::filesystem::path absolute = std::filesystem::absolute(library);
 #ifdef _WIN32
+    DWORD previous_mode = 0;
+    SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &previous_mode);
     const HMODULE module = LoadLibraryExW(absolute.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    const DWORD load_error = GetLastError();
+    SetThreadErrorMode(previous_mode, nullptr);
     if (!module)
     {
         return foundation::Err<inferdeck_provider_entry>(
-            ErrorCode::IoError, "LoadLibrary failed with error " + std::to_string(GetLastError()));
+            ErrorCode::IoError, "LoadLibrary failed with error " + std::to_string(load_error));
     }
     void* symbol = reinterpret_cast<void*>(GetProcAddress(module, INFERDECK_PROVIDER_ENTRY_POINT));
+    if (!symbol)
+    {
+        FreeLibrary(module);
+    }
 #else
     void* module = dlopen(absolute.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!module)
@@ -943,7 +951,8 @@ PluginLoadReport load_plugin_providers(const std::filesystem::path& directory)
     for (const std::filesystem::directory_entry& entry :
          std::filesystem::directory_iterator(directory, error))
     {
-        if (entry.is_regular_file() && is_library(entry.path()))
+        std::error_code file_error;
+        if (entry.is_regular_file(file_error) && is_library(entry.path()))
         {
             libraries.push_back(entry.path());
         }
