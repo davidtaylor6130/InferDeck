@@ -81,6 +81,17 @@ void install_gateway_providers(const inferdeck::gateway::GatewayConfig& cfg,
     {
         foundation::LOG_ERROR("provider_plugin_rejected", "{}", rejected);
     }
+    nlohmann::json gateway = {
+        {"n_batch", cfg.n_batch}, {"n_ubatch", cfg.n_ubatch}, {"use_mmap", cfg.use_mmap},
+        {"use_mlock", cfg.use_mlock}, {"flash_attn", cfg.flash_attn}, {"kv_offload", cfg.kv_offload},
+        {"op_offload", cfg.op_offload}, {"cache_type_k", cfg.cache_type_k}, {"cache_type_v", cfg.cache_type_v},
+        {"swa_full", cfg.swa_full}, {"truncate_prompt", cfg.truncate_prompt},
+        {"vram_safety_margin_mb", cfg.vram_safety_margin_mb}};
+    if (cfg.n_gpu_layers)
+    {
+        gateway["n_gpu_layers"] = *cfg.n_gpu_layers;
+    }
+    inferdeck::provider::set_plugin_host_settings(gateway.dump());
     std::vector<model::ProviderDescriptor> providers = builtin_providers(cfg);
     providers.insert(providers.end(), g_plugins.providers.begin(), g_plugins.providers.end());
     nlohmann::json listed = nlohmann::json::array();
@@ -97,6 +108,6 @@ void install_gateway_providers(const inferdeck::gateway::GatewayConfig& cfg,
                           {"version", status.version}, {"state", status.state},
                           {"error", status.error}, {"modalities", std::move(modalities)}});
     }
-    g_provider_report = {{"abi_version", 1}, {"providers", std::move(listed)},
+    g_provider_report = {{"abi_version", 2}, {"abi_versions", {1, 2}}, {"providers", std::move(listed)},
                          {"rejected_plugins", g_plugins.rejected}};
 }

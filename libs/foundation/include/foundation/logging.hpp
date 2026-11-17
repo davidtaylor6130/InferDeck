@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -48,6 +49,9 @@ public:
 
     void log(LogLevel lvl, std::string_view event, std::string_view message);
 
+    /// <summary>Sends every line to <paramref name="forward"/> instead of spdlog. Provider DLLs use it to log through the gateway.</summary>
+    void set_forwarder(std::function<void(LogLevel, std::string_view, std::string_view)> forward);
+
 private:
     Logger() = default;
     ~Logger();
@@ -59,6 +63,7 @@ private:
     std::shared_ptr<spdlog::logger> previous_default_logger_;
     std::atomic<LogLevel> level_{LogLevel::Info};
     std::atomic_bool initialized_{false};
+    std::function<void(LogLevel, std::string_view, std::string_view)> forward_;
 };
 
 namespace detail {

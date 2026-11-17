@@ -2,12 +2,15 @@
 // does and exercises it, so a provider can be validated before it is installed.
 //
 //   inferdeck-provider-check <library> [--model <path>] [--artifact key=value]...
-//                            [--modality <name>]... [--skip-invoke]
+//                            [--modality <name>]... [--skip-invoke] [--no-load]
 //
-// For every modality in the manifest (or only those named) it creates an
-// instance, loads it, runs one small request, and unloads it. Exit code 0
-// means every step passed. See docs/providers.md, "Checking a plugin".
+// For every modality in the manifest (or only those named) it runs the
+// provider's init hook, creates an instance, loads it, checks the status
+// queries and slots, runs one small request (streaming, cancellation and
+// progress where the modality has them), and unloads it. Exit code 0 means
+// every step passed. See docs/providers.md, "Checking a provider".
 #include <cmath>
+#include <functional>
 #include <cstdio>
 #include <map>
 #include <set>
@@ -40,6 +43,21 @@ std::string error_of(const foundation::Result<T>& result)
     return result ? std::string{} : result.error().message;
 }
 
+/// <summary>When a media call reported progress, a false from the progress callback must cancel it.</summary>
+template <typename Run>
+void check_progress_stop(const std::string& modality, bool progressed, Run run)
+{
+    if (!progressed)
+    {
+        return;
+    }
+    const std::function<bool(int)> stop = [](int) { return false; };
+    const auto stopped = run(stop);
+    report(modality + " stops when progress returns false",
+           !stopped && stopped.error().code == foundation::ErrorCode::Cancelled,
+           stopped ? "expected a Cancelled error" : error_of(stopped));
+}
+
 /// <summary>Runs the smallest sensible request for a modality and checks the reply is well formed.</summary>
 void invoke(const std::string& modality, model::IBackend& backend, int slot)
 {
@@ -53,10 +71,28 @@ void invoke(const std::string& modality, model::IBackend& backend, int slot)
         const auto plain = text->predict(slot, request);
         report(step, static_cast<bool>(plain), error_of(plain));
         std::string streamed;
+        std::string reasoning;
+        int deltas = 0;
         const auto stream = text->predict_stream(
-            slot, request, [&](const model::InferenceDelta& delta) { streamed += delta.content; return true; });
-        report(modality + " stream", stream && streamed == stream->text,
-               stream ? "streamed deltas must add up to the final text" : error_of(stream));
+            slot, request, [&](const model::InferenceDelta& delta)
+            {
+                streamed += delta.content;
+                reasoning += delta.reasoning_text;
+                ++deltas;
+                return true;
+            });
+        report(modality + " stream", stream && streamed == stream->text && reasoning == stream->reasoning_text,
+               stream ? "streamed deltas must add up to the final text and reasoning" : error_of(stream));
+        if (deltas > 0)
+        {
+            const auto stopped = text->predict_stream(
+                slot, request, [](const model::InferenceDelta&) { return false; });
+            report(modality + " stream stops when the client goes away",
+                   !stopped && stopped.error().code == foundation::ErrorCode::Cancelled,
+                   stopped ? "a false callback must end the call with Cancelled" : error_of(stopped));
+        }
+        const auto demand = text->estimate_request_demand(request);
+        report(modality + " estimate request demand", static_cast<bool>(demand), error_of(demand));
     }
     else if (modality == "decision")
     {
@@ -84,17 +120,23 @@ void invoke(const std::string& modality, model::IBackend& backend, int slot)
         request.width = 256;
         request.height = 256;
         request.steps = 1;
-        const auto result = dynamic_cast<model::IImageBackend*>(&backend)->generate_images(slot, request);
+        auto* images = dynamic_cast<model::IImageBackend*>(&backend);
+        bool progressed = false;
+        const auto result = images->generate_images(slot, request, [&](int) { progressed = true; return true; });
         report(step, result && result->png_images.size() == 1 && !result->png_images[0].empty(),
                result ? "expected one non-empty image" : error_of(result));
+        check_progress_stop(modality, progressed, [&](const auto& stop) { return images->generate_images(slot, request, stop); });
     }
     else if (modality == "audio_generation")
     {
         model::AudioGenerationRequest request;
         request.prompt = "one soft piano note";
         request.duration_seconds = 1.0f;
-        const auto result = dynamic_cast<model::IAudioGenerationBackend*>(&backend)->generate_audio(slot, request);
+        auto* audio = dynamic_cast<model::IAudioGenerationBackend*>(&backend);
+        bool progressed = false;
+        const auto result = audio->generate_audio(slot, request, [&](int) { progressed = true; return true; });
         report(step, result && !result->wav_bytes.empty(), result ? "expected audio bytes" : error_of(result));
+        check_progress_stop(modality, progressed, [&](const auto& stop) { return audio->generate_audio(slot, request, stop); });
     }
     else if (modality == "video")
     {
@@ -104,22 +146,31 @@ void invoke(const std::string& modality, model::IBackend& backend, int slot)
         request.height = 256;
         request.frames = 9;
         request.steps = 1;
-        const auto result = dynamic_cast<model::IVideoBackend*>(&backend)->generate_video(slot, request);
+        auto* video = dynamic_cast<model::IVideoBackend*>(&backend);
+        bool progressed = false;
+        const auto result = video->generate_video(slot, request, [&](int) { progressed = true; return true; });
         report(step, result && !result->video_bytes.empty(), result ? "expected video bytes" : error_of(result));
+        check_progress_stop(modality, progressed, [&](const auto& stop) { return video->generate_video(slot, request, stop); });
     }
     else if (modality == "audio_speech")
     {
         model::SpeechRequest request;
         request.input = "Testing.";
-        const auto result = dynamic_cast<model::ISpeechBackend*>(&backend)->synthesize(slot, request);
+        auto* speech = dynamic_cast<model::ISpeechBackend*>(&backend);
+        const auto valid = speech->validate_speech_request(request);
+        report(modality + " validates a plain request", static_cast<bool>(valid), error_of(valid));
+        const auto result = speech->synthesize(slot, request);
         report(step, result && !result->bytes.empty(), result ? "expected audio bytes" : error_of(result));
     }
     else if (modality == "audio_transcription")
     {
         model::TranscriptionRequest request;
         request.pcm.assign(16000, 0.0f);
-        const auto result = dynamic_cast<model::ITranscriptionBackend*>(&backend)->transcribe(slot, request);
+        auto* transcriber = dynamic_cast<model::ITranscriptionBackend*>(&backend);
+        bool progressed = false;
+        const auto result = transcriber->transcribe(slot, request, [&](int) { progressed = true; return true; });
         report(step, static_cast<bool>(result), error_of(result));
+        check_progress_stop(modality, progressed, [&](const auto& stop) { return transcriber->transcribe(slot, request, stop); });
     }
     else
     {
@@ -138,6 +189,7 @@ int main(int argc, char** argv)
     base.min_slots = 1;
     std::set<std::string> only;
     bool skip_invoke = false;
+    bool no_load = false;
     for (int index = 1; index < argc; ++index)
     {
         const std::string argument = argv[index];
@@ -145,6 +197,7 @@ int main(int argc, char** argv)
         if (argument == "--model") base.gguf_path = next();
         else if (argument == "--modality") only.insert(next());
         else if (argument == "--skip-invoke") skip_invoke = true;
+        else if (argument == "--no-load") no_load = true;
         else if (argument == "--artifact")
         {
             const std::string pair = next();
@@ -156,7 +209,7 @@ int main(int argc, char** argv)
     if (library.empty())
     {
         std::puts("usage: inferdeck-provider-check <library> [--model <path>] [--artifact key=value]... "
-                  "[--modality <name>]... [--skip-invoke]");
+                  "[--modality <name>]... [--skip-invoke] [--no-load]");
         return 2;
     }
 
@@ -178,21 +231,42 @@ int main(int argc, char** argv)
         model::ModelInfo info = base;
         info.modality = modality;
         info.capabilities.assign(capabilities.begin(), capabilities.end());
+        if (descriptor->initialize)
+        {
+            const auto initialized = descriptor->initialize({info});
+            report(modality + " init", static_cast<bool>(initialized), error_of(initialized));
+        }
         const std::unique_ptr<model::IBackend> backend = descriptor->factory(info);
         if (!report(modality + " create", backend != nullptr, "create returned no instance"))
         {
             continue;
         }
         report(modality + " refuses a slot before load", !backend->acquire_slot());
+        if (no_load)
+        {
+            continue;
+        }
         const auto loaded = backend->load();
         if (!report(modality + " load", static_cast<bool>(loaded), error_of(loaded)))
         {
             continue;
         }
+        const int slots = backend->n_slots();
+        report(modality + " status queries", backend->is_loaded() && slots >= 1 &&
+               backend->n_free_slots() == slots && backend->min_slots() <= slots &&
+               backend->vram_usage_mb() >= 0 && backend->estimate_vram_mb(slots) >= 0,
+               "expected loaded, n_slots >= 1, all slots free, min_slots <= n_slots, non-negative VRAM");
         const auto slot = backend->acquire_slot();
-        if (report(modality + " acquire slot", static_cast<bool>(slot), error_of(slot)) && !skip_invoke)
+        if (report(modality + " acquire slot", static_cast<bool>(slot) && backend->slot_busy(*slot) &&
+                   backend->n_free_slots() == slots - 1, slot ? "slot accounting is wrong" : error_of(slot)))
         {
-            invoke(modality, *backend, *slot);
+            if (!skip_invoke)
+            {
+                invoke(modality, *backend, *slot);
+            }
+            const auto released = backend->release_slot(*slot);
+            report(modality + " release slot", released && !backend->slot_busy(*slot) &&
+                   backend->n_free_slots() == slots, error_of(released));
         }
         const auto unloaded = backend->unload();
         report(modality + " unload", unloaded && !backend->is_loaded(), error_of(unloaded));

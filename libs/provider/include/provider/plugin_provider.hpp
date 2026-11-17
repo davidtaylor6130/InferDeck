@@ -16,6 +16,12 @@ namespace inferdeck::provider {
 foundation::Result<model::ProviderDescriptor> load_plugin_provider(
     const std::filesystem::path& library);
 
+/// <summary>
+/// Gateway-wide settings (JSON object) handed to every v2 provider's init hook
+/// as host_json "gateway". Call before installing providers.
+/// </summary>
+void set_plugin_host_settings(const std::string& gateway_json);
+
 /// <summary>Outcome of scanning a provider directory.</summary>
 struct PluginLoadReport
 {
@@ -25,7 +31,7 @@ struct PluginLoadReport
 };
 
 /// <summary>
-/// Loads every provider library directly inside <paramref name="directory"/>
+/// Loads every <c>*.provider.dll</c> (<c>.so</c>/<c>.dylib</c>) directly inside <paramref name="directory"/>
 /// (sorted by file name) and publishes each contract so config validation
 /// accepts its runtime name. A missing directory yields an empty report.
 /// </summary>

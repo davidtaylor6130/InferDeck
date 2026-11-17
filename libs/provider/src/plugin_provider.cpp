@@ -4,20 +4,20 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <cstring>
+#include <cstddef>
+#include <cstdlib>
 #include <functional>
+#include <memory>
 #include <mutex>
-#include <optional>
 #include <span>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 #include "foundation/logging.hpp"
 #include "inferdeck/provider_abi.h"
 #include "model/imodel.hpp"
+#include "provider/codec.hpp"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -34,89 +34,102 @@ namespace inferdeck::provider {
 namespace {
 
 using json = nlohmann::json;
-
-namespace {
-
-template <typename T>
-T field(const json& object, const char* key, T fallback)
-{
-    if (!object.is_object()) return fallback;
-    const json::const_iterator found = object.find(key);
-    if (found == object.end() || found->is_null()) return fallback;
-    try
-    {
-        return found->get<T>();
-    }
-    catch (const json::exception&)
-    {
-        return fallback;
-    }
-}
-
-std::string field(const json& object, const char* key, const char* fallback)
-{
-    return field<std::string>(object, key, fallback);
-}
-
-}
 using foundation::ErrorCode;
 using Clock = std::chrono::steady_clock;
 
-/// <summary>Host side of one ABI call: cancellation, streaming events, and the copied reply.</summary>
-struct CallState
+/// <summary>Options a v1 provider cannot receive: its JSON predates them.</summary>
+const std::vector<std::string> k_v1_unsupported = {
+    "logprobs", "logit_bias", "mirostat", "tfs_z", "prompt_keep_tokens",
+    "add_generation_prompt", "reasoning_format"};
+
+/// <summary>One loaded library. Shared by its descriptor and every backend it creates.</summary>
+struct Library
 {
-    std::function<bool()> cancelled;
-    /// <summary>Receives each streaming event. Returns false to stop the call.</summary>
-    std::function<bool(const json&, std::span<const inferdeck_blob>)> on_event;
-    json reply = json::object();
-    std::vector<std::vector<std::byte>> blobs;
+    const inferdeck_provider* v1{nullptr};
+    const inferdeck_provider_v2* v2{nullptr};
+    std::string runtime;
+    std::vector<std::string> unsupported;
+    std::string host_json;
+    inferdeck_host_v2 host{};
+    bool initialized{false};
 };
 
-std::vector<std::byte> copy_blob(const inferdeck_blob& blob)
+std::mutex g_libraries_mutex;
+std::vector<std::shared_ptr<Library>> g_libraries;
+json g_gateway_settings = json::object();
+
+/// <summary>Host side of one ABI call: cancellation, deadline, streaming events, and the copied reply.</summary>
+struct CallState
 {
-    const std::byte* begin = reinterpret_cast<const std::byte*>(blob.data);
-    return blob.data ? std::vector<std::byte>(begin, begin + blob.size) : std::vector<std::byte>{};
-}
+    CallState();
+    CallState(const CallState&) = delete;
+    CallState& operator=(const CallState&) = delete;
+
+    std::function<bool()> cancelled;
+    Clock::time_point deadline{Clock::time_point::max()};
+    std::atomic<bool> stopped{false};
+    /// <summary>Receives each streaming event. Returns false to stop the call.</summary>
+    std::function<bool(const json&, codec::Blobs)> on_event;
+    json reply = json::object();
+    std::vector<std::vector<std::byte>> blobs;
+    std::vector<inferdeck_blob> views;
+    inferdeck_call v1;
+    inferdeck_call_v2 v2;
+
+    codec::Blobs reply_blobs()
+    {
+        views.clear();
+        for (const std::vector<std::byte>& blob : blobs)
+        {
+            views.push_back({reinterpret_cast<const uint8_t*>(blob.data()), blob.size()});
+        }
+        return views;
+    }
+};
 
 int32_t call_cancelled(void* context)
 {
     try
     {
-        const CallState* state = static_cast<const CallState*>(context);
-        return state->cancelled && state->cancelled() ? 1 : 0;
+        CallState* state = static_cast<CallState*>(context);
+        if (state->stopped.load() || (state->cancelled && state->cancelled()))
+        {
+            return INFERDECK_CALL_CANCELLED;
+        }
+        return Clock::now() >= state->deadline ? INFERDECK_CALL_DEADLINE : INFERDECK_CALL_RUNNING;
     }
     catch (...)
     {
-        return 1;
+        return INFERDECK_CALL_CANCELLED;
     }
 }
 
-int32_t call_emit(void* context, const char* event_json,
-                  const inferdeck_blob* blobs, size_t blob_count)
+int32_t call_emit(void* context, const char* event_json, const inferdeck_blob* blobs, size_t blob_count)
 {
+    CallState* state = static_cast<CallState*>(context);
     try
     {
-        CallState* state = static_cast<CallState*>(context);
         const json event = json::parse(event_json ? event_json : "", nullptr, false);
         if (event.is_discarded() || !event.is_object())
         {
             return 1;
         }
-        const std::span<const inferdeck_blob> payload(blobs, blobs ? blob_count : 0);
+        const codec::Blobs payload(blobs, blobs ? blob_count : 0);
         if (state->on_event && !state->on_event(event, payload))
         {
+            state->stopped.store(true);
             return 1;
         }
-        return call_cancelled(context);
+        return call_cancelled(context) != INFERDECK_CALL_RUNNING ? 1 : 0;
     }
     catch (...)
     {
+        state->stopped.store(true);
         return 1;
     }
 }
 
-void call_reply(void* context, const char* result_json,
-                const inferdeck_blob* blobs, size_t blob_count)
+void call_reply(void* context, const char* result_json, const inferdeck_blob* blobs, size_t blob_count)
 {
     try
     {
@@ -126,7 +139,7 @@ void call_reply(void* context, const char* result_json,
         state->blobs.clear();
         for (size_t index = 0; blobs && index < blob_count; ++index)
         {
-            state->blobs.push_back(copy_blob(blobs[index]));
+            state->blobs.push_back(codec::copy_blob(blobs[index]));
         }
     }
     catch (...)
@@ -134,10 +147,34 @@ void call_reply(void* context, const char* result_json,
     }
 }
 
-ErrorCode to_error_code(int32_t status)
+int64_t call_remaining_ms(void* context)
 {
-    return status > 0 && status <= static_cast<int32_t>(ErrorCode::Internal)
-        ? static_cast<ErrorCode>(status) : ErrorCode::Internal;
+    const CallState* state = static_cast<const CallState*>(context);
+    if (state->deadline == Clock::time_point::max())
+    {
+        return -1;
+    }
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(state->deadline - Clock::now());
+    return std::max<int64_t>(0, left.count());
+}
+
+CallState::CallState()
+    : v1{this, call_cancelled, call_emit, call_reply},
+      v2{sizeof(inferdeck_call_v2), this, call_cancelled, call_emit, call_reply, call_remaining_ms}
+{
+}
+
+void host_log(void*, int32_t level, const char* event, const char* message)
+{
+    try
+    {
+        foundation::Logger::instance().log(
+            static_cast<foundation::LogLevel>(std::clamp(level, 0, 5)),
+            event ? event : "provider", message ? message : "");
+    }
+    catch (...)
+    {
+    }
 }
 
 /// <summary>Turns a provider status and its optional {"message"} reply into a Result.</summary>
@@ -147,18 +184,35 @@ foundation::Result<void> to_result(int32_t status, const CallState& state, const
     {
         return foundation::Ok();
     }
+    if (status == INFERDECK_NOT_IMPLEMENTED)
+    {
+        return foundation::Err<void>(ErrorCode::Unavailable, "provider does not implement " + action);
+    }
+    const ErrorCode code = status > 0 && status <= static_cast<int32_t>(ErrorCode::Internal)
+        ? static_cast<ErrorCode>(status) : ErrorCode::Internal;
     const json::const_iterator message = state.reply.find("message");
-    return foundation::Err<void>(
-        to_error_code(status),
-        message != state.reply.end() && message->is_string()
-            ? message->get<std::string>()
-            : "provider " + action + " failed with status " + std::to_string(status));
+    return foundation::Err<void>(code, message != state.reply.end() && message->is_string()
+        ? message->get<std::string>()
+        : "provider " + action + " failed with status " + std::to_string(status));
 }
 
 template <typename T>
 foundation::Result<T> forward_error(const foundation::Result<void>& failed)
 {
     return foundation::Err<T>(failed.error().code, failed.error().message);
+}
+
+template <typename Function>
+int32_t guard(Function function)
+{
+    try
+    {
+        return function();
+    }
+    catch (...)
+    {
+        return INFERDECK_INTERNAL;
+    }
 }
 
 std::string dump(const json& value)
@@ -171,179 +225,16 @@ float elapsed_ms(Clock::time_point started)
     return std::chrono::duration<float, std::milli>(Clock::now() - started).count();
 }
 
-const char* role_name(inference::MessageRole role)
+std::string event_type(const json& event)
 {
-    switch (role)
-    {
-    case inference::MessageRole::Developer: return "developer";
-    case inference::MessageRole::System: return "system";
-    case inference::MessageRole::Assistant: return "assistant";
-    case inference::MessageRole::Tool: return "tool";
-    case inference::MessageRole::Function: return "function";
-    default: return "user";
-    }
-}
-
-template <typename T>
-void put_optional(json& target, const char* key, const std::optional<T>& value)
-{
-    if (value)
-    {
-        target[key] = *value;
-    }
-}
-
-/// <summary>Appends a binary payload and returns its index for the JSON to reference.</summary>
-std::size_t add_blob(std::vector<inferdeck_blob>& blobs, const std::vector<std::byte>& bytes)
-{
-    blobs.push_back({reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()});
-    return blobs.size() - 1;
-}
-
-json model_json(const model::ModelInfo& info)
-{
-    json value = {
-        {"name", info.name},
-        {"family", info.family},
-        {"runtime", info.runtime},
-        {"modality", info.modality},
-        {"capabilities", info.capabilities},
-        {"compute", model::to_string(info.compute)},
-        {"model_path", info.gguf_path},
-        {"mmproj_path", info.mmproj_path},
-        {"chat_template_path", info.chat_template_path},
-        {"n_slots", info.n_slots},
-        {"context_size", info.context_size},
-        {"default_max_output_tokens", info.default_max_output_tokens},
-        {"vram_required_mb", info.vram_required_mb},
-        {"has_vision", info.has_vision},
-        {"artifacts", info.artifacts},
-        {"sampling", {
-            {"temperature", info.sampling.temperature},
-            {"top_p", info.sampling.top_p},
-            {"top_k", info.sampling.top_k},
-            {"min_p", info.sampling.min_p},
-            {"repeat_penalty", info.sampling.repeat_penalty},
-            {"repeat_last_n", info.sampling.repeat_last_n},
-        }},
-    };
-    put_optional(value, "n_gpu_layers", info.n_gpu_layers);
-    return value;
-}
-
-json chat_request_json(int slot, const model::InferenceRequest& request, bool stream,
-                       std::vector<inferdeck_blob>& blobs)
-{
-    json messages = json::array();
-    for (const inference::Message& message : request.messages)
-    {
-        json content = json::array();
-        for (const inference::Content& part : message.content)
-        {
-            if (const inference::TextContent* text = std::get_if<inference::TextContent>(&part))
-            {
-                content.push_back({{"type", "text"}, {"text", text->text}});
-            }
-            else if (const inference::ImageContent* image = std::get_if<inference::ImageContent>(&part))
-            {
-                content.push_back({{"type", "image"}, {"blob", add_blob(blobs, image->bytes)},
-                                   {"media_type", image->media_type}, {"detail", image->detail}});
-            }
-            else if (const inference::AudioContent* audio = std::get_if<inference::AudioContent>(&part))
-            {
-                content.push_back({{"type", "audio"}, {"blob", add_blob(blobs, audio->bytes)},
-                                   {"media_type", audio->media_type}});
-            }
-        }
-        json tool_calls = json::array();
-        for (const inference::FunctionCall& call : message.tool_calls)
-        {
-            tool_calls.push_back({{"id", call.id}, {"name", call.name}, {"arguments", call.arguments}});
-        }
-        messages.push_back({
-            {"role", role_name(message.role)},
-            {"content", std::move(content)},
-            {"tool_calls", std::move(tool_calls)},
-            {"reasoning", message.reasoning},
-            {"tool_call_id", message.tool_call_id},
-            {"name", message.name},
-        });
-    }
-    json tools = json::array();
-    for (const inference::FunctionTool& tool : request.tools)
-    {
-        tools.push_back({{"name", tool.name}, {"description", tool.description},
-                         {"parameters_schema", tool.parameters_schema}});
-    }
-    static constexpr const char* tool_choices[] = {"auto", "none", "required", "function"};
-    static constexpr const char* output_kinds[] = {"text", "json_object", "json_schema", "grammar"};
-    json sampling = {{"seed", request.sampling.seed}};
-    put_optional(sampling, "temperature", request.sampling.temperature);
-    put_optional(sampling, "top_p", request.sampling.top_p);
-    put_optional(sampling, "top_k", request.sampling.top_k);
-    put_optional(sampling, "min_p", request.sampling.min_p);
-    put_optional(sampling, "repeat_penalty", request.sampling.repeat_penalty);
-    put_optional(sampling, "repeat_last_n", request.sampling.repeat_last_n);
-    put_optional(sampling, "frequency_penalty", request.sampling.frequency_penalty);
-    put_optional(sampling, "presence_penalty", request.sampling.presence_penalty);
-    json value = {
-        {"slot", slot},
-        {"stream", stream},
-        {"prompt", request.prompt},
-        {"messages", std::move(messages)},
-        {"tools", std::move(tools)},
-        {"tool_choice", {{"kind", tool_choices[static_cast<int>(request.tool_choice.kind)]},
-                         {"function_name", request.tool_choice.function_name}}},
-        {"output", {{"kind", output_kinds[static_cast<int>(request.output.kind)]},
-                    {"name", request.output.name},
-                    {"schema", request.output.schema},
-                    {"strict", request.output.strict}}},
-        {"sampling", std::move(sampling)},
-        {"stop", request.stop},
-        {"max_output_tokens", request.max_output_tokens},
-        {"parallel_tool_calls", request.parallel_tool_calls},
-    };
-    put_optional(value, "reasoning_effort", request.reasoning_effort);
-    put_optional(value, "enable_reasoning", request.enable_reasoning);
-    put_optional(value, "context_window", request.context_window);
-    return value;
-}
-
-model::InferenceDelta delta_from_json(const json& event)
-{
-    model::InferenceDelta delta;
-    delta.content = field(event, "content", "");
-    delta.reasoning_text = field(event, "reasoning", "");
-    for (const json& call : field(event, "tool_calls", json::array()))
-    {
-        delta.tool_calls.push_back({field(call, "index", std::size_t{0}), field(call, "id", ""),
-                                    "function", field(call, "name", ""), field(call, "arguments", "")});
-    }
-    return delta;
-}
-
-model::InferenceResult result_from_json(const json& reply)
-{
-    model::InferenceResult result;
-    result.text = field(reply, "text", "");
-    result.reasoning_text = field(reply, "reasoning_text", "");
-    result.finish_reason = field(reply, "finish_reason", "stop");
-    result.prompt_tokens = field(reply, "prompt_tokens", 0);
-    result.cached_prompt_tokens = field(reply, "cached_prompt_tokens", 0);
-    result.completion_tokens = field(reply, "completion_tokens", 0);
-    result.reasoning_tokens = field(reply, "reasoning_tokens", 0);
-    for (const json& call : field(reply, "tool_calls", json::array()))
-    {
-        result.tool_calls.push_back({field(call, "id", ""), "function",
-                                     field(call, "name", ""), field(call, "arguments", "")});
-    }
-    return result;
+    const json::const_iterator type = event.find("type");
+    return type != event.end() && type->is_string() ? type->get<std::string>() : std::string{};
 }
 
 /// <summary>
-/// Adapts one provider-library instance to the backend interfaces the
-/// coordinator uses. Slot bookkeeping lives here; everything else crosses the
-/// C ABI as JSON plus binary blobs.
+/// Adapts one provider instance to every backend interface the coordinator
+/// uses, so a plugin is indistinguishable from a built-in runtime. Optional v2
+/// members that are missing, and all of v1, fall back to the IBackend defaults.
 /// </summary>
 class PluginBackend final : public model::IModel,
                             public model::IEmbeddingBackend,
@@ -355,17 +246,24 @@ class PluginBackend final : public model::IModel,
                             public model::IDecisionBackend
 {
 public:
-    PluginBackend(const inferdeck_provider* api, void* instance, model::ModelInfo info)
-        : api_(api), instance_(instance), info_(std::move(info)),
-          slots_(static_cast<std::size_t>(std::max(1, info_.n_slots)), false) {}
+    PluginBackend(std::shared_ptr<const Library> library, void* instance, model::ModelInfo info)
+        : library_(std::move(library)), v1_(library_->v1), v2_(library_->v2), instance_(instance),
+          info_(std::move(info)), slots_(static_cast<std::size_t>(std::max(1, info_.n_slots)), false) {}
 
     ~PluginBackend() override
     {
-        if (is_loaded())
+        if (loaded_.load())
         {
             (void)unload();
         }
-        api_->destroy(instance_);
+        if (v2_)
+        {
+            v2_->destroy(instance_);
+        }
+        else
+        {
+            v1_->destroy(instance_);
+        }
     }
 
     const model::ModelInfo& info() const override { return info_; }
@@ -376,10 +274,15 @@ public:
     foundation::Result<void> load(const model::LifecycleControl& control) override
     {
         cancel_all_.store(false);
-        const foundation::Result<void> loaded = lifecycle(api_->load, control, "load");
+        CallState state;
+        lifecycle(state, control);
+        const foundation::Result<void> loaded = to_result(guard([&]
+        {
+            return v2_ ? v2_->load(instance_, &state.v2) : v1_->load(instance_, &state.v1);
+        }), state, "load");
         if (loaded)
         {
-            refresh_vram_usage();
+            refresh_after_load();
         }
         set_loaded(static_cast<bool>(loaded));
         return loaded;
@@ -387,7 +290,12 @@ public:
 
     foundation::Result<void> unload(const model::LifecycleControl& control) override
     {
-        const foundation::Result<void> unloaded = lifecycle(api_->unload, control, "unload");
+        CallState state;
+        lifecycle(state, control);
+        const foundation::Result<void> unloaded = to_result(guard([&]
+        {
+            return v2_ ? v2_->unload(instance_, &state.v2) : v1_->unload(instance_, &state.v1);
+        }), state, "unload");
         if (unloaded)
         {
             set_loaded(false);
@@ -395,42 +303,109 @@ public:
         return unloaded;
     }
 
-    bool is_loaded() const override
-    {
-        std::lock_guard lock(mutex_);
-        return loaded_;
-    }
+    bool is_loaded() const override { return query(INFERDECK_QUERY_LOADED, 0, loaded_.load() ? 1 : 0) != 0; }
+    bool execution_healthy() const override { return query(INFERDECK_QUERY_HEALTHY, 0, 1) != 0; }
 
     int vram_usage_mb() const override
     {
-        return is_loaded() ? vram_mb_.load() : 0;
+        if (!loaded_.load())
+        {
+            return 0;
+        }
+        return static_cast<int>(query(INFERDECK_QUERY_VRAM_USAGE_MB, 0, v1_vram_mb_.load()));
     }
 
-    void refresh_vram_usage()
+    int n_slots() const override
     {
-        int32_t reported = -1;
-        try
-        {
-            reported = api_->vram_usage_mb(instance_);
-        }
-        catch (...)
-        {
-        }
-        vram_mb_.store(reported < 0 ? info_.vram_required_mb : reported);
+        return static_cast<int>(query(INFERDECK_QUERY_N_SLOTS, 0, static_cast<int64_t>(slots_.size())));
     }
-
-    int n_slots() const override { return static_cast<int>(slots_.size()); }
 
     int n_free_slots() const override
     {
+        if (provider_slots())
+        {
+            return static_cast<int>(query(INFERDECK_QUERY_N_FREE_SLOTS, 0, 0));
+        }
         std::lock_guard lock(mutex_);
         return static_cast<int>(std::count(slots_.begin(), slots_.end(), false));
     }
 
+    int context_pool_capacity() const override
+    {
+        return static_cast<int>(query(INFERDECK_QUERY_CONTEXT_POOL_CAPACITY, 0, 0));
+    }
+
+    int min_slots() const override { return static_cast<int>(query(INFERDECK_QUERY_MIN_SLOTS, 0, n_slots())); }
+    bool can_resize_slots() const override { return query(INFERDECK_QUERY_CAN_RESIZE_SLOTS, 0, 0) != 0; }
+    bool can_reclaim_idle_context() const override
+    {
+        return query(INFERDECK_QUERY_CAN_RECLAIM_IDLE_CONTEXT, 0, 0) != 0;
+    }
+
+    int estimate_vram_mb(int slots) const override
+    {
+        return static_cast<int>(query(INFERDECK_QUERY_ESTIMATE_VRAM_MB, slots, vram_usage_mb()));
+    }
+
+    int additional_vram_reserve_mb() const override
+    {
+        return static_cast<int>(query(INFERDECK_QUERY_ADDITIONAL_VRAM_RESERVE_MB, 0, 0));
+    }
+
+    bool live_vram_accounting_complete() const override
+    {
+        return query(INFERDECK_QUERY_LIVE_VRAM_ACCOUNTING_COMPLETE, 0, 0) != 0;
+    }
+
+    foundation::Result<bool> reclaim_idle_context(int additional_reserve_mb,
+                                                  const model::LifecycleControl& control) override
+    {
+        if (!v2_ || !v2_->reclaim_idle_context)
+        {
+            return false;
+        }
+        CallState state;
+        lifecycle(state, control);
+        const foundation::Result<void> ran = to_result(guard([&]
+        {
+            return v2_->reclaim_idle_context(instance_, additional_reserve_mb, &state.v2);
+        }), state, "reclaim_idle_context");
+        if (!ran)
+        {
+            return forward_error<bool>(ran);
+        }
+        return state.reply.value("reclaimed", false);
+    }
+
+    foundation::Result<void> resize_slots(int slots) override
+    {
+        return resize_slots(slots, model::LifecycleControl{});
+    }
+
+    foundation::Result<void> resize_slots(int slots, const model::LifecycleControl& control) override
+    {
+        if (!v2_ || !v2_->resize_slots)
+        {
+            return foundation::Err<void>(ErrorCode::Unavailable, "backend capacity is fixed");
+        }
+        CallState state;
+        lifecycle(state, control);
+        return to_result(guard([&] { return v2_->resize_slots(instance_, slots, &state.v2); }),
+                         state, "resize_slots");
+    }
+
     foundation::Result<int> acquire_slot() override
     {
+        if (provider_slots())
+        {
+            int32_t slot = -1;
+            const int32_t status = guard([&] { return v2_->acquire_slot(instance_, &slot); });
+            CallState state;
+            const foundation::Result<void> acquired = to_result(status, state, "acquire_slot");
+            return acquired ? foundation::Result<int>(static_cast<int>(slot)) : forward_error<int>(acquired);
+        }
         std::lock_guard lock(mutex_);
-        if (!loaded_)
+        if (!loaded_.load())
         {
             return foundation::Err<int>(ErrorCode::NotLoaded, "backend is not loaded");
         }
@@ -445,6 +420,11 @@ public:
 
     foundation::Result<void> release_slot(int slot_id) override
     {
+        if (provider_slots())
+        {
+            CallState state;
+            return to_result(guard([&] { return v2_->release_slot(instance_, slot_id); }), state, "release_slot");
+        }
         std::lock_guard lock(mutex_);
         if (slot_id < 0 || static_cast<std::size_t>(slot_id) >= slots_.size())
         {
@@ -456,12 +436,74 @@ public:
 
     bool slot_busy(int slot_id) const override
     {
+        if (provider_slots())
+        {
+            return query(INFERDECK_QUERY_SLOT_BUSY, slot_id, 0) != 0;
+        }
         std::lock_guard lock(mutex_);
         return slot_id >= 0 && static_cast<std::size_t>(slot_id) < slots_.size() &&
                slots_[static_cast<std::size_t>(slot_id)];
     }
 
-    void request_cancel() override { cancel_all_.store(true); }
+    foundation::Result<void> reset_all_slots() override
+    {
+        if (!v2_ || !v2_->reset_all_slots)
+        {
+            return foundation::Ok();
+        }
+        CallState state;
+        return to_result(guard([&] { return v2_->reset_all_slots(instance_, &state.v2); }), state,
+                         "reset_all_slots");
+    }
+
+    void request_cancel() override
+    {
+        cancel_all_.store(true);
+        if (v2_ && v2_->request_cancel)
+        {
+            (void)guard([&] { v2_->request_cancel(instance_); return 0; });
+        }
+    }
+
+    foundation::Result<model::RequestDemand> estimate_request_demand(
+        const model::InferenceRequest& request) const override
+    {
+        const foundation::Result<void> supported = reject_unsupported(request);
+        if (!supported)
+        {
+            return forward_error<model::RequestDemand>(supported);
+        }
+        if (!v2_)
+        {
+            return model::RequestDemand{};
+        }
+        std::vector<inferdeck_blob> blobs;
+        CallState state;
+        const int32_t status = invoke("estimate_request_demand", codec::encode(request, -1, false, blobs),
+                                      blobs, state);
+        if (status == INFERDECK_NOT_IMPLEMENTED)
+        {
+            return model::RequestDemand{};
+        }
+        const foundation::Result<void> ran = to_result(status, state, "estimate_request_demand");
+        return ran ? codec::decode_demand(state.reply) : forward_error<model::RequestDemand>(ran);
+    }
+
+    foundation::Result<void> ensure_request_capacity(const model::RequestDemand& demand,
+                                                     const model::LifecycleControl& control) override
+    {
+        if (!v2_)
+        {
+            return foundation::Ok();
+        }
+        CallState state;
+        lifecycle(state, control);
+        const int32_t status = invoke("ensure_request_capacity", codec::encode(demand), {}, state);
+        return status == INFERDECK_NOT_IMPLEMENTED ? foundation::Ok()
+                                                   : to_result(status, state, "ensure_request_capacity");
+    }
+
+    const model::ChatTemplateMeta& chat_template_meta() const override { return template_meta_; }
 
     foundation::Result<model::InferenceResult> predict(
         int slot_id, const model::InferenceRequest& request) override
@@ -470,8 +512,7 @@ public:
     }
 
     foundation::Result<model::InferenceResult> predict_cancellable(
-        int slot_id, const model::InferenceRequest& request,
-        const std::atomic<bool>* cancel) override
+        int slot_id, const model::InferenceRequest& request, const std::atomic<bool>* cancel) override
     {
         return generate(slot_id, request, nullptr, cancel);
     }
@@ -484,357 +525,344 @@ public:
     }
 
     foundation::Result<model::EmbeddingResult> embed(
-        int slot_id, const model::EmbeddingRequest& request,
-        const std::function<bool()>& cancelled) override
+        int slot_id, const model::EmbeddingRequest& request, const std::function<bool()>& cancelled) override
     {
-        json inputs = json::array();
-        for (const model::EmbeddingInput& input : request.inputs)
-        {
-            if (const model::EmbeddingTextInput* text = std::get_if<model::EmbeddingTextInput>(&input))
-            {
-                inputs.push_back(text->text);
-            }
-            else
-            {
-                inputs.push_back(std::get<model::EmbeddingTokenInput>(input).tokens);
-            }
-        }
-        json body = {{"slot", slot_id}, {"inputs", std::move(inputs)}};
-        put_optional(body, "dimensions", request.dimensions);
         CallState state;
-        state.cancelled = cancelled;
+        state.cancelled = [this, &cancelled] { return cancel_all_.load() || (cancelled && cancelled()); };
         const Clock::time_point started = Clock::now();
-        const foundation::Result<void> ran = invoke("embed", body, {}, state);
+        const foundation::Result<void> ran = run("embed", codec::encode(request, slot_id), {}, state);
         if (!ran)
         {
             return forward_error<model::EmbeddingResult>(ran);
         }
-        model::EmbeddingResult result;
-        result.embeddings = field(state.reply, "embeddings", std::vector<std::vector<float>>{});
-        result.prompt_tokens = field(state.reply, "prompt_tokens", 0);
-        result.duration_ms = elapsed_ms(started);
-        return foundation::Ok(std::move(result));
+        return with_duration(codec::decode_embedding_result(state.reply), started);
     }
 
     foundation::Result<model::ImageGenerationResult> generate_images(
         int slot_id, const model::ImageGenerationRequest& request,
         const std::function<bool(int)>& progress) override
     {
-        const json body = {
-            {"slot", slot_id}, {"prompt", request.prompt},
-            {"negative_prompt", request.negative_prompt},
-            {"width", request.width}, {"height", request.height}, {"count", request.count},
-            {"steps", request.steps}, {"seed", request.seed},
-            {"guidance_scale", request.guidance_scale},
-            {"reference_image_count", request.reference_images.size()},
-        };
         std::vector<inferdeck_blob> blobs;
-        for (const std::vector<std::byte>& reference : request.reference_images)
-        {
-            add_blob(blobs, reference);
-        }
-        CallState state = progress_state(progress);
+        const json body = codec::encode(request, slot_id, blobs);
+        CallState state;
+        track_progress(state, progress);
         const Clock::time_point started = Clock::now();
-        const foundation::Result<void> ran = invoke("image", body, blobs, state);
+        const foundation::Result<void> ran = run("image", body, blobs, state);
         if (!ran)
         {
             return forward_error<model::ImageGenerationResult>(ran);
         }
-        model::ImageGenerationResult result;
-        result.png_images = std::move(state.blobs);
-        result.duration_ms = elapsed_ms(started);
-        return foundation::Ok(std::move(result));
+        return with_duration(codec::decode_image_result(state.reply, state.reply_blobs()), started);
     }
 
     foundation::Result<model::AudioGenerationResult> generate_audio(
         int slot_id, const model::AudioGenerationRequest& request,
         const std::function<bool(int)>& progress) override
     {
-        const json body = {
-            {"slot", slot_id}, {"prompt", request.prompt}, {"lyrics", request.lyrics},
-            {"duration_seconds", request.duration_seconds}, {"seed", request.seed},
-            {"steps", request.steps}, {"guidance_scale", request.guidance_scale},
-        };
-        CallState state = progress_state(progress);
+        CallState state;
+        track_progress(state, progress);
         const Clock::time_point started = Clock::now();
-        const foundation::Result<void> ran = invoke("audio_generation", body, {}, state);
+        const foundation::Result<void> ran = run("audio_generation", codec::encode(request, slot_id), {}, state);
         if (!ran)
         {
             return forward_error<model::AudioGenerationResult>(ran);
         }
-        model::AudioGenerationResult result;
-        result.wav_bytes = first_blob(state);
-        result.seed = field(state.reply, "seed", request.seed);
-        result.output_audio_seconds = field(state.reply, "output_audio_seconds", 0.0);
-        result.duration_ms = elapsed_ms(started);
-        return foundation::Ok(std::move(result));
+        foundation::Result<model::AudioGenerationResult> result =
+            codec::decode_audio_generation_result(state.reply, state.reply_blobs());
+        if (result && result->seed < 0)
+        {
+            result->seed = request.seed;
+        }
+        return with_duration(std::move(result), started);
     }
 
     foundation::Result<model::VideoGenerationResult> generate_video(
         int slot_id, const model::VideoGenerationRequest& request,
         const std::function<bool(int)>& progress) override
     {
-        const json body = {
-            {"slot", slot_id}, {"prompt", request.prompt},
-            {"negative_prompt", request.negative_prompt},
-            {"width", request.width}, {"height", request.height},
-            {"frames", request.frames}, {"fps", request.fps}, {"steps", request.steps},
-            {"seed", request.seed}, {"guidance_scale", request.guidance_scale},
-        };
-        CallState state = progress_state(progress);
+        CallState state;
+        track_progress(state, progress);
         const Clock::time_point started = Clock::now();
-        const foundation::Result<void> ran = invoke("video", body, {}, state);
+        const foundation::Result<void> ran = run("video", codec::encode(request, slot_id), {}, state);
         if (!ran)
         {
             return forward_error<model::VideoGenerationResult>(ran);
         }
-        model::VideoGenerationResult result;
-        result.video_bytes = first_blob(state);
-        result.content_type = field(state.reply, "content_type", result.content_type);
-        result.output_video_seconds = field(state.reply, "output_video_seconds", 0.0);
-        result.duration_ms = elapsed_ms(started);
-        return foundation::Ok(std::move(result));
+        return with_duration(codec::decode_video_result(state.reply, state.reply_blobs()), started);
     }
 
-    foundation::Result<void> validate_speech_request(const model::SpeechRequest&) override
+    foundation::Result<void> validate_speech_request(const model::SpeechRequest& request) override
     {
-        return foundation::Ok();
+        if (!v2_)
+        {
+            return foundation::Ok();
+        }
+        CallState state;
+        const int32_t status = invoke("speech_validate", codec::encode(request, -1, false), {}, state);
+        return status == INFERDECK_NOT_IMPLEMENTED ? foundation::Ok() : to_result(status, state, "speech_validate");
     }
 
     foundation::Result<model::AudioResult> synthesize(
         int slot_id, const model::SpeechRequest& request,
         const std::function<bool(const std::byte*, std::size_t)>& stream) override
     {
-        const json body = {
-            {"slot", slot_id}, {"input", request.input}, {"voice", request.voice},
-            {"format", request.format}, {"speed", request.speed},
-            {"stream", static_cast<bool>(stream)},
-        };
         CallState state;
         state.cancelled = [this] { return cancel_all_.load(); };
-        state.on_event = [&stream](const json& event, std::span<const inferdeck_blob> blobs)
+        state.on_event = [&stream](const json& event, codec::Blobs blobs)
         {
-            if (field(event, "type", "") != "audio" || blobs.empty() || !stream)
+            if (event_type(event) != "audio" || blobs.empty() || !stream)
             {
                 return true;
             }
             return stream(reinterpret_cast<const std::byte*>(blobs[0].data), blobs[0].size);
         };
         const Clock::time_point started = Clock::now();
-        const foundation::Result<void> ran = invoke("speech", body, {}, state);
+        const foundation::Result<void> ran =
+            run("speech", codec::encode(request, slot_id, static_cast<bool>(stream)), {}, state);
         if (!ran)
         {
             return forward_error<model::AudioResult>(ran);
         }
-        model::AudioResult result;
-        result.bytes = first_blob(state);
-        result.content_type = field(state.reply, "content_type", "audio/wav");
-        result.output_audio_seconds = field(state.reply, "output_audio_seconds", 0.0);
-        result.duration_ms = elapsed_ms(started);
-        return foundation::Ok(std::move(result));
+        return with_duration(codec::decode_speech_result(state.reply, state.reply_blobs()), started);
     }
 
     foundation::Result<model::TranscriptionResult> transcribe(
         int slot_id, const model::TranscriptionRequest& request,
         const std::function<bool(int)>& progress) override
     {
-        const json body = {
-            {"slot", slot_id}, {"sample_rate", request.sample_rate},
-            {"language", request.language}, {"prompt", request.prompt},
-            {"temperature", request.temperature}, {"pcm_blob", 0},
-        };
-        const inferdeck_blob pcm{reinterpret_cast<const uint8_t*>(request.pcm.data()),
-                                 request.pcm.size() * sizeof(float)};
-        CallState state = progress_state(progress);
+        std::vector<inferdeck_blob> blobs;
+        const json body = codec::encode(request, slot_id, blobs);
+        CallState state;
+        track_progress(state, progress);
         const Clock::time_point started = Clock::now();
-        const foundation::Result<void> ran = invoke("transcribe", body, {&pcm, 1}, state);
+        const foundation::Result<void> ran = run("transcribe", body, blobs, state);
         if (!ran)
         {
             return forward_error<model::TranscriptionResult>(ran);
         }
-        model::TranscriptionResult result;
-        result.text = field(state.reply, "text", "");
-        result.language = field(state.reply, "language", request.language);
-        result.duration_seconds = field(state.reply, "duration_seconds", 0.0f);
-        for (const json& segment : field(state.reply, "segments", json::array()))
+        foundation::Result<model::TranscriptionResult> result = codec::decode_transcription_result(state.reply);
+        if (result && result->inference_ms <= 0.0f)
         {
-            model::TranscriptionSegment parsed;
-            parsed.id = field(segment, "id", static_cast<int>(result.segments.size()));
-            parsed.start_seconds = field(segment, "start_seconds", 0.0f);
-            parsed.end_seconds = field(segment, "end_seconds", 0.0f);
-            parsed.text = field(segment, "text", "");
-            result.segments.push_back(std::move(parsed));
+            result->inference_ms = elapsed_ms(started);
         }
-        result.inference_ms = elapsed_ms(started);
-        return foundation::Ok(std::move(result));
+        if (result && result->language.empty())
+        {
+            result->language = request.language;
+        }
+        return result;
     }
 
     foundation::Result<model::DecisionResult> decide(
-        int slot_id, const model::DecisionRequest& request,
-        const std::function<bool()>& cancelled) override
+        int slot_id, const model::DecisionRequest& request, const std::function<bool()>& cancelled) override
     {
-        static constexpr const char* kinds[] = {"predicate", "choice", "score"};
-        json questions = json::array();
-        for (const model::DecisionQuestion& question : request.questions)
-        {
-            json options = json::array();
-            for (const model::DecisionOption& option : question.options)
-            {
-                options.push_back({{"label", option.label}, {"description", option.description}});
-            }
-            questions.push_back({{"type", kinds[static_cast<int>(question.kind)]},
-                                 {"instructions", question.instructions},
-                                 {"options", std::move(options)}});
-        }
-        const json body = {{"slot", slot_id}, {"input", request.input}, {"questions", std::move(questions)}};
         CallState state;
         state.cancelled = [this, &cancelled] { return cancel_all_.load() || (cancelled && cancelled()); };
         const Clock::time_point started = Clock::now();
-        const foundation::Result<void> ran = invoke("decide", body, {}, state);
+        const foundation::Result<void> ran = run("decide", codec::encode(request, slot_id), {}, state);
         if (!ran)
         {
             return forward_error<model::DecisionResult>(ran);
         }
-        model::DecisionResult result;
-        for (const json& answer : field(state.reply, "answers", json::array()))
-        {
-            result.answers.push_back({field(answer, "probabilities", std::vector<double>{})});
-        }
-        result.input_tokens = field(state.reply, "input_tokens", 0);
-        result.duration_ms = elapsed_ms(started);
-        return foundation::Ok(std::move(result));
+        return with_duration(codec::decode_decision_result(state.reply), started);
     }
 
 private:
-    using LifecycleFunction = int32_t (*)(void*, const inferdeck_call*);
+    bool provider_slots() const { return v2_ && v2_->acquire_slot; }
+
+    int64_t query(int32_t what, int64_t argument, int64_t fallback) const
+    {
+        if (!v2_ || !v2_->query)
+        {
+            return fallback;
+        }
+        try
+        {
+            const int64_t value = v2_->query(instance_, what, argument);
+            return value == INFERDECK_QUERY_DEFAULT ? fallback : value;
+        }
+        catch (...)
+        {
+            return fallback;
+        }
+    }
+
+    static void lifecycle(CallState& state, const model::LifecycleControl& control)
+    {
+        state.cancelled = control.cancelled;
+        state.deadline = control.deadline;
+    }
 
     void set_loaded(bool loaded)
     {
         std::lock_guard lock(mutex_);
-        loaded_ = loaded;
+        loaded_.store(loaded);
         if (!loaded)
         {
             std::fill(slots_.begin(), slots_.end(), false);
         }
     }
 
-    foundation::Result<void> lifecycle(LifecycleFunction function,
-                                       const model::LifecycleControl& control,
-                                       const std::string& action)
+    void refresh_after_load()
     {
+        if (v1_)
+        {
+            const int32_t reported = guard([&] { return v1_->vram_usage_mb(instance_); });
+            v1_vram_mb_.store(reported < 0 ? info_.vram_required_mb : reported);
+            return;
+        }
+        v1_vram_mb_.store(info_.vram_required_mb);
         CallState state;
-        state.cancelled = [&control] { return control.is_cancelled() || control.is_expired(); };
-        const inferdeck_call call{&state, call_cancelled, call_emit, call_reply};
-        int32_t status = INFERDECK_INTERNAL;
-        try
+        template_meta_ = {};
+        if (invoke("chat_template_meta", json::object(), {}, state) == INFERDECK_OK)
         {
-            status = function(instance_, &call);
+            const foundation::Result<model::ChatTemplateMeta> meta = codec::decode_template_meta(state.reply);
+            if (meta)
+            {
+                template_meta_ = *meta;
+            }
         }
-        catch (...)
-        {
-        }
-        return to_result(status, state, action);
     }
 
-    foundation::Result<void> invoke(const char* operation, const json& body,
-                                    std::span<const inferdeck_blob> blobs, CallState& state)
+    foundation::Result<void> reject_unsupported(const model::InferenceRequest& request) const
     {
-        const inferdeck_call call{&state, call_cancelled, call_emit, call_reply};
+        for (const std::string& option : codec::generation_options_used(request))
+        {
+            if (std::find(library_->unsupported.begin(), library_->unsupported.end(), option) !=
+                library_->unsupported.end())
+            {
+                return foundation::Err<void>(ErrorCode::InvalidArgument,
+                    "runtime " + library_->runtime + " does not support the request option " + option);
+            }
+        }
+        return foundation::Ok();
+    }
+
+    int32_t invoke(const char* operation, const json& body, std::span<const inferdeck_blob> blobs,
+                   CallState& state) const
+    {
         const std::string text = dump(body);
-        int32_t status = INFERDECK_INTERNAL;
-        try
+        return guard([&]
         {
-            status = api_->invoke(instance_, operation, text.c_str(),
-                                  blobs.data(), blobs.size(), &call);
-        }
-        catch (...)
-        {
-        }
-        return to_result(status, state, operation);
+            return v2_ ? v2_->invoke(instance_, operation, text.c_str(), blobs.data(), blobs.size(), &state.v2)
+                       : v1_->invoke(instance_, operation, text.c_str(), blobs.data(), blobs.size(), &state.v1);
+        });
     }
 
-    /// <summary>Call state for media operations that report {"type":"progress","percent":n}.</summary>
-    CallState progress_state(const std::function<bool(int)>& progress)
+    foundation::Result<void> run(const char* operation, const json& body,
+                                 std::span<const inferdeck_blob> blobs, CallState& state)
     {
-        CallState state;
+        return to_result(invoke(operation, body, blobs, state), state, operation);
+    }
+
+    /// <summary>Media progress: {"type":"progress","percent":n}. A false from the caller stops the call.</summary>
+    void track_progress(CallState& state, const std::function<bool(int)>& progress)
+    {
         state.cancelled = [this] { return cancel_all_.load(); };
-        state.on_event = [&progress](const json& event, std::span<const inferdeck_blob>)
+        state.on_event = [&progress](const json& event, codec::Blobs)
         {
-            return field(event, "type", "") != "progress" || !progress ||
-                   progress(std::clamp(field(event, "percent", 0), 0, 100));
+            if (event_type(event) != "progress" || !progress)
+            {
+                return true;
+            }
+            const json::const_iterator percent = event.find("percent");
+            return progress(std::clamp(percent != event.end() && percent->is_number() ? percent->get<int>() : 0,
+                                       0, 100));
         };
-        return state;
     }
 
-    static std::vector<std::byte> first_blob(CallState& state)
+    template <typename T>
+    static foundation::Result<T> with_duration(foundation::Result<T> result, Clock::time_point started)
     {
-        return state.blobs.empty() ? std::vector<std::byte>{} : std::move(state.blobs.front());
+        if (result && result->duration_ms <= 0.0f)
+        {
+            result->duration_ms = elapsed_ms(started);
+        }
+        return result;
     }
 
     foundation::Result<model::InferenceResult> generate(
         int slot_id, const model::InferenceRequest& request,
         const TokenCallback* callback, const std::atomic<bool>* cancel)
     {
+        const foundation::Result<void> supported = reject_unsupported(request);
+        if (!supported)
+        {
+            return forward_error<model::InferenceResult>(supported);
+        }
         std::vector<inferdeck_blob> blobs;
-        const json body = chat_request_json(slot_id, request, callback != nullptr, blobs);
+        const json body = codec::encode(request, slot_id, callback != nullptr, blobs);
         const Clock::time_point started = Clock::now();
         float first_token_ms = 0.0f;
         CallState state;
         state.cancelled = [this, cancel] { return cancel_all_.load() || (cancel && cancel->load()); };
-        state.on_event = [&](const json& event, std::span<const inferdeck_blob>)
+        state.on_event = [&](const json& event, codec::Blobs)
         {
-            if (field(event, "type", "") != "delta" || !callback || !*callback)
+            const std::string type = event_type(event);
+            if (type == "request_progress" && request.progress)
+            {
+                codec::apply_progress(event, *request.progress);
+                return true;
+            }
+            if (type != "delta" || !callback || !*callback)
             {
                 return true;
+            }
+            const foundation::Result<model::InferenceDelta> delta = codec::decode_delta(event);
+            if (!delta)
+            {
+                return false;
             }
             if (first_token_ms == 0.0f)
             {
                 first_token_ms = elapsed_ms(started);
             }
-            return (*callback)(delta_from_json(event));
+            return (*callback)(*delta);
         };
-        const foundation::Result<void> ran = invoke("chat", body, blobs, state);
+        const foundation::Result<void> ran = run("chat", body, blobs, state);
         if (!ran)
         {
             return forward_error<model::InferenceResult>(ran);
         }
-        model::InferenceResult result = result_from_json(state.reply);
-        result.duration_ms = elapsed_ms(started);
-        result.first_token_duration_ms = first_token_ms;
-        result.prompt_duration_ms = first_token_ms;
-        result.generation_duration_ms = result.duration_ms - first_token_ms;
-        if (result.generation_duration_ms > 0.0f)
+        foundation::Result<model::InferenceResult> result = codec::decode_inference_result(state.reply);
+        if (result && result->duration_ms <= 0.0f)
         {
-            result.tokens_per_second =
-                static_cast<float>(result.completion_tokens) * 1000.0f / result.generation_duration_ms;
+            result->duration_ms = elapsed_ms(started);
+            result->first_token_duration_ms = first_token_ms;
+            result->prompt_duration_ms = first_token_ms;
+            result->generation_duration_ms = result->duration_ms - first_token_ms;
+            if (result->generation_duration_ms > 0.0f)
+            {
+                result->tokens_per_second =
+                    static_cast<float>(result->completion_tokens) * 1000.0f / result->generation_duration_ms;
+            }
         }
-        return foundation::Ok(std::move(result));
+        return result;
     }
 
-    const inferdeck_provider* api_;
+    std::shared_ptr<const Library> library_;
+    const inferdeck_provider* v1_;
+    const inferdeck_provider_v2* v2_;
     void* instance_;
     model::ModelInfo info_;
+    model::ChatTemplateMeta template_meta_;
     mutable std::mutex mutex_;
-    bool loaded_{false};
+    std::atomic<bool> loaded_{false};
     std::vector<bool> slots_;
     std::atomic<bool> cancel_all_{false};
-    std::atomic<int> vram_mb_{0};
+    std::atomic<int> v1_vram_mb_{0};
 };
 
-std::unique_ptr<model::IBackend> create_backend(const inferdeck_provider* api,
+std::unique_ptr<model::IBackend> create_backend(const std::shared_ptr<const Library>& library,
                                                 const model::ModelInfo& info)
 {
     CallState state;
-    const inferdeck_call call{&state, call_cancelled, call_emit, call_reply};
     void* instance = nullptr;
-    int32_t status = INFERDECK_INTERNAL;
-    try
+    const std::string model_json = dump(codec::encode(info));
+    const int32_t status = guard([&]
     {
-        status = api->create(dump(model_json(info)).c_str(), &call, &instance);
-    }
-    catch (...)
-    {
-    }
+        return library->v2 ? library->v2->create(model_json.c_str(), &state.v2, &instance)
+                           : library->v1->create(model_json.c_str(), &state.v1, &instance);
+    });
     const foundation::Result<void> created = to_result(status, state, "create");
     if (!created || !instance)
     {
@@ -843,14 +871,64 @@ std::unique_ptr<model::IBackend> create_backend(const inferdeck_provider* api,
                               created ? "provider returned no instance" : created.error().message);
         return nullptr;
     }
-    return std::make_unique<PluginBackend>(api, instance, info);
+    return std::make_unique<PluginBackend>(library, instance, info);
 }
 
-/// <summary>Opens the library and returns its entry point, or an error naming the cause.</summary>
-foundation::Result<inferdeck_provider_entry> open_library(const std::filesystem::path& library)
+void shutdown_libraries()
 {
-    using EntryResult = foundation::Result<inferdeck_provider_entry>;
-    const std::filesystem::path absolute = std::filesystem::absolute(library);
+    std::lock_guard lock(g_libraries_mutex);
+    for (const std::shared_ptr<Library>& library : g_libraries)
+    {
+        if (library->initialized && library->v2->shutdown)
+        {
+            (void)guard([&] { library->v2->shutdown(); return 0; });
+        }
+    }
+}
+
+/// <summary>Runs the provider's init hook on the calling (gateway startup) thread.</summary>
+foundation::Result<void> initialize_library(Library& library, const std::vector<model::ModelInfo>& models)
+{
+    if (!library.v2 || !library.v2->init)
+    {
+        return foundation::Ok();
+    }
+    json configured = json::array();
+    for (const model::ModelInfo& info : models)
+    {
+        if (info.runtime == library.runtime)
+        {
+            configured.push_back(codec::encode(info));
+        }
+    }
+    {
+        std::lock_guard lock(g_libraries_mutex);
+        library.host_json = dump({{"abi_version", INFERDECK_PROVIDER_ABI_VERSION_2},
+                                  {"gateway", g_gateway_settings}, {"models", std::move(configured)}});
+    }
+    library.host = {sizeof(inferdeck_host_v2), library.host_json.c_str(), nullptr, host_log};
+    CallState state;
+    const foundation::Result<void> initialized =
+        to_result(guard([&] { return library.v2->init(&library.host, &state.v2); }), state, "init");
+    if (initialized && !library.initialized)
+    {
+        library.initialized = true;
+        static std::once_flag registered;
+        std::call_once(registered, [] { std::atexit(shutdown_libraries); });
+    }
+    return initialized;
+}
+
+/// <summary>Opens the library and returns its v2 and v1 entry points (either may be null).</summary>
+foundation::Result<std::pair<void*, void*>> open_library(const std::filesystem::path& library)
+{
+    using EntryResult = foundation::Result<std::pair<void*, void*>>;
+    std::error_code error;
+    const std::filesystem::path absolute = std::filesystem::absolute(library, error);
+    if (error)
+    {
+        return foundation::Err<std::pair<void*, void*>>(ErrorCode::IoError, error.message());
+    }
 #ifdef _WIN32
     DWORD previous_mode = 0;
     SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &previous_mode);
@@ -859,11 +937,12 @@ foundation::Result<inferdeck_provider_entry> open_library(const std::filesystem:
     SetThreadErrorMode(previous_mode, nullptr);
     if (!module)
     {
-        return foundation::Err<inferdeck_provider_entry>(
+        return foundation::Err<std::pair<void*, void*>>(
             ErrorCode::IoError, "LoadLibrary failed with error " + std::to_string(load_error));
     }
-    void* symbol = reinterpret_cast<void*>(GetProcAddress(module, INFERDECK_PROVIDER_ENTRY_POINT));
-    if (!symbol)
+    void* v2 = reinterpret_cast<void*>(GetProcAddress(module, INFERDECK_PROVIDER_ENTRY_POINT_V2));
+    void* v1 = reinterpret_cast<void*>(GetProcAddress(module, INFERDECK_PROVIDER_ENTRY_POINT));
+    if (!v2 && !v1)
     {
         FreeLibrary(module);
     }
@@ -871,116 +950,182 @@ foundation::Result<inferdeck_provider_entry> open_library(const std::filesystem:
     void* module = dlopen(absolute.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!module)
     {
-        return foundation::Err<inferdeck_provider_entry>(ErrorCode::IoError, dlerror());
+        return foundation::Err<std::pair<void*, void*>>(ErrorCode::IoError, dlerror());
     }
-    void* symbol = dlsym(module, INFERDECK_PROVIDER_ENTRY_POINT);
+    void* v2 = dlsym(module, INFERDECK_PROVIDER_ENTRY_POINT_V2);
+    void* v1 = dlsym(module, INFERDECK_PROVIDER_ENTRY_POINT);
 #endif
-    if (!symbol)
+    if (!v2 && !v1)
     {
-        return foundation::Err<inferdeck_provider_entry>(
-            ErrorCode::NotFound,
-            std::string("library does not export ") + INFERDECK_PROVIDER_ENTRY_POINT);
+        return foundation::Err<std::pair<void*, void*>>(
+            ErrorCode::NotFound, std::string("library exports neither ") + INFERDECK_PROVIDER_ENTRY_POINT_V2 +
+                                     " nor " + INFERDECK_PROVIDER_ENTRY_POINT);
     }
-    return EntryResult(reinterpret_cast<inferdeck_provider_entry>(symbol));
+    return EntryResult(std::make_pair(v2, v1));
 }
 
-bool is_library(const std::filesystem::path& path)
+bool is_provider_library(const std::filesystem::path& path)
 {
-    const std::string extension = path.extension().string();
+    const std::string name = path.filename().string();
 #ifdef _WIN32
-    return extension == ".dll";
+    constexpr std::string_view suffix = ".provider.dll";
+#elif defined(__APPLE__)
+    constexpr std::string_view suffix = ".provider.dylib";
 #else
-    return extension == ".so" || extension == ".dylib";
+    constexpr std::string_view suffix = ".provider.so";
 #endif
+    return name.size() > suffix.size() &&
+           std::equal(suffix.rbegin(), suffix.rend(), name.rbegin(), [](char left, char right)
+           {
+               return left == std::tolower(static_cast<unsigned char>(right));
+           });
 }
 
 }
 
-foundation::Result<model::ProviderDescriptor> load_plugin_provider(
-    const std::filesystem::path& library)
+void set_plugin_host_settings(const std::string& gateway_json)
+{
+    json settings = json::parse(gateway_json, nullptr, false);
+    std::lock_guard lock(g_libraries_mutex);
+    g_gateway_settings = settings.is_object() ? std::move(settings) : json::object();
+}
+
+foundation::Result<model::ProviderDescriptor> load_plugin_provider(const std::filesystem::path& library_path)
 {
     using DescriptorResult = foundation::Result<model::ProviderDescriptor>;
     const auto invalid = [](std::string message)
     {
         return foundation::Err<model::ProviderDescriptor>(ErrorCode::InvalidArgument, std::move(message));
     };
-    const foundation::Result<inferdeck_provider_entry> entry = open_library(library);
+    const foundation::Result<std::pair<void*, void*>> entry = open_library(library_path);
     if (!entry)
     {
         return foundation::Err<model::ProviderDescriptor>(entry.error().code, entry.error().message);
     }
-    const inferdeck_provider* api = (*entry)();
-    if (!api)
+    auto library = std::make_shared<Library>();
+    const char* manifest_text = nullptr;
+    if (entry->first)
     {
-        return invalid("entry point returned no provider table");
+        const inferdeck_provider_v2* api = reinterpret_cast<inferdeck_provider_entry_v2>(entry->first)();
+        if (!api)
+        {
+            return invalid("entry point returned no provider table");
+        }
+        if (api->abi_version != INFERDECK_PROVIDER_ABI_VERSION_2 || api->struct_size < sizeof(inferdeck_provider_v2))
+        {
+            return invalid("provider table is ABI version " + std::to_string(api->abi_version) + " with size " +
+                           std::to_string(api->struct_size) + "; this gateway needs version 2 and size >= " +
+                           std::to_string(sizeof(inferdeck_provider_v2)));
+        }
+        if (!api->manifest_json || !api->create || !api->destroy || !api->load || !api->unload || !api->invoke)
+        {
+            return invalid("provider table has a missing required function or manifest");
+        }
+        if ((api->acquire_slot || api->release_slot) && !(api->acquire_slot && api->release_slot && api->query))
+        {
+            return invalid("acquire_slot, release_slot, and query must be provided together");
+        }
+        library->v2 = api;
+        manifest_text = api->manifest_json;
     }
-    if (api->abi_version != INFERDECK_PROVIDER_ABI_VERSION)
+    else
     {
-        return invalid("provider ABI version " + std::to_string(api->abi_version) +
-                       " is not supported; this gateway speaks version " +
-                       std::to_string(INFERDECK_PROVIDER_ABI_VERSION));
+        const inferdeck_provider* api = reinterpret_cast<inferdeck_provider_entry>(entry->second)();
+        if (!api)
+        {
+            return invalid("entry point returned no provider table");
+        }
+        if (api->abi_version != INFERDECK_PROVIDER_ABI_VERSION)
+        {
+            return invalid("provider ABI version " + std::to_string(api->abi_version) +
+                           " is not supported by the v1 entry point");
+        }
+        if (!api->manifest_json || !api->create || !api->destroy || !api->load ||
+            !api->unload || !api->vram_usage_mb || !api->invoke)
+        {
+            return invalid("provider table has a missing function or manifest");
+        }
+        library->v1 = api;
+        library->unsupported = k_v1_unsupported;
+        manifest_text = api->manifest_json;
     }
-    if (!api->manifest_json || !api->create || !api->destroy || !api->load ||
-        !api->unload || !api->vram_usage_mb || !api->invoke)
-    {
-        return invalid("provider table has a missing function or manifest");
-    }
-    const json manifest = json::parse(api->manifest_json, nullptr, false);
+    const json manifest = json::parse(manifest_text, nullptr, false);
     if (!manifest.is_object())
     {
         return invalid("manifest is not a JSON object");
     }
     model::ProviderDescriptor descriptor;
-    descriptor.contract.name = field(manifest, "runtime", "");
-    const std::string& name = descriptor.contract.name;
-    if (name.empty() || !std::all_of(name.begin(), name.end(), [](unsigned char value)
-        {
-            return std::islower(value) || std::isdigit(value) || value == '_';
-        }))
+    try
     {
-        return invalid("manifest runtime must use lowercase letters, digits, and underscores");
-    }
-    const json modalities = field(manifest, "modalities", json::object());
-    if (!modalities.is_object() || modalities.empty())
-    {
-        return invalid("manifest modalities must map each modality to its capabilities");
-    }
-    for (const auto& [modality, capabilities] : modalities.items())
-    {
-        if (!capabilities.is_array() || capabilities.empty())
-        {
-            return invalid("manifest modality " + modality + " lists no capabilities");
-        }
-        for (const json& capability : capabilities)
-        {
-            if (!capability.is_string())
+        descriptor.contract.name = manifest.value("runtime", "");
+        const std::string& name = descriptor.contract.name;
+        if (name.empty() || !std::all_of(name.begin(), name.end(), [](unsigned char value)
             {
-                return invalid("manifest capabilities must be strings");
+                return std::islower(value) || std::isdigit(value) || value == '_';
+            }))
+        {
+            return invalid("manifest runtime must use lowercase letters, digits, and underscores");
+        }
+        const json modalities = manifest.value("modalities", json::object());
+        if (!modalities.is_object() || modalities.empty())
+        {
+            return invalid("manifest modalities must map each modality to its capabilities");
+        }
+        for (const auto& [modality, capabilities] : modalities.items())
+        {
+            if (!capabilities.is_array() || capabilities.empty())
+            {
+                return invalid("manifest modality " + modality + " lists no capabilities");
             }
-            descriptor.contract.modality_capabilities[modality].insert(capability.get<std::string>());
+            for (const json& capability : capabilities)
+            {
+                descriptor.contract.modality_capabilities[modality].insert(capability.get<std::string>());
+            }
+        }
+        const std::string model_source = manifest.value("model_source", "artifacts");
+        if (model_source == "gguf_path")
+        {
+            descriptor.contract.artifact_policy = model::RuntimeArtifactPolicy::Gguf;
+        }
+        else if (model_source == "none")
+        {
+            descriptor.contract.artifact_policy = model::RuntimeArtifactPolicy::None;
+        }
+        else if (model_source != "artifacts")
+        {
+            return invalid("manifest model_source must be gguf_path, artifacts, or none");
+        }
+        descriptor.contract.vision = manifest.value("vision", false);
+        descriptor.contract.reasoning = manifest.value("reasoning", false);
+        descriptor.contract.speculative = manifest.value("speculative", false);
+        descriptor.version = manifest.value("version", "");
+        for (const std::string& option : manifest.value("unsupported_options", std::vector<std::string>{}))
+        {
+            library->unsupported.push_back(option);
         }
     }
-    const std::string model_source = field(manifest, "model_source", "artifacts");
-    if (model_source == "gguf_path")
+    catch (const json::exception& error)
     {
-        descriptor.contract.artifact_policy = model::RuntimeArtifactPolicy::Gguf;
+        return invalid(std::string("manifest has a value of the wrong type: ") + error.what());
     }
-    else if (model_source == "none")
+    library->runtime = descriptor.contract.name;
+    std::error_code error;
+    descriptor.origin = std::filesystem::absolute(library_path, error).string();
     {
-        descriptor.contract.artifact_policy = model::RuntimeArtifactPolicy::None;
+        std::lock_guard lock(g_libraries_mutex);
+        g_libraries.push_back(library);
     }
-    else if (model_source != "artifacts")
+    descriptor.factory = [library](const model::ModelInfo& info)
     {
-        return invalid("manifest model_source must be gguf_path, artifacts, or none");
-    }
-    descriptor.contract.vision = field(manifest, "vision", false);
-    descriptor.contract.reasoning = field(manifest, "reasoning", false);
-    descriptor.version = field(manifest, "version", "");
-    descriptor.origin = std::filesystem::absolute(library).string();
-    descriptor.factory = [api](const model::ModelInfo& info)
-    {
-        return create_backend(api, info);
+        return create_backend(library, info);
     };
+    if (library->v2 && library->v2->init)
+    {
+        descriptor.initialize = [library](const std::vector<model::ModelInfo>& models)
+        {
+            return initialize_library(*library, models);
+        };
+    }
     return DescriptorResult(std::move(descriptor));
 }
 
@@ -989,13 +1134,13 @@ PluginLoadReport load_plugin_providers(const std::filesystem::path& directory)
     PluginLoadReport report;
     std::error_code error;
     std::vector<std::filesystem::path> libraries;
-    for (const std::filesystem::directory_entry& entry :
-         std::filesystem::directory_iterator(directory, error))
+    std::filesystem::directory_iterator entry(directory, error);
+    for (; !error && entry != std::filesystem::directory_iterator(); entry.increment(error))
     {
         std::error_code file_error;
-        if (entry.is_regular_file(file_error) && is_library(entry.path()))
+        if (entry->is_regular_file(file_error) && is_provider_library(entry->path()))
         {
-            libraries.push_back(entry.path());
+            libraries.push_back(entry->path());
         }
     }
     std::sort(libraries.begin(), libraries.end());

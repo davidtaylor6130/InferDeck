@@ -1,12 +1,13 @@
-// Minimal InferDeck provider. Copy this file to start a new provider.
+// Minimal raw-C-ABI provider, version 1. Kept so v1 loading stays tested; new
+// providers should start from echo_provider_v2.cpp (C++ SDK) or the v2 table.
 //
-// It registers the runtime "echo" with three operations:
+// It registers the runtime "echo_v1" with three operations:
 //   chat    echoes the last user message back, streaming one word at a time
 //   image   returns the bytes of the artifact named "image" as the PNG result
 //   decide  gives every option of every question the same probability
 //
 // Build it as a shared library, drop it into the gateway's providers/
-// directory, and select it per model with `runtime: echo`.
+// directory, and select it per model with `runtime: echo_v1`.
 // The contract it implements is docs/providers.md.
 #define INFERDECK_PROVIDER_BUILD
 #include "inferdeck/provider_abi.h"
@@ -131,7 +132,10 @@ int32_t echo_image(const EchoModel& model, const inferdeck_call* call)
         return fail(call, INFERDECK_IO_ERROR, "artifact \"image\" could not be read");
     }
     const std::vector<char> bytes{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-    call->emit(call->context, R"({"type":"progress","percent":100})", nullptr, 0);
+    if (call->emit(call->context, R"({"type":"progress","percent":100})", nullptr, 0))
+    {
+        return fail(call, INFERDECK_CANCELLED, "image cancelled");
+    }
     const inferdeck_blob png{reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()};
     call->reply(call->context, "{}", &png, 1);
     return INFERDECK_OK;
@@ -184,7 +188,7 @@ int32_t echo_invoke(void* instance, const char* operation, const char* request_j
 const inferdeck_provider echo_provider = {
     INFERDECK_PROVIDER_ABI_VERSION,
     R"({
-        "runtime": "echo",
+        "runtime": "echo_v1",
         "version": "1.0.0",
         "modalities": {
             "text": ["chat_completions", "responses"],

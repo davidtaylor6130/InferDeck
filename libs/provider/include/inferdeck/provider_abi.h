@@ -1,5 +1,5 @@
 /*
- * InferDeck provider ABI, version 1.
+ * InferDeck provider ABI, versions 1 and 2.
  *
  * A provider is a shared library (DLL / .so / .dylib) that runs models for
  * InferDeck inside the gateway process. This header is the whole contract:
@@ -52,7 +52,10 @@ typedef enum inferdeck_status {
     INFERDECK_TIMEOUT = 10,
     INFERDECK_CANCELLED = 11,
     INFERDECK_UNAVAILABLE = 12,
-    INFERDECK_INTERNAL = 13
+    INFERDECK_INTERNAL = 13,
+    /* v2 only: this optional operation is not implemented; the host applies
+     * its documented default instead of failing. */
+    INFERDECK_NOT_IMPLEMENTED = 14
 } inferdeck_status;
 
 /* Binary payload (image, audio, video, PCM samples). Never JSON-encoded. */
@@ -121,6 +124,121 @@ typedef const inferdeck_provider* (*inferdeck_provider_entry)(void);
 
 #ifdef INFERDECK_PROVIDER_BUILD
 INFERDECK_PROVIDER_EXPORT const inferdeck_provider* inferdeck_provider_v1(void);
+#endif
+
+/* ------------------------------------------------------------------------
+ * Version 2. Mirrors the gateway's backend interfaces one for one, so a v2
+ * provider is indistinguishable from a built-in runtime. Every struct starts
+ * with struct_size; readers ignore fields past the size the writer set.
+ * ---------------------------------------------------------------------- */
+
+#define INFERDECK_PROVIDER_ABI_VERSION_2 2u
+#define INFERDECK_PROVIDER_ENTRY_POINT_V2 "inferdeck_provider_v2"
+
+/* Returned by cancelled(). */
+#define INFERDECK_CALL_RUNNING 0
+#define INFERDECK_CALL_CANCELLED 1
+#define INFERDECK_CALL_DEADLINE 2
+
+typedef struct inferdeck_call_v2 {
+    uint32_t struct_size;
+    void* context;
+
+    /* INFERDECK_CALL_RUNNING, _CANCELLED, or _DEADLINE. Return
+     * INFERDECK_CANCELLED or INFERDECK_TIMEOUT respectively. Any thread. */
+    int32_t (*cancelled)(void* context);
+
+    /* One streaming event. Any thread, never concurrently for one call, never
+     * after the call returned. Nonzero return: stop the call. */
+    int32_t (*emit)(void* context, const char* event_json,
+                    const inferdeck_blob* blobs, size_t blob_count);
+
+    /* Final result, or {"message":"..."} with an error status. At most once. */
+    void (*reply)(void* context, const char* result_json,
+                  const inferdeck_blob* blobs, size_t blob_count);
+
+    /* Milliseconds before the call's deadline, or -1 without one. Any thread. */
+    int64_t (*remaining_ms)(void* context);
+} inferdeck_call_v2;
+
+/* Process-wide host services handed to init(). Valid until shutdown(). */
+typedef struct inferdeck_host_v2 {
+    uint32_t struct_size;
+    /* {"abi_version":2,"gateway":{...},"models":[model_json...]} */
+    const char* host_json;
+    void* context;
+    /* level: 0 trace .. 5 fatal. Any thread, any time before shutdown(). */
+    void (*log)(void* context, int32_t level, const char* event, const char* message);
+} inferdeck_host_v2;
+
+/* Status queries. Answered without blocking: the scheduler calls them while
+ * holding its global lock. Return INFERDECK_QUERY_DEFAULT for anything not
+ * implemented and the host applies the documented default. */
+typedef enum inferdeck_query {
+    INFERDECK_QUERY_LOADED = 1,
+    INFERDECK_QUERY_HEALTHY = 2,
+    INFERDECK_QUERY_VRAM_USAGE_MB = 3,
+    INFERDECK_QUERY_N_SLOTS = 4,
+    INFERDECK_QUERY_N_FREE_SLOTS = 5,
+    INFERDECK_QUERY_SLOT_BUSY = 6,
+    INFERDECK_QUERY_CONTEXT_POOL_CAPACITY = 7,
+    INFERDECK_QUERY_MIN_SLOTS = 8,
+    INFERDECK_QUERY_CAN_RESIZE_SLOTS = 9,
+    INFERDECK_QUERY_CAN_RECLAIM_IDLE_CONTEXT = 10,
+    INFERDECK_QUERY_ESTIMATE_VRAM_MB = 11,
+    INFERDECK_QUERY_ADDITIONAL_VRAM_RESERVE_MB = 12,
+    INFERDECK_QUERY_LIVE_VRAM_ACCOUNTING_COMPLETE = 13
+} inferdeck_query;
+
+#define INFERDECK_QUERY_DEFAULT INT64_MIN
+
+/* Optional members may be NULL; the host then uses the default documented in
+ * docs/providers.md. */
+typedef struct inferdeck_provider_v2 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const char* manifest_json;
+
+    /* Optional. Called on the gateway's startup thread before any create, once
+     * per gateway (re)start. shutdown() runs once at process exit. */
+    int32_t (*init)(const inferdeck_host_v2* host, const inferdeck_call_v2* call);
+    void (*shutdown)(void);
+
+    int32_t (*create)(const char* model_json, const inferdeck_call_v2* call,
+                      void** instance);
+    void (*destroy)(void* instance);
+    int32_t (*load)(void* instance, const inferdeck_call_v2* call);
+    int32_t (*unload)(void* instance, const inferdeck_call_v2* call);
+
+    /* Optional, non-blocking. arg is the slot for SLOT_BUSY and the slot count
+     * for ESTIMATE_VRAM_MB. */
+    int64_t (*query)(void* instance, int32_t query, int64_t arg);
+
+    /* Optional, non-blocking, all three or none. Without them the host keeps
+     * n_slots fixed slots itself. */
+    int32_t (*acquire_slot)(void* instance, int32_t* slot);
+    int32_t (*release_slot)(void* instance, int32_t slot);
+    void (*request_cancel)(void* instance);
+
+    /* Optional. */
+    int32_t (*reset_all_slots)(void* instance, const inferdeck_call_v2* call);
+    int32_t (*resize_slots)(void* instance, int32_t slots, const inferdeck_call_v2* call);
+    /* Replies {"reclaimed": true|false}. */
+    int32_t (*reclaim_idle_context)(void* instance, int32_t additional_reserve_mb,
+                                    const inferdeck_call_v2* call);
+
+    /* Runs one operation; see docs/providers.md for the list. May run
+     * concurrently, one call per acquired slot. */
+    int32_t (*invoke)(void* instance, const char* operation,
+                      const char* request_json,
+                      const inferdeck_blob* blobs, size_t blob_count,
+                      const inferdeck_call_v2* call);
+} inferdeck_provider_v2;
+
+typedef const inferdeck_provider_v2* (*inferdeck_provider_entry_v2)(void);
+
+#ifdef INFERDECK_PROVIDER_BUILD_V2
+INFERDECK_PROVIDER_EXPORT const inferdeck_provider_v2* inferdeck_provider_v2(void);
 #endif
 
 #ifdef __cplusplus
