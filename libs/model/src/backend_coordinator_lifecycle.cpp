@@ -1,4 +1,5 @@
 #include "model/backend_coordinator.hpp"
+#include "foundation/logging.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -228,6 +229,11 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
         }
     }
 
+    int used_before_unload = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        used_before_unload = observed_vram_used_mb_;
+    }
     auto r = instance ? instance->unload(control) : foundation::Ok();
 
     {
@@ -246,9 +252,22 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
     cv_.notify_all();
     if (r && released_vram > 0) {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (observed_vram_total_mb_ > 0) {
-            cv_.wait_until(lock, std::min(control.deadline, clock::now() + std::chrono::seconds{3}),
-                [&] { return live_vram_observation_fresh_locked() || shutting_down_.load(); });
+        if (observed_vram_total_mb_ > 0 && used_before_unload > 0) {
+            const int released_target = used_before_unload - released_vram / 2;
+            const auto deadline = std::min(control.deadline, clock::now() + std::chrono::seconds{30});
+            auto last_sample = observed_vram_at_;
+            int last_used = -1;
+            bool settled = false;
+            while (!settled && !shutting_down_.load() && clock::now() < deadline) {
+                cv_.wait_for(lock, std::chrono::milliseconds{250});
+                if (!live_vram_observation_fresh_locked() || observed_vram_at_ == last_sample) continue;
+                last_sample = observed_vram_at_;
+                settled = observed_vram_used_mb_ <= released_target && last_used >= 0 &&
+                    last_used - observed_vram_used_mb_ < 256;
+                last_used = observed_vram_used_mb_;
+            }
+            foundation::LOG_INFO("gpu_release_settled", "model={} settled={} used_before_mb={} used_now_mb={}",
+                                 name, settled, used_before_unload, observed_vram_used_mb_);
         }
     }
     return r;
