@@ -28,7 +28,7 @@ struct GatewayConfig {
     std::vector<model::ModelInfo> models{};
     std::string stats_db_path{};
     std::string adlx_helper_path{};
-    int telemetry_poll_ms{100};
+    int telemetry_poll_ms{1000};
     bool auto_swap{true};
     int n_batch{512};
     int n_ubatch{512};

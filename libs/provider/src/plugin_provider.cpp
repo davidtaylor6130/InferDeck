@@ -34,6 +34,31 @@ namespace inferdeck::provider {
 namespace {
 
 using json = nlohmann::json;
+
+namespace {
+
+template <typename T>
+T field(const json& object, const char* key, T fallback)
+{
+    if (!object.is_object()) return fallback;
+    const json::const_iterator found = object.find(key);
+    if (found == object.end() || found->is_null()) return fallback;
+    try
+    {
+        return found->get<T>();
+    }
+    catch (const json::exception&)
+    {
+        return fallback;
+    }
+}
+
+std::string field(const json& object, const char* key, const char* fallback)
+{
+    return field<std::string>(object, key, fallback);
+}
+
+}
 using foundation::ErrorCode;
 using Clock = std::chrono::steady_clock;
 
@@ -287,12 +312,12 @@ json chat_request_json(int slot, const model::InferenceRequest& request, bool st
 model::InferenceDelta delta_from_json(const json& event)
 {
     model::InferenceDelta delta;
-    delta.content = event.value("content", "");
-    delta.reasoning_text = event.value("reasoning", "");
-    for (const json& call : event.value("tool_calls", json::array()))
+    delta.content = field(event, "content", "");
+    delta.reasoning_text = field(event, "reasoning", "");
+    for (const json& call : field(event, "tool_calls", json::array()))
     {
-        delta.tool_calls.push_back({call.value("index", std::size_t{0}), call.value("id", ""),
-                                    "function", call.value("name", ""), call.value("arguments", "")});
+        delta.tool_calls.push_back({field(call, "index", std::size_t{0}), field(call, "id", ""),
+                                    "function", field(call, "name", ""), field(call, "arguments", "")});
     }
     return delta;
 }
@@ -300,17 +325,17 @@ model::InferenceDelta delta_from_json(const json& event)
 model::InferenceResult result_from_json(const json& reply)
 {
     model::InferenceResult result;
-    result.text = reply.value("text", "");
-    result.reasoning_text = reply.value("reasoning_text", "");
-    result.finish_reason = reply.value("finish_reason", "stop");
-    result.prompt_tokens = reply.value("prompt_tokens", 0);
-    result.cached_prompt_tokens = reply.value("cached_prompt_tokens", 0);
-    result.completion_tokens = reply.value("completion_tokens", 0);
-    result.reasoning_tokens = reply.value("reasoning_tokens", 0);
-    for (const json& call : reply.value("tool_calls", json::array()))
+    result.text = field(reply, "text", "");
+    result.reasoning_text = field(reply, "reasoning_text", "");
+    result.finish_reason = field(reply, "finish_reason", "stop");
+    result.prompt_tokens = field(reply, "prompt_tokens", 0);
+    result.cached_prompt_tokens = field(reply, "cached_prompt_tokens", 0);
+    result.completion_tokens = field(reply, "completion_tokens", 0);
+    result.reasoning_tokens = field(reply, "reasoning_tokens", 0);
+    for (const json& call : field(reply, "tool_calls", json::array()))
     {
-        result.tool_calls.push_back({call.value("id", ""), "function",
-                                     call.value("name", ""), call.value("arguments", "")});
+        result.tool_calls.push_back({field(call, "id", ""), "function",
+                                     field(call, "name", ""), field(call, "arguments", "")});
     }
     return result;
 }
@@ -352,6 +377,10 @@ public:
     {
         cancel_all_.store(false);
         const foundation::Result<void> loaded = lifecycle(api_->load, control, "load");
+        if (loaded)
+        {
+            refresh_vram_usage();
+        }
         set_loaded(static_cast<bool>(loaded));
         return loaded;
     }
@@ -359,7 +388,10 @@ public:
     foundation::Result<void> unload(const model::LifecycleControl& control) override
     {
         const foundation::Result<void> unloaded = lifecycle(api_->unload, control, "unload");
-        set_loaded(false);
+        if (unloaded)
+        {
+            set_loaded(false);
+        }
         return unloaded;
     }
 
@@ -371,12 +403,20 @@ public:
 
     int vram_usage_mb() const override
     {
-        if (!is_loaded())
+        return is_loaded() ? vram_mb_.load() : 0;
+    }
+
+    void refresh_vram_usage()
+    {
+        int32_t reported = -1;
+        try
         {
-            return 0;
+            reported = api_->vram_usage_mb(instance_);
         }
-        const int32_t reported = api_->vram_usage_mb(instance_);
-        return reported < 0 ? info_.vram_required_mb : reported;
+        catch (...)
+        {
+        }
+        vram_mb_.store(reported < 0 ? info_.vram_required_mb : reported);
     }
 
     int n_slots() const override { return static_cast<int>(slots_.size()); }
@@ -470,8 +510,8 @@ public:
             return forward_error<model::EmbeddingResult>(ran);
         }
         model::EmbeddingResult result;
-        result.embeddings = state.reply.value("embeddings", std::vector<std::vector<float>>{});
-        result.prompt_tokens = state.reply.value("prompt_tokens", 0);
+        result.embeddings = field(state.reply, "embeddings", std::vector<std::vector<float>>{});
+        result.prompt_tokens = field(state.reply, "prompt_tokens", 0);
         result.duration_ms = elapsed_ms(started);
         return foundation::Ok(std::move(result));
     }
@@ -524,8 +564,8 @@ public:
         }
         model::AudioGenerationResult result;
         result.wav_bytes = first_blob(state);
-        result.seed = state.reply.value("seed", request.seed);
-        result.output_audio_seconds = state.reply.value("output_audio_seconds", 0.0);
+        result.seed = field(state.reply, "seed", request.seed);
+        result.output_audio_seconds = field(state.reply, "output_audio_seconds", 0.0);
         result.duration_ms = elapsed_ms(started);
         return foundation::Ok(std::move(result));
     }
@@ -550,8 +590,8 @@ public:
         }
         model::VideoGenerationResult result;
         result.video_bytes = first_blob(state);
-        result.content_type = state.reply.value("content_type", result.content_type);
-        result.output_video_seconds = state.reply.value("output_video_seconds", 0.0);
+        result.content_type = field(state.reply, "content_type", result.content_type);
+        result.output_video_seconds = field(state.reply, "output_video_seconds", 0.0);
         result.duration_ms = elapsed_ms(started);
         return foundation::Ok(std::move(result));
     }
@@ -574,7 +614,7 @@ public:
         state.cancelled = [this] { return cancel_all_.load(); };
         state.on_event = [&stream](const json& event, std::span<const inferdeck_blob> blobs)
         {
-            if (event.value("type", "") != "audio" || blobs.empty() || !stream)
+            if (field(event, "type", "") != "audio" || blobs.empty() || !stream)
             {
                 return true;
             }
@@ -588,8 +628,8 @@ public:
         }
         model::AudioResult result;
         result.bytes = first_blob(state);
-        result.content_type = state.reply.value("content_type", "audio/wav");
-        result.output_audio_seconds = state.reply.value("output_audio_seconds", 0.0);
+        result.content_type = field(state.reply, "content_type", "audio/wav");
+        result.output_audio_seconds = field(state.reply, "output_audio_seconds", 0.0);
         result.duration_ms = elapsed_ms(started);
         return foundation::Ok(std::move(result));
     }
@@ -613,16 +653,16 @@ public:
             return forward_error<model::TranscriptionResult>(ran);
         }
         model::TranscriptionResult result;
-        result.text = state.reply.value("text", "");
-        result.language = state.reply.value("language", request.language);
-        result.duration_seconds = state.reply.value("duration_seconds", 0.0f);
-        for (const json& segment : state.reply.value("segments", json::array()))
+        result.text = field(state.reply, "text", "");
+        result.language = field(state.reply, "language", request.language);
+        result.duration_seconds = field(state.reply, "duration_seconds", 0.0f);
+        for (const json& segment : field(state.reply, "segments", json::array()))
         {
             model::TranscriptionSegment parsed;
-            parsed.id = segment.value("id", static_cast<int>(result.segments.size()));
-            parsed.start_seconds = segment.value("start_seconds", 0.0f);
-            parsed.end_seconds = segment.value("end_seconds", 0.0f);
-            parsed.text = segment.value("text", "");
+            parsed.id = field(segment, "id", static_cast<int>(result.segments.size()));
+            parsed.start_seconds = field(segment, "start_seconds", 0.0f);
+            parsed.end_seconds = field(segment, "end_seconds", 0.0f);
+            parsed.text = field(segment, "text", "");
             result.segments.push_back(std::move(parsed));
         }
         result.inference_ms = elapsed_ms(started);
@@ -656,11 +696,11 @@ public:
             return forward_error<model::DecisionResult>(ran);
         }
         model::DecisionResult result;
-        for (const json& answer : state.reply.value("answers", json::array()))
+        for (const json& answer : field(state.reply, "answers", json::array()))
         {
-            result.answers.push_back({answer.value("probabilities", std::vector<double>{})});
+            result.answers.push_back({field(answer, "probabilities", std::vector<double>{})});
         }
-        result.input_tokens = state.reply.value("input_tokens", 0);
+        result.input_tokens = field(state.reply, "input_tokens", 0);
         result.duration_ms = elapsed_ms(started);
         return foundation::Ok(std::move(result));
     }
@@ -720,8 +760,8 @@ private:
         state.cancelled = [this] { return cancel_all_.load(); };
         state.on_event = [&progress](const json& event, std::span<const inferdeck_blob>)
         {
-            return event.value("type", "") != "progress" || !progress ||
-                   progress(std::clamp(event.value("percent", 0), 0, 100));
+            return field(event, "type", "") != "progress" || !progress ||
+                   progress(std::clamp(field(event, "percent", 0), 0, 100));
         };
         return state;
     }
@@ -743,7 +783,7 @@ private:
         state.cancelled = [this, cancel] { return cancel_all_.load() || (cancel && cancel->load()); };
         state.on_event = [&](const json& event, std::span<const inferdeck_blob>)
         {
-            if (event.value("type", "") != "delta" || !callback || !*callback)
+            if (field(event, "type", "") != "delta" || !callback || !*callback)
             {
                 return true;
             }
@@ -778,6 +818,7 @@ private:
     bool loaded_{false};
     std::vector<bool> slots_;
     std::atomic<bool> cancel_all_{false};
+    std::atomic<int> vram_mb_{0};
 };
 
 std::unique_ptr<model::IBackend> create_backend(const inferdeck_provider* api,
@@ -890,7 +931,7 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(
         return invalid("manifest is not a JSON object");
     }
     model::ProviderDescriptor descriptor;
-    descriptor.contract.name = manifest.value("runtime", "");
+    descriptor.contract.name = field(manifest, "runtime", "");
     const std::string& name = descriptor.contract.name;
     if (name.empty() || !std::all_of(name.begin(), name.end(), [](unsigned char value)
         {
@@ -899,7 +940,7 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(
     {
         return invalid("manifest runtime must use lowercase letters, digits, and underscores");
     }
-    const json modalities = manifest.value("modalities", json::object());
+    const json modalities = field(manifest, "modalities", json::object());
     if (!modalities.is_object() || modalities.empty())
     {
         return invalid("manifest modalities must map each modality to its capabilities");
@@ -919,7 +960,7 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(
             descriptor.contract.modality_capabilities[modality].insert(capability.get<std::string>());
         }
     }
-    const std::string model_source = manifest.value("model_source", "artifacts");
+    const std::string model_source = field(manifest, "model_source", "artifacts");
     if (model_source == "gguf_path")
     {
         descriptor.contract.artifact_policy = model::RuntimeArtifactPolicy::Gguf;
@@ -932,9 +973,9 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(
     {
         return invalid("manifest model_source must be gguf_path, artifacts, or none");
     }
-    descriptor.contract.vision = manifest.value("vision", false);
-    descriptor.contract.reasoning = manifest.value("reasoning", false);
-    descriptor.version = manifest.value("version", "");
+    descriptor.contract.vision = field(manifest, "vision", false);
+    descriptor.contract.reasoning = field(manifest, "reasoning", false);
+    descriptor.version = field(manifest, "version", "");
     descriptor.origin = std::filesystem::absolute(library).string();
     descriptor.factory = [api](const model::ModelInfo& info)
     {

@@ -244,6 +244,13 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
         }
     }
     cv_.notify_all();
+    if (r && released_vram > 0) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (observed_vram_total_mb_ > 0) {
+            cv_.wait_until(lock, std::min(control.deadline, clock::now() + std::chrono::seconds{3}),
+                [&] { return live_vram_observation_fresh_locked() || shutting_down_.load(); });
+        }
+    }
     return r;
 }
 

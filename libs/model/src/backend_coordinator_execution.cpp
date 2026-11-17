@@ -30,7 +30,16 @@ foundation::Result<RequestDemand> BackendCoordinator::estimate_request_demand(
 foundation::Result<void> BackendCoordinator::prepare_request_capacity(
     const std::string& name, const RequestDemand& demand,
     const LifecycleControl& control) {
-    std::unique_lock<std::recursive_mutex> lifecycle_lock(swap_mutex_);
+    std::unique_lock<std::recursive_mutex> lifecycle_lock(swap_mutex_, std::defer_lock);
+    while (!lifecycle_lock.try_lock()) {
+        if (control.is_cancelled() || shutting_down_.load())
+            return foundation::Err<void>(foundation::ErrorCode::Cancelled,
+                                         "request capacity preparation cancelled: " + name);
+        if (control.is_expired())
+            return foundation::Err<void>(foundation::ErrorCode::Timeout,
+                                         "timeout waiting for a model swap to finish: " + name);
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
     IModel* model = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -342,6 +351,16 @@ void BackendCoordinator::drain_active(std::chrono::milliseconds timeout) {
     while (active_requests_ > 0 && clock::now() < deadline) {
         cv_.wait_for(lock, std::chrono::milliseconds{50});
     }
+}
+
+void BackendCoordinator::request_shutdown() {
+    shutting_down_.store(true);
+    swap_cancel_.store(true);
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [name, backend] : instances_) {
+        if (backend) backend->request_cancel();
+    }
+    cv_.notify_all();
 }
 
 int BackendCoordinator::active_request_count() const {

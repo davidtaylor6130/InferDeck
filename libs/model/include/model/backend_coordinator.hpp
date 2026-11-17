@@ -176,6 +176,8 @@ public:
 
     bool swap_in_progress() const noexcept { return swap_in_progress_.load(); }
     void request_swap_cancel() noexcept { swap_cancel_.store(true); }
+    void request_shutdown();
+    bool shutting_down() const noexcept { return shutting_down_.load(); }
     void reset_swap_cancel() noexcept { swap_cancel_.store(false); }
     bool swap_cancel_requested() const noexcept { return swap_cancel_.load(); }
 
@@ -291,6 +293,7 @@ private:
     std::recursive_mutex sidecar_mutex_;
     std::atomic<bool> swap_in_progress_{false};
     std::atomic<bool> swap_cancel_{false};
+    std::atomic<bool> shutting_down_{false};
 };
 
 } // namespace inferdeck::model

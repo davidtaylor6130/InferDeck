@@ -82,6 +82,7 @@ std::atomic<bool> g_stop{false};
 std::atomic<bool> g_reload{false};
 std::atomic<bool> g_default_model_loading{false};
 httplib::Server* g_server = nullptr;
+std::atomic<inferdeck::model::BackendCoordinator*> g_coordinator{nullptr};
 inferdeck::provider::PluginLoadReport g_plugins;
 constexpr int runtime_reload_result = 75;
 
@@ -96,7 +97,6 @@ int run_gateway(const fs::path& config_path) {
     using namespace inferdeck::foundation;
     using namespace inferdeck::gateway;
 
-    g_stop.store(false);
     g_reload.store(false);
     g_default_model_loading.store(false);
     const auto config_selection = load_config_with_active(config_path);
@@ -135,6 +135,7 @@ int run_gateway(const fs::path& config_path) {
     }
 
     model::BackendCoordinator coordinator(registry);
+    g_coordinator.store(&coordinator);
     coordinator.set_max_queue_size(static_cast<std::size_t>(std::max(1, cfg.max_queue_size)));
     if (cfg.vram_budget_mb > 0) {
         coordinator.set_vram_budget(cfg.vram_budget_mb, cfg.vram_safety_margin_mb);
@@ -719,7 +720,7 @@ int run_gateway(const fs::path& config_path) {
     }
     reload_monitor_stop.store(true);
     if (reload_monitor.joinable()) reload_monitor.join();
-    g_server = nullptr;
+    g_server = nullptr; g_coordinator.store(nullptr);
 
     ShutdownStateMachine shutdown;
     const auto shutdown_phase = shutdown.run(
@@ -786,13 +787,14 @@ int main(int argc, char** argv) {
     std::set_terminate(my_terminate_handler);
 #ifdef _WIN32
     SymInitialize(GetCurrentProcess(), NULL, TRUE);
-    AddVectoredExceptionHandler(0, CrashHandler);
+    SetUnhandledExceptionFilter(CrashHandler);
+    SetConsoleCtrlHandler(console_control_handler, TRUE);
 #endif
     std::signal(SIGINT, signal_handler); std::signal(SIGTERM, signal_handler);
 
     g_plugins = inferdeck::provider::load_plugin_providers(provider_dir);
     while (true) {
         const int result = run_gateway(config_path);
-        if (result != runtime_reload_result) return result;
+        if (result != runtime_reload_result || g_stop.load()) return result;
     }
 }

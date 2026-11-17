@@ -42,7 +42,7 @@ observability:
   # Keep lifetime usage independent of the Windows service account and cwd.
   stats_db: "C:/InferDeck/data/stats.db"
   adlx_helper: ""
-  telemetry_poll_ms: 100
+  telemetry_poll_ms: 1000
 
 gateway:
   auto_swap: true

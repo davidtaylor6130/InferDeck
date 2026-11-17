@@ -31,6 +31,9 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
     const std::string& name, const AcquireSlotOptions& opts) {
     std::unique_lock<std::mutex> lock(mutex_);
     const auto deadline = clock::now() + opts.timeout;
+    if (shutting_down_.load()) {
+        return foundation::Err<int>(foundation::ErrorCode::Unavailable, "gateway is shutting down");
+    }
     if (!opts.block) {
         if (draining_models_.contains(name) || resizing_models_.contains(name)) {
             return foundation::Err<int>(foundation::ErrorCode::Unavailable,
@@ -72,7 +75,7 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
                         std::nullopt});
     while (true) {
         const auto now = clock::now();
-        if (opts.cancelled && opts.cancelled()) {
+        if ((opts.cancelled && opts.cancelled()) || shutting_down_.load()) {
             erase_waiter_locked(waiter_id);
             cv_.notify_all();
             return foundation::Err<int>(foundation::ErrorCode::Cancelled,

@@ -40,9 +40,17 @@ void my_terminate_handler() {
 
 void signal_handler(int sig) {
     g_stop.store(true);
+    if (auto* coordinator = g_coordinator.load()) coordinator->request_shutdown();
     if (g_server && !g_default_model_loading.load()) g_server->stop();
     std::cerr << "\nreceived signal " << sig << ", stopping\n";
 }
+
+#ifdef _WIN32
+BOOL WINAPI console_control_handler(DWORD control) {
+    signal_handler(static_cast<int>(control));
+    return TRUE;
+}
+#endif
 
 inferdeck::foundation::LogLevel parse_log_level(const std::string& s) {
     using inferdeck::foundation::LogLevel;
@@ -82,7 +90,8 @@ LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ex) {
     if (f) {
         fprintf(f, "=== CRASH ===\n");
         fprintf(f, "code=0x%08lX addr=%p\n", code, ex->ExceptionRecord->ExceptionAddress);
-        CONTEXT* ctx = ex->ContextRecord;
+        CONTEXT context_copy = *ex->ContextRecord;
+        CONTEXT* ctx = &context_copy;
         fprintf(f, "rip=%p rsp=%p rbp=%p\n", (void*)ctx->Rip, (void*)ctx->Rsp, (void*)ctx->Rbp);
         fprintf(f, "rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p\n",
                 (void*)ctx->Rbx, (void*)ctx->Rcx, (void*)ctx->Rdx,
@@ -99,7 +108,6 @@ LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ex) {
         frame.AddrFrame.Mode = AddrModeFlat;
         HANDLE proc = GetCurrentProcess();
         HANDLE thread = GetCurrentThread();
-        SymInitialize(proc, NULL, TRUE);
         for (int i = 0; i < 30; ++i) {
             if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thread, &frame, ctx, NULL,
                              SymFunctionTableAccess64, SymGetModuleBase64, NULL)) break;
@@ -121,7 +129,6 @@ LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ex) {
             }
             free(sym);
         }
-        SymCleanup(proc);
         fclose(f);
     }
     return EXCEPTION_EXECUTE_HANDLER;
