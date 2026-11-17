@@ -153,14 +153,20 @@ int32_t chat(model::IModel& text, const json& body, codec::Blobs blobs, const in
             {
                 cancel.store(true);
             }
-            if (progress)
+            try
             {
-                json snapshot = codec::encode(*progress);
-                if (snapshot != last && !emitter.emit(snapshot))
+                if (progress)
                 {
-                    cancel.store(true);
+                    json snapshot = codec::encode(*progress);
+                    if (snapshot != last && !emitter.emit(snapshot))
+                    {
+                        cancel.store(true);
+                    }
+                    last = std::move(snapshot);
                 }
-                last = std::move(snapshot);
+            }
+            catch (...)
+            {
             }
             std::unique_lock lock(mutex);
             wake.wait_for(lock, stop, std::chrono::milliseconds(50), [] { return false; });
