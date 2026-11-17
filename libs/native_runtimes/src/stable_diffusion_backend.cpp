@@ -69,12 +69,11 @@ struct GenerationResources {
     }
     ~GenerationResources() {
         sd_set_progress_callback(nullptr, nullptr);
-        if (images) free_sd_images(images, count);
+        free_sd_image_generation_result(generated);
     }
     GenerationResources(const GenerationResources&) = delete;
     GenerationResources& operator=(const GenerationResources&) = delete;
-    sd_image_t* images{};
-    int count{};
+    sd_image_generation_result_t* generated{};
 };
 
 class StableDiffusionBackend final : public model::FixedBackend, public model::IImageBackend {
@@ -181,16 +180,18 @@ public:
             params.ref_images = reference_views.empty() ? nullptr : reference_views.data();
             params.ref_images_count = static_cast<int>(reference_views.size());
             const auto started = std::chrono::steady_clock::now();
-            const bool generated = generate_image(context_, &params, &resources.images, &resources.count);
-            if (state.cancelled.load() || !generated || !resources.images || resources.count < 1) {
+            const bool generated = generate_image(context_, &params, &resources.generated);
+            const int count = resources.generated ? resources.generated->count : 0;
+            if (state.cancelled.load() || !generated || count < 1 || !resources.generated->items) {
                 return foundation::Err<model::ImageGenerationResult>(
                     state.cancelled.load() ? foundation::ErrorCode::Cancelled : foundation::ErrorCode::Internal,
                     state.cancelled.load() ? "image generation cancelled" : "stable-diffusion.cpp image generation failed");
             }
             model::ImageGenerationResult result;
-            for (int index = 0; index < resources.count; ++index) {
-                auto png = encode_png(resources.images[index].data, static_cast<int>(resources.images[index].width),
-                                      static_cast<int>(resources.images[index].height), static_cast<int>(resources.images[index].channel));
+            for (int index = 0; index < count; ++index) {
+                const sd_image_t& image = resources.generated->items[index].image;
+                auto png = encode_png(image.data, static_cast<int>(image.width),
+                                      static_cast<int>(image.height), static_cast<int>(image.channel));
                 if (!png) {
                     return foundation::Err<model::ImageGenerationResult>(png.error().code, png.error().message);
                 }

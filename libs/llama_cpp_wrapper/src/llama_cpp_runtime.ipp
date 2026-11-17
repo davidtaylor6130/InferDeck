@@ -90,6 +90,7 @@ Result<void> LlamaCppModel::load(
     const inferdeck::model::LifecycleControl& control) {
   std::lock_guard lk(mtx_);
   if (loaded_.load()) return Result<void>{};
+  cancel_all_.store(false);
   reclaimed_context_vram_mb_.store(0);
   if (control.is_cancelled()) {
     return Result<void>(std::unexpect,
@@ -468,6 +469,7 @@ Result<void> LlamaCppModel::init_shared_context_locked(
         cfg_.mtp_max_active_requests,
         draft_seq_rm_type,
         info_.context_pool_size > 0 || info_.context_pool_auto);
+    scheduler_->set_cancel_all(&cancel_all_);
   }
 
   return Result<void>{};

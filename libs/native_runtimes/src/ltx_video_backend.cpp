@@ -52,13 +52,11 @@ void progress_callback(int step, int steps, float, void* data) {
 }
 
 struct GeneratedVideo {
+    sd_video_generation_result_t* result{};
     sd_image_t* frames{};
     int count{};
     sd_audio_t* audio{};
-    ~GeneratedVideo() {
-        if (frames) free_sd_images(frames, count);
-        if (audio) free_sd_audio(audio);
-    }
+    ~GeneratedVideo() { free_sd_video_generation_result(result); }
 };
 
 struct ProgressCallbackReset {
@@ -199,9 +197,12 @@ foundation::Result<model::VideoGenerationResult> LTXVideoBackend::generate_video
     const auto started = std::chrono::steady_clock::now();
     bool success = false;
     try {
-        int native_fps = 0;
-        success = ::generate_video(context_, &params, &generated.frames,
-                                   &generated.count, &generated.audio, &native_fps);
+        success = ::generate_video(context_, &params, &generated.result);
+        if (generated.result) {
+            generated.frames = generated.result->frames;
+            generated.count = generated.result->frame_count;
+            generated.audio = generated.result->audio;
+        }
     } catch (const std::exception& error) {
         return foundation::Err<model::VideoGenerationResult>(
             foundation::ErrorCode::Internal,

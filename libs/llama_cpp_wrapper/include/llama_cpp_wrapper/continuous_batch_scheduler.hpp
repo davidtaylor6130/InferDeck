@@ -223,6 +223,8 @@ public:
     // Signal the loop to stop and join the thread. Called on model unload.
     void stop();
 
+    void set_cancel_all(const std::atomic<bool>* cancel_all) noexcept { cancel_all_ = cancel_all; }
+
     llama_context* ctx() const noexcept { return ctx_; }
     bool healthy() const noexcept { return !failed_.load() && !stop_.load(); }
 
@@ -262,6 +264,7 @@ private:
     std::string terminal_error_;
     std::atomic<bool> failed_{false};
     std::atomic<bool> stop_{false};
+    const std::atomic<bool>* cancel_all_{nullptr};
     std::thread thread_;
 };
 

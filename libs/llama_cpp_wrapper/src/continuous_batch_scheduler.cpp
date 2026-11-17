@@ -20,6 +20,19 @@ using inferdeck::foundation::LOG_DEBUG;
 using inferdeck::foundation::LOG_INFO;
 using inferdeck::foundation::LOG_WARN;
 
+namespace {
+
+common_batch common_batch_from(const llama_batch& batch)
+{
+    common_batch out;
+    out.tokens.reserve(static_cast<std::size_t>(batch.n_tokens));
+    for (int32_t i = 0; i < batch.n_tokens; ++i)
+        out.add(batch.token[i], batch.pos[i], batch.seq_id[i][0], batch.logits[i] != 0);
+    return out;
+}
+
+}
+
 int detail::prepare_batch_order(std::vector<SlotTask*>& tasks, int capacity, std::size_t turn)
 {
     if (tasks.empty()) return 0;
@@ -168,6 +181,7 @@ void ContinuousBatchScheduler::submit(SlotTask* task) {
 bool ContinuousBatchScheduler::should_cancel(const SlotTask* task) const noexcept {
     if (task->caller_cancel.load()) return true;
     if (task->ext_cancel && task->ext_cancel->load()) return true;
+    if (cancel_all_ && cancel_all_->load()) return true;
     return false;
 }
 
@@ -383,7 +397,7 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
                     mem, seq_id, task->checkpoint_pos - 1, -1) &&
                     llama_memory_seq_rm(draft_mem, seq_id, 0, -1) &&
                     llama_decode(ctx_, replay) == 0 &&
-                    common_speculative_process(speculative_, replay);
+                    common_speculative_process(speculative_, common_batch_from(replay));
                 if (restored) {
                     restored = llama_state_seq_set_data_ext(
                         ctx_, task->recurrent_checkpoint->data(),
@@ -939,7 +953,7 @@ void ContinuousBatchScheduler::run_loop() {
             detail::record_prompt_decode(*task, tokens, batch.n_tokens, decode_ms);
         }
         if (speculative_ && process_mtp &&
-            !common_speculative_process(speculative_, batch)) {
+            !common_speculative_process(speculative_, common_batch_from(batch))) {
             fail_all("MTP draft context decode failed");
             break;
         }

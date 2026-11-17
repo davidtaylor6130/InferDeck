@@ -32,6 +32,7 @@ struct ChatTemplateResult {
   std::vector<std::vector<uint8_t>> media;
   std::vector<std::string> stop_strings;
   common_chat_parser_params parser_params;
+  bool parse_tool_calls{false};
   common_params_sampling sampling_params;
   ChatTemplateMeta meta;
 };
@@ -86,6 +87,7 @@ public:
   inferdeck::foundation::Result<void> unload() override;
   bool is_loaded() const noexcept override { return loaded_.load(); }
   bool execution_healthy() const override;
+  void request_cancel() override { cancel_all_.store(true); }
 
   int vram_usage_mb() const noexcept override;
   bool live_vram_accounting_complete() const override { return true; }
@@ -160,6 +162,7 @@ private:
     std::vector<std::string> stop_strings;
     std::vector<llama_token> stop_tokens;
     common_chat_parser_params parser_params;
+    bool parse_tool_calls{false};
     common_params_sampling sampling_params;
     common_sampler* smp{nullptr};
     int max_tokens{0};
@@ -186,6 +189,8 @@ private:
   inferdeck::model::ModelInfo info_;
   LlamaCppConfig cfg_;
   std::atomic<bool> loaded_{false};
+  std::atomic<bool> cancel_all_{false};
+  std::mutex embed_mtx_;
   std::atomic<int> sequence_capacity_{0};
   std::atomic<int> sequence_capacity_limit_{0};
   std::atomic<int> pool_capacity_{0};

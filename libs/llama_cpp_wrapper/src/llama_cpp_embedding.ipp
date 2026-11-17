@@ -2,7 +2,8 @@ Result<inferdeck::model::EmbeddingResult> LlamaCppModel::embed(
     int slot_id, const inferdeck::model::EmbeddingRequest& request,
     const std::function<bool()>& cancelled) {
   const auto started = std::chrono::steady_clock::now();
-  std::lock_guard lk(mtx_);
+  std::lock_guard embed_lock(embed_mtx_);
+  std::unique_lock lk(mtx_);
   if (!loaded_.load() || !shared_ctx_ || !model_ || !vocab_) {
     return Result<EmbeddingResult>(std::unexpect,
         make_error(ErrorCode::NotLoaded, "embedding model not loaded"));
@@ -24,9 +25,10 @@ Result<inferdeck::model::EmbeddingResult> LlamaCppModel::embed(
                    "requested dimensions must equal native dimensions: " +
                    std::to_string(native_dimensions)));
   }
+  lk.unlock();
   result.embeddings.reserve(request.inputs.size());
   for (const auto& input : request.inputs) {
-    if (cancelled && cancelled()) {
+    if ((cancelled && cancelled()) || cancel_all_.load()) {
       return Result<EmbeddingResult>(std::unexpect,
           make_error(ErrorCode::Cancelled, "embedding request cancelled"));
     }
@@ -52,8 +54,13 @@ Result<inferdeck::model::EmbeddingResult> LlamaCppModel::embed(
     }
     llama_batch batch = llama_batch_init(static_cast<int32_t>(tokens.size()), 0, 1);
     for (std::size_t i = 0; i < tokens.size(); ++i) {
-      common_batch_add(batch, tokens[i], static_cast<llama_pos>(i), {0}, true);
+      batch.token[i] = tokens[i];
+      batch.pos[i] = static_cast<llama_pos>(i);
+      batch.n_seq_id[i] = 1;
+      batch.seq_id[i][0] = 0;
+      batch.logits[i] = 1;
     }
+    batch.n_tokens = static_cast<int32_t>(tokens.size());
     llama_memory_clear(llama_get_memory(shared_ctx_), true);
     if (llama_decode(shared_ctx_, batch) < 0) {
       llama_batch_free(batch);

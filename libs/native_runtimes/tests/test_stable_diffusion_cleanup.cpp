@@ -47,18 +47,26 @@ void free_sd_images(sd_image_t* images, int count) {
     g_images = nullptr;
     ++g_free_count;
 }
-bool generate_image(sd_ctx_t*, const sd_img_gen_params_t* params, sd_image_t** images, int* count) {
+void free_sd_image_generation_result(sd_image_generation_result_t* result) {
+    if (!result) return;
+    for (int index = 0; index < result->count; ++index) delete[] result->items[index].image.data;
+    delete[] result->items;
+    delete result;
+    g_images = nullptr;
+    ++g_free_count;
+}
+bool generate_image(sd_ctx_t*, const sd_img_gen_params_t* params, sd_image_generation_result_t** result_out) {
     g_steps = params->sample_params.sample_steps;
     g_guidance = params->sample_params.guidance.txt_cfg;
     g_reference_count = params->ref_images_count;
     g_reference_width = params->ref_images_count > 0 ? params->ref_images[0].width : 0;
-    g_images = new sd_image_t[1]{};
+    auto* result = new sd_image_generation_result_t{new sd_image_result_t[1]{}, 1};
+    g_images = &result->items[0].image;
     g_images[0].width = 2;
     g_images[0].height = 2;
     g_images[0].channel = 3;
     g_images[0].data = new uint8_t[12]{};
-    *images = g_images;
-    *count = 1;
+    *result_out = result;
     if (g_failure == Failure::Generation) throw std::runtime_error("injected generation failure");
     if (g_callback) g_callback(1, 1, 0.0f, g_callback_data);
     return true;
