@@ -2,7 +2,8 @@
 // does and exercises it, so a provider can be validated before it is installed.
 //
 //   inferdeck-provider-check <library> [--model <path>] [--artifact key=value]...
-//                            [--modality <name>]... [--skip-invoke] [--no-load]
+//                            [--modality <name>]... [--skip-invoke] [--no-load] [--context <tokens>]
+//                            [--speculative mtp|dflash|dflash2] [--draft-model <path>] [--draft-tokens <n>]
 //
 // For every modality in the manifest (or only those named) it runs the
 // provider's init hook, creates an instance, loads it, checks the status
@@ -198,6 +199,14 @@ int main(int argc, char** argv)
         else if (argument == "--modality") only.insert(next());
         else if (argument == "--skip-invoke") skip_invoke = true;
         else if (argument == "--no-load") no_load = true;
+        else if (argument == "--context") base.context_size = std::stoi(next());
+        else if (argument == "--speculative")
+        {
+            base.speculative_type = next();
+            base.mtp_enabled = base.speculative_type == "mtp";
+        }
+        else if (argument == "--draft-model") base.draft_model_path = next();
+        else if (argument == "--draft-tokens") base.mtp_draft_tokens = std::stoi(next());
         else if (argument == "--artifact")
         {
             const std::string pair = next();
@@ -209,7 +218,8 @@ int main(int argc, char** argv)
     if (library.empty())
     {
         std::puts("usage: inferdeck-provider-check <library> [--model <path>] [--artifact key=value]... "
-                  "[--modality <name>]... [--skip-invoke] [--no-load]");
+                  "[--modality <name>]... [--skip-invoke] [--no-load] [--context <tokens>] "
+                  "[--speculative mtp|dflash|dflash2] [--draft-model <path>] [--draft-tokens <n>]");
         return 2;
     }
 

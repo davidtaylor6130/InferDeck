@@ -241,6 +241,39 @@ TEST_CASE("LlamaCppModel: vision requires an existing projector", "[llama][visio
   std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("LlamaCppModel: DFlash requires an existing draft model", "[llama][dflash][load]") {
+  const auto dir = std::filesystem::temp_directory_path() / "inferdeck_llama_dflash_test";
+  std::filesystem::create_directories(dir);
+  ModelInfo info;
+  info.name = "dflash-missing-draft";
+  info.gguf_path = write_fake_gguf(dir).string();
+  LlamaCppConfig config;
+  config.speculative_type = "dflash2";
+  config.draft_model_path = (dir / "missing-draft.gguf").string();
+  LlamaCppModel model(info, config);
+  const auto loaded = model.load();
+  REQUIRE_FALSE(loaded.has_value());
+  CHECK(loaded.error().code == ErrorCode::NotFound);
+  CHECK(loaded.error().message.starts_with("draft model not found:"));
+  CHECK_FALSE(model.is_loaded());
+  std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("Speculative draft margin follows the configured drafter", "[llama][scheduler][dflash]") {
+  using inferdeck::llama_wrapper::detail::is_block_draft_type;
+  using inferdeck::llama_wrapper::detail::speculative_draft_margin;
+  CHECK(is_block_draft_type("dflash"));
+  CHECK(is_block_draft_type("dflash2"));
+  CHECK_FALSE(is_block_draft_type("mtp"));
+  CHECK_FALSE(is_block_draft_type(""));
+  CHECK(speculative_draft_margin(false, false, 7) == 0);
+  CHECK(speculative_draft_margin(true, false, 7) == 4);
+  CHECK(speculative_draft_margin(true, false, 2) == 2);
+  CHECK(speculative_draft_margin(false, true, 7) == 7);
+  CHECK(speculative_draft_margin(false, true, 32) == 16);
+  CHECK(speculative_draft_margin(false, true, 0) == 1);
+}
+
 TEST_CASE("LlamaCppModel: info() returns registered info", "[llama][info]") {
   ModelInfo info;
   info.name = "test-model";

@@ -136,7 +136,9 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(
       bounded_pool_(bounded_pool),
       context_capacity_(ctx ? static_cast<int>(llama_n_ctx(ctx)) : 0),
       draft_context_capacity_(draft_ctx ? static_cast<int>(llama_n_ctx(draft_ctx)) : 0),
-      draft_margin_(speculative ? std::max(0, common_speculative_n_max(speculative)) : 0) {
+      draft_margin_(speculative ? std::max(0, common_speculative_n_max(speculative)) : 0),
+      block_draft_(draft_ctx &&
+                   llama_model_dflash_variant(llama_get_model(draft_ctx)) != LLAMA_DFLASH_VARIANT_NONE) {
     thread_ = std::thread([this] { run_loop(); });
 }
 
@@ -328,7 +330,7 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
             task->checkpoint_pos,
             n_past,
             static_cast<int>(task->prompt_tokens.size())) &&
-        (!draft_mem ||
+        (!draft_mem || block_draft_ ||
          (llama_get_ctx_other(draft_ctx_) != ctx_ &&
           task->checkpoint_pos > 1 &&
           detail::recurrent_checkpoint_usable(
@@ -348,9 +350,9 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
     if (task->checkpoint_pos == task->checkpoint_capture_pos &&
         checkpoint_usable) {
         task->out_recurrent_checkpoint = task->recurrent_checkpoint;
-        task->out_recurrent_draft_checkpoint = draft_mem
+        task->out_recurrent_draft_checkpoint = draft_mem && !block_draft_
             ? task->recurrent_draft_checkpoint : nullptr;
-        task->out_recurrent_replay_checkpoint = draft_mem
+        task->out_recurrent_replay_checkpoint = draft_mem && !block_draft_
             ? task->recurrent_replay_checkpoint : nullptr;
         task->out_checkpoint_pos = task->checkpoint_pos;
     }
@@ -379,12 +381,13 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
         !draft_mem || llama_memory_seq_rm(draft_mem, seq_id, n_past, -1);
     if (!target_trimmed || !draft_trimmed) {
         if (checkpoint_usable) {
-            const auto& initial_checkpoint = draft_mem
+            const bool replay_draft = draft_mem && !block_draft_;
+            const auto& initial_checkpoint = replay_draft
                 ? task->recurrent_replay_checkpoint : task->recurrent_checkpoint;
             bool restored = llama_state_seq_set_data_ext(
                 ctx_, initial_checkpoint->data(), initial_checkpoint->size(),
                 seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == initial_checkpoint->size();
-            if (restored && draft_mem) {
+            if (restored && replay_draft) {
                 llama_token token = task->prompt_tokens[task->checkpoint_pos - 1];
                 llama_pos position = task->checkpoint_pos - 1;
                 int32_t sequence_count = 1;
@@ -954,7 +957,7 @@ void ContinuousBatchScheduler::run_loop() {
         }
         if (speculative_ && process_mtp &&
             !common_speculative_process(speculative_, common_batch_from(batch))) {
-            fail_all("MTP draft context decode failed");
+            fail_all("speculative draft context decode failed");
             break;
         }
 
@@ -977,7 +980,7 @@ void ContinuousBatchScheduler::run_loop() {
                 capture_context(ctx_, task->slot_id);
             if (!target_checkpoint) continue;
             std::shared_ptr<const std::vector<uint8_t>> draft_checkpoint;
-            if (draft_ctx_ && task->mtp_eligible) {
+            if (draft_ctx_ && task->mtp_eligible && !block_draft_) {
                 if (llama_get_ctx_other(draft_ctx_) == ctx_ ||
                     !task->out_recurrent_replay_checkpoint) continue;
                 draft_checkpoint = capture_context(draft_ctx_, task->slot_id);
@@ -1186,7 +1189,7 @@ void ContinuousBatchScheduler::run_loop() {
                 }
                 if (t->n_drafted > 0) {
                     LOG_INFO(
-                        "scheduler_mtp_stats",
+                        "scheduler_speculative_stats",
                         "slot={} drafted={} accepted={} acceptance_pct={:.2f}",
                         t->slot_id,
                         t->n_drafted,

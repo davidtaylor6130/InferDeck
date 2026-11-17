@@ -19,6 +19,7 @@ struct llama_context;
 struct llama_vocab;
 struct llama_sampler;
 struct common_speculative;
+struct common_speculative_init_result;
 struct common_chat_templates;
 struct mtmd_context;
 using llama_token = int32_t;
@@ -55,6 +56,8 @@ struct LlamaCppConfig {
   int mtp_draft_tokens{2};
   float mtp_p_min{0.0f};
   int mtp_max_active_requests{1};
+  std::string speculative_type{};
+  std::string draft_model_path{};
   bool swa_full{false};
   bool truncate_prompt{true};
   std::string chat_template{};
@@ -141,6 +144,10 @@ private:
   };
 
   llama_model_params model_params() const;
+  bool block_draft() const noexcept;
+  int speculative_draft_tokens() const noexcept;
+  void release_draft_locked();
+  bool init_block_draft_locked(int n_slots, const inferdeck::model::LifecycleControl& control);
   llama_context_params shared_context_params_locked(int capacity) const;
   inferdeck::foundation::Result<void> init_shared_context_locked(
       const llama_model_params& model_params,
@@ -201,11 +208,13 @@ private:
   llama_context* shared_ctx_{nullptr};
   llama_context* draft_ctx_{nullptr};
   common_speculative* speculative_{nullptr};
+  std::unique_ptr<common_speculative_init_result> draft_init_;
   mtmd_context* mtmd_{nullptr};
   std::unique_ptr<ContinuousBatchScheduler> scheduler_;
   std::vector<SlotState> slots_;
   std::filesystem::path resolved_gguf_path_;
   std::filesystem::path resolved_mmproj_path_;
+  std::filesystem::path resolved_draft_path_;
   common_chat_templates* chat_templates_{nullptr};
   ChatTemplateMeta chat_template_meta_;
 };

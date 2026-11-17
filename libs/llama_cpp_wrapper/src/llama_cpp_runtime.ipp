@@ -21,6 +21,7 @@ LlamaCppModel::LlamaCppModel(inferdeck::model::ModelInfo info, LlamaCppConfig cf
     : info_(std::move(info)), cfg_(std::move(cfg)) {
   resolved_gguf_path_ = normalize_path(info_.gguf_path);
   resolved_mmproj_path_ = normalize_path(info_.mmproj_path);
+  resolved_draft_path_ = normalize_path(cfg_.draft_model_path);
   if (info_.compute == inferdeck::model::ModelCompute::Cpu) {
     cfg_.n_gpu_layers = 0;
     cfg_.kv_offload = false;
@@ -42,6 +43,61 @@ llama_model_params LlamaCppModel::model_params() const {
   return parameters;
 }
 
+bool LlamaCppModel::block_draft() const noexcept {
+  return detail::is_block_draft_type(cfg_.speculative_type);
+}
+
+int LlamaCppModel::speculative_draft_tokens() const noexcept {
+  return detail::speculative_draft_margin(
+      cfg_.mtp_enabled, block_draft(), cfg_.mtp_draft_tokens);
+}
+
+void LlamaCppModel::release_draft_locked() {
+  if (speculative_) {
+    common_speculative_free(speculative_);
+    speculative_ = nullptr;
+  }
+  if (draft_init_) {
+    draft_init_.reset();
+  } else if (draft_ctx_) {
+    llama_free(draft_ctx_);
+  }
+  draft_ctx_ = nullptr;
+}
+
+bool LlamaCppModel::init_block_draft_locked(
+    int n_slots, const inferdeck::model::LifecycleControl& control) {
+  common_params params;
+  params.n_parallel = n_slots;
+  params.n_batch = std::max(1, cfg_.n_batch);
+  params.n_ubatch = std::max(1, cfg_.n_ubatch);
+  params.kv_unified = cfg_.kv_unified;
+  params.flash_attn_type = flash_attn_from_string(cfg_.flash_attn);
+  params.cpuparams.n_threads = cfg_.n_threads;
+  params.no_kv_offload = !cfg_.kv_offload;
+  params.no_op_offload = !cfg_.op_offload;
+  params.swa_full = cfg_.swa_full;
+  params.load_mode = model_params().load_mode;
+  params.speculative.types = {cfg_.speculative_type == "dflash"
+      ? COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH : COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH2};
+  params.speculative.draft.mparams.path = resolved_draft_path_.string();
+  params.speculative.draft.n_max = speculative_draft_tokens();
+  params.speculative.draft.n_gpu_layers = cfg_.n_gpu_layers.value_or(-1);
+  params.speculative.draft.cache_type_k = cache_type_from_string(cfg_.cache_type_k);
+  params.speculative.draft.cache_type_v = cache_type_from_string(cfg_.cache_type_v);
+  common_params draft_params = common_base_params_to_speculative(params);
+  draft_params.load_progress_callback = [](float, void* user_data) {
+    const auto* lifecycle = static_cast<const inferdeck::model::LifecycleControl*>(user_data);
+    return !lifecycle->is_cancelled() && !lifecycle->is_expired();
+  };
+  draft_params.load_progress_callback_user_data =
+      const_cast<inferdeck::model::LifecycleControl*>(&control);
+  draft_init_ = common_speculative_init_from_params(draft_params, model_, shared_ctx_);
+  draft_ctx_ = draft_init_->context();
+  if (draft_ctx_ == nullptr) draft_init_.reset();
+  return draft_ctx_ != nullptr;
+}
+
 LlamaCppModel::~LlamaCppModel() {
   // Stop scheduler before taking the mutex so no decode races with cleanup.
   if (scheduler_) {
@@ -51,14 +107,7 @@ LlamaCppModel::~LlamaCppModel() {
   std::lock_guard lk(mtx_);
   for (auto& s : slots_) s.busy = false;
   slots_.clear();
-  if (speculative_) {
-    common_speculative_free(speculative_);
-    speculative_ = nullptr;
-  }
-  if (draft_ctx_) {
-    llama_free(draft_ctx_);
-    draft_ctx_ = nullptr;
-  }
+  release_draft_locked();
   if (shared_ctx_) {
     llama_free(shared_ctx_);
     shared_ctx_ = nullptr;
@@ -109,6 +158,10 @@ Result<void> LlamaCppModel::load(
     return Result<void>(std::unexpect,
         make_error(ErrorCode::NotFound, "gguf not found: " + resolved_gguf_path_.string()));
   }
+  if (block_draft() && !std::filesystem::is_regular_file(resolved_draft_path_, ec)) {
+    return Result<void>(std::unexpect,
+        make_error(ErrorCode::NotFound, "draft model not found: " + resolved_draft_path_.string()));
+  }
   if (info_.has_vision && resolved_mmproj_path_.empty()) {
     return Result<void>(std::unexpect,
         make_error(ErrorCode::NotFound, "vision model has no mmproj_path"));
@@ -133,7 +186,7 @@ Result<void> LlamaCppModel::load(
     LOG_INFO("llama_system_info", "{}", sys_info);
   }
   LOG_INFO("llama_model_load_config",
-           "model={} path={} use_mmap={} use_mlock={} n_gpu_layers={} n_ctx={} n_slots={} n_batch={} n_ubatch={} flash_attn={} kv_offload={} op_offload={} cache_type_k={} cache_type_v={} mtp_enabled={} mtp_draft_tokens={} mtp_max_active_requests={} swa_full={}",
+           "model={} path={} use_mmap={} use_mlock={} n_gpu_layers={} n_ctx={} n_slots={} n_batch={} n_ubatch={} flash_attn={} kv_offload={} op_offload={} cache_type_k={} cache_type_v={} mtp_enabled={} speculative_type={} draft_model={} mtp_draft_tokens={} mtp_max_active_requests={} swa_full={}",
            info_.name,
            resolved_gguf_path_.string(),
            cfg_.use_mmap,
@@ -149,6 +202,8 @@ Result<void> LlamaCppModel::load(
            cfg_.cache_type_k,
            cfg_.cache_type_v,
            cfg_.mtp_enabled,
+           cfg_.speculative_type,
+           resolved_draft_path_.string(),
            cfg_.mtp_draft_tokens,
            cfg_.mtp_max_active_requests,
            cfg_.swa_full);
@@ -219,11 +274,7 @@ Result<void> LlamaCppModel::load(
   }
   auto ctx_res = init_shared_context_locked(mparams, control);
   if (!ctx_res.has_value()) {
-    if (speculative_) {
-      common_speculative_free(speculative_);
-      speculative_ = nullptr;
-    }
-    if (draft_ctx_) { llama_free(draft_ctx_); draft_ctx_ = nullptr; }
+    release_draft_locked();
     if (shared_ctx_) { llama_free(shared_ctx_); shared_ctx_ = nullptr; }
     if (mtmd_) { mtmd_free(mtmd_); mtmd_ = nullptr; }
     slots_.clear();
@@ -264,9 +315,7 @@ llama_context_params LlamaCppModel::shared_context_params_locked(int capacity) c
   cparams.embeddings  = info_.supports("embeddings");
   cparams.type_k      = cache_type_from_string(cfg_.cache_type_k);
   cparams.type_v      = cache_type_from_string(cfg_.cache_type_v);
-  cparams.n_rs_seq    = cfg_.mtp_enabled
-      ? static_cast<std::uint32_t>(std::max(1, cfg_.mtp_draft_tokens))
-      : 0;
+  cparams.n_rs_seq    = static_cast<std::uint32_t>(speculative_draft_tokens());
   return cparams;
 }
 
@@ -285,7 +334,7 @@ Result<void> LlamaCppModel::init_shared_context_locked(
   const int initial_ctx_per_slot = info_.concurrency_auto
       ? std::max(512, std::min(ctx_per_slot, std::max(512, cfg_.n_batch)))
       : ctx_per_slot;
-  const int draft_margin = cfg_.mtp_enabled ? std::clamp(cfg_.mtp_draft_tokens, 1, 4) : 0;
+  const int draft_margin = speculative_draft_tokens();
   if (info_.context_pool_auto && (!cfg_.kv_unified || info_.context_pool_size != 0)) {
     return Result<void>(std::unexpect, make_error(ErrorCode::InvalidArgument,
         "automatic context pool requires unified KV and no fixed pool size"));
@@ -336,8 +385,12 @@ Result<void> LlamaCppModel::init_shared_context_locked(
   }
   const int minimum_pool = static_cast<int>(minimum_wide);
   if (info_.context_pool_auto) {
+    std::error_code draft_size_error;
+    const auto draft_bytes = block_draft()
+        ? std::filesystem::file_size(resolved_draft_path_, draft_size_error) : 0;
     const int effective_margin =
-        vram_safety_margin_mb.value_or(cfg_.vram_safety_margin_mb);
+        vram_safety_margin_mb.value_or(cfg_.vram_safety_margin_mb) +
+        (draft_size_error ? 0 : static_cast<int>((draft_bytes + (1u << 20) - 1) >> 20));
     const Result<int> fitted = fit_context_pool(
         resolved_gguf_path_, model_params, cparams, cfg_.mtp_enabled,
         minimum_pool, std::max(minimum_pool, total_ctx), effective_margin, control,
@@ -364,13 +417,16 @@ Result<void> LlamaCppModel::init_shared_context_locked(
         draft_params.n_rs_seq = 0;
         draft_params.n_ubatch = std::min<std::uint32_t>(draft_params.n_ubatch, 512);
         draft_ctx_ = llama_init_from_model(model_, draft_params);
+      } else if (shared_ctx_ && block_draft()) {
+        (void)init_block_draft_locked(n_slots, control);
       }
     } catch (const std::exception& error) {
       allocation_error = error.what();
     }
-    if (shared_ctx_ && (!cfg_.mtp_enabled || draft_ctx_) && allocation_error.empty()) break;
-    const bool missing_draft = shared_ctx_ && cfg_.mtp_enabled && !draft_ctx_;
-    if (draft_ctx_) { llama_free(draft_ctx_); draft_ctx_ = nullptr; }
+    const bool speculation = cfg_.mtp_enabled || block_draft();
+    if (shared_ctx_ && (!speculation || draft_ctx_) && allocation_error.empty()) break;
+    const bool missing_draft = shared_ctx_ && speculation && !draft_ctx_;
+    release_draft_locked();
     if (shared_ctx_) { llama_free(shared_ctx_); shared_ctx_ = nullptr; }
     if (info_.concurrency_auto && total_ctx <= minimum_pool && n_slots > 1 && attempt < 16) {
       n_slots = std::max(1, n_slots / 2);
@@ -381,7 +437,9 @@ Result<void> LlamaCppModel::init_shared_context_locked(
       return Result<void>(std::unexpect, make_error(
           missing_draft && !info_.context_pool_auto ? ErrorCode::InvalidArgument : ErrorCode::OutOfMemory,
           missing_draft && !info_.context_pool_auto
-              ? "MTP is enabled but the GGUF has no usable MTP head or sufficient memory"
+              ? (cfg_.mtp_enabled
+                     ? "MTP is enabled but the GGUF has no usable MTP head or sufficient memory"
+                     : "DFlash draft model could not be loaded or did not fit in memory")
               : "shared context allocation failed at capacity " + std::to_string(total_ctx) +
                   (allocation_error.empty() ? std::string{} : ": " + allocation_error)));
     }
@@ -407,18 +465,21 @@ Result<void> LlamaCppModel::init_shared_context_locked(
            ctx_per_slot);
 
   auto draft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
-  if (cfg_.mtp_enabled) {
+  if (draft_ctx_) {
+    const std::string speculative_name = cfg_.mtp_enabled ? "mtp" : cfg_.speculative_type;
     (void)common_context_can_seq_rm(shared_ctx_);
     draft_seq_rm_type = common_context_can_seq_rm(draft_ctx_);
     if (draft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
       return Result<void>(std::unexpect,
           make_error(ErrorCode::InvalidArgument,
-                     "MTP draft context does not support sequence removal"));
+                     speculative_name + " draft context does not support sequence removal"));
     }
 
     common_params_speculative params;
-    params.types = {COMMON_SPECULATIVE_TYPE_DRAFT_MTP};
-    params.draft.n_max = std::clamp(cfg_.mtp_draft_tokens, 1, 4);
+    params.types = {cfg_.mtp_enabled ? COMMON_SPECULATIVE_TYPE_DRAFT_MTP
+        : cfg_.speculative_type == "dflash" ? COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH
+                                            : COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH2};
+    params.draft.n_max = speculative_draft_tokens();
     params.draft.n_min = 0;
     params.draft.p_min = std::clamp(cfg_.mtp_p_min, 0.0f, 1.0f);
     params.draft.cache_type_k =
@@ -433,18 +494,19 @@ Result<void> LlamaCppModel::init_shared_context_locked(
     } catch (const std::exception& error) {
       return Result<void>(std::unexpect,
           make_error(ErrorCode::Internal,
-                     std::string("MTP initialization failed: ") +
+                     speculative_name + " initialization failed: " +
                      error.what()));
     }
     if (speculative_ == nullptr) {
       return Result<void>(std::unexpect,
           make_error(ErrorCode::Internal,
-                     "MTP initialization returned null"));
+                     speculative_name + " initialization returned null"));
     }
-    LOG_INFO("llama_mtp_initialized",
-             "model={} draft_tokens={} p_min={} max_active_requests={} draft_seq_rm_type={}",
+    LOG_INFO("llama_speculative_initialized",
+             "model={} type={} draft_tokens={} p_min={} max_active_requests={} draft_seq_rm_type={}",
              info_.name,
-             params.draft.n_max,
+             speculative_name,
+             common_speculative_n_max(speculative_),
              params.draft.p_min,
              cfg_.mtp_max_active_requests,
              static_cast<int>(draft_seq_rm_type));
@@ -501,8 +563,7 @@ Result<void> LlamaCppModel::ensure_request_capacity(
   const int current_sequences = static_cast<int>(slots_.size());
   const int requested_sequences = std::max(
       demand.required_sequences, demand.aggregate_sequences);
-  const int draft_margin = cfg_.mtp_enabled
-      ? std::clamp(cfg_.mtp_draft_tokens, 1, 4) : 0;
+  const int draft_margin = speculative_draft_tokens();
   const std::int64_t requested_capacity_wide =
       static_cast<std::int64_t>(std::max(
           demand.required_context, demand.aggregate_context)) + draft_margin;
@@ -554,7 +615,7 @@ Result<void> LlamaCppModel::ensure_request_capacity(
   const std::int64_t maximum_wide =
       static_cast<std::int64_t>(configured_limit) *
       std::max(1, maximum_sequences) +
-      (cfg_.mtp_enabled ? std::clamp(cfg_.mtp_draft_tokens, 1, 4) : 0);
+      speculative_draft_tokens();
   if (maximum_wide > std::numeric_limits<int>::max()) {
     return Result<void>(std::unexpect, make_error(
         ErrorCode::InvalidArgument, "configured context capacity exceeds supported range"));
@@ -592,14 +653,7 @@ Result<void> LlamaCppModel::ensure_request_capacity(
     scheduler_->stop();
     scheduler_.reset();
   }
-  if (speculative_) {
-    common_speculative_free(speculative_);
-    speculative_ = nullptr;
-  }
-  if (draft_ctx_) {
-    llama_free(draft_ctx_);
-    draft_ctx_ = nullptr;
-  }
+  release_draft_locked();
   if (shared_ctx_) {
     llama_free(shared_ctx_);
     shared_ctx_ = nullptr;
@@ -629,14 +683,7 @@ Result<void> LlamaCppModel::ensure_request_capacity(
       scheduler_->stop();
       scheduler_.reset();
     }
-    if (speculative_) {
-      common_speculative_free(speculative_);
-      speculative_ = nullptr;
-    }
-    if (draft_ctx_) {
-      llama_free(draft_ctx_);
-      draft_ctx_ = nullptr;
-    }
+    release_draft_locked();
     if (shared_ctx_) {
       llama_free(shared_ctx_);
       shared_ctx_ = nullptr;
@@ -679,14 +726,7 @@ Result<void> LlamaCppModel::ensure_request_capacity(
       scheduler_->stop();
       scheduler_.reset();
     }
-    if (speculative_) {
-      common_speculative_free(speculative_);
-      speculative_ = nullptr;
-    }
-    if (draft_ctx_) {
-      llama_free(draft_ctx_);
-      draft_ctx_ = nullptr;
-    }
+    release_draft_locked();
     if (shared_ctx_) {
       llama_free(shared_ctx_);
       shared_ctx_ = nullptr;
@@ -741,14 +781,7 @@ Result<void> LlamaCppModel::unload() {
   log_memory_snapshot("llama_model_unload_memory_before", info_.name);
   for (auto& s : slots_) s.busy = false;
   slots_.clear();
-  if (speculative_) {
-    common_speculative_free(speculative_);
-    speculative_ = nullptr;
-  }
-  if (draft_ctx_) {
-    llama_free(draft_ctx_);
-    draft_ctx_ = nullptr;
-  }
+  release_draft_locked();
   if (shared_ctx_) {
     llama_free(shared_ctx_);
     shared_ctx_ = nullptr;
@@ -801,7 +834,7 @@ bool LlamaCppModel::can_reclaim_idle_context() const {
       : std::max(512, info_.context_size);
   const std::int64_t minimum =
       static_cast<std::int64_t>(minimum_ctx) +
-      (cfg_.mtp_enabled ? std::clamp(cfg_.mtp_draft_tokens, 1, 4) : 0);
+      speculative_draft_tokens();
   return (info_.concurrency_auto && slots_.size() > 1) ||
          static_cast<std::int64_t>(llama_n_ctx(shared_ctx_)) > minimum;
 }
@@ -852,7 +885,7 @@ Result<bool> LlamaCppModel::reclaim_idle_context(
       : std::max(512, info_.context_size);
   const std::int64_t minimum_pool_wide =
       static_cast<std::int64_t>(minimum_ctx) +
-      (cfg_.mtp_enabled ? std::clamp(cfg_.mtp_draft_tokens, 1, 4) : 0);
+      speculative_draft_tokens();
   if (minimum_pool_wide > std::numeric_limits<int>::max()) {
     return Result<bool>(std::unexpect, make_error(
         ErrorCode::InvalidArgument,
@@ -921,14 +954,7 @@ Result<bool> LlamaCppModel::reclaim_idle_context(
       scheduler_->stop();
       scheduler_.reset();
     }
-    if (speculative_) {
-      common_speculative_free(speculative_);
-      speculative_ = nullptr;
-    }
-    if (draft_ctx_) {
-      llama_free(draft_ctx_);
-      draft_ctx_ = nullptr;
-    }
+    release_draft_locked();
     if (shared_ctx_) {
       llama_free(shared_ctx_);
       shared_ctx_ = nullptr;

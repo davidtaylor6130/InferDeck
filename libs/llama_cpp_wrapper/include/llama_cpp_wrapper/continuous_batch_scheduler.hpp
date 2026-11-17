@@ -9,6 +9,7 @@
 #include <mutex>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -64,6 +65,15 @@ inline int recurrent_checkpoint_capture_pos(
         ++i;
     }
     return static_cast<int>(i);
+}
+
+constexpr bool is_block_draft_type(std::string_view type) noexcept {
+    return type == "dflash" || type == "dflash2";
+}
+
+constexpr int speculative_draft_margin(bool mtp, bool block_draft, int draft_tokens) noexcept {
+    return mtp ? std::clamp(draft_tokens, 1, 4)
+               : block_draft ? std::clamp(draft_tokens, 1, 16) : 0;
 }
 
 constexpr bool adaptive_mtp_enabled(
@@ -257,6 +267,7 @@ private:
     int context_capacity_;
     int draft_context_capacity_;
     int draft_margin_;
+    bool block_draft_;
 
     std::mutex sub_mtx_;
     std::condition_variable sub_cv_;
