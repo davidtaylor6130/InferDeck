@@ -206,6 +206,7 @@ add_subdirectory(libs/decision_runtime)
 if(INFERDECK_VLLM_RADIANCE_ENABLE)
     add_subdirectory(libs/vllm_radiance_wrapper)
 endif()
+add_subdirectory(libs/provider/runtimes)
 add_subdirectory(apps/inferdeck-gateway)
 add_subdirectory(apps/model-tester)
 
