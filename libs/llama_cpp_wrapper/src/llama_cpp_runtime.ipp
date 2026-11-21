@@ -648,9 +648,9 @@ Result<void> LlamaCppModel::ensure_request_capacity(
       requested_sequences <= current_sequences) {
     return Result<void>{};
   }
-  const bool restorable = !info_.concurrency_auto && info_.context_pool_auto &&
-      cfg_.kv_unified && reclaimed_context_vram_mb_.load() > 0 &&
-      requested_sequences <= current_sequences;
+  const bool restorable = info_.context_pool_auto && cfg_.kv_unified &&
+      reclaimed_context_vram_mb_.load() > 0 &&
+      (info_.concurrency_auto || requested_sequences <= current_sequences);
   if (!restorable && (!info_.concurrency_auto || !info_.context_pool_auto || !cfg_.kv_unified)) {
     if (own_capacity > current_capacity ||
         demand.required_sequences > current_sequences) {

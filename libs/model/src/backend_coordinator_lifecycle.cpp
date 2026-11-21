@@ -169,19 +169,28 @@ foundation::Result<void> BackendCoordinator::unload_current() {
 }
 
 foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
-    auto result = unload_with_control(name, {});
-    if (!result) return result;
     std::vector<std::string> lenders;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto& lender : restore_wanted_) {
-            const auto active = active_requests_by_model_.find(lender);
-            if (active == active_requests_by_model_.end() || active->second == 0) lenders.push_back(lender);
+        for (const auto& [lender, borrowers] : context_borrowers_) {
+            if (borrowers.contains(name)) lenders.push_back(lender);
         }
     }
+    auto result = unload_with_control(name, {});
+    if (!result) return result;
     for (const auto& lender : lenders) {
-        (void)prepare_request_capacity(lender, RequestDemand{0, 0, 1, 1, 0, 0},
-            LifecycleControl{clock::now() + std::chrono::seconds{30}, {}});
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto active = active_requests_by_model_.find(lender);
+            if (!restore_wanted_.contains(lender) ||
+                (active != active_requests_by_model_.end() && active->second > 0)) continue;
+        }
+        const auto restored = prepare_request_capacity(lender, RequestDemand{0, 0, 1, 1, 0, 0},
+            LifecycleControl{clock::now() + std::chrono::seconds{5}, {}}, false);
+        if (!restored) {
+            foundation::LOG_WARN("context_restore_failed", "model={} error={}",
+                                 lender, restored.error().message);
+        }
     }
     return result;
 }

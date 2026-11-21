@@ -494,7 +494,8 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
 }
 
 foundation::Result<bool> BackendCoordinator::release_context_borrowers(
-    const std::string& lender, const LifecycleControl& control) {
+    const std::string& lender, const LifecycleControl& control, bool respect_hold) {
+    (void)respect_hold;
     std::vector<std::string> evictions;
     {
         std::lock_guard<std::mutex> lock(mutex_);

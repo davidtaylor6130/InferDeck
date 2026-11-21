@@ -3130,6 +3130,129 @@ TEST_CASE("BackendCoordinator: co-resident borrower yields when the lender needs
         CHECK(lender_calls("unload") == 0);
         REQUIRE(coordinator.release_slot(large.name, *admitted));
     }
+    const auto mark_restore = [&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{5};
+        options.demand = [] { return Ok(RequestDemand{0, 0, 3000, 1, 0, 0}); };
+        options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl& lifecycle) {
+            return coordinator.prepare_request_capacity(large.name, demand, lifecycle);
+        };
+        const auto slot = coordinator.acquire_slot(large.name, options);
+        REQUIRE(slot);
+        const auto deferred = coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 3000, 1, 6000, 1}, control());
+        REQUIRE_FALSE(deferred);
+        CHECK(deferred.error().code == ErrorCode::ResourceBusy);
+        REQUIRE(coordinator.release_slot(large.name, *slot));
+    };
+    const auto ensure_details = [&] {
+        std::vector<std::string> details;
+        for (const CallRecord& call : lender->calls) {
+            if (call.method == "ensure_capacity") details.push_back(call.detail);
+        }
+        return details;
+    };
+    SECTION("a busy borrower does not block a request that fits") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        mark_restore();
+        const auto borrowed = coordinator.acquire_slot(compact.name);
+        REQUIRE(borrowed);
+        REQUIRE(coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 3000, 1, 3000, 1}, control()));
+        CHECK(coordinator.is_loaded(compact.name));
+        CHECK(lender->pool_capacity.load() == 4000);
+        REQUIRE(coordinator.release_slot(compact.name, *borrowed));
+    }
+    SECTION("a non-evictable borrower does not block a request that fits") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        mark_restore();
+        auto* borrower = dynamic_cast<IModelMock*>(const_cast<IBackend*>(coordinator.get_backend(compact.name)));
+        REQUIRE(borrower);
+        borrower->model_info.eviction_eligible = false;
+        REQUIRE(coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 3000, 1, 3000, 1}, control()));
+        CHECK(coordinator.is_loaded(compact.name));
+    }
+    SECTION("a restore that cannot fit falls back to the request and clears the mark") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        lender->capacity_handler = [&](const RequestDemand& demand) -> Result<void> {
+            if (std::max(demand.required_context, demand.aggregate_context) <= lender->pool_capacity.load())
+                return Ok();
+            return Err<void>(ErrorCode::OutOfMemory, "context growth below demand");
+        };
+        mark_restore();
+        REQUIRE(coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 3000, 1, 3000, 1}, control()));
+        CHECK(ensure_details() == std::vector<std::string>{"3000", "4001", "3000"});
+        REQUIRE(coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 3000, 1, 3000, 1}, control()));
+        CHECK(ensure_details().size() == 4);
+        CHECK(ensure_details().back() == "3000");
+    }
+    SECTION("restore marks are cleared when the lender reloads") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        mark_restore();
+        REQUIRE(coordinator.unload(large.name));
+        REQUIRE(coordinator.load(large.name));
+        lender->pool_capacity.store(4000);
+        REQUIRE(coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 3000, 1, 3000, 1}, control()));
+        CHECK(ensure_details() == std::vector<std::string>{"3000"});
+        CHECK(coordinator.is_loaded(compact.name));
+    }
+    SECTION("simultaneous arrivals on an idle reduced lender see their combined demand") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        std::mutex gate_mutex;
+        std::condition_variable gate_cv;
+        bool first_entered = false;
+        bool resume = false;
+        std::atomic<int> second_aggregate{0};
+        AcquireSlotOptions first_options;
+        first_options.timeout = std::chrono::seconds{5};
+        first_options.demand = [] { return Ok(RequestDemand{0, 0, 3000, 1, 0, 0}); };
+        first_options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl& lifecycle) {
+            {
+                std::unique_lock lock(gate_mutex);
+                first_entered = true;
+                gate_cv.notify_all();
+                gate_cv.wait(lock, [&] { return resume; });
+            }
+            return coordinator.prepare_request_capacity(large.name, demand, lifecycle);
+        };
+        AcquireSlotOptions second_options = first_options;
+        second_options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl& lifecycle) {
+            second_aggregate.store(demand.aggregate_context);
+            return coordinator.prepare_request_capacity(large.name, demand, lifecycle);
+        };
+        auto first = std::async(std::launch::async, [&] { return coordinator.acquire_slot(large.name, first_options); });
+        {
+            std::unique_lock lock(gate_mutex);
+            REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds{2}, [&] { return first_entered; }));
+        }
+        auto second = std::async(std::launch::async, [&] { return coordinator.acquire_slot(large.name, second_options); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+        while (second_aggregate.load() == 0 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds{5});
+        {
+            std::lock_guard lock(gate_mutex);
+            resume = true;
+        }
+        gate_cv.notify_all();
+        CHECK(second_aggregate.load() == 6000);
+        const auto first_slot = first.get();
+        const auto second_slot = second.get();
+        REQUIRE(first_slot);
+        REQUIRE(second_slot);
+        CHECK_FALSE(coordinator.is_loaded(compact.name));
+        CHECK(lender->pool_capacity.load() == 8000);
+        REQUIRE(coordinator.release_slot(large.name, *first_slot));
+        REQUIRE(coordinator.release_slot(large.name, *second_slot));
+    }
     SECTION("a busy lender keeps its borrower until it is idle") {
         REQUIRE(coordinator.swap_to(compact.name));
         lender->pool_capacity.store(4000);
@@ -3234,6 +3357,18 @@ TEST_CASE("BackendCoordinator: restore evicts all borrowers or none",
         REQUIRE(coordinator.prepare_request_capacity("lender-a", restore, control()));
         CHECK_FALSE(coordinator.is_loaded("first"));
         CHECK_FALSE(coordinator.is_loaded("second"));
+    }
+    SECTION("a shared borrower leaving marks its other lender for restore") {
+        REQUIRE(coordinator.swap_to("shared"));
+        REQUIRE(coordinator.prepare_request_capacity("lender-a", restore, control()));
+        CHECK_FALSE(coordinator.is_loaded("shared"));
+        REQUIRE(coordinator.prepare_request_capacity(
+            "lender-b", RequestDemand{0, 0, 3000, 1, 3000, 1}, control()));
+        std::vector<std::string> details;
+        for (const CallRecord& call : mocks["lender-b"]->calls) {
+            if (call.method == "ensure_capacity") details.push_back(call.detail);
+        }
+        CHECK(details == std::vector<std::string>{"4001"});
     }
     SECTION("a borrower shared by two lenders is forgotten by both once it unloads") {
         REQUIRE(coordinator.swap_to("shared"));

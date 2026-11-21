@@ -30,6 +30,12 @@ foundation::Result<RequestDemand> BackendCoordinator::estimate_request_demand(
 foundation::Result<void> BackendCoordinator::prepare_request_capacity(
     const std::string& name, const RequestDemand& demand,
     const LifecycleControl& control) {
+    return prepare_request_capacity(name, demand, control, true);
+}
+
+foundation::Result<void> BackendCoordinator::prepare_request_capacity(
+    const std::string& name, const RequestDemand& demand,
+    const LifecycleControl& control, bool evict_borrowers) {
     std::unique_lock<std::recursive_mutex> lifecycle_lock(swap_mutex_, std::defer_lock);
     while (!lifecycle_lock.try_lock()) {
         if (control.is_cancelled() || shutting_down_.load())
@@ -59,8 +65,8 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
         lending = exceeds && context_borrowers_.contains(name);
         restoring = reduced && idle && restore_wanted_.contains(name);
     }
-    if (lending || restoring) {
-        auto released = release_context_borrowers(name, control);
+    if (lending || (restoring && evict_borrowers)) {
+        auto released = release_context_borrowers(name, control, !lending);
         if (!released) {
             if (lending) return foundation::Err<void>(released.error().code, released.error().message);
             restoring = false;
@@ -113,8 +119,9 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
         resizing_models_.erase(name);
         const int capacity_after = model->context_pool_capacity();
         if (result && capacity_after != capacity_before) {
-            if (lending || restoring) context_borrowers_.erase(name);
-            reduced_lenders_.erase(name);
+            if (lending || (restoring && evict_borrowers)) context_borrowers_.erase(name);
+            if ((lending || restoring) && !context_borrowers_.contains(name))
+                reduced_lenders_.erase(name);
             restore_wanted_.erase(name);
             invalidate_vram_observation_locked();
         }
