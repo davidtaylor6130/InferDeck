@@ -593,11 +593,11 @@ void record_media(const GatewayDeps& deps, const std::string& model_name,
     model::InferenceResult metrics;
     metrics.duration_ms = duration_ms;
     metrics.generation_duration_ms = duration_ms;
-    const auto resolved = deps.coordinator.registry().resolve(model_name);
+    const auto resolved = resolve_model_name(deps, model_name);
     if (observation.modality.empty()) observation.modality = "media";
     record_request(deps, model_name, metrics, status, slot,
                    input_audio_seconds, input_characters,
-                   resolved ? *resolved : model_name, observation);
+                   resolved ? resolved->resolved : model_name, observation);
 }
 
 std::int64_t utf8_character_count(const std::string& text) {

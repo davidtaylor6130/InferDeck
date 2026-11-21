@@ -33,7 +33,9 @@ public:
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] foundation::Result<ModelAlias> set_alias(ModelAlias alias);
     [[nodiscard]] foundation::Result<void> remove_alias(const std::string& name);
-    [[nodiscard]] foundation::Result<std::string> resolve(const std::string& name) const;
+    [[nodiscard]] foundation::Result<std::string> resolve(
+        const std::string& name,
+        const std::function<bool(const std::string&)>& prefer = {}) const;
     [[nodiscard]] std::vector<ModelAlias> aliases() const;
     [[nodiscard]] bool has_alias(const std::string& name) const;
 

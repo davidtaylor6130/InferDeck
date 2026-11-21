@@ -47,6 +47,19 @@
             for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
                 if (alias.name == name) previous = alias;
             }
+            if (body.contains("fallbacks")) {
+                const auto& fallbacks = body["fallbacks"];
+                if (!fallbacks.is_array() ||
+                    !std::all_of(fallbacks.begin(), fallbacks.end(),
+                                 [](const auto& value) { return value.is_string(); })) {
+                    write_error(resp, 400, "invalid_model_alias",
+                                "fallbacks must be an array of model IDs");
+                    return;
+                }
+                requested.fallbacks = fallbacks.get<std::vector<std::string>>();
+            } else if (previous) {
+                requested.fallbacks = previous->fallbacks;
+            }
             std::optional<model::ModelAlias> committed;
             const auto persisted = deps.config_repository->transact_active(
                 body["revision"].get<std::string>(),

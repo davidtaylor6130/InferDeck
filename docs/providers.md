@@ -569,6 +569,7 @@ for anything not implemented. Never blocks.
 | `INFERDECK_QUERY_ESTIMATE_VRAM_MB` | slots | `estimate_vram_mb` | current usage |
 | `INFERDECK_QUERY_ADDITIONAL_VRAM_RESERVE_MB` | | `additional_vram_reserve_mb` | 0 |
 | `INFERDECK_QUERY_LIVE_VRAM_ACCOUNTING_COMPLETE` | | `live_vram_accounting_complete` | 0 |
+| `INFERDECK_QUERY_RECLAIMABLE_IDLE_CONTEXT_MB` | | `reclaimable_idle_context_mb` | 0 |
 
 ### What each operation must do
 

@@ -62,6 +62,7 @@ struct ResidencyInfo {
     bool resizing{false};
     bool concurrency_auto{false};
     int context_pool_capacity{0};
+    bool healthy{true};
 };
 
 struct ModelIdentitySnapshot {
@@ -98,6 +99,8 @@ public:
         std::string requested = {}, std::string resolved = {}) const;
     [[nodiscard]] std::vector<std::string> get_loaded_models() const;
     [[nodiscard]] std::vector<ResidencyInfo> residency() const;
+    [[nodiscard]] std::vector<std::string> unhealthy_models() const;
+    [[nodiscard]] std::vector<std::string> degraded_models() const;
     [[nodiscard]] int get_vram_usage() const;
     void set_vram_budget(int total_mb, int safety_margin_mb = k_default_vram_safety_margin_mb);
     void update_vram_observation(int used_mb, int total_mb);
@@ -114,6 +117,8 @@ public:
     foundation::Result<void> release_slot(
         const std::string& name, int slot_id);
     void set_max_queue_size(std::size_t size);
+    void set_swap_hysteresis(std::chrono::milliseconds hold,
+                             std::chrono::milliseconds quantum);
     [[nodiscard]] std::size_t queued_request_count() const;
     [[nodiscard]] std::vector<QueueInfo> queue() const;
     std::uint64_t reserve_priority_session(const std::string& key,
@@ -178,7 +183,7 @@ public:
     int active_request_count(const std::string& name) const;
 
     bool swap_in_progress() const noexcept { return swap_in_progress_.load(); }
-    void request_swap_cancel() noexcept { swap_cancel_.store(true); }
+    void request_swap_cancel(const std::string& target = {});
     void request_shutdown();
     bool shutting_down() const noexcept { return shutting_down_.load(); }
     void reset_swap_cancel() noexcept { swap_cancel_.store(false); }
@@ -240,6 +245,7 @@ private:
         const std::string& name, const std::string& reservation_key) const;
     bool waiter_is_actionable_locked(const SlotWaiter& waiter) const;
     bool waiter_is_resource_barrier_locked(const SlotWaiter& waiter) const;
+    bool swap_deferred_locked(const SlotWaiter& waiter, time_point now) const;
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
     foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot, const RequestDemand* demand = nullptr,
@@ -255,6 +261,11 @@ private:
         bool force_idle_reclaim = false);
     foundation::Result<void> require_priority_session_allows(
         const std::string& name);
+    foundation::Result<bool> release_context_borrowers(
+        const std::string& lender, const LifecycleControl& control, bool respect_hold);
+    foundation::Result<void> prepare_request_capacity(
+        const std::string& name, const RequestDemand& demand,
+        const LifecycleControl& control, bool evict_borrowers);
     int estimated_vram_locked() const;
     int available_vram_locked() const;
     bool live_vram_observation_fresh_locked() const;
@@ -277,6 +288,9 @@ private:
     std::int64_t next_lease_id_{1};
     std::unordered_set<std::string> draining_models_;
     std::unordered_set<std::string> resizing_models_;
+    std::unordered_map<std::string, std::unordered_set<std::string>> context_borrowers_;
+    std::unordered_set<std::string> reduced_lenders_;
+    std::unordered_set<std::string> restore_wanted_;
     int vram_budget_mb_{0};
     int vram_safety_margin_mb_{k_default_vram_safety_margin_mb};
     int observed_vram_used_mb_{0};
@@ -288,6 +302,14 @@ private:
     std::uint64_t next_waiter_id_{1};
     std::uint64_t resource_generation_{0};
     std::size_t max_queue_size_{128};
+    struct ModelUse {
+        time_point loaded{};
+        time_point last_used{};
+        int priority{0};
+    };
+    std::unordered_map<std::string, ModelUse> model_use_;
+    std::chrono::milliseconds swap_hold_{0};
+    std::chrono::milliseconds swap_quantum_{0};
     struct PrioritySession {
         std::string model;
         time_point deadline{};
@@ -308,6 +330,9 @@ private:
     std::recursive_mutex sidecar_mutex_;
     std::atomic<bool> swap_in_progress_{false};
     std::atomic<bool> swap_cancel_{false};
+    std::mutex swap_tokens_mutex_;
+    std::optional<std::pair<std::string, time_point>> pending_cancel_;
+    std::vector<std::pair<std::string, std::shared_ptr<std::atomic<bool>>>> swap_tokens_;
     std::atomic<bool> shutting_down_{false};
 };
 

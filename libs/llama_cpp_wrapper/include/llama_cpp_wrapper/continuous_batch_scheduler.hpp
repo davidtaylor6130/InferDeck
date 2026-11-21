@@ -97,6 +97,40 @@ constexpr bool adaptive_mtp_request_eligible(
                available, runnable_requests, max_active_requests);
 }
 
+constexpr int batch_draft_allotment(
+    int index, int candidates, int per_seq_max, int budget, std::size_t turn) noexcept {
+    if (index < 0 || index >= candidates || per_seq_max <= 0 || budget <= 0) return 0;
+    const int rotated = static_cast<int>(
+        (static_cast<std::size_t>(index) + turn) % static_cast<std::size_t>(candidates));
+    return std::min(per_seq_max,
+                    budget / candidates + (rotated < budget % candidates ? 1 : 0));
+}
+
+struct SpeculationGate {
+    float acceptance{1.0f};
+    int cooldown{0};
+};
+
+constexpr float speculation_gate_min_acceptance = 0.3f;
+constexpr float speculation_gate_probe_acceptance = 0.5f;
+constexpr int speculation_gate_cooldown_steps = 32;
+
+constexpr bool speculation_gate_step(SpeculationGate& gate) noexcept {
+    if (gate.cooldown <= 0) return true;
+    if (--gate.cooldown == 0) gate.acceptance = speculation_gate_probe_acceptance;
+    return false;
+}
+
+constexpr void speculation_gate_record(
+    SpeculationGate& gate, int drafted, int accepted) noexcept {
+    if (drafted <= 0) return;
+    const float rate = static_cast<float>(std::clamp(accepted, 0, drafted)) / drafted;
+    gate.acceptance = 0.75f * gate.acceptance + 0.25f * rate;
+    if (gate.acceptance < speculation_gate_min_acceptance) {
+        gate.cooldown = speculation_gate_cooldown_steps;
+    }
+}
+
 constexpr float generation_tokens_per_second(
     int completion_tokens, float generation_duration_ms) noexcept {
     return completion_tokens > 0 && generation_duration_ms > 0.0f
@@ -168,6 +202,8 @@ struct SlotTask {
     int spec_draft_pos_max{-1};
     int n_drafted{0};
     int n_draft_accepted{0};
+    detail::SpeculationGate spec_gate;
+    bool spec_batched{false};
     bool mtp_eligible{false};
     bool admitted{false};
     std::int64_t reserved_positions{0};
@@ -220,7 +256,8 @@ public:
         int n_batch,
         int mtp_max_active_requests,
         common_context_seq_rm_type draft_seq_rm_type,
-        bool bounded_pool = false);
+        bool bounded_pool = false,
+        int max_batch_draft_tokens = 8);
     ~ContinuousBatchScheduler();
 
     ContinuousBatchScheduler(const ContinuousBatchScheduler&) = delete;
@@ -264,6 +301,7 @@ private:
     int mtp_max_active_requests_;
     common_context_seq_rm_type draft_seq_rm_type_;
     bool bounded_pool_;
+    int max_batch_draft_tokens_;
     int context_capacity_;
     int draft_context_capacity_;
     int draft_margin_;

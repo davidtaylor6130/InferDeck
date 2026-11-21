@@ -7,6 +7,7 @@
 #include "ggml-backend.h"
 #include "llama.h"
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
+#include "provider/native_log.hpp"
 #include "provider/sdk.hpp"
 
 namespace {
@@ -39,6 +40,7 @@ LlamaCppConfig config_for(const inferdeck::model::ModelInfo& info, const json& g
     config.mtp_draft_tokens = info.mtp_draft_tokens;
     config.mtp_p_min = info.mtp_p_min;
     config.mtp_max_active_requests = info.mtp_max_active_requests;
+    config.max_batch_draft_tokens = info.max_batch_draft_tokens;
     config.speculative_type = info.speculative_type;
     config.draft_model_path = info.draft_model_path;
     config.swa_full = gateway.value("swa_full", config.swa_full);
@@ -74,6 +76,11 @@ const char* device_type_name(enum ggml_backend_dev_type type)
     case GGML_BACKEND_DEVICE_TYPE_ACCEL: return "accel";
     default: return "unknown";
     }
+}
+
+void forward_native_log(ggml_log_level level, const char* text, void*)
+{
+    inferdeck::provider::forward_native_log(static_cast<int>(level), text);
 }
 
 inferdeck::foundation::Result<json> operation(const std::string& name, const json& request)
@@ -128,6 +135,7 @@ inferdeck::provider::sdk::Definition define()
             },
             [](const json&) -> inferdeck::foundation::Result<void>
             {
+                llama_log_set(forward_native_log, nullptr);
                 inferdeck::llama_wrapper::LlamaCppModel::init_backend();
                 return inferdeck::foundation::Ok();
             },

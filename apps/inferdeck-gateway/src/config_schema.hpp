@@ -89,6 +89,8 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
             "cache_type_k", "cache_type_v", "swa_full", "truncate_prompt",
             "vram_budget_mb", "vram_safety_margin_mb", "max_queue_size",
             "voice_session_grace_ms", "speech_admission_timeout_ms", "transcription_max_body_mb", "transcription_decoded_budget_mb", "transcription_upload_timeout_ms", "background_idle_after_seconds",
+            "swap_hold_ms", "swap_quantum_ms",
+            "default_model_preload_delay_ms",
             "sampling"}))) return result;
     if (!(result = check("compatibility", {
             "openai_derivative"}))) return result;
@@ -113,7 +115,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
             if (!(result = reject_unknown_config_keys(
                     alias, "model_aliases[" + std::to_string(index) + "]", {
                         "name", "target", "required_context_size",
-                        "required_capabilities"}))) return result;
+                        "required_capabilities", "fallbacks"}))) return result;
             ++index;
         }
     }
@@ -138,7 +140,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
             if (!(result = reject_unknown_config_keys(
                     model["speculative"], path + ".speculative", {
                         "type", "draft_model", "draft_tokens", "p_min",
-                        "max_active_requests"}))) return result;
+                        "max_active_requests", "max_batch_draft_tokens"}))) return result;
             if (!(result = reject_unknown_config_keys(
                     model["reasoning"], path + ".reasoning", {
                         "supported", "efforts", "default", "none_disables",

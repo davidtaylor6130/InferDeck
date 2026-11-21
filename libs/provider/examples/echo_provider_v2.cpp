@@ -67,6 +67,8 @@ public:
     int estimate_vram_mb(int slots) const override { return info_.vram_required_mb + 10 * slots; }
     int additional_vram_reserve_mb() const override { return 7; }
     bool live_vram_accounting_complete() const override { return true; }
+    bool compute_degraded() const override { return info_.artifacts.contains("degraded"); }
+    int reclaimable_idle_context_mb() const override { return 40; }
 
     foundation::Result<void> resize_slots(int slots) override
     {
@@ -138,6 +140,10 @@ public:
         int, const model::InferenceRequest& request, const TokenCallback& callback,
         const std::atomic<bool>* cancel) override
     {
+        if (info_.artifacts.contains("device_lost"))
+        {
+            return foundation::Err<model::InferenceResult>(ErrorCode::Internal, "vk::DeviceLostError: ErrorDeviceLost");
+        }
         const std::string text = last_user_text(request);
         const std::vector<std::string> words = words_of(text);
         model::InferenceResult result;

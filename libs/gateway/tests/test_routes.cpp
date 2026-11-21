@@ -4,6 +4,7 @@
 #include "foundation/result.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
+#include "gateway/health_json.hpp"
 #include "gateway/openai_routes.hpp"
 #include "gateway/media_routes.hpp"
 #include "gateway/openai_adapter.hpp"
@@ -5159,4 +5160,70 @@ TEST_CASE("Routes: POST /v1/audio/transcriptions accepts audio above 25 MB in ch
     CHECK(response->status == 200);
     CHECK(nlohmann::json::parse(response->body)["text"].get<std::string>().starts_with("test transcript"));
     ts.stop();
+}
+
+#include "gateway/default_model_preload.hpp"
+
+TEST_CASE("default model preload waits, then yields to aborts and resident models",
+          "[gateway][preload]") {
+    using inferdeck::gateway::wait_for_default_preload;
+    const auto never = [] { return false; };
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(wait_for_default_preload(std::chrono::milliseconds{120}, never, never));
+    CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds{100});
+    CHECK_FALSE(wait_for_default_preload(std::chrono::milliseconds{10}, [] { return true; }, never));
+    CHECK_FALSE(wait_for_default_preload(std::chrono::milliseconds{10}, never, [] { return true; }));
+    const auto early = std::chrono::steady_clock::now();
+    CHECK_FALSE(wait_for_default_preload(std::chrono::seconds{30}, [] { return true; }, never));
+    CHECK(std::chrono::steady_clock::now() - early < std::chrono::seconds{1});
+}
+
+TEST_CASE("ensure_model_loaded: GPU-lost backoff pauses automatic GPU loads", "[gateway][backoff]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+    deps.auto_load_blocked = [] { return true; };
+
+    const auto result = ensure_model_loaded(deps, "a");
+
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.code == "gpu_lost_backoff");
+    REQUIRE_FALSE(coordinator.is_loaded("a"));
+}
+
+TEST_CASE("gpu_backoff_until needs two recent restarts and ignores bad stamps", "[gateway][backoff]") {
+    using inferdeck::gateway::gpu_backoff_until;
+    const long long now = 100000;
+    CHECK_FALSE(gpu_backoff_until({now - 60}, now));
+    CHECK(gpu_backoff_until({now - 500, now - 60}, now) == now - 60 + 1800);
+    CHECK_FALSE(gpu_backoff_until({now - 5000, now - 4000}, now));
+    CHECK_FALSE(gpu_backoff_until({now - 60, now + 5000}, now));
+    CHECK(gpu_backoff_until({now - 500, now - 60, now + 5000}, now) == now - 60 + 1800);
+}
+
+TEST_CASE("health body keeps ok true for CPU fallback and ranks reasons", "[health]") {
+  using inferdeck::gateway::health_body;
+  auto healthy = health_body({}, {}, false, true);
+  CHECK(healthy["ok"] == true);
+  CHECK(healthy["status"] == "ok");
+  CHECK_FALSE(healthy.contains("reason"));
+  auto degraded = health_body({}, {"m"}, false, true);
+  CHECK(degraded["ok"] == true);
+  CHECK(degraded["status"] == "degraded");
+  CHECK(degraded["reason"] == "gpu_unavailable");
+  CHECK(degraded["compute_degraded"] == true);
+  CHECK(degraded["degraded_models"] == nlohmann::json::array({"m"}));
+  auto unhealthy = health_body({"u"}, {"m"}, false, true);
+  CHECK(unhealthy["ok"] == false);
+  CHECK(unhealthy["reason"] == "execution_unhealthy");
+  auto backoff = health_body({"u"}, {"m"}, true, true);
+  CHECK(backoff["ok"] == false);
+  CHECK(backoff["reason"] == "gpu_lost_backoff");
 }
