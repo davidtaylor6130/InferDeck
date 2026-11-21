@@ -76,7 +76,7 @@ model_registry:
     n_slots: 1
     min_slots: 1
     residency: on_demand
-    vram_required_mb: 20000
+    vram_required_mb: 30000
     artifacts:
       diffusion_model: "E:/InferDeck/models/leejet/Qwen-Image-2.1-GGUF/qwen_image_2.1-Q8_0.gguf"
       vae: "E:/InferDeck/models/Comfy-Org/Qwen-Image-2.1/vae/qwen_image_2.1_vae_bf16.safetensors"
