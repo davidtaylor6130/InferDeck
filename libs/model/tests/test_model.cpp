@@ -3525,3 +3525,43 @@ TEST_CASE("ModelRegistry: rejects invalid Radiance prefill before admission", "[
     info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
     CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
 }
+
+namespace {
+std::atomic<int> speech_validations{0};
+class SpeechMock : public IModelMock, public ISpeechBackend {
+public:
+    using IModelMock::IModelMock;
+    Result<void> validate_speech_request(const SpeechRequest&) override {
+        ++speech_validations;
+        return Ok();
+    }
+    Result<AudioResult> synthesize(int, const SpeechRequest&,
+        const std::function<bool(const std::byte*, std::size_t)>&) override {
+        return Err<AudioResult>(ErrorCode::Internal, "unused");
+    }
+};
+}
+
+TEST_CASE("BackendCoordinator: speech validation reuses the resident backend",
+          "[model][coordinator][voice]") {
+    ModelRegistry reg;
+    std::atomic<int> created{0};
+    reg.set_factory([&created](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        ++created;
+        return std::make_unique<SpeechMock>(i);
+    });
+    auto voice = make_info("voice");
+    voice.modality = "audio_speech";
+    voice.capabilities = {"audio_speech"};
+    voice.vram_required_mb = 0;
+    reg.register_model(voice);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("voice").has_value());
+    const int after_load = created.load();
+    speech_validations = 0;
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE(coordinator.validate_speech_request("voice", SpeechRequest{}).has_value());
+    }
+    CHECK(created.load() == after_load);
+    CHECK(speech_validations.load() == 3);
+}

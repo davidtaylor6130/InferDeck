@@ -305,6 +305,19 @@ foundation::Result<AudioResult> BackendCoordinator::synthesize(
 
 foundation::Result<void> BackendCoordinator::validate_speech_request(
     const std::string& name, const SpeechRequest& request) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = instances_.find(name);
+        if (it != instances_.end() && it->second) {
+            auto* resident = dynamic_cast<ISpeechBackend*>(it->second.get());
+            if (!resident || !it->second->info().supports("audio_speech")) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "backend does not support speech synthesis: " + name);
+            }
+            return resident->validate_speech_request(request);
+        }
+    }
     auto created = registry_.create_result(name);
     if (!created) {
         return foundation::Err<void>(created.error().code,

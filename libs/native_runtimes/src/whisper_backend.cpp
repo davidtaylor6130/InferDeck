@@ -70,11 +70,14 @@ std::vector<float> resample(const std::vector<float>& input, int input_rate) {
 struct CallbackState {
     const std::function<bool(int)>* progress{};
     std::atomic<bool> cancelled{false};
+    std::atomic<int> percent{0};
+    std::chrono::steady_clock::time_point polled{};
 };
 
 void on_progress(whisper_context*, whisper_state*, int progress, void* data) {
     auto* state = static_cast<CallbackState*>(data);
     if (!state->progress || !*state->progress) return;
+    state->percent.store(progress);
     try {
         if (!(*state->progress)(progress)) state->cancelled.store(true);
     } catch (...) {
@@ -83,7 +86,19 @@ void on_progress(whisper_context*, whisper_state*, int progress, void* data) {
 }
 
 bool should_abort(void* data) {
-    return static_cast<CallbackState*>(data)->cancelled.load();
+    auto* state = static_cast<CallbackState*>(data);
+    if (state->cancelled.load()) return true;
+    const auto now = std::chrono::steady_clock::now();
+    if (state->progress && *state->progress &&
+        now - state->polled >= std::chrono::milliseconds{200}) {
+        state->polled = now;
+        try {
+            if (!(*state->progress)(state->percent.load())) state->cancelled.store(true);
+        } catch (...) {
+            state->cancelled.store(true);
+        }
+    }
+    return state->cancelled.load();
 }
 
 class WhisperBackend final : public model::FixedBackend, public model::ITranscriptionBackend {
