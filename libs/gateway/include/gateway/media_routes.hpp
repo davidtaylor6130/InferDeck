@@ -19,6 +19,8 @@ struct MediaJobOutput {
 
 void handle_image_generations(const httplib::Request& req, httplib::Response& resp,
                               const GatewayDeps& deps);
+void handle_image_edits(const httplib::Request& req, httplib::Response& resp,
+                        const GatewayDeps& deps);
 void handle_audio_generations(const httplib::Request& req,
                               httplib::Response& resp,
                               const GatewayDeps& deps);

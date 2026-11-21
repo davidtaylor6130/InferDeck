@@ -894,6 +894,14 @@ struct TestServer {
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_image_generations(req, resp, make_deps());
                     });
+        server.Post("/v1/images/edits",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_image_edits(req, resp, make_deps());
+                    });
+        server.Post("/api/inferdeck/v1/media/images/edits",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_image_edits(req, resp, make_deps());
+                    });
         server.Post("/v1/audio/speech",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_audio_speech(req, resp, make_deps());
@@ -2704,7 +2712,7 @@ TEST_CASE("Image editing accepts reference images only on InferDeck routes for c
         return response;
     };
     const std::string control = "/api/inferdeck/v1/media/images/generations";
-    const nlohmann::json one = nlohmann::json::array({"data:image/png;base64,AQID"});
+    const nlohmann::json one = nlohmann::json::array({"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABAAAAAAAAAAAA="});
 
     const auto edited = post(control, "edit-model", one);
     REQUIRE(edited.status == 200);
@@ -2712,7 +2720,7 @@ TEST_CASE("Image editing accepts reference images only on InferDeck routes for c
     REQUIRE(backend != nullptr);
     REQUIRE(backend->last_image_request.reference_images.size() == 1);
     CHECK(backend->last_image_request.reference_images[0] ==
-          std::vector<std::byte>{std::byte{1}, std::byte{2}, std::byte{3}});
+          std::vector<std::byte>{std::byte{0x89}, std::byte{0x50}, std::byte{0x4e}, std::byte{0x47}, std::byte{0x0d}, std::byte{0x0a}, std::byte{0x1a}, std::byte{0x0a}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x0d}, std::byte{0x49}, std::byte{0x48}, std::byte{0x44}, std::byte{0x52}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}});
 
     const auto strict = post("/v1/images/generations", "edit-model", one);
     CHECK(strict.status == 400);
@@ -2724,8 +2732,147 @@ TEST_CASE("Image editing accepts reference images only on InferDeck routes for c
           "model does not support image editing");
 
     CHECK(post(control, "edit-model", nlohmann::json::array({"not-a-data-url"})).status == 400);
+    CHECK(post(control, "edit-model", nlohmann::json::array({"data:image/png;base64,AQID"})).status == 400);
+    CHECK(post(control, "edit-model", nlohmann::json::array({"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgABhqAAAYagAAAAAAAAAAA="})).status == 400);
     CHECK(post(control, "edit-model", nlohmann::json::array({one[0], one[0], one[0], one[0], one[0]})).status == 400);
     CHECK(ts.coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("Image edits route accepts multipart uploads over HTTP",
+          "[routes][images][edit]") {
+    TestServer ts;
+    auto editor = make_info("edit-model");
+    editor.runtime = "stable_diffusion_cpp";
+    editor.modality = "image";
+    editor.capabilities = {"image_generation", "image_editing"};
+    ts.registry.register_model(editor);
+    auto generator = editor;
+    generator.name = "generate-only";
+    generator.capabilities = {"image_generation"};
+    ts.registry.register_model(generator);
+    REQUIRE(ts.coordinator.load("edit-model"));
+    REQUIRE(ts.coordinator.load("generate-only"));
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+
+    const auto png = [](std::uint32_t width, std::uint32_t height) {
+        std::string bytes("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR", 16);
+        for (const std::uint32_t value : {width, height}) {
+            for (int shift = 24; shift >= 0; shift -= 8) {
+                bytes.push_back(static_cast<char>((value >> shift) & 0xFF));
+            }
+        }
+        bytes.append(8, '\0');
+        return bytes;
+    };
+    const std::string image = png(64, 64);
+    using Items = httplib::UploadFormDataItems;
+    const auto fields = [] {
+        return Items{{"model", "edit-model", "", ""}, {"prompt", "make it red", "", ""},
+                     {"size", "512x512", "", ""}};
+    };
+    const auto post = [&](Items items, const std::string& path = "/v1/images/edits") {
+        return client.Post(path, items);
+    };
+    const auto code = [](const httplib::Result& response) {
+        return nlohmann::json::parse(response->body)["error"]["code"].get<std::string>();
+    };
+
+    auto items = fields();
+    items.push_back({"image[]", image, "a.png", "image/png"});
+    items.push_back({"image[]", image, "b.bin", "application/octet-stream"});
+    auto ok = post(items);
+    REQUIRE(ok);
+    REQUIRE(ok->status == 200);
+    const auto parsed = nlohmann::json::parse(ok->body);
+    CHECK(parsed["output_format"] == "png");
+    CHECK(parsed["data"].size() == 1);
+    CHECK(parsed["data"][0].contains("b64_json"));
+    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("edit-model"));
+    REQUIRE(backend != nullptr);
+    REQUIRE(backend->last_image_request.reference_images.size() == 2);
+    CHECK(backend->last_image_request.reference_images[0].size() == image.size());
+
+    items = fields();
+    items.push_back({"image", image, "a.jpg", "image/jpeg"});
+    CHECK(post(items)->status == 200);
+    CHECK(post(items, "/api/inferdeck/v1/media/images/edits")->status == 200);
+
+    CHECK(post(fields())->status == 400);
+    items = fields();
+    items.push_back({"image", "not an image", "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"image", png(100000, 100000), "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"image", png(8192, 8192), "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    for (int index = 0; index < 5; ++index) items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"photo", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_parameter");
+    items = fields();
+    items.push_back({"mask", image, "m.png", "image/png"});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_capability");
+    items = fields();
+    items.push_back({"mask", "x", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_capability");
+    items = fields();
+    items.push_back({"image", "text", "", ""});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"model", "edit-model", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"n", "two", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"stream", "true", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"reference_images", "x", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_parameter");
+    items = fields();
+    items.push_back({"input_fidelity", "high", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_capability");
+    items = fields();
+    items.push_back({"input_fidelity", "low", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(post(items)->status == 200);
+
+    items = {{"model", "generate-only", "", ""}, {"prompt", "x", "", ""},
+             {"image", image, "a.png", "image/png"}};
+    CHECK(post(items)->status == 400);
+
+    items = fields();
+    items.push_back({"image", std::string(13U * 1024U * 1024U, 'x'), "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    for (int index = 0; index < 2; ++index) {
+        std::string large = png(64, 64);
+        large.resize(11U * 1024U * 1024U, '\0');
+        items.push_back({"image", large, "a.png", "image/png"});
+    }
+    const auto too_large = post(items);
+    REQUIRE(too_large);
+    CHECK(too_large->status == 413);
+    CHECK(code(too_large) == "request_too_large");
+
+    const auto json_body = client.Post("/v1/images/edits", "{}", "application/json");
+    REQUIRE(json_body);
+    CHECK(json_body->status == 400);
+    CHECK(ts.coordinator.active_request_count() == 0);
+    ts.stop();
 }
 
 TEST_CASE("Media routes select personal defaults and preserve explicit model selection",

@@ -145,6 +145,16 @@ or image streaming return `unsupported_capability`; invalid enum/range values
 remain request errors. Native-only sampler controls remain available only in the
 explicitly enabled derivative profile.
 
+POST /v1/images/edits accepts multipart `image`/`image[]` uploads (one to four
+files, at most 12 MiB each, PNG, JPEG or BMP detected from the bytes; at most
+8192 pixels per side and 16 megapixels) with `model` and `prompt`, for models
+that declare `image_editing`. The total multipart size is limited to 16 MiB
+(413 `request_too_large`) and chunked bodies are refused. Field rules and
+`b64_json` PNG output match generations; `url` output returns
+`unsupported_capability`, as do `mask` and `input_fidelity: high`. The mirror
+`/api/inferdeck/v1/media/images/edits` is a control-plane route and uses
+control-write authentication.
+
 ## Stateless Responses contract
 
 POST /v1/responses decodes directly into the canonical inference domain. It

@@ -46,6 +46,14 @@ select their configured default when its runtime is available. These settings
 do not download models or add runtime support. Without a media default, image
 and video retain the existing `default_model` fallback; music requires `model`.
 
+## Image models
+
+Image models use the `stable_diffusion_cpp` runtime and register at startup, so
+add an entry only once its weights exist. The Qwen-Image-2.1 entry, artifact
+keys and weights are in [qwen-image-2.1.md](qwen-image-2.1.md#configuration).
+Its weights are licensed for non-commercial research or evaluation use only; see
+[the license section](qwen-image-2.1.md#license).
+
 ## Speculative decoding
 
 A `llama_cpp` text model may set `speculative`:
