@@ -371,6 +371,7 @@ TEST_CASE("BackendCoordinator: targeted cancel leaves a concurrent swap running"
   while (!entered.load() && std::chrono::steady_clock::now() < until) {
     std::this_thread::sleep_for(std::chrono::milliseconds{1});
   }
+  REQUIRE(entered.load());
   auto second = std::async(std::launch::async, [&] {
     return c.swap_to_cancellable("b", std::chrono::seconds{5});
   });
@@ -382,4 +383,28 @@ TEST_CASE("BackendCoordinator: targeted cancel leaves a concurrent swap running"
   const auto a = first.get();
   REQUIRE_FALSE(a);
   REQUIRE(a.error().code == ErrorCode::Timeout);
+}
+
+TEST_CASE("BackendCoordinator: a cancel that beats swap registration is honored",
+          "[coordinator][cancel]") {
+  ModelRegistry reg;
+  std::atomic<int> acq{0};
+  reg.set_factory([&](const ModelInfo& info) {
+    return std::make_unique<StubModel>(info, &acq);
+  });
+  for (const char* n : {"m1", "m2"}) {
+    ModelInfo info;
+    info.name = n;
+    info.gguf_path = "C:/fake.gguf";
+    info.n_slots = 1;
+    reg.register_model(info);
+  }
+  BackendCoordinator c(reg);
+  c.request_swap_cancel("m1");
+  const auto other = c.swap_to_cancellable("m2");
+  REQUIRE(other.has_value());
+  const auto cancelled = c.swap_to_cancellable("m1");
+  REQUIRE_FALSE(cancelled);
+  REQUIRE(cancelled.error().code == ErrorCode::Cancelled);
+  REQUIRE(c.swap_to_cancellable("m1").has_value());
 }

@@ -379,13 +379,16 @@ foundation::Result<void> BackendCoordinator::swap_to_with_control(
 
 void BackendCoordinator::request_swap_cancel(const std::string& target) {
   std::lock_guard<std::mutex> lock(swap_tokens_mutex_);
-  if (swap_tokens_.empty()) {
-    if (target.empty()) swap_cancel_.store(true);
-    return;
-  }
+  bool matched = false;
   for (auto& [name, token] : swap_tokens_) {
-    if (target.empty() || name == target) token->store(true);
+    if (target.empty() || name == target) {
+      token->store(true);
+      matched = true;
+    }
   }
+  if (matched) return;
+  if (target.empty()) swap_cancel_.store(true);
+  else pending_cancel_ = {target, clock::now() + std::chrono::seconds{5}};
 }
 
 foundation::Result<void> BackendCoordinator::swap_to_cancellable(
@@ -394,7 +397,13 @@ foundation::Result<void> BackendCoordinator::swap_to_cancellable(
   auto token = std::make_shared<std::atomic<bool>>(false);
   {
     std::lock_guard<std::mutex> lock(swap_tokens_mutex_);
-    if (swap_cancel_.exchange(false)) token->store(true);
+    bool cancelled_early = swap_cancel_.exchange(false);
+    if (pending_cancel_) {
+      cancelled_early = cancelled_early ||
+          (pending_cancel_->first == name && clock::now() < pending_cancel_->second);
+      if (cancelled_early || clock::now() >= pending_cancel_->second) pending_cancel_.reset();
+    }
+    if (cancelled_early) token->store(true);
     swap_tokens_.emplace_back(name, token);
   }
   struct TokenGuard {

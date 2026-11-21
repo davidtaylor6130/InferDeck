@@ -548,6 +548,12 @@ EnsureLoadedResult ensure_model_loaded(
         return {true, 200, "", "", foundation::ErrorCode::Ok};
     }
     if (!deps.auto_swap) {
+        const auto unhealthy = deps.coordinator.unhealthy_models();
+        if (std::find(unhealthy.begin(), unhealthy.end(), model_name) != unhealthy.end()) {
+            return {false, 503, "model_unhealthy",
+                    "model backend is unhealthy; swap to it again or restart the gateway",
+                    foundation::ErrorCode::Unavailable};
+        }
         return {false, 503, "model_not_loaded",
                 "model not loaded; POST /api/inferdeck/v1/swap/to/" +
                     model_name + " then retry",
@@ -643,7 +649,7 @@ void handle_swap_cancel(const httplib::Request& req, httplib::Response& resp,
         write_json(resp, 200, {{"status", "idle"}, {"message", "no swap in progress"}});
         return;
     }
-    deps.coordinator.request_swap_cancel(snap.target);
+    deps.coordinator.request_swap_cancel(snap.swapping ? snap.target : std::string{});
     LOG_INFO("swap_cancel_requested", "target={}", snap.target);
     write_json(resp, 202, {{"status", "cancelling"}, {"target", snap.target}});
 }

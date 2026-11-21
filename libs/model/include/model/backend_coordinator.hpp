@@ -296,6 +296,7 @@ private:
     std::atomic<bool> swap_in_progress_{false};
     std::atomic<bool> swap_cancel_{false};
     std::mutex swap_tokens_mutex_;
+    std::optional<std::pair<std::string, time_point>> pending_cancel_;
     std::vector<std::pair<std::string, std::shared_ptr<std::atomic<bool>>>> swap_tokens_;
     std::atomic<bool> shutting_down_{false};
 };
