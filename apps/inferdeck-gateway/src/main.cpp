@@ -276,7 +276,7 @@ int run_gateway(const fs::path& config_path) {
     const std::string dashboard_session_path =
         std::string(inferdeck::gateway::kControlApiBase) + "/dashboard/session";
 
-    DeadlineServer server(server_request_read_deadline);
+    DeadlineServer server(server_request_read_deadline, std::chrono::milliseconds{cfg.transcription_upload_timeout_ms});
     server.set_read_timeout(server_read_timeout);
     server.set_write_timeout(server_write_timeout);
     server.set_keep_alive_timeout(server_keep_alive_timeout.count());

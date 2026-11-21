@@ -184,6 +184,12 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                              "gateway.voice_session_grace_ms must be between 1000 and 120000");
             }
+            if (gateway["transcription_upload_timeout_ms"] &&
+                (gateway["transcription_upload_timeout_ms"].as<int>() < 30000 ||
+                 gateway["transcription_upload_timeout_ms"].as<int>() > 3600000)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.transcription_upload_timeout_ms must be between 30000 and 3600000");
+            }
             if (gateway["transcription_max_body_mb"] &&
                 (gateway["transcription_max_body_mb"].as<int>() < 1 ||
                  gateway["transcription_max_body_mb"].as<int>() > 4096)) {

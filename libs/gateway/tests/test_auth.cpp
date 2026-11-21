@@ -441,3 +441,14 @@ TEST_CASE("transcription body limit is separate from chat and configurable",
     CHECK(server_body_limit() == (300ULL << 20));
     audio_body_limit = saved;
 }
+
+#include "gateway/deadline_server.hpp"
+
+TEST_CASE("only transcription uploads get the long read deadline",
+          "[gateway][security]") {
+    using inferdeck::gateway::is_transcription_upload_prefix;
+    CHECK(is_transcription_upload_prefix("POST /v1/audio/transcriptions HTTP/1.1\r\n"));
+    CHECK_FALSE(is_transcription_upload_prefix("POST /v1/chat/completions HTTP/1.1\r\n"));
+    CHECK_FALSE(is_transcription_upload_prefix("GET /v1/audio/transcriptions HTTP/1.1\r\n"));
+    CHECK_FALSE(is_transcription_upload_prefix("POST /v1/audio"));
+}
