@@ -447,6 +447,8 @@ namespace {
 class FakeStream final : public httplib::Stream {
 public:
     time_t elapsed_ms{0};
+    time_t timeout_ms{0};
+    void set_read_timeout(time_t sec, time_t usec = 0) override { timeout_ms = sec * 1000 + usec / 1000; }
     bool is_readable() const override { return true; }
     bool wait_readable() const override { return true; }
     bool wait_writable() const override { return true; }
@@ -470,17 +472,18 @@ TEST_CASE("only exact authorized transcription uploads get the long read deadlin
 
     auto inner = std::make_unique<FakeStream>();
     auto* fake = inner.get();
-    UploadDeadlineStream stream(std::move(inner), std::chrono::milliseconds{30000});
+    UploadDeadlineStream stream(std::move(inner), std::chrono::milliseconds{30000}, std::chrono::milliseconds{30000});
     char byte = 0;
     fake->elapsed_ms = 29000;
     CHECK(stream.read(&byte, 1) == 1);
+    CHECK(fake->timeout_ms == 1000);
     fake->elapsed_ms = 31000;
     CHECK(stream.read(&byte, 1) == -1);
     CHECK(stream.get_error() == httplib::Error::Timeout);
 
     auto upload_inner = std::make_unique<FakeStream>();
     auto* slow = upload_inner.get();
-    UploadDeadlineStream upload(std::move(upload_inner), std::chrono::milliseconds{30000});
+    UploadDeadlineStream upload(std::move(upload_inner), std::chrono::milliseconds{30000}, std::chrono::milliseconds{30000});
     current_upload_stream = &upload;
     httplib::Request request;
     request.method = "POST";
@@ -491,5 +494,6 @@ TEST_CASE("only exact authorized transcription uploads get the long read deadlin
     request.path = "/v1/audio/transcriptions";
     DeadlineServer::extend_upload_deadline(request);
     CHECK(upload.read(&byte, 1) == 1);
+    CHECK(slow->timeout_ms == 30000);
     current_upload_stream = nullptr;
 }

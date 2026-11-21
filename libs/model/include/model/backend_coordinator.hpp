@@ -24,6 +24,7 @@ struct AcquireSlotOptions {
     std::chrono::milliseconds timeout{30000};
     bool block{true};
     int priority{0};
+    bool background{false};
     std::function<bool()> cancelled{};
     std::string reservation_key{};
     std::function<foundation::Result<void>()> prepare{};
@@ -215,6 +216,7 @@ private:
         std::optional<RequestDemand> demand;
         int max_aggregate_context{0};
         int max_aggregate_sequences{0};
+        bool background{false};
     };
 
     struct ActiveLease {
@@ -225,6 +227,7 @@ private:
         std::string reservation_key;
         int priority{0};
         bool continuation{false};
+        bool background{false};
     };
 
     struct ContinuationHold {
@@ -248,7 +251,7 @@ private:
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
     foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot, const RequestDemand* demand = nullptr,
-        const std::string& reservation_key = {}, int priority = 0);
+        const std::string& reservation_key = {}, int priority = 0, bool background = false);
     foundation::Result<int> backend_slot_for_lease_locked(
         const std::string& name, int lease_id) const;
     foundation::Result<void> unload_with_control(
@@ -275,6 +278,8 @@ private:
     std::optional<std::string> current_loaded_;
     int active_requests_{0};
     std::unordered_map<std::string, int> active_requests_by_model_;
+    std::unordered_map<std::string, int> background_requests_by_model_;
+    std::unordered_map<std::string, int> validation_pins_;
     std::unordered_map<int, ActiveLease> active_leases_;
     std::unordered_map<std::string, ContinuationHold> continuation_holds_;
     std::unordered_map<std::string, int> active_context_reservation_by_model_;
@@ -310,7 +315,10 @@ private:
         std::size_t refs{1};
         bool kept{false};
         bool live(time_point now) const {
-            return active_holds > 0 || refs > 0 || deadline > now;
+            return active_holds > 0 || deadline > now;
+        }
+        bool retained(time_point now) const {
+            return refs > 0 || live(now);
         }
     };
     std::unordered_map<std::string, PrioritySession> priority_sessions_;

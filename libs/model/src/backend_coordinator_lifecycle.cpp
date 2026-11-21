@@ -200,7 +200,9 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
         draining_models_.insert(name);
         const auto has_active_requests = [&] {
             const auto active = active_requests_by_model_.find(name);
-            return active != active_requests_by_model_.end() && active->second > 0;
+            const auto pins = validation_pins_.find(name);
+            return (active != active_requests_by_model_.end() && active->second > 0) ||
+                   (pins != validation_pins_.end() && pins->second > 0);
         };
         while (has_active_requests() && clock::now() < drain_deadline &&
                !control.is_cancelled()) {
@@ -249,6 +251,7 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
         if (r) {
             active_requests_by_model_.erase(name);
             model_use_.erase(name);
+            background_requests_by_model_.erase(name);
         }
         draining_models_.erase(name);
         if (r) {

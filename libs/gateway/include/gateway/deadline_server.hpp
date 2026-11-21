@@ -17,8 +17,9 @@ inline bool is_transcription_upload(std::string_view method, std::string_view pa
 class UploadDeadlineStream final : public httplib::Stream {
 public:
     UploadDeadlineStream(std::unique_ptr<httplib::Stream> inner,
-                         std::chrono::milliseconds short_deadline)
-        : inner_(std::move(inner)), short_deadline_(short_deadline) {}
+                         std::chrono::milliseconds short_deadline,
+                         std::chrono::milliseconds read_timeout)
+        : inner_(std::move(inner)), short_deadline_(short_deadline), read_timeout_(read_timeout) {}
 
     void allow_long_deadline() { long_deadline_ = true; }
 
@@ -27,9 +28,16 @@ public:
     bool wait_writable() const override { return inner_->wait_writable(); }
     bool is_peer_alive() const override { return inner_->is_peer_alive(); }
     ssize_t read(char* ptr, size_t size) override {
-        if (!long_deadline_ && inner_->duration() > short_deadline_.count()) {
-            error_ = httplib::Error::Timeout;
-            return -1;
+        if (!long_deadline_) {
+            const auto left = short_deadline_.count() - inner_->duration();
+            if (left <= 0) {
+                error_ = httplib::Error::Timeout;
+                return -1;
+            }
+            set_inner_timeout(std::min<time_t>(left, read_timeout_.count()));
+        } else if (!restored_) {
+            set_inner_timeout(read_timeout_.count());
+            restored_ = true;
         }
         const ssize_t count = inner_->read(ptr, size);
         if (count < 0) error_ = inner_->get_error();
@@ -47,8 +55,12 @@ public:
     void set_read_timeout(time_t sec, time_t usec = 0) override { inner_->set_read_timeout(sec, usec); }
 
 private:
+    void set_inner_timeout(time_t ms) { inner_->set_read_timeout(ms / 1000, (ms % 1000) * 1000); }
+
     std::unique_ptr<httplib::Stream> inner_;
     std::chrono::milliseconds short_deadline_;
+    std::chrono::milliseconds read_timeout_;
+    bool restored_{false};
     bool long_deadline_{false};
 };
 
@@ -86,7 +98,9 @@ protected:
                         write_timeout_sec_, write_timeout_usec_,
                         static_cast<time_t>(upload_read_deadline_.count()),
                         std::chrono::steady_clock::now()),
-                    request_read_deadline_);
+                    request_read_deadline_,
+                    std::chrono::milliseconds{
+                        read_timeout_sec_ * 1000 + read_timeout_usec_ / 1000});
                 current_upload_stream = &stream;
                 const bool handled = process_request(
                     stream, remote_address, remote_port, local_address, local_port,

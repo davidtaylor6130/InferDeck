@@ -344,17 +344,24 @@ foundation::Result<void> BackendCoordinator::validate_speech_request(
                     foundation::ErrorCode::InvalidArgument,
                     "backend does not support speech synthesis: " + name);
             }
-            ++active_requests_by_model_[name];
+            ++validation_pins_[name];
         }
     }
     if (pinned) {
-        auto validated = pinned->validate_speech_request(request);
+        foundation::Result<void> validated = foundation::Ok();
+        try {
+            validated = pinned->validate_speech_request(request);
+        } catch (const std::exception& error) {
+            validated = foundation::Err<void>(foundation::ErrorCode::Internal,
+                                              std::string("speech validation failed: ") + error.what());
+        } catch (...) {
+            validated = foundation::Err<void>(foundation::ErrorCode::Internal,
+                                              "speech validation failed");
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto active = active_requests_by_model_.find(name);
-            if (active != active_requests_by_model_.end() && active->second > 0) {
-                --active->second;
-            }
+            auto pin = validation_pins_.find(name);
+            if (pin != validation_pins_.end() && pin->second > 0) --pin->second;
         }
         cv_.notify_all();
         return validated;

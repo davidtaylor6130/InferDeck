@@ -4030,19 +4030,102 @@ TEST_CASE("BackendCoordinator: a kept voice session survives other requests' rel
     CHECK_FALSE(coordinator.priority_session_matches("peer", "chat"));
 }
 
-TEST_CASE("BackendCoordinator: in-flight voice reservation stays live past its deadline",
+TEST_CASE("BackendCoordinator: in-flight voice reservation is retained but expires for blocking",
           "[model][coordinator][voice]") {
     ModelRegistry reg;
     BackendCoordinator coordinator(reg);
     const auto token = coordinator.reserve_priority_session("client", "chat", std::chrono::milliseconds{1});
     std::this_thread::sleep_for(std::chrono::milliseconds{20});
-    CHECK(coordinator.priority_session_matches("client", "chat"));
+    CHECK_FALSE(coordinator.priority_session_matches("client", "chat"));
     const auto second = coordinator.reserve_priority_session("client", "chat", std::chrono::milliseconds{1});
     CHECK(second == token);
     coordinator.release_priority_session("client", second);
-    CHECK(coordinator.priority_session_matches("client", "chat"));
     coordinator.release_priority_session("client", token);
-    CHECK_FALSE(coordinator.priority_session_matches("client", "chat"));
+    const auto fresh = coordinator.reserve_priority_session("client", "chat", std::chrono::milliseconds{60000});
+    CHECK(fresh != token);
+}
+
+TEST_CASE("BackendCoordinator: a long voice reservation does not stall a peer's primary request",
+          "[model][coordinator][voice]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(2);
+        backend->busy_slots.assign(2, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.vram_required_mb = 0;
+    chat.n_slots = 2;
+    chat.min_slots = 2;
+    reg.register_model(chat);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("chat").has_value());
+    const auto token = coordinator.reserve_priority_session("stt-client", "chat", std::chrono::milliseconds{1});
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    AcquireSlotOptions options;
+    options.block = false;
+    options.reservation_key = "peer";
+    auto slot = coordinator.acquire_slot("chat", options);
+    REQUIRE(slot.has_value());
+    REQUIRE(coordinator.release_slot("chat", *slot).has_value());
+    coordinator.release_priority_session("stt-client", token);
+}
+
+TEST_CASE("BackendCoordinator: a queued background media waiter does not stall primary requests",
+          "[model][coordinator][voice]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(i.n_slots);
+        backend->busy_slots.assign(static_cast<std::size_t>(i.n_slots), 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.vram_required_mb = 0;
+    chat.n_slots = 2;
+    chat.min_slots = 2;
+    auto voice = make_info("voice");
+    voice.role = ModelRole::Media;
+    voice.modality = "audio_transcription";
+    voice.capabilities = {"audio_transcription"};
+    voice.vram_required_mb = 0;
+    voice.n_slots = 1;
+    voice.min_slots = 1;
+    reg.register_model(chat);
+    reg.register_model(voice);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("chat").has_value());
+    REQUIRE(coordinator.load("voice").has_value());
+    AcquireSlotOptions running_options;
+    running_options.background = true;
+    auto running = coordinator.acquire_slot("voice", running_options);
+    REQUIRE(running.has_value());
+
+    const auto peer_acquire = [&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::milliseconds{250};
+        options.reservation_key = "peer";
+        return coordinator.acquire_slot("chat", options);
+    };
+    for (const bool background : {true, false}) {
+        std::jthread waiter([&] {
+            AcquireSlotOptions options;
+            options.timeout = std::chrono::milliseconds{400};
+            options.background = background;
+            (void)coordinator.acquire_slot("voice", options);
+        });
+        for (int attempt = 0; attempt < 100 && coordinator.queued_request_count() == 0; ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+        REQUIRE(coordinator.queued_request_count() == 1);
+        auto slot = peer_acquire();
+        CHECK(slot.has_value() == background);
+        if (slot) REQUIRE(coordinator.release_slot("chat", *slot).has_value());
+    }
+    REQUIRE(coordinator.release_slot("voice", *running).has_value());
 }
 
 TEST_CASE("coordinator reports an unhealthy model and recovers it on the next load", "[coordinator][health]")

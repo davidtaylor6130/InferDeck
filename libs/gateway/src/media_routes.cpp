@@ -449,8 +449,9 @@ public:
     VoiceSessionGuard(const VoiceSessionGuard&) = delete;
     VoiceSessionGuard& operator=(const VoiceSessionGuard&) = delete;
     ~VoiceSessionGuard() {
-        if (coordinator_) coordinator_->release_priority_session(key_, token_);
+        if (coordinator_) coordinator_->release_priority_session(key_, token_, ends_turn_);
     }
+    void ends_turn() { ends_turn_ = true; }
     void keep() { coordinator_ = nullptr; }
     void refresh_and_keep() {
         if (coordinator_) {
@@ -466,6 +467,7 @@ private:
     std::string key_;
     std::chrono::milliseconds duration_{};
     std::uint64_t token_{0};
+    bool ends_turn_{false};
 };
 
 struct SpeechStreamState {
@@ -527,7 +529,8 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
                                             const std::string& model_name,
                                             const std::shared_ptr<MediaJob>& job,
                                             std::chrono::milliseconds timeout = std::chrono::minutes{5},
-                                            const char* label = "") {
+                                            const char* label = "",
+                                            bool background = false) {
     constexpr auto load_budget = std::chrono::minutes{5};
     const bool resident = deps.coordinator.is_loaded(model_name);
     const auto queue_timeout = resident ? timeout : std::max<std::chrono::milliseconds>(timeout, load_budget);
@@ -543,6 +546,8 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
             classify_route(req.method, req.path) ==
                 RoutePrincipal::OpenAIDataPlane);
     options.timeout = queue_timeout;
+    options.background = background;
+    if (background) options.priority -= 1;
     options.cancelled = cancelled;
     options.prepare = [&deps, model_name, deadline, cancelled, stage] {
         stage->store("model_load");
