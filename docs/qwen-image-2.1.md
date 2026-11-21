@@ -75,7 +75,6 @@ model_registry:
     capabilities: [image_generation, image_editing]
     n_slots: 1
     min_slots: 1
-    residency: on_demand
     vram_required_mb: 20000
     artifacts:
       diffusion_model: "E:/InferDeck/models/leejet/Qwen-Image-2.1-GGUF/qwen_image_2.1-Q8_0.gguf"
