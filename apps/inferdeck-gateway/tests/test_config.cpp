@@ -704,6 +704,27 @@ model_registry:
       default: high
       none_disables: true
 )"));
+    CHECK(validate_config_text(R"(
+model_registry:
+  - name: template-none-default
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [none, minimal, low, medium, high, xhigh]
+      default: none
+      none_disables: true
+)"));
+    CHECK(validate_config_text(R"(
+model_registry:
+  - name: inkling-style
+    gguf_path: model.gguf
+    reasoning:
+      supported: true
+      efforts: [none, minimal, low, medium, high, xhigh]
+      default: high
+      none_disables: true
+      aliases:
+        max: xhigh
+)"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:
   - name: none-tier-without-disable
