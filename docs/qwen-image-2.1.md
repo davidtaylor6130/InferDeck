@@ -46,7 +46,8 @@ turbo preset or previews.
 stable-diffusion.cpp is built with `SD_USE_UPSTREAM_GGML=ON` so it shares
 llama.cpp's ggml, and the whole build uses `GGML_MAX_NAME=160` to match it; a
 mismatch corrupts tensor lookups and aborts on the first generation. INT8
-`convrot` safetensors are not supported; use GGUF or BF16 weights. FP8 weights
+`convrot` safetensors have CPU and Vulkan kernels upstream at this pin but are
+not tested in InferDeck; use GGUF or BF16 weights, which are the validated formats. FP8 weights
 are converted to F16 at load time. The Validation section below was measured on
 `f8890b9` and must be repeated on `01c463a`.
 
@@ -120,12 +121,15 @@ ignored. Each image must be at most 8192 pixels per side and 16 megapixels. The
 total multipart size limit is 16 MiB (413 `request_too_large` above it), chunked
 bodies are refused, and `mask` or `input_fidelity: high` return
 `unsupported_capability`. The same
-route exists at `/api/inferdeck/v1/media/images/edits`. Both convert the upload
-into the JSON path below, so they share its validation, model capability check
-and output.
+route exists at `/api/inferdeck/v1/media/images/edits`. Both share the
+generation path's validation, model capability check and output.
 
 ```sh
-curl -H "Expect:" http://127.0.0.1:11434/v1/images/edits   -F model=qwen-image-2.1-q8   -F "prompt=change the sign text to InferDeck"   -F size=1024x1024   -F "image[]=@input.png;type=image/png"
+curl -H "Expect:" http://127.0.0.1:11434/v1/images/edits \
+  -F model=qwen-image-2.1-q8 \
+  -F "prompt=change the sign text to InferDeck" \
+  -F size=1024x1024 \
+  -F "image[]=@input.png;type=image/png"
 ```
 
 The JSON form is an InferDeck extension on

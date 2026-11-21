@@ -202,6 +202,13 @@ void run_image_request(const httplib::Request& req, httplib::Response& resp,
                             image.error().message, "reference_images");
                 return;
             }
+            const auto probe = model::probe_image(image->bytes);
+            if (!probe || !model::reference_image_within_budget(*probe)) {
+                write_error(resp, 400, "invalid_image_request",
+                            "reference image must be a PNG, JPEG, or BMP within 8192 pixels per side and 16 megapixels",
+                            "reference_images");
+                return;
+            }
             request.reference_images.push_back(std::move(image->bytes));
         }
     }
@@ -350,6 +357,11 @@ void handle_image_edits(const httplib::Request& req, httplib::Response& resp,
         if (name == "mask") {
             write_error(resp, 400, "unsupported_capability",
                         "mask is not supported by the native image runtime", name);
+            return;
+        }
+        if (name == "reference_images") {
+            write_error(resp, 400, "unsupported_parameter",
+                        "unsupported Images parameter: " + name, name);
             return;
         }
         if (name == "input_fidelity") {

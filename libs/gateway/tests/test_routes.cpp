@@ -2712,7 +2712,7 @@ TEST_CASE("Image editing accepts reference images only on InferDeck routes for c
         return response;
     };
     const std::string control = "/api/inferdeck/v1/media/images/generations";
-    const nlohmann::json one = nlohmann::json::array({"data:image/png;base64,AQID"});
+    const nlohmann::json one = nlohmann::json::array({"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABAAAAAAAAAAAA="});
 
     const auto edited = post(control, "edit-model", one);
     REQUIRE(edited.status == 200);
@@ -2720,7 +2720,7 @@ TEST_CASE("Image editing accepts reference images only on InferDeck routes for c
     REQUIRE(backend != nullptr);
     REQUIRE(backend->last_image_request.reference_images.size() == 1);
     CHECK(backend->last_image_request.reference_images[0] ==
-          std::vector<std::byte>{std::byte{1}, std::byte{2}, std::byte{3}});
+          std::vector<std::byte>{std::byte{0x89}, std::byte{0x50}, std::byte{0x4e}, std::byte{0x47}, std::byte{0x0d}, std::byte{0x0a}, std::byte{0x1a}, std::byte{0x0a}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x0d}, std::byte{0x49}, std::byte{0x48}, std::byte{0x44}, std::byte{0x52}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}});
 
     const auto strict = post("/v1/images/generations", "edit-model", one);
     CHECK(strict.status == 400);
@@ -2732,6 +2732,8 @@ TEST_CASE("Image editing accepts reference images only on InferDeck routes for c
           "model does not support image editing");
 
     CHECK(post(control, "edit-model", nlohmann::json::array({"not-a-data-url"})).status == 400);
+    CHECK(post(control, "edit-model", nlohmann::json::array({"data:image/png;base64,AQID"})).status == 400);
+    CHECK(post(control, "edit-model", nlohmann::json::array({"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgABhqAAAYagAAAAAAAAAAA="})).status == 400);
     CHECK(post(control, "edit-model", nlohmann::json::array({one[0], one[0], one[0], one[0], one[0]})).status == 400);
     CHECK(ts.coordinator.active_request_count() == 0);
 }
@@ -2835,6 +2837,10 @@ TEST_CASE("Image edits route accepts multipart uploads over HTTP",
     items.push_back({"stream", "true", "", ""});
     items.push_back({"image", image, "a.png", "image/png"});
     CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"reference_images", "x", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_parameter");
     items = fields();
     items.push_back({"input_fidelity", "high", "", ""});
     items.push_back({"image", image, "a.png", "image/png"});
