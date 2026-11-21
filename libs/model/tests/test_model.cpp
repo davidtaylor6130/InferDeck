@@ -3525,3 +3525,26 @@ TEST_CASE("ModelRegistry: rejects invalid Radiance prefill before admission", "[
     info.artifacts["kv_cache_dtype"] = "int4_per_token_head";
     CHECK_THROWS_AS(registry.register_model(info), std::invalid_argument);
 }
+
+TEST_CASE("coordinator reports an unhealthy model and recovers it on the next load", "[coordinator][health]")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel>
+    {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots.store(info.n_slots);
+        backend->busy_slots.assign(info.n_slots, 0);
+        return backend;
+    });
+    registry.register_model(make_info("gpu"));
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load("gpu"));
+    CHECK(coordinator.unhealthy_models().empty());
+    as_mock(const_cast<IModel*>(coordinator.get_model("gpu")))->healthy.store(false);
+    CHECK(coordinator.unhealthy_models() == std::vector<std::string>{"gpu"});
+    CHECK_FALSE(coordinator.residency().front().healthy);
+    CHECK_FALSE(coordinator.is_ready("gpu"));
+    REQUIRE(coordinator.ensure_loaded("gpu"));
+    CHECK(coordinator.is_ready("gpu"));
+    CHECK(coordinator.unhealthy_models().empty());
+}

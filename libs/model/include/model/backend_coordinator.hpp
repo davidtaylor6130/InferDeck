@@ -60,6 +60,7 @@ struct ResidencyInfo {
     bool resizing{false};
     bool concurrency_auto{false};
     int context_pool_capacity{0};
+    bool healthy{true};
 };
 
 struct ModelIdentitySnapshot {
@@ -96,6 +97,7 @@ public:
         std::string requested = {}, std::string resolved = {}) const;
     [[nodiscard]] std::vector<std::string> get_loaded_models() const;
     [[nodiscard]] std::vector<ResidencyInfo> residency() const;
+    [[nodiscard]] std::vector<std::string> unhealthy_models() const;
     [[nodiscard]] int get_vram_usage() const;
     void set_vram_budget(int total_mb, int safety_margin_mb = 2048);
     void update_vram_observation(int used_mb, int total_mb);

@@ -666,6 +666,7 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
         {"vram_usage_mb", deps.coordinator.get_vram_usage()},
         {"vram_budget_mb", deps.coordinator.vram_budget_mb()},
         {"vram_available_mb", deps.coordinator.vram_available_mb()},
+        {"unhealthy_models", deps.coordinator.unhealthy_models()},
         {"resource_decision", deps.coordinator.last_resource_decision()},
         {"active_requests", deps.coordinator.active_request_count()},
         {"swapping", snap.swapping},
@@ -696,6 +697,7 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
             {"estimated_vram_mb", resident.estimated_vram_mb},
             {"primary", resident.primary},
             {"resizing", resident.resizing},
+            {"healthy", resident.healthy},
         });
     }
     write_json(resp, 200, body);

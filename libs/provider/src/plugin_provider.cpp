@@ -196,6 +196,18 @@ foundation::Result<void> to_result(int32_t status, const CallState& state, const
         : "provider " + action + " failed with status " + std::to_string(status));
 }
 
+bool is_fatal_device_error(const std::string& message)
+{
+    std::string lowered(message);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (const char* marker : {"device lost", "device_lost", "devicelost", "device hung", "gpu hang"})
+    {
+        if (lowered.find(marker) != std::string::npos) return true;
+    }
+    return false;
+}
+
 template <typename T>
 foundation::Result<T> forward_error(const foundation::Result<void>& failed)
 {
@@ -284,6 +296,7 @@ public:
         {
             refresh_after_load();
         }
+        if (loaded) device_failed_.store(false);
         set_loaded(static_cast<bool>(loaded));
         return loaded;
     }
@@ -304,7 +317,10 @@ public:
     }
 
     bool is_loaded() const override { return query(INFERDECK_QUERY_LOADED, 0, loaded_.load() ? 1 : 0) != 0; }
-    bool execution_healthy() const override { return query(INFERDECK_QUERY_HEALTHY, 0, 1) != 0; }
+    bool execution_healthy() const override
+    {
+        return !device_failed_.load() && query(INFERDECK_QUERY_HEALTHY, 0, 1) != 0;
+    }
 
     int vram_usage_mb() const override
     {
@@ -751,7 +767,14 @@ private:
     foundation::Result<void> run(const char* operation, const json& body,
                                  std::span<const inferdeck_blob> blobs, CallState& state)
     {
-        return to_result(invoke(operation, body, blobs, state), state, operation);
+        foundation::Result<void> result = to_result(invoke(operation, body, blobs, state), state, operation);
+        if (!result && is_fatal_device_error(result.error().message))
+        {
+            device_failed_.store(true);
+            foundation::LOG_ERROR("provider_device_failed", "runtime={} model={} operation={} error={}",
+                                  info_.runtime, info_.name, operation, result.error().message);
+        }
+        return result;
     }
 
     /// <summary>Media progress: {"type":"progress","percent":n}. A false from the caller stops the call.</summary>
@@ -847,6 +870,7 @@ private:
     model::ChatTemplateMeta template_meta_;
     mutable std::mutex mutex_;
     std::atomic<bool> loaded_{false};
+    std::atomic<bool> device_failed_{false};
     std::vector<bool> slots_;
     std::atomic<bool> cancel_all_{false};
     std::atomic<int> v1_vram_mb_{0};
