@@ -153,6 +153,35 @@ foundation::Result<bool> check_available(
 
 } // namespace
 
+
+foundation::Result<std::size_t> context_pool_kv_bytes(
+    const llama_context* context) try {
+  std::size_t total = 0;
+  if (context == nullptr) return total;
+  const llama_memory_breakdown breakdown = llama_get_memory_breakdown(context);
+  for (const auto& [buffer_type, data] : breakdown) {
+    if (ggml_backend_buft_is_host(buffer_type)) continue;
+    const auto next = checked_add(total, data.context);
+    if (!next) return std::unexpected(next.error());
+    total = *next;
+  }
+  return total;
+} catch (...) {
+  return foundation::Err<std::size_t>(
+      foundation::ErrorCode::Internal, "context pool kv snapshot failed");
+}
+
+int conservative_reclaimable_context_mb(
+    std::size_t kv_bytes, std::int64_t capacity, std::int64_t minimum,
+    int vram_safety_margin_mb) {
+  if (capacity <= minimum || capacity <= 0) return 0;
+  const std::int64_t kv_mb = static_cast<std::int64_t>(kv_bytes / kMib);
+  const std::int64_t freed = kv_mb * (capacity - minimum) / capacity -
+      std::max(0, vram_safety_margin_mb);
+  if (freed <= 0) return 0;
+  return static_cast<int>(std::min<std::int64_t>(
+      freed * 9 / 10, std::numeric_limits<int>::max()));
+}
 foundation::Result<std::size_t> context_pool_device_memory_bytes(
     const llama_context* target_context,
     const llama_context* draft_context) try {

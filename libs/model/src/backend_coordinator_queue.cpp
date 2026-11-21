@@ -660,7 +660,7 @@ bool BackendCoordinator::swap_deferred_locked(const SlotWaiter& waiter, time_poi
             backend && backend->is_loaded() && backend->execution_healthy() &&
             backend->can_reclaim_idle_context()) reclaimable_mb += backend->reclaimable_idle_context_mb();
     }
-    if (reclaimable_mb > 0 && reclaimable_mb >= info->vram_required_mb - available_vram_locked()) return false;
+    if (vram_budget_mb_ > 0 && reclaimable_mb > 0 && reclaimable_mb >= info->vram_required_mb - available_vram_locked()) return false;
     for (const auto& [name, backend] : instances_) {
         if (!backend || !backend->is_loaded() || !backend->info().eviction_eligible ||
             backend->info().residency == ResidencyPolicy::Always ||

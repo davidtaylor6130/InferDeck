@@ -842,12 +842,10 @@ int LlamaCppModel::reclaimable_idle_context_mb() const {
       static_cast<std::int64_t>(minimum_ctx) + speculative_draft_tokens();
   const std::int64_t capacity = static_cast<std::int64_t>(llama_n_ctx(shared_ctx_));
   if (capacity <= minimum) return 0;
-  const Result<std::size_t> memory =
-      context_pool_device_memory_bytes(shared_ctx_, draft_ctx_);
-  if (!memory) return 0;
-  const std::int64_t mb = static_cast<std::int64_t>(*memory / (1024ULL * 1024ULL));
-  return static_cast<int>(std::min<std::int64_t>(
-      mb * (capacity - minimum) / capacity, std::numeric_limits<int>::max()));
+  const Result<std::size_t> kv = context_pool_kv_bytes(shared_ctx_);
+  if (!kv) return 0;
+  return conservative_reclaimable_context_mb(
+      *kv, capacity, minimum, cfg_.vram_safety_margin_mb);
 }
 
 bool LlamaCppModel::can_reclaim_idle_context() const {
