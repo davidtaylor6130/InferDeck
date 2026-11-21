@@ -57,6 +57,7 @@ speculative:
   draft_tokens: 3          # mtp: 1-4 (default 2); dflash/dflash2: 1-16 (default 3; above 4 is slower on Vulkan, see below)
   p_min: 0.0               # 0-1; DFlash2 truncates the draft at a lower selector probability
   max_active_requests: 1   # speculation runs only while this many requests or fewer are runnable
+  max_batch_draft_tokens: 8  # 1-64; total draft tokens verified per step when 2+ requests speculate
 ```
 
 - `mtp` drafts from the target GGUF's own MTP head; `draft_model` is rejected.
@@ -71,6 +72,17 @@ speculative:
   runnable requests the model decodes without drafting, and a request that lost
   its draft cache resynchronises before drafting again. Image requests always
   bypass speculation.
+- Within the window every speculating request drafts in one shared drafter
+  decode and all drafts are verified in one target decode. With two or more
+  speculating requests the step's draft tokens are split evenly under
+  `max_batch_draft_tokens` (a single request keeps its full `draft_tokens`), and
+  a request whose recent acceptance falls below 30% decodes plainly for 32 steps
+  before probing again. The budget limits the tokens the target verifies, not
+  drafter compute: MTP and DFlash still draft `draft_tokens` and the draft is
+  truncated afterwards. A budget below `max_active_requests` is accepted but
+  logged, because some requests then draft nothing on a given step. The default
+  `max_active_requests` stays 1; raise it to the slot count to speculate under
+  concurrency.
 - With `context_pool_auto`, the drafter's file size is reserved from the fitted
   pool; its KV cache is covered by the allocation retry.
 

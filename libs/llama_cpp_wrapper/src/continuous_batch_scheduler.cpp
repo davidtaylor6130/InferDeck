@@ -123,7 +123,8 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(
     int n_batch,
     int mtp_max_active_requests,
     common_context_seq_rm_type draft_seq_rm_type,
-    bool bounded_pool)
+    bool bounded_pool,
+    int max_batch_draft_tokens)
     : ctx_(ctx),
       draft_ctx_(draft_ctx),
       speculative_(speculative),
@@ -134,6 +135,7 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(
       mtp_max_active_requests_(std::max(1, mtp_max_active_requests)),
       draft_seq_rm_type_(draft_seq_rm_type),
       bounded_pool_(bounded_pool),
+      max_batch_draft_tokens_(std::max(1, max_batch_draft_tokens)),
       context_capacity_(ctx ? static_cast<int>(llama_n_ctx(ctx)) : 0),
       draft_context_capacity_(draft_ctx ? static_cast<int>(llama_n_ctx(draft_ctx)) : 0),
       draft_margin_(speculative ? std::max(0, common_speculative_n_max(speculative)) : 0),
@@ -664,8 +666,36 @@ void ContinuousBatchScheduler::run_loop() {
 
         std::vector<SlotTask*> drafting;
         if (mtp_window) {
+            std::vector<SlotTask*> candidates;
             for (auto* t : runnable) {
-                if (!t->mtp_eligible || !t->prompt_done || !draft_ctx_) continue;
+                t->spec_batched = false;
+                if (t->mtp_eligible && t->prompt_done && draft_ctx_) {
+                    candidates.push_back(t);
+                }
+            }
+            const bool batched = candidates.size() > 1;
+            std::vector<SlotTask*> allowed;
+            for (auto* t : candidates) {
+                if (!batched) {
+                    t->spec_gate = {};
+                    allowed.push_back(t);
+                } else if (detail::speculation_gate_step(t->spec_gate)) {
+                    allowed.push_back(t);
+                }
+            }
+            const int candidate_count = static_cast<int>(allowed.size());
+            for (int index = 0; index < candidate_count; ++index) {
+                auto* t = allowed[static_cast<std::size_t>(index)];
+                const int allotment = batched
+                    ? detail::batch_draft_allotment(
+                          index,
+                          candidate_count,
+                          draft_margin_,
+                          max_batch_draft_tokens_,
+                          batch_turn)
+                    : -1;
+                if (allotment == 0) continue;
+                t->spec_batched = batched;
                 auto* draft_mem = llama_get_memory(draft_ctx_);
                 t->spec_draft_pos_max = draft_mem
                     ? static_cast<int>(
@@ -692,7 +722,7 @@ void ContinuousBatchScheduler::run_loop() {
                 common_speculative_get_draft_params(
                     speculative_, t->slot_id) = {
                         true,
-                        -1,
+                        allotment,
                         t->n_pos,
                         t->last_token,
                         &t->prompt_tokens,
@@ -1098,6 +1128,12 @@ void ContinuousBatchScheduler::run_loop() {
                 t->slot_id,
                 static_cast<uint16_t>(accepted_drafts));
             t->n_draft_accepted += accepted_drafts;
+            if (t->spec_batched) {
+                detail::speculation_gate_record(
+                    t->spec_gate,
+                    static_cast<int>(t->spec_draft.size()),
+                    accepted_drafts);
+            }
             t->n_pos += static_cast<int>(accepted.size());
 
             auto* target_mem = llama_get_memory(ctx_);

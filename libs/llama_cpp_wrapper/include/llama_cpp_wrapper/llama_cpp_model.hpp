@@ -56,6 +56,7 @@ struct LlamaCppConfig {
   int mtp_draft_tokens{2};
   float mtp_p_min{0.0f};
   int mtp_max_active_requests{1};
+  int max_batch_draft_tokens{8};
   std::string speculative_type{};
   std::string draft_model_path{};
   bool swa_full{false};

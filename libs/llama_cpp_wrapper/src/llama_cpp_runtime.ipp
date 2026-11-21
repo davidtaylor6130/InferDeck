@@ -510,6 +510,14 @@ Result<void> LlamaCppModel::init_shared_context_locked(
              params.draft.p_min,
              cfg_.mtp_max_active_requests,
              static_cast<int>(draft_seq_rm_type));
+    if (cfg_.mtp_max_active_requests > 1 &&
+        cfg_.max_batch_draft_tokens < cfg_.mtp_max_active_requests) {
+      LOG_WARN("llama_speculative_budget_below_window",
+               "model={} max_batch_draft_tokens={} max_active_requests={}",
+               info_.name,
+               cfg_.max_batch_draft_tokens,
+               cfg_.mtp_max_active_requests);
+    }
   }
 
   slots_.clear();
@@ -530,7 +538,8 @@ Result<void> LlamaCppModel::init_shared_context_locked(
         cfg_.n_batch,
         cfg_.mtp_max_active_requests,
         draft_seq_rm_type,
-        info_.context_pool_size > 0 || info_.context_pool_auto);
+        info_.context_pool_size > 0 || info_.context_pool_auto,
+        cfg_.max_batch_draft_tokens);
     scheduler_->set_cancel_all(&cancel_all_);
   }
 

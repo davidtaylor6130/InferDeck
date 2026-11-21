@@ -140,7 +140,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
             if (!(result = reject_unknown_config_keys(
                     model["speculative"], path + ".speculative", {
                         "type", "draft_model", "draft_tokens", "p_min",
-                        "max_active_requests"}))) return result;
+                        "max_active_requests", "max_batch_draft_tokens"}))) return result;
             if (!(result = reject_unknown_config_keys(
                     model["reasoning"], path + ".reasoning", {
                         "supported", "efforts", "default", "none_disables",
