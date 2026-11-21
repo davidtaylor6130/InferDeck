@@ -1,8 +1,6 @@
 /// <summary>Backend factory of every active provider by runtime name; filled by install_gateway_providers.</summary>
 std::map<std::string, model::ModelRegistry::BackendFactory> g_runtime_factories;
 
-/// <summary>Applies queue, swap hysteresis and VRAM budget settings from the gateway config.</summary>
-/// <remarks>Hysteresis only applies with auto_swap; a zero hold disables it.</remarks>
 void configure_coordinator(model::BackendCoordinator& coordinator,
                            const inferdeck::gateway::GatewayConfig& cfg) {
     coordinator.set_max_queue_size(static_cast<std::size_t>(std::max(1, cfg.max_queue_size)));
