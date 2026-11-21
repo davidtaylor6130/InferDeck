@@ -8,6 +8,7 @@
 #include <iterator>
 #include <optional>
 
+#include "foundation/logging.hpp"
 #include "ggml-backend.h"
 #include "llama.h"
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
@@ -81,6 +82,21 @@ const char* device_type_name(enum ggml_backend_dev_type type)
     }
 }
 
+void forward_native_log(ggml_log_level level, const char* text, void*)
+{
+    using inferdeck::foundation::LogLevel;
+    static thread_local ggml_log_level last = GGML_LOG_LEVEL_INFO;
+    if (level != GGML_LOG_LEVEL_CONT) last = level;
+    const bool verbose = inferdeck::foundation::Logger::instance().level() <= LogLevel::Debug;
+    if (!text || (last < GGML_LOG_LEVEL_WARN && !verbose)) return;
+    std::string line(text);
+    while (!line.empty() && (line.back() == 0x0A || line.back() == 0x0D)) line.pop_back();
+    if (line.empty()) return;
+    inferdeck::foundation::Logger::instance().log(
+        last >= GGML_LOG_LEVEL_ERROR ? LogLevel::Error : last == GGML_LOG_LEVEL_WARN ? LogLevel::Warn : LogLevel::Debug,
+        "llama_native", line);
+}
+
 /// <summary>"quantize" {source, destination, quantization, threads} and "devices" {}.</summary>
 inferdeck::foundation::Result<json> operation(const std::string& name, const json& request)
 {
@@ -134,6 +150,7 @@ inferdeck::provider::sdk::Definition define()
             },
             [](const json&) -> inferdeck::foundation::Result<void>
             {
+                llama_log_set(forward_native_log, nullptr);
                 inferdeck::llama_wrapper::LlamaCppModel::init_backend();
                 return inferdeck::foundation::Ok();
             },
