@@ -4893,3 +4893,19 @@ TEST_CASE("predict_stream honors the cancel flag and returns promptly", "[routes
     REQUIRE(done.load());
     REQUIRE(coordinator.release_slot("a", *slot));
 }
+
+#include "gateway/default_model_preload.hpp"
+
+TEST_CASE("default model preload waits, then yields to aborts and resident models",
+          "[gateway][preload]") {
+    using inferdeck::gateway::wait_for_default_preload;
+    const auto never = [] { return false; };
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(wait_for_default_preload(std::chrono::milliseconds{120}, never, never));
+    CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds{100});
+    CHECK_FALSE(wait_for_default_preload(std::chrono::milliseconds{10}, [] { return true; }, never));
+    CHECK_FALSE(wait_for_default_preload(std::chrono::milliseconds{10}, never, [] { return true; }));
+    const auto early = std::chrono::steady_clock::now();
+    CHECK_FALSE(wait_for_default_preload(std::chrono::seconds{30}, [] { return true; }, never));
+    CHECK(std::chrono::steady_clock::now() - early < std::chrono::seconds{1});
+}

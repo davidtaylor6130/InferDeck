@@ -997,3 +997,15 @@ model_registry:
     std::filesystem::remove(path, error);
     std::filesystem::remove(draft, error);
 }
+
+TEST_CASE("Preload delay accepts 0 to 3600000 milliseconds", "[config][preload]") {
+    const auto build = [](const char* value) {
+        return validate_config_text(std::string("schema_version: 1\ngateway:\n  default_model_preload_delay_ms: ") +
+                                    value + "\n");
+    };
+    CHECK(build("0"));
+    CHECK(build("60000"));
+    CHECK(build("3600000"));
+    CHECK_FALSE(build("-1"));
+    CHECK_FALSE(build("3600001"));
+}

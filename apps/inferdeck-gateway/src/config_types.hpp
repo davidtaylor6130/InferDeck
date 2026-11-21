@@ -47,7 +47,7 @@ struct GatewayConfig {
     int max_queue_size{128};
     int voice_session_grace_ms{15000};
     int background_idle_after_seconds{900};
-    int default_model_preload_delay_ms{60000};
+    int default_model_preload_delay_ms{0};
     model::SamplingConfig sampling{};
     bool openai_derivative_compatibility_enabled{false};
     std::vector<model::ModelAlias> model_aliases{};

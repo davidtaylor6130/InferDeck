@@ -134,8 +134,17 @@ survive gateway restarts. See
 `gateway.default_model_preload_delay_ms` delays the startup load of
 `default_model` so the GPU is not allocated while Windows is still bringing up
 the login screen and desktop. It accepts 0 to 3600000 milliseconds and defaults
-to 60000. Requests that arrive during the delay still load their model as
-usual. Shutdown and config reload cancel the delay.
+to 0 (no delay); the shipped `config/gateway.yml` sets 60000. The delay applies
+only at process start, not on config reload. Requests that arrive during the
+delay still load their model as usual, and the preload is skipped if any model
+is resident or a swap is running when the delay ends. Shutdown and config reload
+cancel the delay.
+
+When a provider reports a lost GPU device, the gateway marks that runtime
+unhealthy (`/api/inferdeck/v1/health` returns `ok: false` and
+`status: "degraded"`), logs `gpu_device_lost_restart`, shuts down gracefully and
+exits with code 76 so the service manager restarts it with a fresh GPU
+instance.
 
 ## Atomicity and recovery
 
