@@ -262,7 +262,7 @@ try {
         authenticated_oversized_json = Invoke-RawStatus $Port `
             "POST /v1/chat/completions HTTP/1.1`r`nHost: 127.0.0.1:$Port`r`nAuthorization: Bearer test-data-token`r`nContent-Type: application/json`r`nContent-Length: 17825792`r`nConnection: close`r`n`r`n"
         authenticated_oversized_audio = Invoke-RawStatus $Port `
-            "POST /v1/audio/transcriptions HTTP/1.1`r`nHost: 127.0.0.1:$Port`r`nAuthorization: Bearer test-data-token`r`nContent-Type: multipart/form-data; boundary=test`r`nContent-Length: 28311552`r`nConnection: close`r`n`r`n"
+            "POST /v1/audio/transcriptions HTTP/1.1`r`nHost: 127.0.0.1:$Port`r`nAuthorization: Bearer test-data-token`r`nContent-Type: multipart/form-data; boundary=test`r`nContent-Length: 220200960`r`nConnection: close`r`n`r`n"
         chunked_json = Invoke-RawStatus $Port `
             "POST /v1/chat/completions HTTP/1.1`r`nHost: 127.0.0.1:$Port`r`nAuthorization: Bearer test-data-token`r`nContent-Type: application/json`r`nTransfer-Encoding: chunked`r`nConnection: close`r`n`r`n"
         expect_continue = $expectResponse.Status
