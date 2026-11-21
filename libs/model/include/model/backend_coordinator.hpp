@@ -262,7 +262,10 @@ private:
     foundation::Result<void> require_priority_session_allows(
         const std::string& name);
     foundation::Result<bool> release_context_borrowers(
-        const std::string& lender, const LifecycleControl& control);
+        const std::string& lender, const LifecycleControl& control, bool respect_hold);
+    foundation::Result<void> prepare_request_capacity(
+        const std::string& name, const RequestDemand& demand,
+        const LifecycleControl& control, bool evict_borrowers);
     int estimated_vram_locked() const;
     int available_vram_locked() const;
     bool live_vram_observation_fresh_locked() const;

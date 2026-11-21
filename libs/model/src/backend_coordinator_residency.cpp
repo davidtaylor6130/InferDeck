@@ -521,7 +521,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
 }
 
 foundation::Result<bool> BackendCoordinator::release_context_borrowers(
-    const std::string& lender, const LifecycleControl& control) {
+    const std::string& lender, const LifecycleControl& control, bool respect_hold) {
     std::vector<std::string> evictions;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -546,6 +546,12 @@ foundation::Result<bool> BackendCoordinator::release_context_borrowers(
             const auto active = active_requests_by_model_.find(*it);
             if (draining_models_.contains(*it) || resizing_models_.contains(*it) ||
                 (active != active_requests_by_model_.end() && active->second > 0)) return true;
+            const auto use = model_use_.find(*it);
+            if (respect_hold && swap_hold_ > std::chrono::milliseconds::zero() &&
+                use != model_use_.end() &&
+                clock::now() - std::max(use->second.loaded, use->second.last_used) < swap_hold_) {
+                return true;
+            }
             evictions.push_back(*it);
             ++it;
         }
