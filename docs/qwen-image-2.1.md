@@ -14,10 +14,10 @@ Qwen Research License Agreement (release date 2026-09-20; `license: other`,
 `qwen-research` on Hugging Face). Per
 [the license](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE):
 
-- Use, copying, distribution and modification are granted for non-commercial
-  purposes only, defined as research or evaluation. Commercial use needs a
-  separate licence from the licensor (Hangzhou Tongyi Laboratory Technology
-  Co., Ltd.).
+- Use is for non-commercial research or evaluation use only (the agreement
+  defines "Non-Commercial" as research or evaluation purposes only). Commercial
+  use needs a separate licence from the licensor (Hangzhou Tongyi Laboratory
+  Technology Co., Ltd.).
 - Redistribution must carry the agreement, notices on modified files, and the
   attribution "Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT,
   Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights
@@ -29,8 +29,26 @@ Qwen Research License Agreement (release date 2026-09-20; `license: other`,
   the licence.
 
 The Qwen3-VL-8B text encoder is Apache-2.0. InferDeck does not redistribute
-either. Converted GGUF files (`leejet/Qwen-Image-2.1-GGUF`) are derivative works
-and carry the same terms.
+either. Treat converted GGUF files (`leejet/Qwen-Image-2.1-GGUF`) as covered by
+the same agreement.
+
+## Runtime pin
+
+`libs/third_party/stable-diffusion.cpp` is pinned to `01c463a`
+(`master-1104-5dcfa79-1-g01c463a`, 2026-11-15). It builds against the ggml in
+the runtime-upgrade llama.cpp and includes Qwen-Image-2.1 generation,
+multi-reference editing, the `qwen_image_2_1_prefix_cache_type` model argument
+and the `qwen-image-2.1-turbo` sigma preset. The limits recorded for the earlier
+`f8890b9` pin (no turbo preset, no TAEQI2.1 previews, ggml mismatch with newer
+revisions) no longer apply to the pin itself; InferDeck does not yet expose the
+turbo preset or previews.
+
+stable-diffusion.cpp is built with `SD_USE_UPSTREAM_GGML=ON` so it shares
+llama.cpp's ggml, and the whole build uses `GGML_MAX_NAME=160` to match it; a
+mismatch corrupts tensor lookups and aborts on the first generation. INT8
+`convrot` safetensors are not supported; use GGUF or BF16 weights. FP8 weights
+are converted to F16 at load time. The Validation section below was measured on
+`f8890b9` and must be repeated on `01c463a`.
 
 ## Weights
 
@@ -59,10 +77,10 @@ model_registry:
     residency: on_demand
     vram_required_mb: 20000
     artifacts:
-      diffusion_model: "F:/InferDeck/models/image/qwen-image-2.1/qwen_image_2.1-Q8_0.gguf"
-      vae: "F:/InferDeck/models/image/qwen-image-2.1/qwen_image_2.1_vae_bf16.safetensors"
-      llm: "F:/InferDeck/models/image/qwen-image-2.1/Qwen3VL-8B-Instruct-Q8_0.gguf"
-      llm_vision: "F:/InferDeck/models/image/qwen-image-2.1/mmproj-Qwen3VL-8B-Instruct-F16.gguf"
+      diffusion_model: "E:/InferDeck/models/leejet/Qwen-Image-2.1-GGUF/qwen_image_2.1-Q8_0.gguf"
+      vae: "E:/InferDeck/models/Comfy-Org/Qwen-Image-2.1/vae/qwen_image_2.1_vae_bf16.safetensors"
+      llm: "E:/InferDeck/models/Qwen/Qwen3-VL-8B-Instruct-GGUF/Qwen3VL-8B-Instruct-Q8_0.gguf"
+      llm_vision: "E:/InferDeck/models/Qwen/Qwen3-VL-8B-Instruct-GGUF/mmproj-Qwen3VL-8B-Instruct-F16.gguf"
       guidance_scale: "6.0"
       backend: vulkan
 ```
@@ -82,7 +100,10 @@ Image artifact keys for `stable_diffusion_cpp`:
 | `backend` | `vulkan` (default) or `cpu`. |
 | `max_vram` | Optional GiB budget for managed weights. |
 
-Declare `image_editing` only on models that accept reference images.
+Declare `image_editing` only on models that accept reference images. It gates
+reference images on `/v1/images/edits` and the JSON `reference_images` field;
+a model without it is rejected with `unsupported_image_model`. Plain generation
+needs only `image_generation`.
 
 ## API
 
@@ -92,15 +113,19 @@ by 64. Strict routes cannot send steps or guidance, so set the model's
 shows a woven texture.
 
 Editing has two entry points. `POST /v1/images/edits` is the OpenAI-shaped
-multipart route: send `image` or `image[]` files (one to four; PNG, JPEG or BMP,
-at most 12 MiB each), plus `model`, `prompt`, and optionally `size` and `n`. The
-body limit is 16 MiB, and `mask` returns `unsupported_capability`. The same
+multipart route: send `image` or `image[]` files (one to four, at most 12 MiB
+each), plus `model`, `prompt`, and optionally `size` and `n`. The format is
+detected from the file bytes (PNG, JPEG or BMP); the declared content type is
+ignored. Each image must be at most 8192 pixels per side and 16 megapixels. The
+total multipart size limit is 16 MiB (413 `request_too_large` above it), chunked
+bodies are refused, and `mask` or `input_fidelity: high` return
+`unsupported_capability`. The same
 route exists at `/api/inferdeck/v1/media/images/edits`. Both convert the upload
 into the JSON path below, so they share its validation, model capability check
 and output.
 
 ```sh
-curl -H "Expect:" http://127.0.0.1:11434/v1/images/edits   -F model=qwen-image-2.1-q8 -F "prompt=change the sign text to InferDeck"   -F size=1024x1024 -F "image[]=@input.png;type=image/png"
+curl -H "Expect:" http://127.0.0.1:11434/v1/images/edits   -F model=qwen-image-2.1-q8   -F "prompt=change the sign text to InferDeck"   -F size=1024x1024   -F "image[]=@input.png;type=image/png"
 ```
 
 The JSON form is an InferDeck extension on
@@ -117,7 +142,8 @@ The JSON form is an InferDeck extension on
 ```
 
 - One to four entries, each a base64 `data:image/...` URL (PNG, JPEG, or BMP),
-  at most 8192x8192 pixels. The whole request body is limited to 16 MiB.
+  at most 8192 pixels per side and 16 megapixels. The whole request body is
+  limited to 16 MiB.
 - Order matters when the prompt refers to "the first image".
 - The response is the same as generation: `data[].b64_json` PNG images.
 - The model must declare `image_editing`, otherwise the request fails with
