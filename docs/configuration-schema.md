@@ -131,6 +131,12 @@ seconds and defaults to 900. Lease records use the managed-key database and
 survive gateway restarts. See
 [Background availability and leases](background-leases.md).
 
+`gateway.default_model_preload_delay_ms` delays the startup load of
+`default_model` so the GPU is not allocated while Windows is still bringing up
+the login screen and desktop. It accepts 0 to 3600000 milliseconds and defaults
+to 60000. Requests that arrive during the delay still load their model as
+usual. Shutdown and config reload cancel the delay.
+
 ## Atomicity and recovery
 
 Persistence writes a sibling temporary file, flushes it, and atomically replaces

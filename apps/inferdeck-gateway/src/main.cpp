@@ -620,7 +620,7 @@ int run_gateway(const fs::path& config_path) {
                wrap([&](const httplib::Request&,
                         httplib::Response& resp) {
         resp.set_content(nlohmann::json{
-                             {"ok", true},
+                             {"ok", true}, {"unhealthy_models", coordinator.unhealthy_models()},
                              {"db_healthy", stats_db.healthy()},
                              {"version", inferdeck::app::build_version},
                              {"build_revision", inferdeck::app::build_revision},
@@ -683,8 +683,8 @@ int run_gateway(const fs::path& config_path) {
         if (!cfg.default_model.empty() && registry.has(cfg.default_model)) {
             g_default_model_loading.store(true);
             default_model_loader = std::thread(
-                [&coordinator, default_model = cfg.default_model] {
-                    LOG_INFO("default_model_load_begin", "name={}", default_model);
+                [&coordinator, default_model = cfg.default_model, delay = cfg.default_model_preload_delay_ms] {
+                    for (auto t = std::chrono::steady_clock::now() + std::chrono::milliseconds{delay}; std::chrono::steady_clock::now() < t && !g_stop.load() && !g_reload.load();) std::this_thread::sleep_for(std::chrono::milliseconds{100}); LOG_INFO("default_model_load_begin", "name={}", default_model);
                     model::AcquireSlotOptions options;
                     options.timeout = std::chrono::minutes{5};
                     options.priority = -100;
