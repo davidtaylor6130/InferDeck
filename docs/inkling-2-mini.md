@@ -76,7 +76,8 @@ mainline llama.cpp.
 - **Reasoning.** The chat template reads `reasoning_effort` as a string and
   maps it to a number: none 0, minimal 0.1, low 0.2, medium 0.7, high 0.9,
   xhigh and max 0.99. With no value it uses 0.9, so `default: high` matches
-  the model's own default. List `none` as an effort so a `none` request reaches
+  the model's own default. `max` is configured as an alias of `xhigh`,
+  since both map to 0.99. List `none` as an effort so a `none` request reaches
   the template as effort 0; otherwise InferDeck drops the variable and the
   template falls back to 0.9. Effort 0 is not a hard switch: the model still
   writes a short reasoning block. Reasoning arrives in `reasoning_content`.
@@ -91,11 +92,13 @@ mainline llama.cpp.
   speed on short prompts (985 against 1,328 tokens/s at 2K). Raise it only
   with shorter slots: 256 is safe up to 65,536. ggml-org/llama.cpp#32740
   (open) moves the bias into flash attention and removes this limit.
-- **KV cache.** Only the 8 global attention passes (4 global layers, 2 of them
-  inside the 3-pass loop) keep the full context; the sliding-window layers
-  keep 1,024 tokens. q8_0 costs about 17 KB per token and q4_0 about 9 KB.
-  Four 131,072-token slots measured 29.6 GB of VRAM with q8_0 and 25.7 GB
-  with q4_0. KV type changes speed by under 5%.
+- **KV cache.** The model has 24 physical layers; every sixth (5, 11, 17,
+  23) uses global attention and the rest a 1,024-token sliding window.
+  Layers 6 to 17 run three times, so a token takes 6 + 12 x 3 + 6 = 48 layer
+  passes, and the global layers give 1 + 3 + 3 + 1 = 8 global passes. Only
+  those 8 keep the full context. q8_0 costs about 17 KB per token and q4_0 about 9 KB.
+  Four 131,072-token slots measured 29.6 GB of VRAM after load with q8_0, and
+  25.7 GB after load (25.8 GB peak under load) with q4_0. KV type changes speed by under 5%.
 - **1,048,576 tokens** does not fit in 32 GB with this pin.
 - **Speculative decoding** is not available. The official MTP head is only in
   the safetensors release, and the DSpark drafter needs the unmerged
@@ -115,8 +118,11 @@ Measured on the R9700 with the configuration above unless noted.
 | GPU health | No new watchdog or bugcheck reports during the session |
 
 Speed on the R9700 from a streaming benchmark (512 output tokens, reasoning at
-each model's default, so decode includes reasoning tokens). Flint and Qwen3.8-27B ran their live entries
-(Flint with DFlash2, Qwen3.8-27B with MTP) on the same build.
+each model's default, so decode includes reasoning tokens). Flint and Qwen3.8-27B ran their live entries on the same build: Flint
+`flint-UD-Q4_K_XL` with DFlash2 (`draft_tokens: 3`, `max_active_requests: 1`),
+4 x 100,000-token slots, q4_0 KV, `n_ubatch: 2048`; Qwen3.8-27B
+`UD-IQ4_XS` with MTP (`draft_tokens: 2`), 4 x 100,000-token slots, q4_0 KV,
+`n_ubatch: 2048`. Peak VRAM is the whole device during each model's runs.
 
 | Scenario | Inkling 2 Mini | Flint | Qwen3.8-27B |
 |---|---|---|---|
