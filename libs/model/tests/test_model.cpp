@@ -1307,12 +1307,12 @@ TEST_CASE("BackendCoordinator: keeps two models resident when budget fits", "[mo
     REQUIRE(coordinator.vram_available_mb() == 0);
 }
 
-TEST_CASE("BackendCoordinator: default VRAM reserve leaves 3072 MB free",
+TEST_CASE("BackendCoordinator: default VRAM reserve leaves 2048 MB free",
           "[model][coordinator][residency]") {
     ModelRegistry registry;
     BackendCoordinator coordinator(registry);
     coordinator.set_vram_budget(32476);
-    CHECK(coordinator.vram_available_mb() == 32476 - 3072);
+    CHECK(coordinator.vram_available_mb() == 32476 - 2048);
 }
 
 TEST_CASE("BackendCoordinator: live headroom preserves an overestimated resident model",

@@ -97,7 +97,7 @@ public:
     [[nodiscard]] std::vector<std::string> get_loaded_models() const;
     [[nodiscard]] std::vector<ResidencyInfo> residency() const;
     [[nodiscard]] int get_vram_usage() const;
-    void set_vram_budget(int total_mb, int safety_margin_mb = 3072);
+    void set_vram_budget(int total_mb, int safety_margin_mb = 2048);
     void update_vram_observation(int used_mb, int total_mb);
     [[nodiscard]] int vram_budget_mb() const;
     [[nodiscard]] int vram_available_mb() const;

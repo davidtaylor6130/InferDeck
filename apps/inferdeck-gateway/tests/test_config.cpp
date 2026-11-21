@@ -827,8 +827,8 @@ TEST_CASE("VRAM reserve accepts zero and rejects invalid sizes", "[config][pool]
     std::filesystem::remove(path);
 }
 
-TEST_CASE("VRAM reserve defaults to 3072 MB", "[config][reserve]") {
-    CHECK(inferdeck::gateway::GatewayConfig{}.vram_safety_margin_mb == 3072);
+TEST_CASE("VRAM reserve defaults to 2048 MB", "[config][reserve]") {
+    CHECK(inferdeck::gateway::GatewayConfig{}.vram_safety_margin_mb == 2048);
 }
 
 TEST_CASE("Automatic concurrency requires a fitted llama pool", "[config][pool]") {
