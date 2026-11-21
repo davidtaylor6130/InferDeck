@@ -34,13 +34,28 @@ $marker = Join-Path $StateDir 'recovery-in-progress.txt'
 function Write-Log([string]$Message) { Add-Content $log "$(Get-Date -Format s) $Message" }
 
 if (Test-Path $marker) {
+    $parts = @((Get-Content $marker -ErrorAction SilentlyContinue | Select-Object -First 1) -split '\|')
+    $started = [datetime]::MinValue
+    $attempts = 0
+    if ($parts.Count -ge 2 -and [datetime]::TryParse($parts[0], [ref]$started)) { $attempts = [int]$parts[1] } else { $started = [datetime]::MinValue }
     $pending = Get-CimInstance Win32_Service -Filter "Name='$Service'"
-    if ($pending -and $pending.StartMode -ne 'Disabled' -and $pending.State -eq 'Stopped') {
+    if (-not $pending -or $pending.StartMode -eq 'Disabled') {
+        Write-Log "recovery marker removed: $Service is missing or disabled"
+        Remove-Item $marker -Force -ErrorAction SilentlyContinue
+    } elseif (((Get-Date) - $started).TotalMinutes -gt 30) {
+        Write-Log "recovery marker removed: older than 30 min"
+        Remove-Item $marker -Force -ErrorAction SilentlyContinue
+    } elseif ($pending.State -eq 'Running') {
+        Remove-Item $marker -Force -ErrorAction SilentlyContinue
+    } elseif ($attempts -ge 3) {
+        Write-Log "recovery marker removed: $Service still not running after $attempts resume attempts"
+        Remove-Item $marker -Force -ErrorAction SilentlyContinue
+    } elseif ($pending.State -eq 'Stopped') {
+        Set-Content $marker "$($started.ToString('s'))|$($attempts + 1)"
         Start-Service $Service -ErrorAction SilentlyContinue
-        Write-Log "interrupted recovery found; started $Service, state=$((Get-Service $Service).Status)"
-        Remove-Item $marker -Force -ErrorAction SilentlyContinue
-    } elseif ($pending -and $pending.State -eq 'Running') {
-        Remove-Item $marker -Force -ErrorAction SilentlyContinue
+        $resumed = (Get-Service $Service).Status
+        Write-Log "interrupted recovery found; resume attempt $($attempts + 1) started $Service, state=$resumed"
+        if ($resumed -eq 'Running') { Remove-Item $marker -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -72,7 +87,7 @@ $application = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$Servi
 $children = @(if ($servicePid -gt 0 -and $application) {
     Get-CimInstance Win32_Process -Filter "ParentProcessId=$servicePid" | Where-Object { $_.ExecutablePath -eq $application }
 })
-Set-Content $marker (Get-Date -Format s)
+Set-Content $marker "$(Get-Date -Format s)|0"
 sc.exe stop $Service | Out-Null
 $deadline = (Get-Date).AddSeconds(90)
 while ((Get-Service $Service -ErrorAction SilentlyContinue).Status -ne 'Stopped' -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
