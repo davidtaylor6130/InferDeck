@@ -9,33 +9,28 @@ for the measurements and two known limits.
 
 ## License
 
-The Qwen-Image-2.1 weights are published under the Qwen Research License
-(`license: other`, `qwen-research` on Hugging Face), not an open-source
-license. Read
-[the license](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE)
-before any use beyond research. The Qwen3-VL-8B text encoder is Apache-2.0.
-InferDeck does not redistribute either.
+The Qwen-Image-2.1 weights are not open source. They are published under the
+Qwen Research License Agreement (release date 2026-09-20; `license: other`,
+`qwen-research` on Hugging Face). Per
+[the license](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE):
 
-## Runtime pin
+- Use, copying, distribution and modification are granted for non-commercial
+  purposes only, defined as research or evaluation. Commercial use needs a
+  separate licence from the licensor (Hangzhou Tongyi Laboratory Technology
+  Co., Ltd.).
+- Redistribution must carry the agreement, notices on modified files, and the
+  attribution "Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT,
+  Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights
+  Reserved."
+- Using the weights or their outputs to create, train, fine-tune or improve a
+  distributed AI model requires prominently displaying "Built with Qwen" or
+  "Improved using Qwen". "Qwen" may not be the primary name of a derivative.
+- Starting IP litigation against the licensor over the Materials terminates
+  the licence.
 
-`libs/third_party/stable-diffusion.cpp` is pinned to
-`f8890b9db34a96d5c516382914971f4b4b92d402` (`master-924-f8890b9`, 2026-09-27).
-This is the newest revision that builds against the ggml bundled with the
-pinned llama.cpp (`73a43d1f`). Later revisions call `ggml_prec_set_acc`, which
-that ggml does not have.
-
-stable-diffusion.cpp is built with `SD_USE_UPSTREAM_GGML=ON` so it shares
-llama.cpp's ggml. The whole build uses `GGML_MAX_NAME=160` to match this
-stable-diffusion.cpp revision; a mismatch corrupts tensor lookups and aborts
-the process on the first generation. Consequences:
-
-- INT8 `convrot` safetensors are not supported. Use GGUF or BF16 weights.
-- FP8 weights are converted to F16 at load time.
-- TAEQI2.1 previews and the `qwen-image-2.1-turbo` sigma preset arrived
-  upstream after this pin and are not available.
-
-Moving past this pin needs a llama.cpp update or a separate ggml for the image
-runtime. Both are larger changes than this integration.
+The Qwen3-VL-8B text encoder is Apache-2.0. InferDeck does not redistribute
+either. Converted GGUF files (`leejet/Qwen-Image-2.1-GGUF`) are derivative works
+and carry the same terms.
 
 ## Weights
 
@@ -61,7 +56,8 @@ model_registry:
     capabilities: [image_generation, image_editing]
     n_slots: 1
     min_slots: 1
-    vram_required_mb: 20000   # measured edit peak 18.4 GB plus margin
+    residency: on_demand
+    vram_required_mb: 20000
     artifacts:
       diffusion_model: "F:/InferDeck/models/image/qwen-image-2.1/qwen_image_2.1-Q8_0.gguf"
       vae: "F:/InferDeck/models/image/qwen-image-2.1/qwen_image_2.1_vae_bf16.safetensors"
@@ -95,7 +91,19 @@ by 64. Strict routes cannot send steps or guidance, so set the model's
 `guidance_scale` artifact to 6.0; at the generic default of 7.0 the output
 shows a woven texture.
 
-Editing is an InferDeck extension on
+Editing has two entry points. `POST /v1/images/edits` is the OpenAI-shaped
+multipart route: send `image` or `image[]` files (one to four; PNG, JPEG or BMP,
+at most 12 MiB each), plus `model`, `prompt`, and optionally `size` and `n`. The
+body limit is 16 MiB, and `mask` returns `unsupported_capability`. The same
+route exists at `/api/inferdeck/v1/media/images/edits`. Both convert the upload
+into the JSON path below, so they share its validation, model capability check
+and output.
+
+```sh
+curl -H "Expect:" http://127.0.0.1:11434/v1/images/edits   -F model=qwen-image-2.1-q8 -F "prompt=change the sign text to InferDeck"   -F size=1024x1024 -F "image[]=@input.png;type=image/png"
+```
+
+The JSON form is an InferDeck extension on
 `POST /api/inferdeck/v1/media/images/generations` and
 `POST /compat/openai-derivative/v1/images/generations`. Add `reference_images`:
 

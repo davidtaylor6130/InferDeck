@@ -46,6 +46,34 @@ select their configured default when its runtime is available. These settings
 do not download models or add runtime support. Without a media default, image
 and video retain the existing `default_model` fallback; music requires `model`.
 
+## Image models
+
+A split Qwen-Image-2.1 entry for the `stable_diffusion_cpp` runtime. Models
+register at startup, so this entry belongs in `gateway.yml` only once the
+weights exist at the listed paths. `image_editing` enables reference images on
+`/v1/images/edits`. The weights are licensed for non-commercial use only; see
+[qwen-image-2.1.md](qwen-image-2.1.md#license).
+
+```yaml
+model_registry:
+  - name: qwen-image-2.1-q8
+    family: qwen-image-2.1
+    runtime: stable_diffusion_cpp
+    modality: image
+    capabilities: [image_generation, image_editing]
+    residency: on_demand
+    n_slots: 1
+    min_slots: 1
+    vram_required_mb: 20000
+    artifacts:
+      diffusion_model: "E:/InferDeck/models/leejet/Qwen-Image-2.1-GGUF/qwen_image_2.1-Q8_0.gguf"
+      vae: "E:/InferDeck/models/Comfy-Org/Qwen-Image-2.1/vae/qwen_image_2.1_vae_bf16.safetensors"
+      llm: "E:/InferDeck/models/Qwen/Qwen3-VL-8B-Instruct-GGUF/Qwen3VL-8B-Instruct-Q8_0.gguf"
+      llm_vision: "E:/InferDeck/models/Qwen/Qwen3-VL-8B-Instruct-GGUF/mmproj-Qwen3VL-8B-Instruct-F16.gguf"
+      guidance_scale: "6.0"
+      backend: vulkan
+```
+
 ## Speculative decoding
 
 A `llama_cpp` text model may set `speculative`:

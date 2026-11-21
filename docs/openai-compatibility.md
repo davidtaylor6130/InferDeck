@@ -145,6 +145,11 @@ or image streaming return `unsupported_capability`; invalid enum/range values
 remain request errors. Native-only sampler controls remain available only in the
 explicitly enabled derivative profile.
 
+POST /v1/images/edits accepts multipart `image`/`image[]` uploads (one to four
+PNG, JPEG or BMP files) with `model` and `prompt`, for models that declare
+`image_editing`. It follows the same field rules and output as generations;
+`mask` returns `unsupported_capability`.
+
 ## Stateless Responses contract
 
 POST /v1/responses decodes directly into the canonical inference domain. It
