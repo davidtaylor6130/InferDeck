@@ -234,7 +234,7 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
     int last_slot = -1;
     int chunks_started = 0;
     bool admission_failed = false;
-    auto result = transcribe_in_chunks(*decoded, 300, report,
+    auto result = transcribe_in_chunks(*decoded, 60, report,
         [&](const model::TranscriptionRequest& chunk, const std::function<bool(int)>& chunk_progress)
             -> foundation::Result<model::TranscriptionResult> {
             const bool later_chunk = chunks_started++ > 0;
