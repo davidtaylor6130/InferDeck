@@ -1326,6 +1326,40 @@ TEST_CASE("BackendCoordinator: default VRAM reserve leaves 2048 MB free",
     CHECK(coordinator.vram_available_mb() == 32476 - 2048);
 }
 
+TEST_CASE("BackendCoordinator: safety margin absorbs observed desktop VRAM",
+          "[model][coordinator][residency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 30000;
+    registry.register_model(chat);
+
+    SECTION("desktop usage below the margin is not reserved twice") {
+        BackendCoordinator coordinator(registry);
+        coordinator.set_vram_budget(32476, 2048);
+        coordinator.update_vram_observation(750, 32624);
+        CHECK(coordinator.vram_available_mb() == 32476 - 2048);
+        CHECK(coordinator.swap_to("chat").has_value());
+        CHECK(coordinator.is_loaded("chat"));
+    }
+    SECTION("desktop usage above the margin still blocks the load") {
+        BackendCoordinator coordinator(registry);
+        coordinator.set_vram_budget(32476, 2048);
+        coordinator.update_vram_observation(3000, 32624);
+        CHECK(coordinator.vram_available_mb() == 32476 - 3000);
+        CHECK_FALSE(coordinator.swap_to("chat").has_value());
+        CHECK_FALSE(coordinator.is_loaded("chat"));
+    }
+}
+
 TEST_CASE("BackendCoordinator: live headroom preserves an overestimated resident model",
           "[model][coordinator][residency][concurrency]") {
     ModelRegistry registry;

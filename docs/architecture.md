@@ -79,6 +79,12 @@ of declared availability and observed pressure with the incomplete runtime's
 full declared footprint reserved.
 `gateway.vram_budget_mb` caps hardware detection and
 `gateway.vram_safety_margin_mb` defaults to 2048 MB (room for the Windows desktop and login screen) and may be set to 0. It reserves GPU headroom only; host/system memory reserve is separate.
+With fresh telemetry, usage not attributed to InferDeck's own resident
+estimates counts as other-process usage, and the margin covers it rather than
+adding to it: live availability is `min(budget, total) - observed_used -
+max(0, margin - other_process_used) - pending reserves`, so the effective
+desktop reserve is `max(margin, other_process_used)`. With a 32476 MB budget,
+a 2048 MB margin, and 750 MB of desktop usage, 30428 MB remains available.
 
 Lazy native runtimes reserve their declared peak beyond memory already retained
 by the runtime. This prevents an unloaded phase from being double-spent while

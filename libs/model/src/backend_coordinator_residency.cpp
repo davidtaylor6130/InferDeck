@@ -214,17 +214,23 @@ int BackendCoordinator::available_vram_locked() const {
         const int capacity =
             std::min(vram_budget_mb_, observed_vram_total_mb_);
         std::int64_t reserved = 0;
+        std::int64_t resident = 0;
         for (const auto& [_, backend] : instances_) {
-            if (!backend || !backend->is_loaded() ||
-                backend->estimate_vram_mb(backend->n_slots()) <= 0) continue;
-            reserved += backend->live_vram_accounting_complete()
-                ? std::max(0, backend->additional_vram_reserve_mb())
-                : std::max(0, backend->estimate_vram_mb(backend->n_slots()));
+            const int estimate = backend && backend->is_loaded()
+                ? backend->estimate_vram_mb(backend->n_slots()) : 0;
+            if (estimate <= 0) continue;
+            const int pending = std::max(0, backend->additional_vram_reserve_mb());
+            const bool complete = backend->live_vram_accounting_complete();
+            reserved += complete ? pending : estimate;
+            resident += complete ? std::max(0, estimate - pending) : estimate;
         }
+        const std::int64_t observed = observed_vram_used_mb_;
+        const std::int64_t other_processes =
+            std::max<std::int64_t>(0, observed - resident);
+        const std::int64_t desktop_reserve = std::max<std::int64_t>(
+            0, static_cast<std::int64_t>(vram_safety_margin_mb_) - other_processes);
         const std::int64_t available =
-            static_cast<std::int64_t>(capacity) -
-            static_cast<std::int64_t>(vram_safety_margin_mb_) -
-            static_cast<std::int64_t>(observed_vram_used_mb_) - reserved;
+            static_cast<std::int64_t>(capacity) - observed - desktop_reserve - reserved;
         const int observed_available = static_cast<int>(
             std::clamp<std::int64_t>(
                 available, 0, std::numeric_limits<int>::max()));
