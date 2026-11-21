@@ -695,6 +695,23 @@ model_registry:
       efforts: [low, high]
       default: none
 )"));
+    CHECK(validate_config_text(R"(
+model_registry:
+  - name: template-none-tier
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [none, low, high]
+      default: high
+      none_disables: true
+)"));
+    CHECK_FALSE(validate_config_text(R"(
+model_registry:
+  - name: none-tier-without-disable
+    gguf_path: model.gguf
+    reasoning:
+      efforts: [none, low, high]
+      default: high
+)"));
     CHECK_FALSE(validate_config_text(R"(
 model_registry:
   - name: bad-reasoning-alias

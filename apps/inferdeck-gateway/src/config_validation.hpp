@@ -552,10 +552,13 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                             foundation::ErrorCode::InvalidArgument,
                             "reasoning efforts must be a non-empty sequence: " + name);
                     }
+                    const bool none_disables = reasoning["none_disables"] &&
+                        reasoning["none_disables"].as<bool>();
                     if (reasoning["efforts"]) {
                         for (const auto& effort : reasoning["efforts"]) {
                             const auto value = effort.as<std::string>();
-                            if (value.empty() || value == "none" || !efforts.insert(value).second) {
+                            if (value.empty() || (value == "none" && !none_disables) ||
+                                !efforts.insert(value).second) {
                                 return foundation::Err<void>(
                                     foundation::ErrorCode::InvalidArgument,
                                     "reasoning efforts must be unique non-empty tiers: " + name);
@@ -565,8 +568,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     const auto default_effort = reasoning["default"]
                         ? reasoning["default"].as<std::string>() : std::string{};
                     if (supported && !efforts.contains(default_effort) &&
-                        !(default_effort == "none" && reasoning["none_disables"] &&
-                          reasoning["none_disables"].as<bool>())) {
+                        !(default_effort == "none" && none_disables)) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
                             "reasoning default must be a supported effort: " + name);

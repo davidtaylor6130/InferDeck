@@ -146,7 +146,13 @@ foundation::Result<std::string> apply_reasoning_effort(
                     info.name);
         }
         inputs.enable_thinking = false;
-        inputs.chat_template_kwargs.erase("reasoning_effort");
+        if (std::find(info.reasoning.efforts.begin(), info.reasoning.efforts.end(),
+                      resolved) != info.reasoning.efforts.end()) {
+            inputs.chat_template_kwargs["reasoning_effort"] =
+                quote_json_string(resolved);
+        } else {
+            inputs.chat_template_kwargs.erase("reasoning_effort");
+        }
     } else {
         if (std::find(info.reasoning.efforts.begin(), info.reasoning.efforts.end(),
                       resolved) == info.reasoning.efforts.end()) {
