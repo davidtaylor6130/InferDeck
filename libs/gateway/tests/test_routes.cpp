@@ -2728,6 +2728,61 @@ TEST_CASE("Image editing accepts reference images only on InferDeck routes for c
     CHECK(ts.coordinator.active_request_count() == 0);
 }
 
+TEST_CASE("Image edits route converts multipart uploads into reference images",
+          "[routes][images][edit]") {
+    TestServer ts;
+    auto editor = make_info("edit-model");
+    editor.runtime = "stable_diffusion_cpp";
+    editor.modality = "image";
+    editor.capabilities = {"image_generation", "image_editing"};
+    ts.registry.register_model(editor);
+    REQUIRE(ts.coordinator.load("edit-model"));
+
+    struct Part { std::string name; std::string content; std::string type; };
+    const auto post = [&](const std::vector<Part>& fields, const std::vector<Part>& files) {
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        request.path = "/v1/images/edits";
+        request.set_header("Content-Type", "multipart/form-data; boundary=x");
+        for (const auto& field : fields) {
+            request.form.fields.emplace(field.name, httplib::FormField{field.name, field.content, {}});
+        }
+        for (const auto& file : files) {
+            request.form.files.emplace(file.name,
+                httplib::FormData{file.name, file.content, "f.bin", file.type, {}});
+        }
+        httplib::Response response;
+        handle_image_edits(request, response, ts.make_deps());
+        return response;
+    };
+    const std::vector<Part> fields{{"model", "edit-model", ""}, {"prompt", "make it red", ""},
+                                   {"size", "512x512", ""}};
+    const std::string bytes("", 3);
+
+    const auto ok = post(fields, {{"image[]", bytes, "image/png"}, {"image[]", bytes, "image/jpeg"}});
+    REQUIRE(ok.status == 200);
+    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("edit-model"));
+    REQUIRE(backend != nullptr);
+    REQUIRE(backend->last_image_request.reference_images.size() == 2);
+    CHECK(backend->last_image_request.reference_images[0] ==
+          std::vector<std::byte>{std::byte{1}, std::byte{2}, std::byte{3}});
+
+    CHECK(post(fields, {}).status == 400);
+    CHECK(post(fields, {{"image", bytes, "image/gif"}}).status == 400);
+    CHECK(post(fields, {{"image", "", "image/png"}}).status == 400);
+    CHECK(post(fields, {{"photo", bytes, "image/png"}}).status == 400);
+    CHECK(post(fields, std::vector<Part>(5, {"image", bytes, "image/png"})).status == 400);
+    auto with_mask = fields;
+    with_mask.push_back({"mask", "x", ""});
+    const auto masked = post(with_mask, {{"image", bytes, "image/png"}});
+    CHECK(masked.status == 400);
+    CHECK(nlohmann::json::parse(masked.body)["error"]["code"] == "unsupported_capability");
+    auto bad_count = fields;
+    bad_count.push_back({"n", "two", ""});
+    CHECK(post(bad_count, {{"image", bytes, "image/png"}}).status == 400);
+    CHECK(ts.coordinator.active_request_count() == 0);
+}
+
 TEST_CASE("Media routes select personal defaults and preserve explicit model selection",
           "[routes][media-defaults]") {
     for (const std::string modality : {"image", "music", "video"}) {

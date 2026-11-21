@@ -328,6 +328,9 @@ TEST_CASE("Request policies enforce endpoint body and media constraints",
     CHECK(validate_request(request,
                            request_policy("POST", "/v1/audio/transcriptions")) ==
           RequestValidationStatus::Allowed);
+    CHECK(validate_request(request, request_policy("POST", "/v1/images/edits")) ==
+          RequestValidationStatus::Allowed);
+    CHECK(request_policy("POST", "/v1/images/edits").content == ContentPolicy::Multipart);
     CHECK(server_read_timeout.count() == 30);
     CHECK(server_write_timeout.count() == 30);
     CHECK(server_keep_alive_timeout.count() == 5);

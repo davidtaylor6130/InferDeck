@@ -9,7 +9,8 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     const bool derivative =
         deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative;
     const bool inferdeck_route =
-        derivative || req.path.starts_with("/api/inferdeck/v1/media/");
+        derivative || req.path.starts_with("/api/inferdeck/v1/media/") ||
+        req.path == "/v1/images/edits";
     if (!derivative) {
         static constexpr std::array<std::string_view, 14> supported_fields{
             "model", "prompt", "background", "moderation", "n",
@@ -290,4 +291,82 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     record_media(deps, model_name, result->duration_ms, 200, *slot,
                  0.0, 0, completed_observation);
     finish_job(job, "completed");
+}
+
+void handle_image_edits(const httplib::Request& req, httplib::Response& resp,
+                        const GatewayDeps& deps) {
+    if (!req.is_multipart_form_data()) {
+        write_error(resp, 400, "invalid_image_request",
+                    "multipart/form-data body is required");
+        return;
+    }
+    nlohmann::json body = nlohmann::json::object();
+    for (const auto& [name, field] : req.form.fields) {
+        if (req.form.get_field_count(name) != 1) {
+            write_error(resp, 400, "invalid_image_request",
+                        name + " must be supplied exactly once", name);
+            return;
+        }
+        if (name == "mask") {
+            write_error(resp, 400, "unsupported_capability",
+                        "mask is not supported by the native image runtime",
+                        name);
+            return;
+        }
+        if (name == "n") {
+            char* end = nullptr;
+            const long count = std::strtol(field.content.c_str(), &end, 10);
+            if (field.content.empty() || *end != '\0') {
+                write_error(resp, 400, "invalid_image_request",
+                            "n must be an integer", name);
+                return;
+            }
+            body[name] = count;
+        } else if (name == "stream") {
+            if (field.content != "true" && field.content != "false") {
+                write_error(resp, 400, "invalid_image_request",
+                            "stream must be a boolean", name);
+                return;
+            }
+            body[name] = field.content == "true";
+        } else {
+            body[name] = field.content;
+        }
+    }
+    nlohmann::json references = nlohmann::json::array();
+    for (const auto& [name, file] : req.form.files) {
+        if (name != "image" && name != "image[]") {
+            write_error(resp, 400, "unsupported_parameter",
+                        "unsupported Images parameter: " + name, name);
+            return;
+        }
+        if (file.content_type != "image/png" &&
+            file.content_type != "image/jpeg" &&
+            file.content_type != "image/bmp") {
+            write_error(resp, 400, "invalid_image_request",
+                        "image must be PNG, JPEG, or BMP", name);
+            return;
+        }
+        if (file.content.empty() || file.content.size() > 12U * 1024U * 1024U) {
+            write_error(resp, 400, "invalid_image_request",
+                        "image must be between 1 byte and 12 MiB", name);
+            return;
+        }
+        const auto* first =
+            reinterpret_cast<const std::byte*>(file.content.data());
+        references.push_back(
+            "data:" + file.content_type + ";base64," +
+            base64(std::vector<std::byte>(first, first + file.content.size())));
+    }
+    if (references.empty() || references.size() > 4) {
+        write_error(resp, 400, "invalid_image_request",
+                    "between 1 and 4 image files are required", "image");
+        return;
+    }
+    body["reference_images"] = std::move(references);
+    httplib::Request edit = req;
+    edit.body = body.dump();
+    edit.headers.erase("Content-Type");
+    edit.set_header("Content-Type", "application/json");
+    handle_image_generations(edit, resp, deps);
 }
