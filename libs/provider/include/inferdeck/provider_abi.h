@@ -129,8 +129,13 @@ INFERDECK_PROVIDER_EXPORT const inferdeck_provider* inferdeck_provider_v1(void);
 /* ------------------------------------------------------------------------
  * Version 2. Mirrors the gateway's backend interfaces one for one, so a v2
  * provider is indistinguishable from a built-in runtime. Every struct starts
- * with struct_size; readers ignore fields past the size the writer set.
+ * with struct_size, the number of bytes the writer filled in. Members are
+ * only ever appended. A reader must not touch a member unless
+ * struct_size >= offsetof(member) + sizeof(member); INFERDECK_STRUCT_HAS
+ * does that check. The host treats absent provider table members as NULL.
  * ---------------------------------------------------------------------- */
+
+#define INFERDECK_STRUCT_HAS(ptr, type, member)     ((ptr)->struct_size >= offsetof(type, member) + sizeof((ptr)->member))
 
 #define INFERDECK_PROVIDER_ABI_VERSION_2 2u
 #define INFERDECK_PROVIDER_ENTRY_POINT_V2 "inferdeck_provider_v2"
@@ -241,6 +246,11 @@ typedef struct inferdeck_provider_v2 {
                                const inferdeck_blob* blobs, size_t blob_count,
                                const inferdeck_call_v2* call);
 } inferdeck_provider_v2;
+
+/* Smallest provider table the host accepts: everything up to and including
+ * invoke. This value is frozen; later members (provider_invoke and any added
+ * after it) are optional and recognised only when struct_size covers them. */
+#define INFERDECK_PROVIDER_V2_MIN_SIZE offsetof(inferdeck_provider_v2, provider_invoke)
 
 typedef const inferdeck_provider_v2* (*inferdeck_provider_entry_v2)(void);
 

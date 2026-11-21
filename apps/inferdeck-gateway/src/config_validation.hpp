@@ -14,6 +14,7 @@
 
 #include "config_schema.hpp"
 #include "foundation/result.hpp"
+#include "model/model_info.hpp"
 #include "model/model_registry.hpp"
 #include "model/runtime_contract.hpp"
 
@@ -444,7 +445,8 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                         ? speculative["type"].as<std::string>() : "none";
                     const int draft_margin = speculative_type == "none" ? 0
                         : (speculative["draft_tokens"] ? speculative["draft_tokens"].as<int>()
-                                                       : (speculative_type == "mtp" ? 2 : 7));
+                                                       : (speculative_type == "mtp" ? model::k_default_mtp_draft_tokens
+                                                                                   : model::k_default_dflash_draft_tokens));
                     if (pool_size < 0 || (pool_size > 0 &&
                         (!unified || static_cast<std::int64_t>(pool_size) <
                             static_cast<std::int64_t>(std::max(512, context_size)) + draft_margin))) {
@@ -596,16 +598,10 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     const std::string type = speculative["type"]
                         ? speculative["type"].as<std::string>() : "none";
                     const bool dflash = type == "dflash" || type == "dflash2";
-                    if (type != "none" && type != "mtp" && !dflash) {
+                    if (type != "none" && !runtime_contract->speculative_types.contains(type)) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "unsupported speculative type for model: " + name);
-                    }
-                    if ((type != "none" && !runtime_contract->speculative) ||
-                        (dflash && runtime != "llama_cpp")) {
-                        return foundation::Err<void>(
-                            foundation::ErrorCode::InvalidArgument,
-                            "speculative decoding requires a runtime with speculative support: " + name);
+                            "runtime does not declare speculative type " + type + ": " + name);
                     }
                     const std::string draft_model = speculative["draft_model"]
                         ? speculative["draft_model"].as<std::string>() : "";
@@ -621,7 +617,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     }
                     const int max_draft_tokens = dflash ? 16 : 4;
                     const int draft_tokens = speculative["draft_tokens"]
-                        ? speculative["draft_tokens"].as<int>() : (dflash ? 3 : 2);
+                        ? speculative["draft_tokens"].as<int>() : (dflash ? model::k_default_dflash_draft_tokens : model::k_default_mtp_draft_tokens);
                     if (draft_tokens < 1 || draft_tokens > max_draft_tokens) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,

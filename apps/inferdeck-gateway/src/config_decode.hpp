@@ -228,7 +228,8 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
                     ? speculative["draft_model"].as<std::string>() : "";
                 info.mtp_draft_tokens = speculative["draft_tokens"]
                     ? speculative["draft_tokens"].as<int>()
-                    : (info.speculative_type.starts_with("dflash") ? 3 : 2);
+                    : (info.speculative_type.starts_with("dflash") ? model::k_default_dflash_draft_tokens
+                                                                 : model::k_default_mtp_draft_tokens);
                 info.mtp_p_min = speculative["p_min"]
                     ? speculative["p_min"].as<float>() : 0.0f;
                 info.mtp_max_active_requests =

@@ -12,6 +12,7 @@
 #include "chat.h"
 #include "common.h"
 #include "model/imodel.hpp"
+#include "model/model_info.hpp"
 #include "llama_cpp_wrapper/continuous_batch_scheduler.hpp"
 
 struct llama_model;
@@ -19,7 +20,6 @@ struct llama_context;
 struct llama_vocab;
 struct llama_sampler;
 struct common_speculative;
-struct common_speculative_init_result;
 struct common_chat_templates;
 struct mtmd_context;
 using llama_token = int32_t;
@@ -48,12 +48,12 @@ struct LlamaCppConfig {
   std::string flash_attn{"auto"};
   bool kv_offload{true};
   bool kv_unified{false};
-  int vram_safety_margin_mb{2048};
+  int vram_safety_margin_mb{model::k_default_vram_safety_margin_mb};
   bool op_offload{true};
   std::string cache_type_k{"q8_0"};
   std::string cache_type_v{"q8_0"};
   bool mtp_enabled{false};
-  int mtp_draft_tokens{2};
+  int mtp_draft_tokens{model::k_default_mtp_draft_tokens};
   float mtp_p_min{0.0f};
   int mtp_max_active_requests{1};
   int max_batch_draft_tokens{8};
@@ -149,7 +149,10 @@ private:
   bool block_draft() const noexcept;
   int speculative_draft_tokens() const noexcept;
   void release_draft_locked();
-  bool init_block_draft_locked(int n_slots, const inferdeck::model::LifecycleControl& control);
+  void release_draft_model_locked();
+  common_params block_draft_params(int n_slots, const inferdeck::model::LifecycleControl& control) const;
+  inferdeck::foundation::Result<void> load_draft_model_locked(const inferdeck::model::LifecycleControl& control);
+  bool init_block_draft_locked(int n_slots);
   llama_context_params shared_context_params_locked(int capacity) const;
   inferdeck::foundation::Result<void> init_shared_context_locked(
       const llama_model_params& model_params,
@@ -210,7 +213,8 @@ private:
   llama_context* shared_ctx_{nullptr};
   llama_context* draft_ctx_{nullptr};
   common_speculative* speculative_{nullptr};
-  std::unique_ptr<common_speculative_init_result> draft_init_;
+  llama_model* draft_model_{nullptr};
+  std::atomic<int> draft_footprint_mb_{0};
   mtmd_context* mtmd_{nullptr};
   std::unique_ptr<ContinuousBatchScheduler> scheduler_;
   std::vector<SlotState> slots_;

@@ -1,5 +1,3 @@
-// The embedded-CPython vLLM Radiance runtime as a v2 provider DLL. CPython is
-// initialised by init(), which the gateway calls on its startup thread.
 #include "provider/sdk.hpp"
 #include "vllm_radiance_wrapper/vllm_radiance_model.hpp"
 
@@ -16,16 +14,28 @@ inferdeck::provider::sdk::Definition define()
             },
             [](const json& host) -> inferdeck::foundation::Result<void>
             {
+                std::string python_root;
                 for (const json& model : host.value("models", json::array()))
                 {
                     const json artifacts = model.value("artifacts", json::object());
+                    const std::string name = model.value("name", std::string{});
                     if (!artifacts.contains("python_root"))
                     {
                         return inferdeck::foundation::Err<void>(inferdeck::foundation::ErrorCode::InvalidArgument,
-                            "model " + model.value("name", std::string{}) + " has no python_root artifact");
+                            "model " + name + " has no python_root artifact");
                     }
-                    return inferdeck::vllm_radiance_wrapper::initialize_python_runtime(
-                        artifacts["python_root"].get<std::string>());
+                    const std::string root = artifacts["python_root"].get<std::string>();
+                    if (!python_root.empty() && root != python_root)
+                    {
+                        return inferdeck::foundation::Err<void>(inferdeck::foundation::ErrorCode::InvalidArgument,
+                            "model " + name + " uses python_root " + root + " but another model uses " +
+                                python_root + "; one embedded Python serves every vllm_radiance model");
+                    }
+                    python_root = root;
+                }
+                if (!python_root.empty())
+                {
+                    return inferdeck::vllm_radiance_wrapper::initialize_python_runtime(python_root);
                 }
                 return inferdeck::foundation::Ok();
             }};

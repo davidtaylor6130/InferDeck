@@ -1,4 +1,3 @@
-/// <summary>Backend factory of every active provider by runtime name; filled by install_gateway_providers.</summary>
 std::map<std::string, model::ModelRegistry::BackendFactory> g_runtime_factories;
 
 void configure_coordinator(model::BackendCoordinator& coordinator,

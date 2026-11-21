@@ -16,6 +16,7 @@
 
 #include "foundation/result.hpp"
 #include "model/imodel.hpp"
+#include "model/model_info.hpp"
 #include "model/model_registry.hpp"
 
 namespace inferdeck::model {
@@ -100,7 +101,7 @@ public:
     [[nodiscard]] std::vector<ResidencyInfo> residency() const;
     [[nodiscard]] std::vector<std::string> unhealthy_models() const;
     [[nodiscard]] int get_vram_usage() const;
-    void set_vram_budget(int total_mb, int safety_margin_mb = 2048);
+    void set_vram_budget(int total_mb, int safety_margin_mb = k_default_vram_safety_margin_mb);
     void update_vram_observation(int used_mb, int total_mb);
     [[nodiscard]] int vram_budget_mb() const;
     [[nodiscard]] int vram_available_mb() const;
@@ -285,7 +286,7 @@ private:
     std::unordered_set<std::string> resizing_models_;
     std::unordered_map<std::string, std::unordered_set<std::string>> context_borrowers_;
     int vram_budget_mb_{0};
-    int vram_safety_margin_mb_{1024};
+    int vram_safety_margin_mb_{k_default_vram_safety_margin_mb};
     int observed_vram_used_mb_{0};
     int observed_vram_total_mb_{0};
     time_point observed_vram_at_{};

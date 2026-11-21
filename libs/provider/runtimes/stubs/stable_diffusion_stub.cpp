@@ -1,5 +1,3 @@
-// Test double for the stable-diffusion.cpp C API, so the real image and video
-// backends can be packaged and checked as provider DLLs without a GPU.
 #include <stable-diffusion.h>
 
 #include <cstdint>

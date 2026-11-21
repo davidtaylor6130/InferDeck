@@ -92,7 +92,7 @@ Building `inferdeck-gateway` builds the `inferdeck-runtime-providers` target
 too. The result is ready to copy:
 
 ```
-$BUILD/bin/Release/inferdeck-gateway.exe   + spdlog.dll, fmt.dll, ...  (core only)
+$BUILD/bin/Release/inferdeck-gateway.exe   + other vcpkg DLLs  (core only)
 $BUILD/bin/Release/static/                 dashboard
 $BUILD/bin/Release/python/                 Radiance's Python modules
 $BUILD/bin/Release/providers/*.provider.dll + the libraries they import
@@ -258,7 +258,10 @@ and every other runtime stay as they are; putting the old DLL back rolls back.
    ```
 
    Expected: Windows system DLLs, `vulkan-1.dll`, the MSVC runtime,
-   `spdlog.dll`, `fmt.dll`. Nothing named `ggml` or `llama`.
+   `sherpa-onnx-c-api.dll` or `python312.dll` for those runtimes. Nothing named
+   `ggml`, `llama`, `spdlog`, or `fmt`: `cmake/vcpkg-triplets/x64-windows.cmake`
+   builds fmt and spdlog as static libraries, so every module holds a private
+   copy and no provider can load a mismatched shared one.
 
 5. **Check it without loading weights** (loads the library, runs `init`,
    creates an instance per modality):
@@ -290,7 +293,8 @@ unloads, and loads again.
 
 ```bash
 $BUILD/bin/Release/inferdeck-provider-check <library> [--model <path>] [--artifact key=value]... \
-    [--modality <name>]... [--skip-invoke] [--no-load] [--context <tokens>]     [--speculative mtp|dflash|dflash2] [--draft-model <path>] [--draft-tokens <n>]
+    [--modality <name>]... [--skip-invoke] [--no-load] [--context <tokens>] \
+    [--speculative mtp|dflash|dflash2] [--draft-model <path>] [--draft-tokens <n>]
 ```
 
 | Option | Meaning |
@@ -402,9 +406,13 @@ version 1 (`inferdeck_provider_v1`). A library exporting both is loaded as v2.
 - **Exceptions and panics never cross the boundary.** Catch everything and
   return a status. The SDK does this for you.
 - **Struct sizes.** Every v2 struct starts with `uint32_t struct_size`. Set it
-  to `sizeof` the struct you compiled against. A reader never touches fields
-  past the size the writer set; the gateway rejects a table smaller than the
-  v2.0 layout.
+  to `sizeof` the struct you compiled against. Members are only ever appended,
+  and a reader touches a member only when `struct_size >= offsetof(member) +
+  sizeof(member)` (`INFERDECK_STRUCT_HAS`). The gateway accepts a provider
+  table of at least `INFERDECK_PROVIDER_V2_MIN_SIZE` bytes, a frozen value:
+  everything up to and including `invoke`. Members past `struct_size`, such as
+  `provider_invoke`, count as NULL. A provider reads `inferdeck_call_v2` and
+  `inferdeck_host_v2` members (`remaining_ms`, `log`) the same way.
 - **In-process only.** Do not start child processes or proxy to a server.
 - **Unknown JSON keys** may appear in later versions; ignore them.
 
@@ -475,7 +483,7 @@ Every potentially long function receives an `inferdeck_call_v2`. Pass
 
 `init` receives `inferdeck_host_v2`, valid until `shutdown`:
 
-- `host_json`: `{"abi_version": 2, "gateway": {...}, "models": [<model_json>...]}`.
+- `host_json`: valid until `shutdown`, including across a gateway reload (the host keeps every generated copy alive). `{"abi_version": 2, "gateway": {...}, "models": [<model_json>...]}`.
   `gateway` carries gateway-wide runtime defaults (`n_batch`, `n_ubatch`,
   `use_mmap`, `use_mlock`, `n_gpu_layers`, `flash_attn`, `kv_offload`,
   `op_offload`, `cache_type_k`, `cache_type_v`, `swa_full`,
@@ -515,6 +523,7 @@ Every potentially long function receives an `inferdeck_call_v2`. Pass
   "vision": true,
   "reasoning": true,
   "speculative": false,
+  "speculative_types": ["mtp", "dflash", "dflash2"],
   "unsupported_options": ["mirostat", "tfs_z"]
 }
 ```
@@ -526,6 +535,7 @@ Every potentially long function receives an `inferdeck_call_v2`. Pass
 | `modalities` | Each modality served, with its capabilities. Config validation rejects models asking for anything else. |
 | `model_source` | `gguf_path` (model must set `gguf_path`), `artifacts` (default; an `artifacts` map), or `none`. |
 | `vision`, `reasoning`, `speculative` | Whether text models may use image input, reasoning, MTP. Default false. |
+| `speculative_types` | Speculative decoding types a model may select with `speculative.type` (`mtp`, `dflash`, `dflash2`). Config validation rejects any other type for this runtime. When absent, `speculative: true` means `["mtp"]`. |
 | `unsupported_options` | Request features this provider cannot honour. The gateway rejects such a request with HTTP 400 instead of silently dropping the option. Values: `logprobs`, `logit_bias`, `mirostat`, `tfs_z`, `prompt_keep_tokens`, `add_generation_prompt`, `reasoning_format`, `tools`, `structured_output`, `image_input`, `audio_input`. |
 
 | Modality | Capabilities | Operations |
@@ -579,9 +589,15 @@ compatibility. Unset optionals are `null`. Put anything runtime-specific in
 `artifacts`.
 
 `speculative_type` (`mtp`, `dflash`, `dflash2`, or empty) and
-`draft_model_path` carry DFlash settings to the `llama_cpp` DLL. They were
-added to the codec without an ABI version change: a DLL built before them
-ignores both keys and loads the model without DFlash.
+`draft_model_path` carry DFlash settings to the `llama_cpp` DLL. The drafter
+loads once with the target and stays resident until unload; only its context
+is rebuilt when the context pool is resized. Its weights and context must be
+included in the model's `vram_required_mb`.
+
+These keys were added to the codec without an ABI version change. A DLL whose
+manifest has no `speculative_types` (and no `speculative: true`) declares no
+speculative type, so config validation now rejects any model that selects one
+for that runtime. A DLL with `speculative: true` only is limited to `mtp`.
 
 **`chat`** (text). Request: `prompt`, `messages[]` (`role`; `content[]` of
 `{"type":"text","text"}`, `{"type":"image","blob","media_type","detail"}`,

@@ -1,6 +1,3 @@
-// One built-in native runtime (stable-diffusion.cpp, LTX, ACE-Step, whisper.cpp,
-// Windows SAPI, ...) packaged as a v2 provider DLL. CMake picks the runtime with
-// INFERDECK_PROVIDER_RUNTIME and its factory with INFERDECK_PROVIDER_FACTORY.
 #include "model/ibackend.hpp"
 #include "provider/sdk.hpp"
 

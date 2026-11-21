@@ -74,8 +74,8 @@ speculative:
   `draft_tokens` to the drafter's trained block size (block 8 drafts at most 7).
   `dflash` accepts any DFlash-family drafter; `dflash2` requires a DFlash2
   candidate selector.
-- The runtime contract must declare speculative support, and DFlash is accepted
-  only for `runtime: llama_cpp`.
+- The runtime's manifest must list the type in `speculative_types`; the built-in
+  `llama_cpp` provider lists `mtp`, `dflash`, and `dflash2`.
 - Both modes share the adaptive window: at more than `max_active_requests`
   runnable requests the model decodes without drafting, and a request that lost
   its draft cache resynchronises before drafting again. Image requests always
@@ -91,8 +91,12 @@ speculative:
   logged, because some requests then draft nothing on a given step. The default
   `max_active_requests` stays 1; raise it to the slot count to speculate under
   concurrency.
-- With `context_pool_auto`, the drafter's file size is reserved from the fitted
-  pool; its KV cache is covered by the allocation retry.
+- The drafter loads once with the target model and is kept for the model's load
+  lifetime; a drafter that fails to load fails the model load with a clear error
+  and is never retried at a smaller context. Set `vram_required_mb` to cover the
+  target, its KV cache, and the drafter's weights and context. With
+  `context_pool_auto` the drafter is already resident when the pool is fitted;
+  its context is covered by the allocation retry.
 
 Measured on an AMD Radeon AI PRO R9700 (Vulkan), Qwen3.8-27B UD-IQ4_XS, one
 slot, 48K context, greedy, 512 output tokens:
