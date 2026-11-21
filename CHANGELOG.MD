@@ -18,6 +18,7 @@
 - Image models can set default `steps` and `guidance_scale` artifacts.
 - `POST /v1/decisions` in the OpenAI Decisions shape, served by the new
   `jev_style` runtime for Jev-Style decision models (`docs/decisions.md`).
+- Model installs from multi-repo bundle recipes.
 - `GET /api/inferdeck/v1/providers` and the `inferdeck-provider-check` tool for
   validating provider libraries.
 - The build fails at configure time when stable-diffusion.cpp and InferDeck
@@ -49,9 +50,8 @@
 - Desktop VRAM was reserved twice under live telemetry, which blocked loads that should fit (#210).
 - A GPU model that falls back to CPU is reported as `degraded` with reason `gpu_unavailable` in `/health` (#211).
 - Co-residency lenders regrow their context pool after borrowers leave or demand exceeds the lent pool.
-- Radiance releases its kernel scratch on unload and partially loaded weights on a failed load (2e24a18).
-- Long speech-to-text is transcribed in 60 s chunks (0afe11f).
-- Long speech-to-text no longer stalls other requests.
+- Radiance releases its kernel scratch on unload and partially loaded weights on a failed load.
+- Long speech-to-text no longer stalls other requests; admission is bounded and cancellation is responsive (#205).
 
 ### Removed
 - The standalone OpenCode config exporter and its dedicated CI test. OpenCode
