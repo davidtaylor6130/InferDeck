@@ -100,6 +100,7 @@ public:
     [[nodiscard]] std::vector<std::string> get_loaded_models() const;
     [[nodiscard]] std::vector<ResidencyInfo> residency() const;
     [[nodiscard]] std::vector<std::string> unhealthy_models() const;
+    [[nodiscard]] std::vector<std::string> degraded_models() const;
     [[nodiscard]] int get_vram_usage() const;
     void set_vram_budget(int total_mb, int safety_margin_mb = k_default_vram_safety_margin_mb);
     void update_vram_observation(int used_mb, int total_mb);

@@ -93,6 +93,16 @@ std::vector<std::string> BackendCoordinator::unhealthy_models() const {
     return names;
 }
 
+std::vector<std::string> BackendCoordinator::degraded_models() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> names;
+    for (const auto& [name, backend] : instances_) {
+        if (backend && backend->is_loaded() && backend->compute_degraded()) names.push_back(name);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
 std::vector<ResidencyInfo> BackendCoordinator::residency() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ResidencyInfo> out;

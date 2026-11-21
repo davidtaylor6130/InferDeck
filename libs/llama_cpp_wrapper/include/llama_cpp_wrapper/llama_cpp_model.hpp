@@ -91,6 +91,7 @@ public:
   inferdeck::foundation::Result<void> unload() override;
   bool is_loaded() const noexcept override { return loaded_.load(); }
   bool execution_healthy() const override;
+  bool compute_degraded() const override { return compute_degraded_.load(); }
   void request_cancel() override { cancel_all_.store(true); }
 
   int vram_usage_mb() const noexcept override;
@@ -201,6 +202,7 @@ private:
   inferdeck::model::ModelInfo info_;
   LlamaCppConfig cfg_;
   std::atomic<bool> loaded_{false};
+  std::atomic<bool> compute_degraded_{false};
   std::atomic<bool> cancel_all_{false};
   std::mutex embed_mtx_;
   std::atomic<int> sequence_capacity_{0};

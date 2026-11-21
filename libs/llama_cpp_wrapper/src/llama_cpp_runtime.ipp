@@ -186,6 +186,7 @@ LlamaCppModel::~LlamaCppModel() {
   }
   vocab_ = nullptr;
   loaded_.store(false);
+  compute_degraded_.store(false);
   sequence_capacity_.store(0);
   sequence_capacity_limit_.store(0);
   pool_capacity_.store(0);
@@ -287,6 +288,16 @@ Result<void> LlamaCppModel::load(
                    "llama_model_load_from_file returned null for " + resolved_gguf_path_.string()));
   }
   log_memory_snapshot("llama_model_loaded_memory_after", info_.name);
+  {
+    std::size_t gpu_devices = 0;
+    for (std::size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+      const auto type = ggml_backend_dev_type(ggml_backend_dev_get(i));
+      if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) ++gpu_devices;
+    }
+    const bool degraded = gpu_compute_unavailable(info_.compute, gpu_devices);
+    compute_degraded_.store(degraded);
+    if (degraded) LOG_WARN("llama_gpu_unavailable_cpu_fallback", "model={} compute={}", info_.name, to_string(info_.compute));
+  }
   vocab_ = llama_model_get_vocab(model_);
   if (vocab_ == nullptr) {
     release_draft_model_locked();
@@ -879,6 +890,7 @@ Result<void> LlamaCppModel::unload() {
   }
   vocab_ = nullptr;
   loaded_.store(false);
+  compute_degraded_.store(false);
   sequence_capacity_.store(0);
   sequence_capacity_limit_.store(0);
   pool_capacity_.store(0);

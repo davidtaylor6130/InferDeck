@@ -2072,3 +2072,11 @@ TEST_CASE("Reclaimable idle context estimate is conservative", "[llama][context-
   CHECK(conservative_reclaimable_context_mb(4 * gib, 8192, 2048, 1024) == 2048 * 9 / 10);
   CHECK(conservative_reclaimable_context_mb(gib, 8192, 2048, 1024) == 0);
 }
+
+TEST_CASE("GPU compute without a GPU device is degraded", "[llama][health]") {
+  using inferdeck::llama_wrapper::gpu_compute_unavailable;
+  using inferdeck::model::ModelCompute;
+  CHECK(gpu_compute_unavailable(ModelCompute::VulkanGpu, 0));
+  CHECK_FALSE(gpu_compute_unavailable(ModelCompute::VulkanGpu, 1));
+  CHECK_FALSE(gpu_compute_unavailable(ModelCompute::Cpu, 0));
+}

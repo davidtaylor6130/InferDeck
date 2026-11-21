@@ -10,6 +10,10 @@
 
 namespace inferdeck::llama_wrapper {
 
+[[nodiscard]] constexpr bool gpu_compute_unavailable(model::ModelCompute compute, std::size_t gpu_device_count) noexcept {
+    return compute != model::ModelCompute::Cpu && gpu_device_count == 0;
+}
+
 [[nodiscard]] foundation::Result<std::size_t> context_pool_device_memory_bytes(
     const llama_context* target_context,
     const llama_context* draft_context);
