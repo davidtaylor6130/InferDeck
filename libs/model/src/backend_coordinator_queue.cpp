@@ -652,6 +652,13 @@ bool BackendCoordinator::swap_deferred_locked(const SlotWaiter& waiter, time_poi
     const auto info = registry_.get_info_result(waiter.model);
     if (!info || (vram_budget_mb_ > 0 && available_vram_locked() >= info->vram_required_mb)) return false;
     for (const auto& [name, backend] : instances_) {
+        const auto active = active_requests_by_model_.find(name);
+        if (name != waiter.model && !resizing_models_.contains(name) &&
+            (active == active_requests_by_model_.end() || active->second == 0) &&
+            backend && backend->is_loaded() && backend->execution_healthy() &&
+            backend->can_reclaim_idle_context()) return false;
+    }
+    for (const auto& [name, backend] : instances_) {
         if (!backend || !backend->is_loaded() || !backend->info().eviction_eligible ||
             backend->info().residency == ResidencyPolicy::Always ||
             is_independent_sidecar(backend->info())) continue;

@@ -2218,6 +2218,45 @@ TEST_CASE("BackendCoordinator: swap hysteresis is bounded and bypassable",
     REQUIRE(coordinator.release_slot("b", *b_slot));
 }
 
+TEST_CASE("BackendCoordinator: swap hysteresis does not delay a co-resident load admitted by idle context reclaim",
+          "[model][coordinator][queue][residency][context-reclaim]") {
+    ModelRegistry reg;
+    IModelMock* warm = nullptr;
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        if (i.name == "a") warm = backend.get();
+        return backend;
+    });
+    for (const char* name : {"a", "b"}) {
+        auto info = make_info(name);
+        info.vram_required_mb = 5000;
+        info.n_slots = 1;
+        info.min_slots = 1;
+        reg.register_model(info);
+    }
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(8000, 0);
+    coordinator.set_swap_hysteresis(std::chrono::seconds{10}, std::chrono::seconds{10});
+    run_turn_on_a(coordinator);
+    REQUIRE(warm);
+    warm->reclaimable_mb.store(2000);
+
+    const auto started = std::chrono::steady_clock::now();
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::seconds{5};
+    options.prepare = [&] { return coordinator.swap_to("b"); };
+    auto b_slot = coordinator.acquire_slot("b", options);
+    REQUIRE(b_slot);
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{2});
+    CHECK(coordinator.is_loaded("a"));
+    CHECK(coordinator.is_loaded("b"));
+    CHECK(warm->reclaimable_mb.load() == 0);
+    REQUIRE(coordinator.release_slot("b", *b_slot));
+}
+
 TEST_CASE("BackendCoordinator: one cold prepare completes before another can swap",
           "[model][coordinator][queue][residency]") {
     ModelRegistry reg;
