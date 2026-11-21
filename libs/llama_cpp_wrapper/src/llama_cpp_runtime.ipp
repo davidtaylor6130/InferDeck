@@ -121,6 +121,16 @@ Result<void> LlamaCppModel::load_draft_model_locked(
         ErrorCode::InvalidArgument,
         "DFlash draft model failed to load: " + resolved_draft_path_.string()));
   }
+  const llama_dflash_variant variant = llama_model_dflash_variant(draft_model_);
+  const bool variant_matches = cfg_.speculative_type == "dflash"
+      ? variant != LLAMA_DFLASH_VARIANT_NONE : variant == LLAMA_DFLASH_VARIANT_DFLASH2;
+  if (!variant_matches) {
+    release_draft_model_locked();
+    return Result<void>(std::unexpect, make_error(
+        ErrorCode::InvalidArgument,
+        "draft model " + resolved_draft_path_.string() + " is not a " +
+            (cfg_.speculative_type == "dflash" ? "DFlash" : "DFlash2") + " drafter"));
+  }
   LOG_INFO("draft_model_loaded", "model={} path={} size_mb={}",
            info_.name, resolved_draft_path_.string(),
            static_cast<std::uint64_t>(llama_model_size(draft_model_) >> 20));

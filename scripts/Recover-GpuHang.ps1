@@ -12,10 +12,10 @@ $ErrorActionPreference = 'Stop'
 if ($Install) {
     $script = Join-Path $StateDir 'Recover-GpuHang.ps1'
     New-Item $StateDir -ItemType Directory -Force | Out-Null
-    icacls $StateDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
+    icacls $StateDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls failed on $StateDir" }
-    $owner = (Get-Acl $StateDir).Owner
-    if ($owner -notin @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
+    $owner = (Get-Acl $StateDir).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18', 'S-1-5-32-544')) {
         throw "$StateDir is owned by $owner; refusing to install a SYSTEM task script from it"
     }
     Copy-Item $PSCommandPath $script -Force
@@ -55,6 +55,12 @@ Write-Log "$($hangs.Count) GPU watchdog reports in $WindowMinutes min; stopping 
 Set-Content $last (Get-Date -Format s)
 $servicePid = [int](Get-CimInstance Win32_Service -Filter "Name='$Service'").ProcessId
 Stop-Service $Service -Force -ErrorAction SilentlyContinue
+$application = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$Service\Parameters" -ErrorAction SilentlyContinue).Application
+if ($servicePid -gt 0 -and $application) {
+    foreach ($child in Get-CimInstance Win32_Process -Filter "ParentProcessId=$servicePid" | Where-Object { $_.ExecutablePath -eq $application }) {
+        Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
 if ($servicePid -gt 0) { Stop-Process -Id $servicePid -Force -ErrorAction SilentlyContinue }
 foreach ($gpu in Get-PnpDevice -Class Display -PresentOnly | Where-Object { $_.InstanceId -like 'PCI\*' }) {
     pnputil /restart-device "$($gpu.InstanceId)" | Out-Null

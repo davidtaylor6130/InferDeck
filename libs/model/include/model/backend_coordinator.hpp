@@ -17,7 +17,6 @@
 #include "foundation/result.hpp"
 #include "model/imodel.hpp"
 #include "model/model_info.hpp"
-#include "model/model_info.hpp"
 #include "model/model_registry.hpp"
 
 namespace inferdeck::model {

@@ -590,9 +590,12 @@ compatibility. Unset optionals are `null`. Put anything runtime-specific in
 `draft_model_path` carry DFlash settings to the `llama_cpp` DLL. The drafter
 loads once with the target and stays resident until unload; only its context
 is rebuilt when the context pool is resized. Its weights and context must be
-included in the model's `vram_required_mb`. They were
-added to the codec without an ABI version change: a DLL built before them
-ignores both keys and loads the model without DFlash.
+included in the model's `vram_required_mb`.
+
+These keys were added to the codec without an ABI version change. A DLL whose
+manifest has no `speculative_types` (and no `speculative: true`) declares no
+speculative type, so config validation now rejects any model that selects one
+for that runtime. A DLL with `speculative: true` only is limited to `mtp`.
 
 **`chat`** (text). Request: `prompt`, `messages[]` (`role`; `content[]` of
 `{"type":"text","text"}`, `{"type":"image","blob","media_type","detail"}`,
