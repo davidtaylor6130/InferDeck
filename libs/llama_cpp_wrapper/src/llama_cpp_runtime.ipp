@@ -717,6 +717,8 @@ Result<void> LlamaCppModel::ensure_request_capacity(
   }
 
   const llama_model_params model_parameters = model_params();
+  const Result<std::size_t> memory_before =
+      context_pool_device_memory_bytes(shared_ctx_, draft_ctx_);
 
   if (scheduler_) {
     scheduler_->stop();
@@ -832,7 +834,18 @@ Result<void> LlamaCppModel::ensure_request_capacity(
             std::to_string(requested_capacity) + ")"));
   }
 
-  reclaimed_context_vram_mb_.store(0);
+  const Result<std::size_t> memory_after =
+      context_pool_device_memory_bytes(shared_ctx_, draft_ctx_);
+  if (pool_capacity_.load() >= maximum_capacity || !memory_before || !memory_after) {
+    reclaimed_context_vram_mb_.store(0);
+  } else {
+    constexpr std::size_t mib = 1024ULL * 1024ULL;
+    const std::size_t regained_bytes =
+        *memory_after > *memory_before ? *memory_after - *memory_before : 0;
+    const int regained_mb = static_cast<int>(std::min<std::size_t>(
+        regained_bytes / mib, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    reclaimed_context_vram_mb_.store(std::max(0, reclaimed_context_vram_mb_.load() - regained_mb));
+  }
   LOG_INFO("context_pool_grown", "model={} old_capacity={} new_capacity={} required_context={} cache_reset=true",
            info_.name, current_capacity, pool_capacity_.load(),
            demand.required_context);
