@@ -4929,3 +4929,13 @@ TEST_CASE("ensure_model_loaded: GPU-lost backoff pauses automatic GPU loads", "[
     REQUIRE(result.code == "gpu_lost_backoff");
     REQUIRE_FALSE(coordinator.is_loaded("a"));
 }
+
+TEST_CASE("gpu_backoff_until needs two recent restarts and ignores bad stamps", "[gateway][backoff]") {
+    using inferdeck::gateway::gpu_backoff_until;
+    const long long now = 100000;
+    CHECK_FALSE(gpu_backoff_until({now - 60}, now));
+    CHECK(gpu_backoff_until({now - 500, now - 60}, now) == now - 60 + 1800);
+    CHECK_FALSE(gpu_backoff_until({now - 5000, now - 4000}, now));
+    CHECK_FALSE(gpu_backoff_until({now - 60, now + 5000}, now));
+    CHECK(gpu_backoff_until({now - 500, now - 60, now + 5000}, now) == now - 60 + 1800);
+}

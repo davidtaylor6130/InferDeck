@@ -23,20 +23,18 @@ void record_gpu_lost_restart() {
     if (stamps.size() > 10) stamps.erase(stamps.begin(), stamps.end() - 10);
     std::ofstream out(gpu_lost_stamp_path(), std::ios::trunc);
     for (const auto stamp : stamps) out << stamp << std::endl;
+    if (!out) foundation::LOG_WARN("gpu_lost_stamp_write_failed", "path={}", gpu_lost_stamp_path().string());
 }
 
 bool gpu_backoff_active(const model::BackendCoordinator& coordinator) {
-    return g_gpu_backoff_until.load() > unix_seconds() && !coordinator.get_loaded_model();
+    if (coordinator.get_loaded_model()) g_gpu_backoff_until.store(0);
+    return g_gpu_backoff_until.load() > unix_seconds();
 }
 
 void configure_gpu_lost_backoff(inferdeck::gateway::GatewayDeps& deps) {
-    const auto now = unix_seconds();
-    const auto stamps = read_gpu_lost_stamps();
-    const auto recent = std::count_if(stamps.begin(), stamps.end(),
-                                      [now](long long stamp) { return now - stamp <= 600; });
-    if (recent >= 2 && now - stamps.back() < 1800) {
-        g_gpu_backoff_until.store(stamps.back() + 1800);
-        foundation::LOG_WARN("gpu_lost_backoff", "restarts_10min={} until_unix={}", recent, stamps.back() + 1800);
+    if (const auto until = inferdeck::gateway::gpu_backoff_until(read_gpu_lost_stamps(), unix_seconds())) {
+        g_gpu_backoff_until.store(*until);
+        foundation::LOG_WARN("gpu_lost_backoff", "until_unix={}", *until);
     }
     deps.auto_load_blocked = [&coordinator = deps.coordinator] { return gpu_backoff_active(coordinator); };
 }
@@ -57,9 +55,9 @@ nlohmann::json build_health_json(const model::BackendCoordinator& coordinator, b
 
 void install_gpu_lost_handler() {
     inferdeck::provider::set_fatal_device_handler([](const std::string& runtime, const std::string& message) {
+        if (g_gpu_lost_restart.exchange(true)) return;
         foundation::LOG_FATAL("gpu_device_lost_restart", "runtime={} error={}", runtime, message);
         record_gpu_lost_restart();
-        g_gpu_lost_restart.store(true);
         g_stop.store(true);
         if (auto* coordinator = g_coordinator.load()) coordinator->request_shutdown();
     });
