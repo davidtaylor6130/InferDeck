@@ -34,8 +34,6 @@
 - GPU hang recovery task script and 50 MB NSSM service log rotation.
 
 ### Changed
-- stable-diffusion.cpp is pinned to `master-924-f8890b9` and shares llama.cpp's
-  ggml.
 - Built-in runtimes register through one provider descriptor list instead of
   being wired individually in the gateway entry point.
 - The MCP OpenCode config tool reads context limits from discovery `limits`.
@@ -44,10 +42,15 @@
 - Configuration errors are reported at startup; invalid chat input returns 400.
 
 ### Fixed
-- GPU device loss marks the model unhealthy and restarts the gateway; `/health` reports `degraded`; repeated restarts back off GPU auto-loads.
+- GPU device loss marks the model unhealthy and restarts the gateway; `/health` reports `degraded`; two GPU-lost restarts within 10 minutes back off GPU auto-loads for 30 minutes (#198).
 - Each swap has its own cancellation token.
 - Only WARN/ERROR llama.cpp native logs are forwarded to the service log.
-- The coordinator waits for released GPU memory before the next load; a hung Radiance Python call exits cleanly.
+- The coordinator waits for the driver to release GPU memory before the next load; a hung Radiance Python call no longer freezes the gateway.
+- Desktop VRAM was reserved twice under live telemetry, which blocked loads that should fit (#210).
+- A GPU model that falls back to CPU is reported as `degraded` with reason `gpu_unavailable` in `/health` (#211).
+- Co-residency lenders regrow their context pool after borrowers leave or demand exceeds the lent pool.
+- Radiance releases its kernel scratch on unload and partially loaded weights on a failed load (2e24a18).
+- Long speech-to-text is transcribed in 60 s chunks (0afe11f).
 - Long speech-to-text no longer stalls other requests.
 
 ### Removed
