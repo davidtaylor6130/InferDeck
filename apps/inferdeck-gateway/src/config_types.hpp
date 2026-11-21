@@ -43,7 +43,7 @@ struct GatewayConfig {
     bool swa_full{false};
     bool truncate_prompt{true};
     int vram_budget_mb{0};
-    int vram_safety_margin_mb{1024};
+    int vram_safety_margin_mb{3072};
     int max_queue_size{128};
     int voice_session_grace_ms{15000};
     int background_idle_after_seconds{900};

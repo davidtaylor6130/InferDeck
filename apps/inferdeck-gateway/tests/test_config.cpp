@@ -827,6 +827,10 @@ TEST_CASE("VRAM reserve accepts zero and rejects invalid sizes", "[config][pool]
     std::filesystem::remove(path);
 }
 
+TEST_CASE("VRAM reserve defaults to 3072 MB", "[config][reserve]") {
+    CHECK(inferdeck::gateway::GatewayConfig{}.vram_safety_margin_mb == 3072);
+}
+
 TEST_CASE("Automatic concurrency requires a fitted llama pool", "[config][pool]") {
     const std::string prefix = "model_registry:\n  - name: auto\n    gguf_path: model.gguf\n";
     CHECK(validate_config_text(prefix + "    concurrency_auto: true\n    kv_unified: true\n    context_pool_auto: true\n"));

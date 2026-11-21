@@ -76,7 +76,7 @@ account for its future peak. Otherwise the planner uses the more conservative
 of declared availability and observed pressure with the incomplete runtime's
 full declared footprint reserved.
 `gateway.vram_budget_mb` caps hardware detection and
-`gateway.vram_safety_margin_mb` defaults to 1024 MB and may be set to 0. It reserves GPU headroom only; host/system memory reserve is separate.
+`gateway.vram_safety_margin_mb` defaults to 3072 MB (room for the Windows desktop and login screen) and may be set to 0. It reserves GPU headroom only; host/system memory reserve is separate.
 
 Lazy native runtimes reserve their declared peak beyond memory already retained
 by the runtime. This prevents an unloaded phase from being double-spent while

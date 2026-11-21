@@ -48,7 +48,7 @@ struct LlamaCppConfig {
   std::string flash_attn{"auto"};
   bool kv_offload{true};
   bool kv_unified{false};
-  int vram_safety_margin_mb{1024};
+  int vram_safety_margin_mb{3072};
   bool op_offload{true};
   std::string cache_type_k{"q8_0"};
   std::string cache_type_v{"q8_0"};
