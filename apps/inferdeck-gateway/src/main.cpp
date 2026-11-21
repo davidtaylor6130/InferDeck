@@ -63,6 +63,7 @@
 #include "model/model_registry.hpp"
 #include "model/provider.hpp"
 #include "provider/plugin_provider.hpp"
+#include "gateway/default_model_preload.hpp"
 #include "observability/gpu_telemetry.hpp"
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
@@ -89,6 +90,8 @@ constexpr int runtime_reload_result = 75;
 #include "provider_runtime.ipp"
 #include "media_control_routes.ipp"
 #include "decision_routes.ipp"
+#include "gateway/health_json.hpp"
+#include "default_model_runtime.ipp"
 int run_gateway(const fs::path& config_path) {
     using namespace inferdeck;
     using namespace inferdeck::foundation;
@@ -134,10 +137,7 @@ int run_gateway(const fs::path& config_path) {
 
     model::BackendCoordinator coordinator(registry);
     g_coordinator.store(&coordinator);
-    coordinator.set_max_queue_size(static_cast<std::size_t>(std::max(1, cfg.max_queue_size)));
-    if (cfg.vram_budget_mb > 0) {
-        coordinator.set_vram_budget(cfg.vram_budget_mb, cfg.vram_safety_margin_mb);
-    }
+    configure_coordinator(coordinator, cfg);
     std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     ModelStore model_store(cfg.model_store_root, cfg.model_store_archive_root,
                            cfg.model_store_hf_token, coordinator, {}, {},
@@ -189,6 +189,7 @@ int run_gateway(const fs::path& config_path) {
     GatewayDeps deps{coordinator, "15", cfg.auto_swap, cfg.default_model,
                      cfg.voice_session_grace_ms, &metrics, &stats_db,
                      &events, &swap_tracker, &maintenance_resource};
+    configure_gpu_lost_backoff(deps);
     deps.media_default_models = cfg.media_default_models;
     deps.api_keys = api_keys;
     apply_speech_deps(deps, cfg);
@@ -607,13 +608,7 @@ int run_gateway(const fs::path& config_path) {
     server.Get(control_api_pattern("/health"),
                wrap([&](const httplib::Request&,
                         httplib::Response& resp) {
-        resp.set_content(nlohmann::json{
-                             {"ok", true},
-                             {"db_healthy", stats_db.healthy()},
-                             {"version", inferdeck::app::build_version},
-                             {"build_revision", inferdeck::app::build_revision},
-                             {"build_dirty", inferdeck::app::build_dirty}}.dump(),
-                         "application/json");
+        resp.set_content(build_health_json(coordinator, stats_db.healthy()).dump(), "application/json");
     }));
     auto request_config_reload = [] {
         g_reload.store(true);
@@ -670,33 +665,8 @@ int run_gateway(const fs::path& config_path) {
     if (bound) {
         if (!cfg.default_model.empty() && registry.has(cfg.default_model)) {
             g_default_model_loading.store(true);
-            default_model_loader = std::thread(
-                [&coordinator, default_model = cfg.default_model] {
-                    LOG_INFO("default_model_load_begin", "name={}", default_model);
-                    model::AcquireSlotOptions options;
-                    options.timeout = std::chrono::minutes{5};
-                    options.priority = -100;
-                    options.cancelled = [] {
-                        return g_stop.load() || g_reload.load();
-                    };
-                    options.prepare = [&coordinator, default_model] {
-                        return coordinator.swap_to_cancellable(
-                            default_model, std::chrono::minutes{5}, [] {
-                                return g_stop.load() || g_reload.load();
-                            });
-                    };
-                    auto slot = coordinator.acquire_slot(default_model, options);
-                    auto loaded = slot
-                        ? coordinator.release_slot(default_model, *slot)
-                        : foundation::Err<void>(slot.error().code, slot.error().message);
-                    if (loaded) {
-                        LOG_INFO("default_model_load_complete", "name={}", default_model);
-                    } else {
-                        LOG_ERROR("default_model_load_failed", "name={} error={}",
-                                  default_model, loaded.error().message);
-                    }
-                    g_default_model_loading.store(false);
-                });
+            default_model_loader = start_default_model_loader(
+                coordinator, cfg.default_model, cfg.default_model_preload_delay_ms);
         }
         LOG_INFO("server_listening", "host={} port={}", cfg.host, cfg.port);
         listen_ok = server.listen_after_bind();
@@ -718,7 +688,7 @@ int run_gateway(const fs::path& config_path) {
         LOG_FATAL("shutdown_deadline_exceeded",
                   "backend lifecycle did not quiesce within 120 seconds");
         foundation::Logger::instance().shutdown();
-        std::quick_exit(2);
+        std::quick_exit(g_gpu_lost_restart.load() ? gpu_lost_exit_code : 2);
     }
     if (default_model_loader.joinable()) default_model_loader.join();
     swap_tracker.join();
@@ -746,7 +716,7 @@ int run_gateway(const fs::path& config_path) {
         return runtime_reload_result;
     }
     LOG_INFO("server_stopped", "graceful shutdown");
-    return 0;
+    return g_gpu_lost_restart.load() ? gpu_lost_exit_code : 0;
 }
 
 int main(int argc, char** argv) {
@@ -775,6 +745,7 @@ int main(int argc, char** argv) {
 #endif
     std::signal(SIGINT, signal_handler); std::signal(SIGTERM, signal_handler);
 
+    install_gpu_lost_handler();
     g_plugins = inferdeck::provider::load_plugin_providers(provider_dir);
     while (true) {
         int result = 1;

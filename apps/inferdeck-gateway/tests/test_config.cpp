@@ -443,6 +443,7 @@ TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
     CHECK(qwen->mtp_draft_tokens == 2);
     CHECK(qwen->mtp_p_min == 0.0f);
     CHECK(qwen->mtp_max_active_requests == 1);
+    CHECK(qwen->max_batch_draft_tokens == 8);
     CHECK(qwen->has_vision);
     CHECK(qwen->sampling.temperature == 1.0f);
     CHECK(qwen->sampling.top_p == 0.95f);
@@ -573,6 +574,11 @@ model_registry:
         "gateway:\n  background_idle_after_seconds: 86401\n"));
     CHECK(validate_config_text(
         "gateway:\n  background_idle_after_seconds: 900\n"));
+    CHECK(validate_config_text("gateway:\n  swap_hold_ms: 0\n"));
+    CHECK(validate_config_text("gateway:\n  swap_hold_ms: 20000\n  swap_quantum_ms: 180000\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  swap_hold_ms: -1\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  swap_hold_ms: 200000\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  swap_quantum_ms: 300001\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\nauth:\n  required: true\n  token: secret\n"));
     CHECK_FALSE(validate_config_text("control:\n  allow_remote: true\n"));
@@ -819,6 +825,7 @@ TEST_CASE("Shared context capacity validates request and draft headroom", "[conf
     CHECK_FALSE(validate_config_text(prefix + "    context_pool_size: -1\n"));
     CHECK_FALSE(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 32768\n    speculative:\n      type: mtp\n      draft_tokens: 2\n"));
     CHECK(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 32770\n    speculative:\n      type: mtp\n      draft_tokens: 2\n"));
+    CHECK(validate_config_text(prefix + "    n_slots: 4\n    speculative:\n      type: mtp\n      max_active_requests: 4\n      max_batch_draft_tokens: 4\n"));
 }
 
 TEST_CASE("Automatic shared pools require unified storage and no fixed size", "[config][pool]") {
@@ -980,6 +987,12 @@ model_registry:
     CHECK(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path + "\n"));
     CHECK(validate_config_text(prefix + "      type: dflash\n      draft_model: " + draft_path +
                                "\n      draft_tokens: 16\n      p_min: 0.2\n      max_active_requests: 2\n"));
+    CHECK(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path +
+                               "\n      max_active_requests: 2\n      max_batch_draft_tokens: 6\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path +
+                                     "\n      max_batch_draft_tokens: 0\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path +
+                                     "\n      max_batch_draft_tokens: 65\n"));
     CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n"));
     CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: C:/missing/draft.gguf\n"));
     CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path +
@@ -1012,4 +1025,16 @@ model_registry:
     std::error_code error;
     std::filesystem::remove(path, error);
     std::filesystem::remove(draft, error);
+}
+
+TEST_CASE("Preload delay accepts 0 to 3600000 milliseconds", "[config][preload]") {
+    const auto build = [](const char* value) {
+        return validate_config_text(std::string("schema_version: 1\ngateway:\n  default_model_preload_delay_ms: ") +
+                                    value + "\n");
+    };
+    CHECK(build("0"));
+    CHECK(build("60000"));
+    CHECK(build("3600000"));
+    CHECK_FALSE(build("-1"));
+    CHECK_FALSE(build("3600001"));
 }

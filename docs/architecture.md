@@ -64,7 +64,7 @@ Resident models with independent admission pools may execute at the same time.
 
 Successful STT reserves the configured default conversation model for the same client through the STT-to-chat hand-off. The matching chat runs at media priority, and TTS releases the reservation. `gateway.voice_session_grace_ms` bounds abandoned sessions; clients behind a shared address can send `X-InferDeck-Voice-Session` to provide a distinct key.
 
-Long recordings: `POST /v1/audio/transcriptions` accepts up to `gateway.transcription_max_body_mb` (default 200 MB) and 4 hours of audio. The request stays synchronous. The gateway decodes the file, then transcribes it in 5-minute chunks split at the quietest point, passing the tail of the previous chunk as the initial prompt, and returns the merged transcript. The model slot is released and re-acquired between chunks so other requests are served fairly. A client must therefore allow a read timeout proportional to the audio length; a 1-hour recording can take many minutes on CPU. `gateway.transcription_upload_timeout_ms` (default 600000) bounds only the upload of an authorized `/v1/audio/transcriptions` request; all other requests keep the 30 s read deadline. `gateway.transcription_decoded_budget_mb` (default 1024) bounds decoded audio held in memory; excess requests get `503` with `Retry-After`. `gateway.speech_admission_timeout_ms` (default 30000) bounds STT and TTS slot and decode waits; loading a non-resident speech model has its own 5-minute budget. A short STT request can still time out behind a running chunk of a long one: later chunks wait at most 10 minutes and queue one priority level below foreground requests, so a waiting foreground request goes next, but a running chunk is not preempted. There is no asynchronous job mode.
+Long recordings: `POST /v1/audio/transcriptions` accepts up to `gateway.transcription_max_body_mb` (default 200 MB) and 4 hours of audio. The request stays synchronous. The gateway decodes the file, then transcribes it in 1-minute chunks split at the quietest point (Parakeet drops speech after a minute or more of silence inside one long chunk), passing the tail of the previous chunk as the initial prompt, and returns the merged transcript. The model slot is released and re-acquired between chunks so other requests are served fairly. A client must therefore allow a read timeout proportional to the audio length; a 1-hour recording can take many minutes on CPU. `gateway.transcription_upload_timeout_ms` (default 600000) bounds only the upload of an authorized `/v1/audio/transcriptions` request; all other requests keep the 30 s read deadline. `gateway.transcription_decoded_budget_mb` (default 1024) bounds decoded audio held in memory; excess requests get `503` with `Retry-After`. `gateway.speech_admission_timeout_ms` (default 30000) bounds STT and TTS slot and decode waits; loading a non-resident speech model has its own 5-minute budget. A short STT request can still time out behind a running chunk of a long one: later chunks wait at most 10 minutes and queue one priority level below foreground requests, so a waiting foreground request goes next, but a running chunk is not preempted. There is no asynchronous job mode.
 
 Priority is preemptive at queue and swap boundaries. A native backend load that has already begun remains non-preemptive because model libraries do not expose a safe generic cancellation point; CPU voice can still run, and the reserved conversation model is selected at the next safe swap boundary.
 
@@ -79,6 +79,22 @@ of declared availability and observed pressure with the incomplete runtime's
 full declared footprint reserved.
 `gateway.vram_budget_mb` caps hardware detection and
 `gateway.vram_safety_margin_mb` defaults to 2048 MB (room for the Windows desktop and login screen) and may be set to 0. It reserves GPU headroom only; host/system memory reserve is separate.
+With fresh telemetry, `other_process_used = max(0, observed_used -
+own_resident)`, where `own_resident` is the sum of InferDeck's resident
+estimates (a complete-accounting runtime's estimate minus its pending
+reserve; an incomplete-accounting runtime's full estimate). The margin covers
+other-process usage rather than adding to it: live availability is
+`min(budget, total) - observed_used - max(0, margin - other_process_used) -
+pending reserves`, so the effective desktop reserve is
+`max(margin, other_process_used)`. Incomplete-accounting runtimes still
+reserve their full declared estimate on top of observed usage, and the result
+is capped by declared availability. With a 32476 MB budget, a 2048 MB margin,
+and 750 MB of desktop usage, 30428 MB remains available. An overestimated
+resident (observed below its estimate) yields zero other-process usage and
+keeps the full margin. Trade-off: growth of an underestimated resident beyond
+its estimate is indistinguishable from other processes and is counted as
+other-process usage, so it can absorb the margin; the observed usage itself is
+still subtracted in full.
 
 Lazy native runtimes reserve their declared peak beyond memory already retained
 by the runtime. This prevents an unloaded phase from being double-spent while
@@ -155,6 +171,8 @@ InferDeck control routes cover model load/unload, swap status/cancellation,
 dashboard image/music generation, media job cancellation and output retrieval,
 metrics, history, configuration, model aliases, and the model store. Dashboard
 live state uses one SSE connection; there is no WebSocket layer.
+
+`GET /api/inferdeck/v1/health` reports `status: "degraded"`, `compute_degraded: true`, `reason: "gpu_unavailable"` and `degraded_models` when a GPU-configured llama.cpp model loaded but no GPU backend device exists, so it silently runs on CPU. `ok` stays true for this case so deploy scripts keep working; `ok: false` is reserved for unhealthy models (`reason: "execution_unhealthy"`) and the GPU-lost backoff (`reason: "gpu_lost_backoff"`, highest precedence). The load is not failed; the gateway logs WARN `llama_gpu_unavailable_cpu_fallback`. Providers expose this through `INFERDECK_QUERY_COMPUTE_DEGRADED`; older providers are never degraded.
 
 Responses is stateless. Storage/background/conversation parameters are rejected rather than silently retained.
 

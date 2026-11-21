@@ -16,6 +16,7 @@
 #include "llama_cpp_wrapper/llama_chat_adapter.hpp"
 #include "llama_cpp_wrapper/streaming_tool_call_state.hpp"
 #include "../src/sampling_windows.hpp"
+#include "../src/context_pool_fit.hpp"
 #include "foundation/logging.hpp"
 #include "model/imodel.hpp"
 #include "llama.h"
@@ -428,6 +429,83 @@ TEST_CASE("Adaptive MTP is limited to the configured low-concurrency window",
   CHECK(adaptive_mtp_request_eligible(true, true, 1, 1));
   CHECK_FALSE(adaptive_mtp_request_eligible(true, true, 2, 1));
   CHECK_FALSE(adaptive_mtp_request_eligible(false, true, 1, 1));
+}
+
+TEST_CASE("Batched speculation splits the per-step draft budget across sequences",
+          "[llama][scheduler][mtp]") {
+  using inferdeck::llama_wrapper::detail::batch_draft_allotment;
+
+  CHECK(batch_draft_allotment(0, 1, 7, 2, 0) == 2);
+  CHECK(batch_draft_allotment(0, 1, 3, 8, 0) == 3);
+  CHECK(batch_draft_allotment(0, 2, 3, 8, 0) == 3);
+  CHECK(batch_draft_allotment(1, 2, 3, 8, 0) == 3);
+  int total = 0;
+  for (int index = 0; index < 4; ++index) {
+    CHECK(batch_draft_allotment(index, 4, 3, 8, 0) == 2);
+    total += batch_draft_allotment(index, 4, 3, 8, 0);
+  }
+  CHECK(total == 8);
+  total = 0;
+  for (int index = 0; index < 3; ++index) total += batch_draft_allotment(index, 3, 7, 8, 0);
+  CHECK(total == 8);
+  CHECK(batch_draft_allotment(0, 3, 7, 8, 0) == 3);
+  CHECK(batch_draft_allotment(2, 3, 7, 8, 0) == 2);
+  CHECK(batch_draft_allotment(0, 4, 3, 2, 0) == 1);
+  CHECK(batch_draft_allotment(1, 4, 3, 2, 0) == 1);
+  CHECK(batch_draft_allotment(2, 4, 3, 2, 0) == 0);
+  CHECK(batch_draft_allotment(3, 4, 3, 2, 0) == 0);
+  CHECK(batch_draft_allotment(4, 4, 3, 8, 0) == 0);
+  CHECK(batch_draft_allotment(0, 4, 0, 8, 0) == 0);
+}
+
+TEST_CASE("Batched speculation rotates a scarce draft budget across sequences",
+          "[llama][scheduler][mtp]") {
+  using inferdeck::llama_wrapper::detail::batch_draft_allotment;
+
+  std::vector<int> drafted(4, 0);
+  for (std::size_t turn = 0; turn < 4; ++turn) {
+    int step_total = 0;
+    for (int index = 0; index < 4; ++index) {
+      const int allotment = batch_draft_allotment(index, 4, 3, 2, turn);
+      drafted[static_cast<std::size_t>(index)] += allotment;
+      step_total += allotment;
+    }
+    CHECK(step_total == 2);
+  }
+  for (const int tokens : drafted) CHECK(tokens == 2);
+}
+
+TEST_CASE("Batched speculation backs off a sequence with low acceptance",
+          "[llama][scheduler][mtp]") {
+  using namespace inferdeck::llama_wrapper::detail;
+
+  SpeculationGate gate;
+  CHECK(speculation_gate_step(gate));
+  speculation_gate_record(gate, 0, 0);
+  CHECK(gate.acceptance == 1.0f);
+  for (int step = 0; step < 20; ++step) speculation_gate_record(gate, 2, 2);
+  CHECK(gate.cooldown == 0);
+  CHECK(speculation_gate_step(gate));
+
+  int rejected_steps = 0;
+  while (gate.cooldown == 0 && rejected_steps < 100) {
+    speculation_gate_record(gate, 2, 0);
+    ++rejected_steps;
+  }
+  CHECK(rejected_steps == 5);
+  CHECK(gate.cooldown == speculation_gate_cooldown_steps);
+  speculation_gate_record(gate, 0, 0);
+  CHECK(gate.cooldown == speculation_gate_cooldown_steps);
+  for (int step = 0; step < speculation_gate_cooldown_steps; ++step) {
+    CHECK_FALSE(speculation_gate_step(gate));
+  }
+  CHECK(gate.acceptance == speculation_gate_probe_acceptance);
+  CHECK(speculation_gate_step(gate));
+  speculation_gate_record(gate, 3, 3);
+  CHECK(gate.cooldown == 0);
+  CHECK(gate.acceptance > speculation_gate_probe_acceptance);
+  speculation_gate_record(gate, 2, 5);
+  CHECK(gate.acceptance <= 1.0f);
 }
 
 TEST_CASE("ContinuousBatchScheduler generation limit includes the current token",
@@ -1983,4 +2061,22 @@ TEST_CASE("Automatic sequence fitting exceeds configured slots and preserves out
   CHECK(model.n_free_slots() == model.n_slots());
   REQUIRE(model.unload());
   LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("Reclaimable idle context estimate is conservative", "[llama][context-reclaim]") {
+  using inferdeck::llama_wrapper::conservative_reclaimable_context_mb;
+  constexpr std::size_t gib = 1024ULL * 1024ULL * 1024ULL;
+  CHECK(conservative_reclaimable_context_mb(4 * gib, 8192, 8192, 0) == 0);
+  CHECK(conservative_reclaimable_context_mb(4 * gib, 4096, 8192, 0) == 0);
+  CHECK(conservative_reclaimable_context_mb(4 * gib, 8192, 2048, 0) == 3072 * 9 / 10);
+  CHECK(conservative_reclaimable_context_mb(4 * gib, 8192, 2048, 1024) == 2048 * 9 / 10);
+  CHECK(conservative_reclaimable_context_mb(gib, 8192, 2048, 1024) == 0);
+}
+
+TEST_CASE("GPU compute without a GPU device is degraded", "[llama][health]") {
+  using inferdeck::llama_wrapper::gpu_compute_unavailable;
+  using inferdeck::model::ModelCompute;
+  CHECK(gpu_compute_unavailable(ModelCompute::VulkanGpu, 0));
+  CHECK_FALSE(gpu_compute_unavailable(ModelCompute::VulkanGpu, 1));
+  CHECK_FALSE(gpu_compute_unavailable(ModelCompute::Cpu, 0));
 }

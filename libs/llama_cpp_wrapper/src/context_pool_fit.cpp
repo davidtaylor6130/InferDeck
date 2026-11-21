@@ -153,6 +153,35 @@ foundation::Result<bool> check_available(
 
 } // namespace
 
+
+foundation::Result<std::size_t> context_pool_kv_bytes(
+    const llama_context* context) try {
+  std::size_t total = 0;
+  if (context == nullptr) return total;
+  const llama_memory_breakdown breakdown = llama_get_memory_breakdown(context);
+  for (const auto& [buffer_type, data] : breakdown) {
+    if (ggml_backend_buft_is_host(buffer_type)) continue;
+    const auto next = checked_add(total, data.context);
+    if (!next) return std::unexpected(next.error());
+    total = *next;
+  }
+  return total;
+} catch (...) {
+  return foundation::Err<std::size_t>(
+      foundation::ErrorCode::Internal, "context pool kv snapshot failed");
+}
+
+int conservative_reclaimable_context_mb(
+    std::size_t kv_bytes, std::int64_t capacity, std::int64_t minimum,
+    int vram_safety_margin_mb) {
+  if (capacity <= minimum || capacity <= 0) return 0;
+  const std::int64_t kv_mb = static_cast<std::int64_t>(kv_bytes / kMib);
+  const std::int64_t freed = kv_mb * (capacity - minimum) / capacity -
+      std::max(0, vram_safety_margin_mb);
+  if (freed <= 0) return 0;
+  return static_cast<int>(std::min<std::int64_t>(
+      freed * 9 / 10, std::numeric_limits<int>::max()));
+}
 foundation::Result<std::size_t> context_pool_device_memory_bytes(
     const llama_context* target_context,
     const llama_context* draft_context) try {
@@ -186,6 +215,19 @@ foundation::Result<std::size_t> context_pool_device_memory_bytes(
   return foundation::Err<std::size_t>(
       foundation::ErrorCode::Internal,
       "context pool memory snapshot failed");
+}
+
+std::size_t gpu_device_count(const llama_model_params& params) {
+  std::size_t count = 0;
+  if (params.devices) {
+    while (params.devices[count]) ++count;
+    return count;
+  }
+  for (std::size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+    const enum ggml_backend_dev_type type = ggml_backend_dev_type(ggml_backend_dev_get(i));
+    if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) ++count;
+  }
+  return count;
 }
 
 foundation::Result<int> fit_context_pool(
@@ -226,15 +268,7 @@ foundation::Result<int> fit_context_pool(
       const_cast<model::LifecycleControl*>(&control);
 
   std::vector<float> single_device_split(llama_max_devices(), 0.0f);
-  std::size_t gpu_count = 0;
-  if (probe_model_params.devices) {
-    while (probe_model_params.devices[gpu_count]) ++gpu_count;
-  } else {
-    for (std::size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-      const enum ggml_backend_dev_type type = ggml_backend_dev_type(ggml_backend_dev_get(i));
-      if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) ++gpu_count;
-    }
-  }
+  const std::size_t gpu_count = gpu_device_count(probe_model_params);
   if (!probe_model_params.tensor_split && gpu_count == 1 && !single_device_split.empty()) {
     single_device_split[0] = 1.0f;
     probe_model_params.tensor_split = single_device_split.data();

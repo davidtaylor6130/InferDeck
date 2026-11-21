@@ -7,9 +7,11 @@
 #include "transcription_chunking.hpp"
 #include "foundation/json_utils.hpp"
 #include "foundation/logging.hpp"
+#include "model/image_probe.hpp"
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>

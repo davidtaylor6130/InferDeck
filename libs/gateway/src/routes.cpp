@@ -548,7 +548,21 @@ EnsureLoadedResult ensure_model_loaded(
     if (deps.coordinator.is_ready(model_name)) {
         return {true, 200, "", "", foundation::ErrorCode::Ok};
     }
+    if (deps.auto_load_blocked && deps.auto_load_blocked()) {
+        const auto gated = deps.coordinator.registry().get_info_result(model_name);
+        if (gated && gated->compute != model::ModelCompute::Cpu) {
+            return {false, 503, "gpu_lost_backoff",
+                    "GPU runtime restarted repeatedly after a lost device; automatic loads are paused, swap to a model manually to retry",
+                    foundation::ErrorCode::Unavailable};
+        }
+    }
     if (!deps.auto_swap) {
+        const auto unhealthy = deps.coordinator.unhealthy_models();
+        if (std::find(unhealthy.begin(), unhealthy.end(), model_name) != unhealthy.end()) {
+            return {false, 503, "model_unhealthy",
+                    "model backend is unhealthy after a GPU runtime failure; the gateway restarts automatically if the device was lost",
+                    foundation::ErrorCode::Unavailable};
+        }
         return {false, 503, "model_not_loaded",
                 "model not loaded; POST /api/inferdeck/v1/swap/to/" +
                     model_name + " then retry",
@@ -644,7 +658,7 @@ void handle_swap_cancel(const httplib::Request& req, httplib::Response& resp,
         write_json(resp, 200, {{"status", "idle"}, {"message", "no swap in progress"}});
         return;
     }
-    deps.coordinator.request_swap_cancel();
+    deps.coordinator.request_swap_cancel(snap.swapping ? snap.target : std::string{});
     LOG_INFO("swap_cancel_requested", "target={}", snap.target);
     write_json(resp, 202, {{"status", "cancelling"}, {"target", snap.target}});
 }
@@ -667,6 +681,7 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
         {"vram_usage_mb", deps.coordinator.get_vram_usage()},
         {"vram_budget_mb", deps.coordinator.vram_budget_mb()},
         {"vram_available_mb", deps.coordinator.vram_available_mb()},
+        {"unhealthy_models", deps.coordinator.unhealthy_models()},
         {"resource_decision", deps.coordinator.last_resource_decision()},
         {"active_requests", deps.coordinator.active_request_count()},
         {"swapping", snap.swapping},
@@ -697,6 +712,7 @@ void handle_swap_status(const httplib::Request& req, httplib::Response& resp,
             {"estimated_vram_mb", resident.estimated_vram_mb},
             {"primary", resident.primary},
             {"resizing", resident.resizing},
+            {"healthy", resident.healthy},
         });
     }
     write_json(resp, 200, body);

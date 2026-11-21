@@ -39,6 +39,7 @@ public:
     std::function<void()> load_gate{};
     std::atomic<bool> loaded{false};
     std::atomic<bool> healthy{true};
+    std::atomic<bool> degraded{false};
     std::atomic<int> vram_mb{4096};
     std::atomic<int> additional_vram_mb{0};
     std::atomic<int> reclaimable_mb{0};
@@ -97,6 +98,7 @@ public:
     }
 
     bool is_loaded() const override { return loaded.load(); }
+    bool compute_degraded() const override { return degraded.load(); }
     bool execution_healthy() const override {
         if (reclaim_in_progress.load()) ++guarded_query_count;
         return healthy.load();
@@ -105,6 +107,7 @@ public:
     bool can_reclaim_idle_context() const override {
         return reclaimable_mb.load() > 0;
     }
+    int reclaimable_idle_context_mb() const override { return reclaimable_mb.load(); }
     Result<bool> reclaim_idle_context(int reserve_mb, const LifecycleControl& control) override {
         if (control.is_cancelled()) return Err<bool>(ErrorCode::Cancelled, "cancelled");
         record("reclaim_context", std::to_string(reserve_mb));
@@ -1325,6 +1328,65 @@ TEST_CASE("BackendCoordinator: default VRAM reserve leaves 2048 MB free",
     CHECK(coordinator.vram_available_mb() == 32476 - 2048);
 }
 
+TEST_CASE("BackendCoordinator: safety margin absorbs observed desktop VRAM",
+          "[model][coordinator][residency]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.n_slots = 1;
+    chat.min_slots = 1;
+    chat.vram_required_mb = 30000;
+    registry.register_model(chat);
+
+    SECTION("desktop usage below the margin is not reserved twice") {
+        BackendCoordinator coordinator(registry);
+        coordinator.set_vram_budget(32476, 2048);
+        coordinator.update_vram_observation(750, 32624);
+        CHECK(coordinator.vram_available_mb() == 32476 - 2048);
+        CHECK(coordinator.swap_to("chat").has_value());
+        CHECK(coordinator.is_loaded("chat"));
+    }
+    SECTION("desktop usage above the margin still blocks the load") {
+        BackendCoordinator coordinator(registry);
+        coordinator.set_vram_budget(32476, 2048);
+        coordinator.update_vram_observation(3000, 32624);
+        CHECK(coordinator.vram_available_mb() == 32476 - 3000);
+        CHECK_FALSE(coordinator.swap_to("chat").has_value());
+        CHECK_FALSE(coordinator.is_loaded("chat"));
+    }
+    SECTION("desktop usage equal to the margin is reserved once") {
+        BackendCoordinator coordinator(registry);
+        coordinator.set_vram_budget(32476, 2048);
+        coordinator.update_vram_observation(2048, 32624);
+        CHECK(coordinator.vram_available_mb() == 32476 - 2048);
+    }
+    auto small = make_info("small");
+    small.n_slots = 1;
+    small.min_slots = 1;
+    small.vram_required_mb = 20000;
+    registry.register_model(small);
+    SECTION("resident usage is not counted as desktop usage") {
+        BackendCoordinator coordinator(registry);
+        coordinator.set_vram_budget(32476, 2048);
+        REQUIRE(coordinator.swap_to("small").has_value());
+        coordinator.update_vram_observation(20000 + 750, 32624);
+        CHECK(coordinator.vram_available_mb() == 32476 - 2048 - 20000);
+    }
+    SECTION("overestimated resident keeps the full margin") {
+        BackendCoordinator coordinator(registry);
+        coordinator.set_vram_budget(32476, 2048);
+        REQUIRE(coordinator.swap_to("small").has_value());
+        coordinator.update_vram_observation(18000, 32624);
+        CHECK(coordinator.vram_available_mb() == 32476 - 2048 - 18000);
+    }
+}
+
 TEST_CASE("BackendCoordinator: live headroom preserves an overestimated resident model",
           "[model][coordinator][residency][concurrency]") {
     ModelRegistry registry;
@@ -2105,6 +2167,191 @@ TEST_CASE("BackendCoordinator: runnable voice bypasses a busy loaded waiter",
     waiter.join();
     REQUIRE(queued);
     REQUIRE(coordinator.release_slot("chat", *queued));
+}
+
+namespace {
+
+void register_competing_models(ModelRegistry& reg) {
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        return backend;
+    });
+    for (const char* name : {"a", "b"}) {
+        auto info = make_info(name);
+        info.vram_required_mb = 5000;
+        info.n_slots = 1;
+        info.min_slots = 1;
+        reg.register_model(info);
+    }
+}
+
+void run_turn_on_a(BackendCoordinator& coordinator) {
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::seconds{2};
+    options.prepare = [&] { return coordinator.swap_to("a"); };
+    auto slot = coordinator.acquire_slot("a", options);
+    REQUIRE(slot);
+    REQUIRE(coordinator.release_slot("a", *slot));
+}
+
+}
+
+TEST_CASE("BackendCoordinator: swap hysteresis keeps a warm model across a tool-call gap",
+          "[model][coordinator][queue][residency]") {
+    ModelRegistry reg;
+    register_competing_models(reg);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(5000, 0);
+    coordinator.set_swap_hysteresis(std::chrono::milliseconds{300},
+                                    std::chrono::seconds{5});
+    run_turn_on_a(coordinator);
+
+    const auto b_started = std::chrono::steady_clock::now();
+    Result<int> b_slot = Err<int>(ErrorCode::Internal, "not completed");
+    std::jthread other_agent([&] {
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{5};
+        options.prepare = [&] { return coordinator.swap_to("b"); };
+        b_slot = coordinator.acquire_slot("b", options);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    run_turn_on_a(coordinator);
+    CHECK(coordinator.is_loaded("a"));
+    CHECK_FALSE(coordinator.is_loaded("b"));
+
+    other_agent.join();
+    REQUIRE(b_slot);
+    CHECK(coordinator.is_loaded("b"));
+    CHECK(std::chrono::steady_clock::now() - b_started >= std::chrono::milliseconds{350});
+    REQUIRE(coordinator.release_slot("b", *b_slot));
+}
+
+TEST_CASE("BackendCoordinator: swap hysteresis is bounded and bypassable",
+          "[model][coordinator][queue][residency]") {
+    ModelRegistry reg;
+    register_competing_models(reg);
+    BackendCoordinator coordinator(reg);
+    int budget = 5000;
+    int priority = 0;
+    auto hold = std::chrono::milliseconds{10000};
+    auto quantum = std::chrono::milliseconds{10000};
+    auto max_wait = std::chrono::milliseconds{1000};
+    bool a_keeps_working = false;
+    SECTION("quantum ends deferral while the other agent keeps the model warm") {
+        hold = std::chrono::milliseconds{300};
+        quantum = std::chrono::milliseconds{800};
+        max_wait = std::chrono::milliseconds{3000};
+        a_keeps_working = true;
+    }
+    SECTION("higher priority skips deferral") { priority = 10; }
+    SECTION("co-resident fit skips deferral") { budget = 10000; }
+    coordinator.set_vram_budget(budget, 0);
+    coordinator.set_swap_hysteresis(hold, quantum);
+    run_turn_on_a(coordinator);
+
+    std::jthread agent_a([&](std::stop_token stop) {
+        while (a_keeps_working && !stop.stop_requested()) {
+            AcquireSlotOptions options;
+            options.timeout = std::chrono::seconds{5};
+            options.prepare = [&] { return coordinator.swap_to("a"); };
+            auto slot = coordinator.acquire_slot("a", options);
+            if (slot) (void)coordinator.release_slot("a", *slot);
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+    });
+    const auto started = std::chrono::steady_clock::now();
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::seconds{5};
+    options.priority = priority;
+    options.prepare = [&] { return coordinator.swap_to("b"); };
+    auto b_slot = coordinator.acquire_slot("b", options);
+    REQUIRE(b_slot);
+    const auto waited = std::chrono::steady_clock::now() - started;
+    CHECK(waited < max_wait);
+    if (a_keeps_working) CHECK(waited >= std::chrono::milliseconds{700});
+    CHECK(coordinator.is_loaded("b"));
+    CHECK(coordinator.is_loaded("a") == (budget == 10000));
+    REQUIRE(coordinator.release_slot("b", *b_slot));
+}
+
+TEST_CASE("BackendCoordinator: swap hysteresis does not delay a co-resident load admitted by idle context reclaim",
+          "[model][coordinator][queue][residency][context-reclaim]") {
+    ModelRegistry reg;
+    IModelMock* warm = nullptr;
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        if (i.name == "a") warm = backend.get();
+        return backend;
+    });
+    for (const char* name : {"a", "b"}) {
+        auto info = make_info(name);
+        info.vram_required_mb = 5000;
+        info.n_slots = 1;
+        info.min_slots = 1;
+        reg.register_model(info);
+    }
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(8000, 0);
+    coordinator.set_swap_hysteresis(std::chrono::seconds{10}, std::chrono::seconds{10});
+    run_turn_on_a(coordinator);
+    REQUIRE(warm);
+    warm->reclaimable_mb.store(2000);
+
+    const auto started = std::chrono::steady_clock::now();
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::seconds{5};
+    options.prepare = [&] { return coordinator.swap_to("b"); };
+    auto b_slot = coordinator.acquire_slot("b", options);
+    REQUIRE(b_slot);
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{2});
+    CHECK(coordinator.is_loaded("a"));
+    CHECK(coordinator.is_loaded("b"));
+    CHECK(warm->reclaimable_mb.load() == 0);
+    REQUIRE(coordinator.release_slot("b", *b_slot));
+}
+
+TEST_CASE("BackendCoordinator: insufficient idle context reclaim does not evict a warm model during the swap hold",
+          "[model][coordinator][queue][residency][context-reclaim]") {
+    ModelRegistry reg;
+    IModelMock* warm = nullptr;
+    reg.set_factory([&](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(1);
+        backend->busy_slots.assign(1, 0);
+        if (i.name == "a") warm = backend.get();
+        return backend;
+    });
+    for (const char* name : {"a", "b"}) {
+        auto info = make_info(name);
+        info.vram_required_mb = 5000;
+        info.n_slots = 1;
+        info.min_slots = 1;
+        reg.register_model(info);
+    }
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(8000, 0);
+    coordinator.set_swap_hysteresis(std::chrono::seconds{10}, std::chrono::seconds{10});
+    run_turn_on_a(coordinator);
+    REQUIRE(warm);
+    warm->reclaimable_mb.store(1000);
+
+    AcquireSlotOptions options;
+    options.timeout = std::chrono::milliseconds{1000};
+    options.prepare = [&] { return coordinator.swap_to("b"); };
+    auto b_slot = coordinator.acquire_slot("b", options);
+    CHECK_FALSE(b_slot);
+    CHECK(coordinator.is_loaded("a"));
+    CHECK_FALSE(coordinator.is_loaded("b"));
+    CHECK(warm->reclaimable_mb.load() == 1000);
+    CHECK(warm->n_slots() == 1);
+    CHECK(warm->vram_mb.load() == 5000);
 }
 
 TEST_CASE("BackendCoordinator: one cold prepare completes before another can swap",
@@ -3152,6 +3399,20 @@ TEST_CASE("BackendCoordinator: co-resident borrower yields when the lender needs
         }
         return details;
     };
+    SECTION("an opportunistic restore respects the swap hold while a forced one does not") {
+        coordinator.set_swap_hysteresis(std::chrono::seconds{10}, std::chrono::seconds{10});
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        mark_restore();
+        REQUIRE(coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 3000, 1, 3000, 1}, control()));
+        CHECK(coordinator.is_loaded(compact.name));
+        CHECK(lender->pool_capacity.load() == 4000);
+        REQUIRE(coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 6000, 1, 6000, 1}, control()));
+        CHECK_FALSE(coordinator.is_loaded(compact.name));
+        CHECK(lender->pool_capacity.load() == 8000);
+    }
     SECTION("a busy borrower does not block a request that fits") {
         REQUIRE(coordinator.swap_to(compact.name));
         lender->pool_capacity.store(4000);
@@ -4210,4 +4471,49 @@ TEST_CASE("BackendCoordinator: a queued background media waiter does not stall p
         if (slot) REQUIRE(coordinator.release_slot("chat", *slot).has_value());
     }
     REQUIRE(coordinator.release_slot("voice", *running).has_value());
+}
+
+TEST_CASE("coordinator lists degraded models only while loaded", "[coordinator][health]")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel>
+    {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots.store(info.n_slots);
+        backend->busy_slots.assign(info.n_slots, 0);
+        return backend;
+    });
+    registry.register_model(make_info("gpu"));
+    BackendCoordinator coordinator(registry);
+    CHECK(coordinator.degraded_models().empty());
+    REQUIRE(coordinator.load("gpu"));
+    CHECK(coordinator.degraded_models().empty());
+    as_mock(const_cast<IModel*>(coordinator.get_model("gpu")))->degraded.store(true);
+    CHECK(coordinator.degraded_models() == std::vector<std::string>{"gpu"});
+    CHECK(coordinator.unhealthy_models().empty());
+    REQUIRE(coordinator.unload("gpu"));
+    CHECK(coordinator.degraded_models().empty());
+}
+
+TEST_CASE("coordinator reports an unhealthy model and recovers it on the next load", "[coordinator][health]")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel>
+    {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots.store(info.n_slots);
+        backend->busy_slots.assign(info.n_slots, 0);
+        return backend;
+    });
+    registry.register_model(make_info("gpu"));
+    BackendCoordinator coordinator(registry);
+    REQUIRE(coordinator.load("gpu"));
+    CHECK(coordinator.unhealthy_models().empty());
+    as_mock(const_cast<IModel*>(coordinator.get_model("gpu")))->healthy.store(false);
+    CHECK(coordinator.unhealthy_models() == std::vector<std::string>{"gpu"});
+    CHECK_FALSE(coordinator.residency().front().healthy);
+    CHECK_FALSE(coordinator.is_ready("gpu"));
+    REQUIRE(coordinator.ensure_loaded("gpu"));
+    CHECK(coordinator.is_ready("gpu"));
+    CHECK(coordinator.unhealthy_models().empty());
 }

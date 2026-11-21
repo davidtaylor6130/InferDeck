@@ -129,6 +129,9 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["transcription_decoded_budget_mb"]) cfg.transcription_decoded_budget_mb = g["transcription_decoded_budget_mb"].as<int>();
         if (g["transcription_max_body_mb"]) cfg.transcription_max_body_mb = g["transcription_max_body_mb"].as<int>();
         if (g["speech_admission_timeout_ms"]) cfg.speech_admission_timeout_ms = g["speech_admission_timeout_ms"].as<int>();
+        if (g["swap_hold_ms"]) cfg.swap_hold_ms = g["swap_hold_ms"].as<int>();
+        if (g["swap_quantum_ms"]) cfg.swap_quantum_ms = g["swap_quantum_ms"].as<int>();
+        if (g["default_model_preload_delay_ms"]) cfg.default_model_preload_delay_ms = g["default_model_preload_delay_ms"].as<int>();
         if (g["background_idle_after_seconds"]) {
             cfg.background_idle_after_seconds =
                 g["background_idle_after_seconds"].as<int>();
@@ -232,6 +235,9 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
                 info.mtp_max_active_requests =
                     speculative["max_active_requests"]
                         ? speculative["max_active_requests"].as<int>() : 1;
+                info.max_batch_draft_tokens =
+                    speculative["max_batch_draft_tokens"]
+                        ? speculative["max_batch_draft_tokens"].as<int>() : 8;
             }
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
             info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";

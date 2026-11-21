@@ -56,6 +56,7 @@ struct LlamaCppConfig {
   int mtp_draft_tokens{model::k_default_mtp_draft_tokens};
   float mtp_p_min{0.0f};
   int mtp_max_active_requests{1};
+  int max_batch_draft_tokens{8};
   std::string speculative_type{};
   std::string draft_model_path{};
   bool swa_full{false};
@@ -90,6 +91,7 @@ public:
   inferdeck::foundation::Result<void> unload() override;
   bool is_loaded() const noexcept override { return loaded_.load(); }
   bool execution_healthy() const override;
+  bool compute_degraded() const override { return loaded_.load() && compute_degraded_.load(); }
   void request_cancel() override { cancel_all_.store(true); }
 
   int vram_usage_mb() const noexcept override;
@@ -100,6 +102,7 @@ public:
   int min_slots() const noexcept override { return info_.concurrency_auto ? 1 : info_.min_slots; }
   bool can_resize_slots() const noexcept override;
   bool can_reclaim_idle_context() const override;
+  int reclaimable_idle_context_mb() const override;
   inferdeck::foundation::Result<bool> reclaim_idle_context(
       int additional_reserve_mb,
       const inferdeck::model::LifecycleControl& control) override;
@@ -199,6 +202,7 @@ private:
   inferdeck::model::ModelInfo info_;
   LlamaCppConfig cfg_;
   std::atomic<bool> loaded_{false};
+  std::atomic<bool> compute_degraded_{false};
   std::atomic<bool> cancel_all_{false};
   std::mutex embed_mtx_;
   std::atomic<int> sequence_capacity_{0};

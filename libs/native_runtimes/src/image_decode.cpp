@@ -5,16 +5,24 @@
 #include <memory>
 
 #include "media_io.h"
+#include "model/image_probe.hpp"
 
 namespace inferdeck::native_runtimes {
 
 foundation::Result<DecodedImage> decode_image_rgb(std::span<const std::byte> encoded)
 {
-    constexpr int max_dimension = 8192;
+    constexpr int max_dimension = static_cast<int>(model::kMaxReferenceImageSide);
     if (encoded.empty() || encoded.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
     {
         return foundation::Err<DecodedImage>(foundation::ErrorCode::InvalidArgument,
                                              "reference image is empty or too large");
+    }
+    const auto probe = model::probe_image(encoded);
+    if (!probe || !model::reference_image_within_budget(*probe))
+    {
+        return foundation::Err<DecodedImage>(
+            foundation::ErrorCode::InvalidArgument,
+            "reference image is not a readable PNG, JPEG, or BMP within 8192 pixels per side and 16 megapixels");
     }
     DecodedImage image;
     int channels = 0;
