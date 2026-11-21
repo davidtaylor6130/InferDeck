@@ -1108,6 +1108,16 @@ TEST_CASE("Model discovery reports an alias's resolved target and its limits",
     CHECK(retargeted["limits"]["default_output_tokens"].is_null());
     CHECK(retargeted["has_vision"] == false);
     CHECK(retargeted["alias_contract"]["required_context_tokens"] == 32768);
+
+    inferdeck::model::ModelAlias tiered{"everyday", "small-target", 16384, {"chat_completions"}};
+    tiered.fallbacks = {"large-target"};
+    REQUIRE(routes.registry.set_alias(tiered));
+    const auto fallback = find_entry("everyday");
+    CHECK(fallback["alias_target"] == "small-target");
+    CHECK(fallback["alias_fallbacks"] == nlohmann::json::array({"large-target"}));
+    CHECK(fallback["limits"]["context_tokens"] == 32768);
+    CHECK(fallback["context_size"] == 32768);
+    CHECK(fallback["has_vision"] == false);
 }
 
 TEST_CASE("Configured external models can be unregistered without rewriting unrelated config",
