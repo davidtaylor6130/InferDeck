@@ -444,6 +444,17 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (available_vram_locked() >= required) return foundation::Ok();
+            if (reclaim_bypassed_models_.contains(name)) {
+                const auto waiter = std::find_if(waiters_.begin(), waiters_.end(),
+                    [&name](const SlotWaiter& item) { return item.model == name && item.preparing; });
+                if (waiter != waiters_.end() && swap_deferred_locked(*waiter, clock::now(), false)) {
+                    last_resource_decision_ = "swap to " + name +
+                        " deferred while a recently used model stays resident";
+                    ++resource_generation_;
+                    return foundation::Err<void>(foundation::ErrorCode::ResourceBusy,
+                        "swap held for recently used model: " + name);
+                }
+            }
             for (const auto& [loaded_name, backend] : instances_) {
                 const auto active = active_requests_by_model_.find(loaded_name);
                 const int estimated = backend && backend->is_loaded()

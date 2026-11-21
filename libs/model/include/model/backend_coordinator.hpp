@@ -115,10 +115,6 @@ public:
     foundation::Result<void> release_slot(
         const std::string& name, int slot_id);
     void set_max_queue_size(std::size_t size);
-    /// <summary>Keeps a recently used model resident across agentic tool-call gaps.
-    /// A swap that would evict a model used within <c>hold</c> is deferred until that
-    /// model goes cold or <c>quantum</c> has passed since the later of the waiter's
-    /// enqueue and the warm model's load. Zero <c>hold</c> disables deferral.</summary>
     void set_swap_hysteresis(std::chrono::milliseconds hold,
                              std::chrono::milliseconds quantum);
     [[nodiscard]] std::size_t queued_request_count() const;
@@ -247,7 +243,8 @@ private:
         const std::string& name, const std::string& reservation_key) const;
     bool waiter_is_actionable_locked(const SlotWaiter& waiter) const;
     bool waiter_is_resource_barrier_locked(const SlotWaiter& waiter) const;
-    bool swap_deferred_locked(const SlotWaiter& waiter, time_point now) const;
+    bool swap_deferred_locked(const SlotWaiter& waiter, time_point now,
+        bool reclaim_bypasses = true) const;
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
     foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot, const RequestDemand* demand = nullptr,
@@ -287,6 +284,7 @@ private:
     std::int64_t next_lease_id_{1};
     std::unordered_set<std::string> draining_models_;
     std::unordered_set<std::string> resizing_models_;
+    std::unordered_set<std::string> reclaim_bypassed_models_;
     std::unordered_map<std::string, std::unordered_set<std::string>> context_borrowers_;
     int vram_budget_mb_{0};
     int vram_safety_margin_mb_{1024};

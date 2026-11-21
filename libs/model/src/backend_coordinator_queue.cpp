@@ -201,9 +201,14 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
                     load_waiter->resource_blocked = true;
                     load_waiter->prepared = false;
                     const auto generation_before = resource_generation_;
+                    const bool reclaim_bypassed =
+                        !swap_deferred_locked(*load_waiter, now) &&
+                        swap_deferred_locked(*load_waiter, now, false);
+                    if (reclaim_bypassed) reclaim_bypassed_models_.insert(name);
                     lock.unlock();
                     auto prepared = opts.prepare();
                     lock.lock();
+                    if (reclaim_bypassed) reclaim_bypassed_models_.erase(name);
                     load_waiter = std::find_if(waiters_.begin(), waiters_.end(),
                         [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
                     if (load_waiter != waiters_.end()) load_waiter->preparing = false;
@@ -644,12 +649,8 @@ bool BackendCoordinator::waiter_is_resource_barrier_locked(const SlotWaiter& wai
     return waiter.resource_blocked && !model_is_independent_sidecar_locked(waiter.model);
 }
 
-/// <summary>True while loading the waiter's model would evict a model that is executing
-/// or was used within <c>swap_hold_</c>. Each warm model keeps that protection for
-/// <c>swap_quantum_</c> after the later of the waiter's enqueue and its own load, so a
-/// swap always buys at least one quantum of residency. Higher priority and voice media
-/// bypass it.</summary>
-bool BackendCoordinator::swap_deferred_locked(const SlotWaiter& waiter, time_point now) const
+bool BackendCoordinator::swap_deferred_locked(const SlotWaiter& waiter, time_point now,
+    bool reclaim_bypasses) const
 {
     if (swap_hold_ <= std::chrono::milliseconds::zero() ||
         model_is_priority_media_locked(waiter.model)) return false;
@@ -657,7 +658,7 @@ bool BackendCoordinator::swap_deferred_locked(const SlotWaiter& waiter, time_poi
     if (own != instances_.end() && own->second && own->second->is_loaded()) return false;
     const auto info = registry_.get_info_result(waiter.model);
     if (!info || (vram_budget_mb_ > 0 && available_vram_locked() >= info->vram_required_mb)) return false;
-    for (const auto& [name, backend] : instances_) {
+    if (reclaim_bypasses) for (const auto& [name, backend] : instances_) {
         const auto active = active_requests_by_model_.find(name);
         if (name != waiter.model && !resizing_models_.contains(name) &&
             (active == active_requests_by_model_.end() || active->second == 0) &&
