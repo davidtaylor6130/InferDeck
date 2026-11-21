@@ -547,11 +547,19 @@ EnsureLoadedResult ensure_model_loaded(
     if (deps.coordinator.is_ready(model_name)) {
         return {true, 200, "", "", foundation::ErrorCode::Ok};
     }
+    if (deps.auto_load_blocked && deps.auto_load_blocked()) {
+        const auto gated = deps.coordinator.registry().get_info_result(model_name);
+        if (gated && gated->compute != model::ModelCompute::Cpu) {
+            return {false, 503, "gpu_lost_backoff",
+                    "GPU runtime restarted repeatedly after a lost device; automatic loads are paused, swap to a model manually to retry",
+                    foundation::ErrorCode::Unavailable};
+        }
+    }
     if (!deps.auto_swap) {
         const auto unhealthy = deps.coordinator.unhealthy_models();
         if (std::find(unhealthy.begin(), unhealthy.end(), model_name) != unhealthy.end()) {
             return {false, 503, "model_unhealthy",
-                    "model backend is unhealthy; swap to it again or restart the gateway",
+                    "model backend is unhealthy after a GPU runtime failure; the gateway restarts automatically if the device was lost",
                     foundation::ErrorCode::Unavailable};
         }
         return {false, 503, "model_not_loaded",

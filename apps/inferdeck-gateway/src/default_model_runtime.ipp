@@ -1,11 +1,67 @@
 std::atomic<bool> g_gpu_lost_restart{false};
 constexpr int gpu_lost_exit_code = 76;
 
+std::atomic<long long> g_gpu_backoff_until{0};
+
+long long unix_seconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+fs::path gpu_lost_stamp_path() { return executable_dir() / "gpu-lost-restarts.txt"; }
+
+std::vector<long long> read_gpu_lost_stamps() {
+    std::vector<long long> stamps;
+    std::ifstream in(gpu_lost_stamp_path());
+    for (long long value; in >> value;) stamps.push_back(value);
+    return stamps;
+}
+
+void record_gpu_lost_restart() {
+    auto stamps = read_gpu_lost_stamps();
+    stamps.push_back(unix_seconds());
+    if (stamps.size() > 10) stamps.erase(stamps.begin(), stamps.end() - 10);
+    std::ofstream out(gpu_lost_stamp_path(), std::ios::trunc);
+    for (const auto stamp : stamps) out << stamp << std::endl;
+}
+
+bool gpu_backoff_active(const model::BackendCoordinator& coordinator) {
+    return g_gpu_backoff_until.load() > unix_seconds() && !coordinator.get_loaded_model();
+}
+
+void configure_gpu_lost_backoff(inferdeck::gateway::GatewayDeps& deps) {
+    const auto now = unix_seconds();
+    const auto stamps = read_gpu_lost_stamps();
+    const auto recent = std::count_if(stamps.begin(), stamps.end(),
+                                      [now](long long stamp) { return now - stamp <= 600; });
+    if (recent >= 2 && now - stamps.back() < 1800) {
+        g_gpu_backoff_until.store(stamps.back() + 1800);
+        foundation::LOG_WARN("gpu_lost_backoff", "restarts_10min={} until_unix={}", recent, stamps.back() + 1800);
+    }
+    deps.auto_load_blocked = [&coordinator = deps.coordinator] { return gpu_backoff_active(coordinator); };
+}
+
+nlohmann::json build_health_json(const model::BackendCoordinator& coordinator, bool db_healthy) {
+    const auto unhealthy = coordinator.unhealthy_models();
+    const bool backoff = gpu_backoff_active(coordinator);
+    nlohmann::json body = {{"ok", unhealthy.empty() && !backoff},
+                           {"status", unhealthy.empty() && !backoff ? "ok" : "degraded"},
+                           {"unhealthy_models", unhealthy},
+                           {"db_healthy", db_healthy},
+                           {"version", inferdeck::app::build_version},
+                           {"build_revision", inferdeck::app::build_revision},
+                           {"build_dirty", inferdeck::app::build_dirty}};
+    if (backoff) body["reason"] = "gpu_lost_backoff";
+    return body;
+}
+
 void install_gpu_lost_handler() {
     inferdeck::provider::set_fatal_device_handler([](const std::string& runtime, const std::string& message) {
         foundation::LOG_FATAL("gpu_device_lost_restart", "runtime={} error={}", runtime, message);
+        record_gpu_lost_restart();
         g_gpu_lost_restart.store(true);
         g_stop.store(true);
+        if (auto* coordinator = g_coordinator.load()) coordinator->request_shutdown();
     });
 }
 
@@ -18,7 +74,8 @@ std::thread start_default_model_loader(model::BackendCoordinator& coordinator,
         if (!inferdeck::gateway::wait_for_default_preload(
                 std::chrono::milliseconds{delay_ms}, aborted,
                 [&coordinator] {
-                    return !coordinator.get_loaded_models().empty() || coordinator.swap_in_progress();
+                    return coordinator.get_loaded_model().has_value() || coordinator.swap_in_progress() ||
+                           gpu_backoff_active(coordinator);
                 })) {
             g_default_model_loading.store(false);
             return;

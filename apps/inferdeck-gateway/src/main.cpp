@@ -188,6 +188,7 @@ int run_gateway(const fs::path& config_path) {
     GatewayDeps deps{coordinator, "15", cfg.auto_swap, cfg.default_model,
                      cfg.voice_session_grace_ms, &metrics, &stats_db,
                      &events, &swap_tracker, &maintenance_resource};
+    configure_gpu_lost_backoff(deps);
     deps.media_default_models = cfg.media_default_models;
     deps.api_keys = api_keys;
     deps.background_idle_after_seconds = cfg.background_idle_after_seconds;
@@ -621,15 +622,7 @@ int run_gateway(const fs::path& config_path) {
     server.Get(control_api_pattern("/health"),
                wrap([&](const httplib::Request&,
                         httplib::Response& resp) {
-        resp.set_content(nlohmann::json{
-                             {"ok", coordinator.unhealthy_models().empty()},
-                             {"status", coordinator.unhealthy_models().empty() ? "ok" : "degraded"},
-                             {"unhealthy_models", coordinator.unhealthy_models()},
-                             {"db_healthy", stats_db.healthy()},
-                             {"version", inferdeck::app::build_version},
-                             {"build_revision", inferdeck::app::build_revision},
-                             {"build_dirty", inferdeck::app::build_dirty}}.dump(),
-                         "application/json");
+        resp.set_content(build_health_json(coordinator, stats_db.healthy()).dump(), "application/json");
     }));
     auto request_config_reload = [] {
         g_reload.store(true);
@@ -709,7 +702,7 @@ int run_gateway(const fs::path& config_path) {
         LOG_FATAL("shutdown_deadline_exceeded",
                   "backend lifecycle did not quiesce within 120 seconds");
         foundation::Logger::instance().shutdown();
-        std::quick_exit(2);
+        std::quick_exit(g_gpu_lost_restart.load() ? gpu_lost_exit_code : 2);
     }
     if (default_model_loader.joinable()) default_model_loader.join();
     swap_tracker.join();

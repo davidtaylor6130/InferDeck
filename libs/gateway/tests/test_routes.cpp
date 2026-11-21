@@ -4909,3 +4909,23 @@ TEST_CASE("default model preload waits, then yields to aborts and resident model
     CHECK_FALSE(wait_for_default_preload(std::chrono::seconds{30}, [] { return true; }, never));
     CHECK(std::chrono::steady_clock::now() - early < std::chrono::seconds{1});
 }
+
+TEST_CASE("ensure_model_loaded: GPU-lost backoff pauses automatic GPU loads", "[gateway][backoff]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+    deps.auto_load_blocked = [] { return true; };
+
+    const auto result = ensure_model_loaded(deps, "a");
+
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.code == "gpu_lost_backoff");
+    REQUIRE_FALSE(coordinator.is_loaded("a"));
+}
