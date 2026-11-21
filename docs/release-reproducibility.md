@@ -16,7 +16,9 @@ The Windows release environment is pinned to:
   against SHA-256
   `48b132169b64fe65cdb0f20970195335a65354e73f1ea5373032c2a8bbad4297`;
 - vcpkg baseline `77df67cfff9c12ccfdb52284e07c87c75092f723`;
-- llama.cpp submodule `d92ea9bb126ab957849dd0c0f1f881a64de7dc86`;
+- llama.cpp submodule `0ea4ffd007514d5dfd47cb57360e21079d5f7810` (upstream
+  `b12614` plus the approved, unmerged Vulkan fix ggml-org/llama.cpp#32735; the
+  commit is fetchable by SHA from ggml-org/llama.cpp);
 - Vulkan-Headers submodule `015e25c3c91b70eb1a754d36fb14c4ba6ad9b0b9`;
 - stable-diffusion.cpp submodule `01c463a223203f374f70b2a0aa83c1301cdbcaae`,
   built against llama.cpp's ggml (`SD_USE_UPSTREAM_GGML=ON`);
