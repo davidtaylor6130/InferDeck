@@ -1,5 +1,3 @@
-// The Jev-Style decision runtime as a v2 provider DLL, with its own static
-// llama.cpp. See docs/providers.md.
 #include "decision_runtime/jev_style.hpp"
 #include "llama.h"
 #include "provider/sdk.hpp"
