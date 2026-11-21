@@ -355,7 +355,7 @@ void BackendCoordinator::drain_active(std::chrono::milliseconds timeout) {
 
 void BackendCoordinator::request_shutdown() {
     shutting_down_.store(true);
-    swap_cancel_.store(true);
+    request_swap_cancel();
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& [name, backend] : instances_) {
         if (backend) backend->request_cancel();

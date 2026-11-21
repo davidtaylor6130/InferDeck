@@ -347,3 +347,39 @@ TEST_CASE("BackendCoordinator: swap deadline bounds a blocking capacity resize",
   REQUIRE(c.get_backend("resident")->n_slots() == 2);
   REQUIRE_FALSE(c.is_loaded("target"));
 }
+
+TEST_CASE("BackendCoordinator: targeted cancel leaves a concurrent swap running",
+          "[coordinator][cancel]") {
+  ModelRegistry reg;
+  std::atomic<int> acq{0};
+  std::atomic<bool> entered{false};
+  reg.set_factory([&](const ModelInfo& info) {
+    return std::make_unique<BlockingLoadModel>(info, &acq, &entered);
+  });
+  for (const char* n : {"a", "b"}) {
+    ModelInfo info;
+    info.name = n;
+    info.gguf_path = "C:/fake.gguf";
+    info.n_slots = 1;
+    reg.register_model(info);
+  }
+  BackendCoordinator c(reg);
+  auto first = std::async(std::launch::async, [&] {
+    return c.swap_to_cancellable("a", std::chrono::milliseconds{400});
+  });
+  const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds{250};
+  while (!entered.load() && std::chrono::steady_clock::now() < until) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+  auto second = std::async(std::launch::async, [&] {
+    return c.swap_to_cancellable("b", std::chrono::seconds{5});
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds{50});
+  c.request_swap_cancel("b");
+  const auto b = second.get();
+  REQUIRE_FALSE(b);
+  REQUIRE(b.error().code == ErrorCode::Cancelled);
+  const auto a = first.get();
+  REQUIRE_FALSE(a);
+  REQUIRE(a.error().code == ErrorCode::Timeout);
+}

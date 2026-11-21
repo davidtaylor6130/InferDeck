@@ -377,45 +377,60 @@ foundation::Result<void> BackendCoordinator::swap_to_with_control(
   return loaded;
 }
 
+void BackendCoordinator::request_swap_cancel(const std::string& target) {
+  std::lock_guard<std::mutex> lock(swap_tokens_mutex_);
+  if (swap_tokens_.empty()) {
+    if (target.empty()) swap_cancel_.store(true);
+    return;
+  }
+  for (auto& [name, token] : swap_tokens_) {
+    if (target.empty() || name == target) token->store(true);
+  }
+}
+
 foundation::Result<void> BackendCoordinator::swap_to_cancellable(
     const std::string& name, std::chrono::milliseconds timeout,
     std::function<bool()> cancelled) {
+  auto token = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(swap_tokens_mutex_);
+    if (swap_cancel_.exchange(false)) token->store(true);
+    swap_tokens_.emplace_back(name, token);
+  }
+  struct TokenGuard {
+    BackendCoordinator& self;
+    std::shared_ptr<std::atomic<bool>> token;
+    ~TokenGuard() {
+      std::lock_guard<std::mutex> lock(self.swap_tokens_mutex_);
+      std::erase_if(self.swap_tokens_, [&](const auto& e) { return e.second == token; });
+    }
+  } guard{*this, token};
   const LifecycleControl control{
       clock::now() + timeout,
-      [this, cancelled = std::move(cancelled)] {
-        return swap_cancel_.load() || (cancelled && cancelled());
+      [this, token, cancelled = std::move(cancelled)] {
+        return token->load() || shutting_down_.load() || (cancelled && cancelled());
       }};
   auto info = registry_.get_info_result(name);
   if (!info) return foundation::Err<void>(info.error().code, info.error().message);
   if (is_independent_sidecar(*info)) {
-    if (swap_cancel_.load()) {
-      reset_swap_cancel();
+    if (token->load()) {
       return foundation::Err(foundation::ErrorCode::Cancelled,
                              "swap cancelled before sidecar load");
     }
-    auto result = load_with_lock_deadline(
-        name, control.deadline, control.cancelled);
-    reset_swap_cancel();
-    return result;
+    return load_with_lock_deadline(name, control.deadline, control.cancelled);
   }
   if (is_ready(name)) return foundation::Ok();
-  if (swap_cancel_.load()) {
-    reset_swap_cancel();
+  if (token->load()) {
     return foundation::Err(foundation::ErrorCode::Cancelled, "swap cancelled before start");
   }
   swap_in_progress_.store(true);
   foundation::Result<void> result;
   try {
-    if (swap_cancel_.load()) {
-      result = foundation::Err(foundation::ErrorCode::Cancelled, "swap cancelled before load");
-    } else {
-      result = swap_to_with_control(name, control);
-    }
+    result = swap_to_with_control(name, control);
   } catch (...) {
     result = foundation::Err(foundation::ErrorCode::Internal, "swap threw");
   }
   swap_in_progress_.store(false);
-  reset_swap_cancel();
   return result;
 }
 

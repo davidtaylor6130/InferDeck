@@ -643,7 +643,7 @@ void handle_swap_cancel(const httplib::Request& req, httplib::Response& resp,
         write_json(resp, 200, {{"status", "idle"}, {"message", "no swap in progress"}});
         return;
     }
-    deps.coordinator.request_swap_cancel();
+    deps.coordinator.request_swap_cancel(snap.target);
     LOG_INFO("swap_cancel_requested", "target={}", snap.target);
     write_json(resp, 202, {{"status", "cancelling"}, {"target", snap.target}});
 }

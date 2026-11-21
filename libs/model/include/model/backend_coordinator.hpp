@@ -175,7 +175,7 @@ public:
     int active_request_count(const std::string& name) const;
 
     bool swap_in_progress() const noexcept { return swap_in_progress_.load(); }
-    void request_swap_cancel() noexcept { swap_cancel_.store(true); }
+    void request_swap_cancel(const std::string& target = {});
     void request_shutdown();
     bool shutting_down() const noexcept { return shutting_down_.load(); }
     void reset_swap_cancel() noexcept { swap_cancel_.store(false); }
@@ -293,6 +293,8 @@ private:
     std::recursive_mutex sidecar_mutex_;
     std::atomic<bool> swap_in_progress_{false};
     std::atomic<bool> swap_cancel_{false};
+    std::mutex swap_tokens_mutex_;
+    std::vector<std::pair<std::string, std::shared_ptr<std::atomic<bool>>>> swap_tokens_;
     std::atomic<bool> shutting_down_{false};
 };
 
