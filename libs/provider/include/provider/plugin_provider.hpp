@@ -1,7 +1,9 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "foundation/result.hpp"
@@ -21,6 +23,13 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(
 /// as host_json "gateway". Call before installing providers.
 /// </summary>
 void set_plugin_host_settings(const std::string& gateway_json);
+
+/// <summary>True when a provider error message reports a lost or removed GPU device.</summary>
+bool is_fatal_device_error(std::string_view message);
+
+/// <summary>Called once per provider library when a call fails with a fatal device error.</summary>
+using FatalDeviceHandler = std::function<void(const std::string& runtime, const std::string& message)>;
+void set_fatal_device_handler(FatalDeviceHandler handler);
 
 /// <summary>Outcome of scanning a provider directory.</summary>
 struct PluginLoadReport

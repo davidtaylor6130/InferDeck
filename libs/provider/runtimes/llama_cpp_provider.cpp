@@ -8,10 +8,10 @@
 #include <iterator>
 #include <optional>
 
-#include "foundation/logging.hpp"
 #include "ggml-backend.h"
 #include "llama.h"
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
+#include "provider/native_log.hpp"
 #include "provider/sdk.hpp"
 
 namespace {
@@ -84,17 +84,7 @@ const char* device_type_name(enum ggml_backend_dev_type type)
 
 void forward_native_log(ggml_log_level level, const char* text, void*)
 {
-    using inferdeck::foundation::LogLevel;
-    static thread_local ggml_log_level last = GGML_LOG_LEVEL_INFO;
-    if (level != GGML_LOG_LEVEL_CONT) last = level;
-    const bool verbose = inferdeck::foundation::Logger::instance().level() <= LogLevel::Debug;
-    if (!text || (last < GGML_LOG_LEVEL_WARN && !verbose)) return;
-    std::string line(text);
-    while (!line.empty() && (line.back() == 0x0A || line.back() == 0x0D)) line.pop_back();
-    if (line.empty()) return;
-    inferdeck::foundation::Logger::instance().log(
-        last >= GGML_LOG_LEVEL_ERROR ? LogLevel::Error : last == GGML_LOG_LEVEL_WARN ? LogLevel::Warn : LogLevel::Debug,
-        "llama_native", line);
+    inferdeck::provider::forward_native_log(static_cast<int>(level), text);
 }
 
 /// <summary>"quantize" {source, destination, quantization, threads} and "devices" {}.</summary>

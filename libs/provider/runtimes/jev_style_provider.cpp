@@ -2,9 +2,15 @@
 // llama.cpp. See docs/providers.md.
 #include "decision_runtime/jev_style.hpp"
 #include "llama.h"
+#include "provider/native_log.hpp"
 #include "provider/sdk.hpp"
 
 namespace {
+
+void forward_native_log(ggml_log_level level, const char* text, void*)
+{
+    inferdeck::provider::forward_native_log(static_cast<int>(level), text);
+}
 
 inferdeck::provider::sdk::Definition define()
 {
@@ -15,7 +21,7 @@ inferdeck::provider::sdk::Definition define()
             },
             [](const nlohmann::json&) -> inferdeck::foundation::Result<void>
             {
-                static const bool initialized = (llama_backend_init(), true);
+                static const bool initialized = (llama_log_set(forward_native_log, nullptr), llama_backend_init(), true);
                 (void)initialized;
                 return inferdeck::foundation::Ok();
             }};
