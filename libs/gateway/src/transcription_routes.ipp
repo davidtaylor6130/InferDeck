@@ -181,7 +181,18 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         finish_job(job, internal_status == 499 ? "cancelled" : "failed");
         return;
     }
-    auto slot = acquire_media_slot(req, deps, runtime_model, job);
+    auto decoded = decode_audio(file.content);
+    decode_permit->release();
+    if (!decoded) {
+        foundation::LOG_WARN("transcription_decode_failed", "model={} bytes={} reason={}",
+                             model_name, file.content.size(), decoded.error().message);
+        write_error(resp, 400, "invalid_audio", decoded.error().message);
+        record_media(deps, model_name, 0, 400, -1, 0.0, 0, observation);
+        finish_job(job, "failed");
+        return;
+    }
+    auto slot = acquire_media_slot(req, deps, runtime_model, job,
+                                   std::chrono::milliseconds{deps.speech_admission_timeout_ms}, "stt");
     if (!slot) {
         const int status = status_for(slot.error().code);
         const int internal_status = internal_status_for(slot.error().code);
@@ -193,9 +204,6 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         return;
     }
     SlotGuard guard{&deps.coordinator, runtime_model, *slot};
-    auto decoded = decode_audio(file.content);
-    decode_permit->release();
-    if (!decoded) { write_error(resp, 400, "invalid_audio", decoded.error().message); record_media(deps, model_name, 0, 400, *slot, 0.0, 0, observation); finish_job(job, "failed"); return; }
     decoded->language = std::move(parameters->language);
     decoded->prompt = std::move(parameters->prompt);
     decoded->temperature = parameters->temperature;

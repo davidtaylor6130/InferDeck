@@ -342,6 +342,8 @@ foundation::Result<DecodePermit> acquire_decode_permit(
                 "request cancelled while waiting for audio decoding");
         }
         if (std::chrono::steady_clock::now() >= deadline) {
+            foundation::LOG_WARN("media_admission_failed",
+                                 "modality=stt stage=decode_permit waited_ms=30000");
             return foundation::Err<DecodePermit>(
                 foundation::ErrorCode::Timeout,
                 "timeout waiting for audio decoding");
@@ -498,9 +500,11 @@ struct SpeechStreamState {
 foundation::Result<int> acquire_media_slot(const httplib::Request& req,
                                             const GatewayDeps& deps,
                                             const std::string& model_name,
-                                            const std::shared_ptr<MediaJob>& job) {
-    constexpr auto video_load_timeout = std::chrono::minutes{5};
-    const auto deadline = std::chrono::steady_clock::now() + video_load_timeout;
+                                            const std::shared_ptr<MediaJob>& job,
+                                            std::chrono::milliseconds timeout = std::chrono::minutes{5},
+                                            const char* label = "") {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    const auto stage = std::make_shared<std::atomic<const char*>>("slot_queue");
     const std::function<bool()> cancelled = [&req, job] {
         return req.is_connection_closed() || job->cancelled->load();
     };
@@ -510,15 +514,25 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
         deps.public_data_plane_access &&
             classify_route(req.method, req.path) ==
                 RoutePrincipal::OpenAIDataPlane);
-    options.timeout = video_load_timeout;
+    options.timeout = timeout;
     options.cancelled = cancelled;
-    options.prepare = [&deps, model_name, deadline, cancelled] {
+    options.prepare = [&deps, model_name, deadline, cancelled, stage] {
+        stage->store("model_load");
         auto loaded = ensure_model_loaded(
             deps, model_name, deadline, cancelled);
         if (loaded.ok) return foundation::Ok();
         return foundation::Err<void>(loaded.error_code, loaded.message);
     };
-    return deps.coordinator.acquire_slot(model_name, options);
+    auto slot = deps.coordinator.acquire_slot(model_name, options);
+    if (!slot && *label) {
+        foundation::LOG_WARN("media_admission_failed",
+                             "modality={} model={} stage={} waited_ms={} error={}",
+                             label, model_name, stage->load(),
+                             std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 timeout - (deadline - std::chrono::steady_clock::now())).count(),
+                             slot.error().message);
+    }
+    return slot;
 }
 
 int status_for(foundation::ErrorCode code) {
