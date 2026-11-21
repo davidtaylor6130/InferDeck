@@ -530,7 +530,8 @@ Result<void> LlamaCppModel::init_shared_context_locked(
         cfg_.n_batch,
         cfg_.mtp_max_active_requests,
         draft_seq_rm_type,
-        info_.context_pool_size > 0 || info_.context_pool_auto);
+        info_.context_pool_size > 0 || info_.context_pool_auto,
+        cfg_.max_batch_draft_tokens);
     scheduler_->set_cancel_all(&cancel_all_);
   }
 

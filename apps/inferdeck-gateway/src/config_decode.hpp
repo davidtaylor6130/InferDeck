@@ -227,6 +227,9 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
                 info.mtp_max_active_requests =
                     speculative["max_active_requests"]
                         ? speculative["max_active_requests"].as<int>() : 1;
+                info.max_batch_draft_tokens =
+                    speculative["max_batch_draft_tokens"]
+                        ? speculative["max_batch_draft_tokens"].as<int>() : 8;
             }
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
             info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";

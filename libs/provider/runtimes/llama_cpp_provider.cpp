@@ -44,6 +44,7 @@ LlamaCppConfig config_for(const inferdeck::model::ModelInfo& info, const json& g
     config.mtp_draft_tokens = info.mtp_draft_tokens;
     config.mtp_p_min = info.mtp_p_min;
     config.mtp_max_active_requests = info.mtp_max_active_requests;
+    config.max_batch_draft_tokens = info.max_batch_draft_tokens;
     config.speculative_type = info.speculative_type;
     config.draft_model_path = info.draft_model_path;
     config.swa_full = gateway.value("swa_full", config.swa_full);

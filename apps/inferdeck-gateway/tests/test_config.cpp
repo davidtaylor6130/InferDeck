@@ -443,6 +443,7 @@ TEST_CASE("Repository Qwen 3.8 27B profile enables adaptive MTP",
     CHECK(qwen->mtp_draft_tokens == 2);
     CHECK(qwen->mtp_p_min == 0.0f);
     CHECK(qwen->mtp_max_active_requests == 1);
+    CHECK(qwen->max_batch_draft_tokens == 8);
     CHECK(qwen->has_vision);
     CHECK(qwen->sampling.temperature == 1.0f);
     CHECK(qwen->sampling.top_p == 0.95f);
@@ -964,6 +965,12 @@ model_registry:
     CHECK(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path + "\n"));
     CHECK(validate_config_text(prefix + "      type: dflash\n      draft_model: " + draft_path +
                                "\n      draft_tokens: 16\n      p_min: 0.2\n      max_active_requests: 2\n"));
+    CHECK(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path +
+                               "\n      max_active_requests: 2\n      max_batch_draft_tokens: 6\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path +
+                                     "\n      max_batch_draft_tokens: 0\n"));
+    CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path +
+                                     "\n      max_batch_draft_tokens: 65\n"));
     CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n"));
     CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: C:/missing/draft.gguf\n"));
     CHECK_FALSE(validate_config_text(prefix + "      type: dflash2\n      draft_model: " + draft_path +

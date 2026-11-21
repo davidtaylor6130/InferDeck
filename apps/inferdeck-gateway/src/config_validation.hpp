@@ -604,6 +604,13 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                             foundation::ErrorCode::InvalidArgument,
                             "speculative max_active_requests exceeds slot bounds: " + name);
                     }
+                    const int max_batch_draft = speculative["max_batch_draft_tokens"]
+                        ? speculative["max_batch_draft_tokens"].as<int>() : 8;
+                    if (max_batch_draft < 1 || max_batch_draft > 64) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "speculative max_batch_draft_tokens must be between 1 and 64: " + name);
+                    }
                 }
                 auto sampling = validate_sampling_node(
                     entry["sampling"], "model_registry." + name + ".sampling");
