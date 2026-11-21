@@ -3072,6 +3072,30 @@ TEST_CASE("BackendCoordinator: co-resident borrower yields when the lender needs
             CHECK_FALSE(coordinator.is_loaded(compact.name));
         }
     }
+    SECTION("partial growth keeps the borrower until a larger demand needs it") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        lender->capacity_handler = [&](const RequestDemand& demand) -> Result<void> {
+            const int needed = std::max(demand.required_context, demand.aggregate_context);
+            if (needed < lender->pool_capacity.load()) return Ok();
+            if (coordinator_ptr->is_loaded("small") && needed >= 6000)
+                return Err<void>(ErrorCode::OutOfMemory, "context growth below demand");
+            lender->pool_capacity.store(needed + 1);
+            return Ok();
+        };
+        coordinator.update_vram_observation(1000, 9000);
+        CHECK(coordinator.vram_available_mb() == 8000);
+        REQUIRE(coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 4000, 1, 4000, 1}, control()));
+        CHECK(lender->pool_capacity.load() == 4001);
+        CHECK(coordinator.is_loaded(compact.name));
+        CHECK(coordinator.vram_available_mb() == 0);
+        coordinator.update_vram_observation(0, 0);
+        REQUIRE(coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 6000, 1, 6000, 1}, control()));
+        CHECK_FALSE(coordinator.is_loaded(compact.name));
+        CHECK(lender->pool_capacity.load() == 6001);
+    }
     SECTION("a busy lender keeps its borrower until it is idle") {
         REQUIRE(coordinator.swap_to(compact.name));
         lender->pool_capacity.store(4000);

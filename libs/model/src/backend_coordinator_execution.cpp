@@ -89,8 +89,11 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
     {
         std::lock_guard<std::mutex> lock(mutex_);
         resizing_models_.erase(name);
-        if (result && model->context_pool_capacity() != capacity_before) {
-            context_borrowers_.erase(name);
+        const int capacity_after = model->context_pool_capacity();
+        if (result && capacity_after != capacity_before) {
+            const std::int64_t full_capacity =
+                static_cast<std::int64_t>(model->info().context_size) * model->n_slots();
+            if (lending || capacity_after >= full_capacity) context_borrowers_.erase(name);
             invalidate_vram_observation_locked();
         }
         if (result) {

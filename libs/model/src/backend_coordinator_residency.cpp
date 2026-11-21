@@ -531,6 +531,14 @@ foundation::Result<bool> BackendCoordinator::release_context_borrowers(
             return foundation::Err<bool>(foundation::ErrorCode::Cancelled,
                                          "context restore cancelled: " + lender);
         }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto active = active_requests_by_model_.find(candidate);
+            if ((active != active_requests_by_model_.end() && active->second > 0) ||
+                draining_models_.contains(candidate) || resizing_models_.contains(candidate)) {
+                return true;
+            }
+        }
         auto unloaded = unload_with_control(candidate, control);
         if (!unloaded) {
             if (unloaded.error().code == foundation::ErrorCode::Cancelled)

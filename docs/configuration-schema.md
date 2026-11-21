@@ -133,7 +133,9 @@ the alias is created or retargeted, not on every request.
 
 A restore is refused while the lender has active requests or any borrower is
 active, draining or resizing; the request waits and retries without evicting
-anything. A borrower that cannot be evicted makes the restore fail with an
+anything. A lender with continuous traffic therefore restores only in a gap
+between its requests, and the waiting request gives up after the model's
+`request_queue_timeout_seconds`. A borrower that cannot be evicted makes the restore fail with an
 out-of-memory error, so the lender keeps its reduced pool and its cache.
 
 ## Files and selection
