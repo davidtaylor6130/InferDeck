@@ -1358,6 +1358,31 @@ TEST_CASE("BackendCoordinator: safety margin absorbs observed desktop VRAM",
         CHECK_FALSE(coordinator.swap_to("chat").has_value());
         CHECK_FALSE(coordinator.is_loaded("chat"));
     }
+    SECTION("desktop usage equal to the margin is reserved once") {
+        BackendCoordinator coordinator(registry);
+        coordinator.set_vram_budget(32476, 2048);
+        coordinator.update_vram_observation(2048, 32624);
+        CHECK(coordinator.vram_available_mb() == 32476 - 2048);
+    }
+    auto small = make_info("small");
+    small.n_slots = 1;
+    small.min_slots = 1;
+    small.vram_required_mb = 20000;
+    registry.register_model(small);
+    SECTION("resident usage is not counted as desktop usage") {
+        BackendCoordinator coordinator(registry);
+        coordinator.set_vram_budget(32476, 2048);
+        REQUIRE(coordinator.swap_to("small").has_value());
+        coordinator.update_vram_observation(20000 + 750, 32624);
+        CHECK(coordinator.vram_available_mb() == 32476 - 2048 - 20000);
+    }
+    SECTION("overestimated resident keeps the full margin") {
+        BackendCoordinator coordinator(registry);
+        coordinator.set_vram_budget(32476, 2048);
+        REQUIRE(coordinator.swap_to("small").has_value());
+        coordinator.update_vram_observation(18000, 32624);
+        CHECK(coordinator.vram_available_mb() == 32476 - 2048 - 18000);
+    }
 }
 
 TEST_CASE("BackendCoordinator: live headroom preserves an overestimated resident model",

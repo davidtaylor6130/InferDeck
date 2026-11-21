@@ -79,12 +79,22 @@ of declared availability and observed pressure with the incomplete runtime's
 full declared footprint reserved.
 `gateway.vram_budget_mb` caps hardware detection and
 `gateway.vram_safety_margin_mb` defaults to 2048 MB (room for the Windows desktop and login screen) and may be set to 0. It reserves GPU headroom only; host/system memory reserve is separate.
-With fresh telemetry, usage not attributed to InferDeck's own resident
-estimates counts as other-process usage, and the margin covers it rather than
-adding to it: live availability is `min(budget, total) - observed_used -
-max(0, margin - other_process_used) - pending reserves`, so the effective
-desktop reserve is `max(margin, other_process_used)`. With a 32476 MB budget,
-a 2048 MB margin, and 750 MB of desktop usage, 30428 MB remains available.
+With fresh telemetry, `other_process_used = max(0, observed_used -
+own_resident)`, where `own_resident` is the sum of InferDeck's resident
+estimates (a complete-accounting runtime's estimate minus its pending
+reserve; an incomplete-accounting runtime's full estimate). The margin covers
+other-process usage rather than adding to it: live availability is
+`min(budget, total) - observed_used - max(0, margin - other_process_used) -
+pending reserves`, so the effective desktop reserve is
+`max(margin, other_process_used)`. Incomplete-accounting runtimes still
+reserve their full declared estimate on top of observed usage, and the result
+is capped by declared availability. With a 32476 MB budget, a 2048 MB margin,
+and 750 MB of desktop usage, 30428 MB remains available. An overestimated
+resident (observed below its estimate) yields zero other-process usage and
+keeps the full margin. Trade-off: growth of an underestimated resident beyond
+its estimate is indistinguishable from other processes and is counted as
+other-process usage, so it can absorb the margin; the observed usage itself is
+still subtracted in full.
 
 Lazy native runtimes reserve their declared peak beyond memory already retained
 by the runtime. This prevents an unloaded phase from being double-spent while
