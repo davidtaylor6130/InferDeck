@@ -57,16 +57,23 @@ void LlamaCppModel::release_draft_locked() {
     common_speculative_free(speculative_);
     speculative_ = nullptr;
   }
-  if (draft_init_) {
-    draft_init_.reset();
-  } else if (draft_ctx_) {
+  if (draft_ctx_) {
     llama_free(draft_ctx_);
+    draft_ctx_ = nullptr;
   }
-  draft_ctx_ = nullptr;
 }
 
-bool LlamaCppModel::init_block_draft_locked(
-    int n_slots, const inferdeck::model::LifecycleControl& control) {
+void LlamaCppModel::release_draft_model_locked() {
+  release_draft_locked();
+  if (draft_model_) {
+    llama_model_free(draft_model_);
+    draft_model_ = nullptr;
+  }
+  draft_footprint_mb_.store(0);
+}
+
+common_params LlamaCppModel::block_draft_params(
+    int n_slots, const inferdeck::model::LifecycleControl& control) const {
   common_params params;
   params.n_parallel = n_slots;
   params.n_batch = std::max(1, cfg_.n_batch);
@@ -92,10 +99,52 @@ bool LlamaCppModel::init_block_draft_locked(
   };
   draft_params.load_progress_callback_user_data =
       const_cast<inferdeck::model::LifecycleControl*>(&control);
-  draft_init_ = common_speculative_init_from_params(draft_params, model_, shared_ctx_);
-  draft_ctx_ = draft_init_->context();
-  if (draft_ctx_ == nullptr) draft_init_.reset();
-  return draft_ctx_ != nullptr;
+  return draft_params;
+}
+
+Result<void> LlamaCppModel::load_draft_model_locked(
+    const inferdeck::model::LifecycleControl& control) {
+  common_params draft_params = block_draft_params(1, control);
+  llama_model_params draft_model_params = common_model_params_to_llama(draft_params);
+  draft_model_ = common_model_load(
+      draft_params.speculative.draft.mparams.get_paths(), draft_model_params);
+  if (draft_model_ == nullptr) {
+    if (control.is_cancelled()) {
+      return Result<void>(std::unexpect, make_error(
+          ErrorCode::Cancelled, "draft model load cancelled"));
+    }
+    if (control.is_expired()) {
+      return Result<void>(std::unexpect, make_error(
+          ErrorCode::Timeout, "draft model load deadline expired"));
+    }
+    return Result<void>(std::unexpect, make_error(
+        ErrorCode::InvalidArgument,
+        "DFlash draft model failed to load: " + resolved_draft_path_.string()));
+  }
+  LOG_INFO("draft_model_loaded", "model={} path={} size_mb={}",
+           info_.name, resolved_draft_path_.string(),
+           static_cast<std::uint64_t>(llama_model_size(draft_model_) >> 20));
+  return Result<void>{};
+}
+
+bool LlamaCppModel::init_block_draft_locked(int n_slots) {
+  if (draft_model_ == nullptr || shared_ctx_ == nullptr) return false;
+  const inferdeck::model::LifecycleControl no_control;
+  common_params draft_params = block_draft_params(n_slots, no_control);
+  llama_context_params cparams = common_context_params_to_llama(draft_params);
+  cparams.n_ctx = llama_n_ctx(shared_ctx_);
+  cparams.n_rs_seq = 0;
+  cparams.ctx_other = shared_ctx_;
+  draft_ctx_ = llama_init_from_model(draft_model_, cparams);
+  if (draft_ctx_ == nullptr) return false;
+  const auto context_bytes = context_pool_device_memory_bytes(nullptr, draft_ctx_);
+  const std::uint64_t resident_bytes = llama_model_size(draft_model_) +
+      (context_bytes ? static_cast<std::uint64_t>(*context_bytes) : 0);
+  draft_footprint_mb_.store(static_cast<int>(std::min<std::uint64_t>(
+      resident_bytes >> 20, std::numeric_limits<int>::max())));
+  LOG_INFO("draft_footprint_measured", "model={} draft_mb={}",
+           info_.name, draft_footprint_mb_.load());
+  return true;
 }
 
 LlamaCppModel::~LlamaCppModel() {
@@ -121,6 +170,7 @@ LlamaCppModel::~LlamaCppModel() {
     chat_templates_ = nullptr;
   }
   if (model_) {
+    release_draft_model_locked();
     llama_model_free(model_);
     model_ = nullptr;
   }
@@ -229,6 +279,7 @@ Result<void> LlamaCppModel::load(
   log_memory_snapshot("llama_model_loaded_memory_after", info_.name);
   vocab_ = llama_model_get_vocab(model_);
   if (vocab_ == nullptr) {
+    release_draft_model_locked();
     llama_model_free(model_);
     model_ = nullptr;
     return Result<void>(std::unexpect,
@@ -240,6 +291,7 @@ Result<void> LlamaCppModel::load(
   if (info_.supports("chat_completions")) {
     chat_templates_ = common_chat_templates_init(model_, cfg_.chat_template).release();
     if (chat_templates_ == nullptr) {
+      release_draft_model_locked();
       llama_model_free(model_);
       model_ = nullptr;
       return Result<void>(std::unexpect,
@@ -262,6 +314,7 @@ Result<void> LlamaCppModel::load(
         common_chat_templates_free(chat_templates_);
         chat_templates_ = nullptr;
       }
+      release_draft_model_locked();
       llama_model_free(model_);
       model_ = nullptr;
       vocab_ = nullptr;
@@ -272,7 +325,8 @@ Result<void> LlamaCppModel::load(
     LOG_INFO("vision_projector_loaded",
              "model={} path={}", info_.name, resolved_mmproj_path_.string());
   }
-  auto ctx_res = init_shared_context_locked(mparams, control);
+  auto ctx_res = block_draft() ? load_draft_model_locked(control) : Result<void>{};
+  if (ctx_res.has_value()) ctx_res = init_shared_context_locked(mparams, control);
   if (!ctx_res.has_value()) {
     release_draft_locked();
     if (shared_ctx_) { llama_free(shared_ctx_); shared_ctx_ = nullptr; }
@@ -282,6 +336,7 @@ Result<void> LlamaCppModel::load(
       common_chat_templates_free(chat_templates_);
       chat_templates_ = nullptr;
     }
+    release_draft_model_locked();
     llama_model_free(model_);
     model_ = nullptr;
     vocab_ = nullptr;
@@ -385,12 +440,7 @@ Result<void> LlamaCppModel::init_shared_context_locked(
   }
   const int minimum_pool = static_cast<int>(minimum_wide);
   if (info_.context_pool_auto) {
-    std::error_code draft_size_error;
-    const auto draft_bytes = block_draft()
-        ? std::filesystem::file_size(resolved_draft_path_, draft_size_error) : 0;
-    const int effective_margin =
-        vram_safety_margin_mb.value_or(cfg_.vram_safety_margin_mb) +
-        (draft_size_error ? 0 : static_cast<int>((draft_bytes + (1u << 20) - 1) >> 20));
+    const int effective_margin = vram_safety_margin_mb.value_or(cfg_.vram_safety_margin_mb);
     const Result<int> fitted = fit_context_pool(
         resolved_gguf_path_, model_params, cparams, cfg_.mtp_enabled,
         minimum_pool, std::max(minimum_pool, total_ctx), effective_margin, control,
@@ -418,7 +468,7 @@ Result<void> LlamaCppModel::init_shared_context_locked(
         draft_params.n_ubatch = std::min<std::uint32_t>(draft_params.n_ubatch, 512);
         draft_ctx_ = llama_init_from_model(model_, draft_params);
       } else if (shared_ctx_ && block_draft()) {
-        (void)init_block_draft_locked(n_slots, control);
+        (void)init_block_draft_locked(n_slots);
       }
     } catch (const std::exception& error) {
       allocation_error = error.what();
@@ -428,6 +478,11 @@ Result<void> LlamaCppModel::init_shared_context_locked(
     const bool missing_draft = shared_ctx_ && speculation && !draft_ctx_;
     release_draft_locked();
     if (shared_ctx_) { llama_free(shared_ctx_); shared_ctx_ = nullptr; }
+    if (control.is_cancelled() || control.is_expired()) {
+      return Result<void>(std::unexpect, make_error(
+          control.is_cancelled() ? ErrorCode::Cancelled : ErrorCode::Timeout,
+          "context pool allocation cancelled or expired"));
+    }
     if (info_.concurrency_auto && total_ctx <= minimum_pool && n_slots > 1 && attempt < 16) {
       n_slots = std::max(1, n_slots / 2);
       cparams.n_seq_max = static_cast<std::uint32_t>(n_slots);
@@ -439,7 +494,7 @@ Result<void> LlamaCppModel::init_shared_context_locked(
           missing_draft && !info_.context_pool_auto
               ? (cfg_.mtp_enabled
                      ? "MTP is enabled but the GGUF has no usable MTP head or sufficient memory"
-                     : "DFlash draft model could not be loaded or did not fit in memory")
+                     : "DFlash draft context could not be created or did not fit in memory")
               : "shared context allocation failed at capacity " + std::to_string(total_ctx) +
                   (allocation_error.empty() ? std::string{} : ": " + allocation_error)));
     }
@@ -795,6 +850,7 @@ Result<void> LlamaCppModel::unload() {
     chat_templates_ = nullptr;
   }
   if (model_) {
+    release_draft_model_locked();
     llama_model_free(model_);
     model_ = nullptr;
   }
