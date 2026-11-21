@@ -59,7 +59,7 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
         }
         auto slot = it->second->acquire_slot();
         if (!slot) return slot;
-        auto lease = issue_lease_locked(name, *slot, nullptr, opts.reservation_key, opts.priority);
+        auto lease = issue_lease_locked(name, *slot, nullptr, opts.reservation_key, opts.priority, opts.background);
         if (!lease) (void)it->second->release_slot(*slot);
         return lease;
     }
@@ -250,7 +250,7 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             auto slot = it->second->acquire_slot();
             if (slot) {
                 const auto waiter_demand = waiter != waiters_.end() && waiter->demand_prepared ? &*waiter->demand : nullptr;
-                auto lease = issue_lease_locked(name, *slot, waiter_demand, opts.reservation_key, opts.priority);
+                auto lease = issue_lease_locked(name, *slot, waiter_demand, opts.reservation_key, opts.priority, opts.background);
                 if (!lease) {
                     (void)it->second->release_slot(*slot);
                     if (lease.error().code == foundation::ErrorCode::ResourceBusy) {
@@ -302,6 +302,10 @@ foundation::Result<void> BackendCoordinator::release_slot(
         model_sequences = std::max(0, model_sequences - sequence_reservation);
         auto active = active_requests_by_model_.find(name);
         if (active != active_requests_by_model_.end() && active->second > 0) --active->second;
+        if (released_lease.background) {
+            auto background = background_requests_by_model_.find(name);
+            if (background != background_requests_by_model_.end() && background->second > 0) --background->second;
+        }
         if (it->second->estimate_vram_mb(it->second->n_slots()) > 0) {
             ++resource_generation_;
         }
@@ -399,11 +403,11 @@ std::uint64_t BackendCoordinator::reserve_priority_session(
         std::lock_guard<std::mutex> lock(mutex_);
         const auto now = clock::now();
         std::erase_if(priority_sessions_, [now](const auto& entry) {
-            return !entry.second.live(now);
+            return !entry.second.retained(now);
         });
         const auto live = priority_sessions_.find(key);
         if (live != priority_sessions_.end() && live->second.model == model &&
-            live->second.live(now)) {
+            live->second.retained(now)) {
             ++live->second.refs;
             live->second.deadline = std::max(live->second.deadline, now + duration);
             token = live->second.token;
@@ -495,7 +499,9 @@ bool BackendCoordinator::priority_session_matches(
 }
 
 bool BackendCoordinator::priority_media_active_locked() const {
-    for (const auto& [name, active] : active_requests_by_model_) {
+    for (const auto& [name, active_total] : active_requests_by_model_) {
+        const auto background = background_requests_by_model_.find(name);
+        const int active = active_total - (background == background_requests_by_model_.end() ? 0 : background->second);
         if (active <= 0) continue;
         const auto backend = instances_.find(name);
         if (backend != instances_.end() && backend->second &&
@@ -709,7 +715,7 @@ void BackendCoordinator::erase_waiter_locked(std::uint64_t id) {
 
 foundation::Result<int> BackendCoordinator::issue_lease_locked(
     const std::string& name, int backend_slot, const RequestDemand* demand,
-    const std::string& reservation_key, int priority) {
+    const std::string& reservation_key, int priority, bool background) {
     const auto backend = instances_.find(name);
     if (draining_models_.contains(name) || resizing_models_.contains(name) ||
         backend == instances_.end() || !backend->second ||
@@ -733,7 +739,8 @@ foundation::Result<int> BackendCoordinator::issue_lease_locked(
         continuation_holds_.at(name).key == reservation_key;
     continuation_holds_.erase(name);
     active_leases_.emplace(lease_id, ActiveLease{name, backend_slot, reservation,
-        sequence_reservation, reservation_key, std::clamp(priority, -100, 100), continuation});
+        sequence_reservation, reservation_key, std::clamp(priority, -100, 100), continuation, background});
+    if (background) ++background_requests_by_model_[name];
     active_context_reservation_by_model_[name] += reservation;
     active_sequence_reservation_by_model_[name] += sequence_reservation;
     ++active_requests_;

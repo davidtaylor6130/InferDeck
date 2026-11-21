@@ -182,6 +182,7 @@ void handle_audio_speech(const httplib::Request& req, httplib::Response& resp,
         return;
     }
     VoiceSessionGuard voice_session(req, deps);
+    voice_session.ends_turn();
     auto job = begin_job(model_name, "audio_speech");
     if (deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative) {
         resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));

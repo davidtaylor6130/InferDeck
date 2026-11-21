@@ -232,11 +232,16 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         return !req.is_connection_closed() && !job->cancelled->load();
     };
     int last_slot = -1;
+    int chunks_started = 0;
     bool admission_failed = false;
     auto result = transcribe_in_chunks(*decoded, 300, report,
         [&](const model::TranscriptionRequest& chunk, const std::function<bool(int)>& chunk_progress)
             -> foundation::Result<model::TranscriptionResult> {
-            auto slot = acquire_media_slot(req, deps, runtime_model, job, admission_timeout, "stt");
+            const bool later_chunk = chunks_started++ > 0;
+            auto slot = acquire_media_slot(
+                req, deps, runtime_model, job,
+                later_chunk ? std::chrono::milliseconds{std::chrono::hours{24}} : admission_timeout,
+                "stt", later_chunk);
             if (!slot) {
                 admission_failed = true;
                 return foundation::Err<model::TranscriptionResult>(slot.error().code, slot.error().message);

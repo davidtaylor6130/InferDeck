@@ -38,7 +38,7 @@ foundation::Result<model::TranscriptionRequest> decode_compressed_audio(
     constexpr ma_uint64 block_frames = 1ULL << 16;
     ma_uint64 frames_read = 0;
     bool read_failed = false;
-    while (frames_read < max_frames) {
+    while (frames_read <= max_frames) {
         const auto old_size = request.pcm.size();
         request.pcm.resize(old_size + block_frames);
         ma_uint64 got = 0;
@@ -49,7 +49,7 @@ foundation::Result<model::TranscriptionRequest> decode_compressed_audio(
         if (read_result != MA_SUCCESS && read_result != MA_AT_END) read_failed = true;
         if (got < block_frames || read_failed) break;
     }
-    const bool too_long = frames_read >= max_frames;
+    const bool too_long = frames_read > max_frames;
     ma_decoder_uninit(&decoder);
     if (too_long) {
         return foundation::Err<model::TranscriptionRequest>(
@@ -62,6 +62,7 @@ foundation::Result<model::TranscriptionRequest> decode_compressed_audio(
             "compressed audio could not be decoded");
     }
     request.pcm.resize(static_cast<std::size_t>(frames_read));
+    request.pcm.shrink_to_fit();
     if (std::any_of(request.pcm.begin(), request.pcm.end(),
                     [](float sample) { return !std::isfinite(sample); })) {
         return foundation::Err<model::TranscriptionRequest>(

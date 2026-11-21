@@ -3607,17 +3607,45 @@ TEST_CASE("BackendCoordinator: a kept voice session survives other requests' rel
     CHECK_FALSE(coordinator.priority_session_matches("peer", "chat"));
 }
 
-TEST_CASE("BackendCoordinator: in-flight voice reservation stays live past its deadline",
+TEST_CASE("BackendCoordinator: in-flight voice reservation is retained but expires for blocking",
           "[model][coordinator][voice]") {
     ModelRegistry reg;
     BackendCoordinator coordinator(reg);
     const auto token = coordinator.reserve_priority_session("client", "chat", std::chrono::milliseconds{1});
     std::this_thread::sleep_for(std::chrono::milliseconds{20});
-    CHECK(coordinator.priority_session_matches("client", "chat"));
+    CHECK_FALSE(coordinator.priority_session_matches("client", "chat"));
     const auto second = coordinator.reserve_priority_session("client", "chat", std::chrono::milliseconds{1});
     CHECK(second == token);
     coordinator.release_priority_session("client", second);
-    CHECK(coordinator.priority_session_matches("client", "chat"));
     coordinator.release_priority_session("client", token);
-    CHECK_FALSE(coordinator.priority_session_matches("client", "chat"));
+    const auto fresh = coordinator.reserve_priority_session("client", "chat", std::chrono::milliseconds{60000});
+    CHECK(fresh != token);
+}
+
+TEST_CASE("BackendCoordinator: a long voice reservation does not stall a peer's primary request",
+          "[model][coordinator][voice]") {
+    ModelRegistry reg;
+    reg.set_factory([](const ModelInfo& i) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(i);
+        backend->vram_mb.store(i.vram_required_mb);
+        backend->max_slots.store(2);
+        backend->busy_slots.assign(2, 0);
+        return backend;
+    });
+    auto chat = make_info("chat");
+    chat.vram_required_mb = 0;
+    chat.n_slots = 2;
+    chat.min_slots = 2;
+    reg.register_model(chat);
+    BackendCoordinator coordinator(reg);
+    REQUIRE(coordinator.load("chat").has_value());
+    const auto token = coordinator.reserve_priority_session("stt-client", "chat", std::chrono::milliseconds{1});
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    AcquireSlotOptions options;
+    options.block = false;
+    options.reservation_key = "peer";
+    auto slot = coordinator.acquire_slot("chat", options);
+    REQUIRE(slot.has_value());
+    REQUIRE(coordinator.release_slot("chat", *slot).has_value());
+    coordinator.release_priority_session("stt-client", token);
 }
