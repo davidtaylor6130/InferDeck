@@ -1,3 +1,9 @@
+void run_image_request(const httplib::Request& req, httplib::Response& resp,
+                       const GatewayDeps& deps,
+                       const RequestObservation& observation,
+                       nlohmann::json body,
+                       std::vector<std::vector<std::byte>>* uploads);
+
 void handle_image_generations(const httplib::Request& req, httplib::Response& resp,
                               const GatewayDeps& deps) {
     const auto observation = observe_request(
@@ -6,8 +12,19 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     nlohmann::json body;
     try { body = nlohmann::json::parse(req.body); }
     catch (const std::exception& error) { write_error(resp, 400, "invalid_json", error.what()); return; }
+    run_image_request(req, resp, deps, observation, std::move(body), nullptr);
+}
+
+void run_image_request(const httplib::Request& req, httplib::Response& resp,
+                       const GatewayDeps& deps,
+                       const RequestObservation& observation,
+                       nlohmann::json body,
+                       std::vector<std::vector<std::byte>>* uploads) {
     const bool derivative =
         deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative;
+    const bool inferdeck_route =
+        derivative || uploads != nullptr ||
+        req.path.starts_with("/api/inferdeck/v1/media/");
     if (!derivative) {
         static constexpr std::array<std::string_view, 14> supported_fields{
             "model", "prompt", "background", "moderation", "n",
@@ -21,7 +38,8 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         }
         for (const auto& field : body.items()) {
             if (std::find(supported_fields.begin(), supported_fields.end(),
-                          field.key()) == supported_fields.end()) {
+                          field.key()) == supported_fields.end() &&
+                !(inferdeck_route && field.key() == "reference_images")) {
                 write_error(resp, 400, "unsupported_parameter",
                             "unsupported Images parameter: " +
                                 field.key(),
@@ -161,8 +179,39 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     request.count = body.contains("n") && !body["n"].is_null()
         ? body["n"].get<int>() : 1;
     request.seed = body.value("seed", std::int64_t{-1});
-    request.steps = body.value("steps", 20);
-    request.guidance_scale = body.value("guidance_scale", 7.0f);
+    request.steps = body.value("steps", 0);
+    request.guidance_scale = body.value("guidance_scale", -1.0f);
+    if (uploads != nullptr) {
+        request.reference_images = std::move(*uploads);
+    } else if (body.contains("reference_images") && !body["reference_images"].is_null()) {
+        const auto& references = body["reference_images"];
+        if (!inferdeck_route || !references.is_array() || references.size() > 4) {
+            write_error(resp, 400, "invalid_image_request",
+                        "reference_images must be an array of at most 4 base64 data:image URLs",
+                        "reference_images");
+            return;
+        }
+        for (const auto& reference : references) {
+            auto image = reference.is_string()
+                ? parse_data_image_url(reference.get<std::string>())
+                : foundation::Err<inference::ImageContent>(
+                      foundation::ErrorCode::InvalidArgument,
+                      "reference_images entries must be strings");
+            if (!image) {
+                write_error(resp, 400, "invalid_image_request",
+                            image.error().message, "reference_images");
+                return;
+            }
+            const auto probe = model::probe_image(image->bytes);
+            if (!probe || !model::reference_image_within_budget(*probe)) {
+                write_error(resp, 400, "invalid_image_request",
+                            "reference image must be a PNG, JPEG, or BMP within 8192 pixels per side and 16 megapixels",
+                            "reference_images");
+                return;
+            }
+            request.reference_images.push_back(std::move(image->bytes));
+        }
+    }
     const std::string size =
         body.contains("size") && !body["size"].is_null()
             ? body["size"].get<std::string>() : "1024x1024";
@@ -171,8 +220,10 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
         model_name.empty() || request.prompt.empty() || request.prompt.size() > 32000 ||
         request.negative_prompt.size() > 32768 || request.count < 1 || request.count > 10 ||
         request.width < 256 || request.height < 256 || request.width > 2048 || request.height > 2048 ||
-        request.width % 64 != 0 || request.height % 64 != 0 || request.steps < 1 || request.steps > 200 ||
-        !std::isfinite(request.guidance_scale) || request.guidance_scale < 0.0f || request.guidance_scale > 50.0f) {
+        request.width % 64 != 0 || request.height % 64 != 0 || request.steps < 0 || request.steps > 200 ||
+        (body.contains("steps") && request.steps < 1) ||
+        !std::isfinite(request.guidance_scale) || request.guidance_scale > 50.0f ||
+        (body.contains("guidance_scale") && request.guidance_scale < 0.0f)) {
         write_error(resp, 400, "invalid_image_request", "invalid model, prompt, size, count, seed, steps, or guidance scale");
         return;
     }
@@ -187,6 +238,11 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
                     "model does not support image generation", "model");
         return;
     }
+    if (!request.reference_images.empty() && !info->supports("image_editing")) {
+        write_error(resp, 400, "unsupported_image_model",
+                    "model does not support image editing", "model");
+        return;
+    }
     auto job = begin_job(
         model_name, "image", request.prompt,
         nlohmann::json{
@@ -195,6 +251,7 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
             {"seed", request.seed},
             {"steps", request.steps},
             {"guidance_scale", request.guidance_scale},
+            {"reference_images", request.reference_images.size()},
         });
     if (derivative ||
         req.path.starts_with("/api/inferdeck/v1/media/")) {
@@ -257,4 +314,121 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     record_media(deps, model_name, result->duration_ms, 200, *slot,
                  0.0, 0, completed_observation);
     finish_job(job, "completed");
+}
+
+void handle_image_edits(const httplib::Request& req, httplib::Response& resp,
+                        const GatewayDeps& deps) {
+    const auto observation = observe_request(
+        req, resp, deps, "image_generation", false);
+    if (!req.is_multipart_form_data()) {
+        write_error(resp, 400, "invalid_image_request",
+                    "multipart/form-data body is required");
+        return;
+    }
+    constexpr std::size_t max_upload_bytes = 16U * 1024U * 1024U;
+    constexpr std::size_t max_image_bytes = 12U * 1024U * 1024U;
+    std::size_t total = 0;
+    for (const auto& [_, field] : req.form.fields) total += field.content.size();
+    for (const auto& [_, file] : req.form.files) total += file.content.size();
+    if (total > max_upload_bytes) {
+        write_error(resp, 413, "request_too_large",
+                    "multipart body exceeds 16 MiB");
+        return;
+    }
+    const auto bad = [&resp](std::string_view message, const std::string& param) {
+        write_error(resp, 400, "invalid_image_request", std::string(message), param);
+    };
+    const auto number = [](const std::string& text, auto& out) {
+        const char* last = text.data() + text.size();
+        const auto [end, error] = std::from_chars(text.data(), last, out);
+        return !text.empty() && error == std::errc{} && end == last;
+    };
+    nlohmann::json body = nlohmann::json::object();
+    for (const auto& [name, field] : req.form.fields) {
+        if (req.form.get_field_count(name) != 1) {
+            bad(name + " must be supplied exactly once", name);
+            return;
+        }
+        const std::string& text = field.content;
+        if (name == "image" || name == "image[]") {
+            bad(name + " must be a file upload", name);
+            return;
+        }
+        if (name == "mask") {
+            write_error(resp, 400, "unsupported_capability",
+                        "mask is not supported by the native image runtime", name);
+            return;
+        }
+        if (name == "reference_images") {
+            write_error(resp, 400, "unsupported_parameter",
+                        "unsupported Images parameter: " + name, name);
+            return;
+        }
+        if (name == "input_fidelity") {
+            if (text == "high") {
+                write_error(resp, 400, "unsupported_capability",
+                            "input_fidelity high is not supported by the native image runtime",
+                            name);
+                return;
+            }
+            if (!text.empty() && text != "low") {
+                bad("input_fidelity must be low or high", name);
+                return;
+            }
+            continue;
+        }
+        if (name == "n" || name == "output_compression" || name == "partial_images" ||
+            name == "steps") {
+            int value = 0;
+            if (!number(text, value)) { bad(name + " must be an integer", name); return; }
+            body[name] = value;
+        } else if (name == "seed") {
+            std::int64_t value = 0;
+            if (!number(text, value)) { bad(name + " must be an integer", name); return; }
+            body[name] = value;
+        } else if (name == "guidance_scale") {
+            float value = 0.0f;
+            if (!number(text, value)) { bad(name + " must be a number", name); return; }
+            body[name] = value;
+        } else if (name == "stream") {
+            if (text != "true" && text != "false") { bad("stream must be a boolean", name); return; }
+            body[name] = text == "true";
+        } else {
+            body[name] = text;
+        }
+    }
+    std::vector<std::vector<std::byte>> uploads;
+    for (const auto& [name, file] : req.form.files) {
+        if (name == "mask") {
+            write_error(resp, 400, "unsupported_capability",
+                        "mask is not supported by the native image runtime", name);
+            return;
+        }
+        if (name != "image" && name != "image[]") {
+            write_error(resp, 400, "unsupported_parameter",
+                        "unsupported Images parameter: " + name, name);
+            return;
+        }
+        if (file.content.empty() || file.content.size() > max_image_bytes) {
+            bad("image must be between 1 byte and 12 MiB", name);
+            return;
+        }
+        const auto* first = reinterpret_cast<const std::byte*>(file.content.data());
+        std::vector<std::byte> bytes(first, first + file.content.size());
+        const auto probe = model::probe_image(bytes);
+        if (!probe) {
+            bad("image must be a PNG, JPEG, or BMP file", name);
+            return;
+        }
+        if (!model::reference_image_within_budget(*probe)) {
+            bad("image exceeds 8192 pixels per side or 16 megapixels", name);
+            return;
+        }
+        uploads.push_back(std::move(bytes));
+    }
+    if (uploads.empty() || uploads.size() > 4) {
+        bad("between 1 and 4 image files are required", "image");
+        return;
+    }
+    run_image_request(req, resp, deps, observation, std::move(body), &uploads);
 }

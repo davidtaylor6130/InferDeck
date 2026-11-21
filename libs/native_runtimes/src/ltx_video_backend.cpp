@@ -52,13 +52,11 @@ void progress_callback(int step, int steps, float, void* data) {
 }
 
 struct GeneratedVideo {
+    sd_video_generation_result_t* result{};
     sd_image_t* frames{};
     int count{};
     sd_audio_t* audio{};
-    ~GeneratedVideo() {
-        if (frames) free_sd_images(frames, count);
-        if (audio) free_sd_audio(audio);
-    }
+    ~GeneratedVideo() { free_sd_video_generation_result(result); }
 };
 
 struct ProgressCallbackReset {
@@ -124,6 +122,7 @@ foundation::Result<void> LTXVideoBackend::load() {
         return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                      "LTX video model artifacts are incomplete");
     }
+    install_diffusion_logging();
     sd_ctx_params_t params;
     sd_ctx_params_init(&params);
     params.diffusion_model_path = diffusion_model_path_.c_str();
@@ -198,8 +197,12 @@ foundation::Result<model::VideoGenerationResult> LTXVideoBackend::generate_video
     const auto started = std::chrono::steady_clock::now();
     bool success = false;
     try {
-        success = ::generate_video(context_, &params, &generated.frames,
-                                   &generated.count, &generated.audio);
+        success = ::generate_video(context_, &params, &generated.result);
+        if (generated.result) {
+            generated.frames = generated.result->frames;
+            generated.count = generated.result->frame_count;
+            generated.audio = generated.result->audio;
+        }
     } catch (const std::exception& error) {
         return foundation::Err<model::VideoGenerationResult>(
             foundation::ErrorCode::Internal,

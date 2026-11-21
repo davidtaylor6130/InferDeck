@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,14 @@ struct StoreFile {
     std::string runtime;
     std::string modality;
     std::vector<std::string> capabilities;
+    std::string artifact_key;
+};
+
+struct StoreBundle {
+    std::string id;
+    std::string family;
+    std::map<std::string, std::string> settings;
+    int vram_required_mb{0};
 };
 
 struct StoreDownload {
@@ -42,6 +51,7 @@ struct StoreDownload {
     std::uint64_t bytes_total{0};
     std::string installed_path;
     std::vector<StoreFile> artifacts;
+    std::optional<StoreBundle> bundle;
 };
 
 struct StoreQuantization {
@@ -107,6 +117,14 @@ public:
         const std::string& repo, const std::string& filename,
         const std::string& runtime, const std::string& modality,
         const std::string& model_name);
+    /// Sets the JSON file of multi-repo bundle recipes (data/model-bundles.json).
+    /// The file is re-read on every call, so edits apply without a restart.
+    void set_bundle_recipes(std::filesystem::path path);
+    /// Lists validated recipes; fails with the first invalid recipe named.
+    foundation::Result<nlohmann::json> bundles() const;
+    /// Resolves every recipe component across its repos and queues one bundle job.
+    foundation::Result<std::uint64_t> install_bundle(
+        const std::string& bundle_id, const std::string& model_name);
     foundation::Result<void> cancel(std::uint64_t id);
     foundation::Result<void> resume(std::uint64_t id);
     foundation::Result<void> remove(const std::string& model_name);
@@ -129,6 +147,9 @@ private:
     foundation::Result<std::vector<StoreFile>> resolve_bundle(
         const std::string& repo, const std::string& runtime,
         const std::string& modality, const std::string& bundle_name);
+    foundation::Result<std::uint64_t> enqueue(
+        std::vector<StoreFile> artifacts, const std::string& filename,
+        const std::string& model_name, std::optional<StoreBundle> bundle);
     foundation::Result<void> start(std::uint64_t id);
     void worker_entry(std::uint64_t id,
                       const std::shared_ptr<std::atomic<bool>>& done) noexcept;
@@ -159,6 +180,7 @@ private:
 
     std::filesystem::path root_;
     std::filesystem::path archive_root_;
+    std::filesystem::path bundle_recipes_path_{"data/model-bundles.json"};
     std::string token_;
     model::BackendCoordinator& coordinator_;
     std::unique_ptr<IModelStoreTransport> transport_;

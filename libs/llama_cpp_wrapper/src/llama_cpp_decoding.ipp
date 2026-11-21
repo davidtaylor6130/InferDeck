@@ -166,12 +166,12 @@ Result<InferenceResult> LlamaCppModel::predict_cancellable(
   try {
     auto msg = parse_final_message_with_ids(generated, setup.parser_params);
     apply_parsed_message(out, msg);
-    if (setup.parser_params.parse_tool_calls && out.tool_calls.empty())
+    if (setup.parse_tool_calls && out.tool_calls.empty())
       apply_fallback_tool_calls(out, generated);
   } catch (const std::exception& e) {
     LOG_ERROR("chat_parse_failed", "model={} error={}", info_.name, e.what());
     out.text = std::move(generated);
-    if (setup.parser_params.parse_tool_calls)
+    if (setup.parse_tool_calls)
       apply_fallback_tool_calls(out, out.text);
   }
   out.reasoning_tokens = count_output_tokens(vocab_, out.reasoning_text);
@@ -273,7 +273,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       std::vector<common_chat_msg_diff> diffs;
       try {
         diffs = parser_state.update(piece, /*is_partial=*/true,
-                                    setup.parser_params.parse_tool_calls);
+                                    setup.parse_tool_calls);
       } catch (...) {}
 
       for (const auto& diff : diffs) {
@@ -350,29 +350,29 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
   if (out.completion_tokens >= setup.max_tokens)
     out.finish_reason = "length";
 
-  if (callback_aborted) return Result<InferenceResult>(std::move(out));
+  if (callback_aborted) return Result<InferenceResult>(std::unexpect, make_error(ErrorCode::Cancelled, "client stopped reading the stream"));
 
   bool fallback_tool_calls_used = false;
   try {
     auto final_diffs = parser_state.update("", /*is_partial=*/false,
-                                            setup.parser_params.parse_tool_calls);
+                                            setup.parse_tool_calls);
     for (const auto& diff : final_diffs) {
       auto delta = to_delta(diff);
       if (delta.content.empty() && delta.reasoning_text.empty() && delta.tool_calls.empty())
         continue;
-      if (!callback(delta)) return Result<InferenceResult>(std::move(out));
+      if (!callback(delta)) return Result<InferenceResult>(std::unexpect, make_error(ErrorCode::Cancelled, "client stopped reading the stream"));
       tool_call_stream_state.observe(delta);
     }
     auto msg = parse_final_message_with_ids(generated, setup.parser_params);
     apply_parsed_message(out, msg);
-    if (setup.parser_params.parse_tool_calls && out.tool_calls.empty()) {
+    if (setup.parse_tool_calls && out.tool_calls.empty()) {
       apply_fallback_tool_calls(out, generated);
       fallback_tool_calls_used = !out.tool_calls.empty();
     }
   } catch (const std::exception& e) {
     LOG_ERROR("chat_parse_failed", "model={} error={}", info_.name, e.what());
     out.text = std::move(generated);
-    if (setup.parser_params.parse_tool_calls) {
+    if (setup.parse_tool_calls) {
       apply_fallback_tool_calls(out, out.text);
       fallback_tool_calls_used = !out.tool_calls.empty();
     }
@@ -387,7 +387,7 @@ Result<InferenceResult> LlamaCppModel::predict_stream(
       tcd.function_name = tc.function_name;
       tcd.function_arguments = tc.function_arguments;
       delta.tool_calls.push_back(std::move(tcd));
-      if (!callback(delta)) break;
+      if (!callback(delta)) return Result<InferenceResult>(std::unexpect, make_error(ErrorCode::Cancelled, "client stopped reading the stream"));
     }
   }
   out.reasoning_tokens = count_output_tokens(vocab_, out.reasoning_text);

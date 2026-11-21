@@ -1058,6 +1058,111 @@ TEST_CASE("Control model inventory retains InferDeck runtime fields",
     CHECK(body["models"][0]["loaded"] == false);
 }
 
+TEST_CASE("Model discovery reports an alias's resolved target and its limits",
+          "[gateway][dashboard][models][aliases]") {
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    inferdeck::model::ModelInfo large;
+    large.name = "large-target";
+    large.context_size = 106496;
+    large.default_max_output_tokens = 16384;
+    large.has_vision = true;
+    large.capabilities = {"chat_completions", "responses"};
+    routes.registry.register_model(large);
+    inferdeck::model::ModelInfo compact = large;
+    compact.name = "small-target";
+    compact.context_size = 32768;
+    compact.default_max_output_tokens = 0;
+    compact.has_vision = false;
+    routes.registry.register_model(compact);
+    REQUIRE(routes.registry.set_alias({"normal", "large-target", 32768, {"chat_completions"}}));
+
+    auto client = routes.client();
+    const auto find_entry = [&](const std::string& id) {
+        const auto response = client.Get("/api/inferdeck/v1/models");
+        REQUIRE(response);
+        REQUIRE(response->status == 200);
+        for (const auto& entry : nlohmann::json::parse(response->body)["models"]) {
+            if (entry["id"] == id) return entry;
+        }
+        FAIL("missing discovery entry " << id);
+        return nlohmann::json{};
+    };
+
+    const auto alias = find_entry("normal");
+    CHECK(alias["alias"] == true);
+    CHECK(alias["resolved_model"] == "large-target");
+    CHECK(alias["limits"] == find_entry("large-target")["limits"]);
+    CHECK(alias["limits"]["context_tokens"] == 106496);
+    CHECK(alias["limits"]["max_output_tokens"] == 106495);
+    CHECK(alias["limits"]["default_output_tokens"] == 16384);
+    CHECK(alias["has_vision"] == true);
+    CHECK(alias["alias_contract"]["required_context_tokens"] == 32768);
+    CHECK(alias["alias_contract"]["required_capabilities"] ==
+          nlohmann::json::array({"chat_completions"}));
+
+    REQUIRE(routes.registry.set_alias({"normal", "small-target", 32768, {"chat_completions"}}));
+    const auto retargeted = find_entry("normal");
+    CHECK(retargeted["resolved_model"] == "small-target");
+    CHECK(retargeted["limits"]["context_tokens"] == 32768);
+    CHECK(retargeted["limits"]["default_output_tokens"].is_null());
+    CHECK(retargeted["has_vision"] == false);
+    CHECK(retargeted["alias_contract"]["required_context_tokens"] == 32768);
+
+    inferdeck::model::ModelAlias tiered{"everyday", "small-target", 16384, {"chat_completions"}};
+    tiered.fallbacks = {"large-target"};
+    REQUIRE(routes.registry.set_alias(tiered));
+    const auto fallback = find_entry("everyday");
+    CHECK(fallback["alias_target"] == "small-target");
+    CHECK(fallback["alias_fallbacks"] == nlohmann::json::array({"large-target"}));
+    CHECK(fallback["limits"]["context_tokens"] == 32768);
+    CHECK(fallback["context_size"] == 32768);
+    CHECK(fallback["has_vision"] == false);
+}
+
+TEST_CASE("Unloading an alias with fallbacks unloads its resident candidate",
+          "[gateway][dashboard][models][aliases]") {
+    struct ResidentBackend : inferdeck::model::IBackend {
+        explicit ResidentBackend(inferdeck::model::ModelInfo value) : model(std::move(value)) {}
+        inferdeck::model::ModelInfo model;
+        bool loaded{false};
+        const inferdeck::model::ModelInfo& info() const override { return model; }
+        inferdeck::foundation::Result<void> load() override { loaded = true; return Ok(); }
+        inferdeck::foundation::Result<void> unload() override { loaded = false; return Ok(); }
+        bool is_loaded() const override { return loaded; }
+        int vram_usage_mb() const override { return 0; }
+        int n_slots() const override { return 1; }
+        int n_free_slots() const override { return 1; }
+        inferdeck::foundation::Result<int> acquire_slot() override { return Ok(0); }
+        inferdeck::foundation::Result<void> release_slot(int) override { return Ok(); }
+        bool slot_busy(int) const override { return false; }
+    };
+    TempConfig config;
+    ConfigRouteServer routes(config);
+    routes.registry.set_factory([](const inferdeck::model::ModelInfo& info) {
+        return std::make_unique<ResidentBackend>(info);
+    });
+    inferdeck::model::ModelInfo large;
+    large.name = "large-target";
+    large.context_size = 65536;
+    routes.registry.register_model(large);
+    inferdeck::model::ModelInfo compact = large;
+    compact.name = "small-target";
+    compact.context_size = 16384;
+    routes.registry.register_model(compact);
+    inferdeck::model::ModelAlias tiered{"everyday", "small-target", 16384, {"chat_completions"}};
+    tiered.fallbacks = {"large-target"};
+    REQUIRE(routes.registry.set_alias(tiered));
+    REQUIRE(routes.coordinator.load("large-target"));
+
+    auto client = routes.client();
+    const auto unloaded = client.Post(
+        "/api/inferdeck/v1/models/unload", R"({"model":"everyday"})", "application/json");
+    REQUIRE(unloaded);
+    CHECK(unloaded->status == 200);
+    CHECK_FALSE(routes.coordinator.is_loaded("large-target"));
+}
+
 TEST_CASE("Configured external models can be unregistered without rewriting unrelated config",
           "[gateway][dashboard][models]") {
     TempConfig config;

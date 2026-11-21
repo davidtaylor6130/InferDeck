@@ -16,6 +16,7 @@ std::string observed_backend{};
 }
 
 extern "C" {
+void sd_set_log_callback(sd_log_cb_t, void*) {}
 void sd_set_progress_callback(sd_progress_cb_t cb, void* data) { callback = cb; callback_data = data; }
 void sd_ctx_params_init(sd_ctx_params_t* params) { *params = {}; }
 void sd_vid_gen_params_init(sd_vid_gen_params_t* params) { *params = {}; }
@@ -32,11 +33,16 @@ void free_sd_images(sd_image_t* images, int count) {
     ++freed_images;
 }
 void free_sd_audio(sd_audio_t* audio) { delete[] audio->data; delete audio; ++freed_audio; }
-bool generate_video(sd_ctx_t*, const sd_vid_gen_params_t*, sd_image_t** frames, int* count, sd_audio_t** audio) {
-    auto* result = new sd_image_t[1]{};
-    result[0] = {512, 320, 3, new uint8_t[512 * 320 * 3]{}};
-    *frames = result; *count = 1;
-    *audio = new sd_audio_t{16000, 1, 160, new float[160]{}};
+void free_sd_video_generation_result(sd_video_generation_result_t* result) {
+    if (!result) return;
+    free_sd_images(result->frames, result->frame_count);
+    if (result->audio) free_sd_audio(result->audio);
+    delete result;
+}
+bool generate_video(sd_ctx_t*, const sd_vid_gen_params_t*, sd_video_generation_result_t** result_out) {
+    auto* frames = new sd_image_t[1]{};
+    frames[0] = {512, 320, 3, new uint8_t[512 * 320 * 3]{}};
+    *result_out = new sd_video_generation_result_t{frames, 1, new sd_audio_t{16000, 1, 160, new float[160]{}}, 0, nullptr};
     if (callback) callback(1, 2, 0.0f, callback_data);
     if (failure == Failure::Throw) throw std::runtime_error("injected failure");
     return failure != Failure::Cancel;

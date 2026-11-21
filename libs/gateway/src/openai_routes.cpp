@@ -511,6 +511,8 @@ bool fail_response_stream(ResponsesStreamState& state, httplib::DataSink& sink,
 
 #include "embeddings_routes.ipp"
 
+#include "decisions_routes.ipp"
+
 #include "responses_routes.ipp"
 
 } // namespace inferdeck::gateway

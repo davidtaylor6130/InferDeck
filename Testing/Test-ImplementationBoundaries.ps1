@@ -44,8 +44,20 @@ run_profile_benchmark_trial(', 'void write_dashboard_file(')
     @{
         Path = 'libs/gateway/src/model_quantizer.cpp'
         MaximumLines = 100
-        Required = @('llama_model_quantize(', 'params.allow_requantize = false', 'generic_u8string()', 'make_native_model_quantizer')
+        Required = @('invoke_provider_operation("llama_cpp", "quantize"', 'generic_u8string()', 'make_native_model_quantizer')
+        Forbidden = @('llama_model_quantize(', 'llama.h', 'system(', 'popen(')
+    },
+    @{
+        Path = 'libs/provider/runtimes/llama_cpp_provider.cpp'
+        MaximumLines = 200
+        Required = @('llama_model_quantize(', 'params.allow_requantize = false', 'INFERDECK_PROVIDER_SDK(define)')
         Forbidden = @('llama_quantize(', 'system(', 'popen(')
+    },
+    @{
+        Path = 'apps/inferdeck-gateway/CMakeLists.txt'
+        MaximumLines = 200
+        Required = @('provider')
+        Forbidden = @('llama_cpp_wrapper', 'native_runtimes', 'decision_runtime', 'vllm_radiance_wrapper)')
     },
     @{
         Path = 'libs/gateway/src/model_store_quantization.ipp'

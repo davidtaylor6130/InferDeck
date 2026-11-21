@@ -9,7 +9,8 @@
     {"method": "POST", "path": "/v1/embeddings"},
     {"method": "POST", "path": "/v1/images/generations"},
     {"method": "POST", "path": "/v1/audio/speech"},
-    {"method": "POST", "path": "/v1/audio/transcriptions"}
+    {"method": "POST", "path": "/v1/audio/transcriptions"},
+    {"method": "POST", "path": "/v1/decisions"}
   ],
   "derivative_routes": [
     {"method": "POST", "path": "/compat/openai-derivative/v1/chat/completions"},

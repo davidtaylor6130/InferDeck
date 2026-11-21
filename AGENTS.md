@@ -34,6 +34,10 @@ libs/gateway/                 HTTP routes (routes.cpp), dashboard /api routes
                               SwapTracker, auth, CORS, metrics builder
 libs/observability/           GPU telemetry (PDH/DXGI), Metrics, SQLite StatsDb
 libs/optimize/                In-house search (random + greedy) for inferdeck-bench
+libs/provider/                Provider C ABI v1/v2 (provider_abi.h), shared codec, C++ SDK,
+                              loader/adapter, echo examples, inferdeck-provider-check,
+                              runtimes/ (every runtime's provider DLL entry + CMake)
+libs/decision_runtime/        Jev-Style decision models (POST /v1/decisions)
 libs/third_party/llama.cpp    Vendored, Vulkan build (gitignored — cloned, not committed)
 
 config/gateway.yml            Active config (only this one is read)
@@ -98,10 +102,15 @@ The authoritative live boot target is the automatic LocalSystem NSSM service
 startup/logon/watchdog tasks and the old `InferDeckGateway` service are
 disabled and are not deployment targets.
 
-A deploy requires copying **both** artifacts from the same revision:
+A deploy copies these from the same build (`build/bin/Release/`):
 
-- `build/bin/Release/inferdeck-gateway.exe` → `C:\InferDeck\inferdeck-gateway.exe`
-- `apps/inferdeck-gateway/static/` → `C:\InferDeck\static/`
+- `inferdeck-gateway.exe` and the DLLs beside it → `C:\InferDeck\`
+- `providers/` (every runtime DLL plus the libraries they import) → `C:\InferDeck\providers\`
+- `static/` → `C:\InferDeck\static\`, `python/` → `C:\InferDeck\python\`
+
+The exe contains no runtime; without `providers\` every model is unavailable.
+A single runtime can be swapped by replacing only its `<runtime>.provider.dll`
+(docs/providers.md, Recipe B).
 
 The gateway serves the dashboard from `executable_dir()/static`, so the
 exe and its static dir must come from the same build. Replacing just the
@@ -116,6 +125,8 @@ current `index-*.js`/`index-*.css` remain.
 OpenAI-compatible (`/v1`):
 - `POST /v1/chat/completions` — streaming + non-streaming, tool calls,
   with SSE chunks ending in `data: [DONE]`.
+- `POST /v1/decisions` — typed questions with calibrated probabilities
+  (`docs/decisions.md`).
 - `GET /v1/models`, `GET /api/inferdeck/v1/health`, `GET /api/inferdeck/v1/metrics`, `GET /api/inferdeck/v1/stats/history`
 
 The OpenAI-derivative compatibility profile is default-off. Its chat,
@@ -175,6 +186,35 @@ Concurrency invariants:
 - CPU STT/TTS native runtimes bypass GPU preparation. A successful STT request
   reserves the default chat model for that client through TTS; the bounded
   grace is configured by `gateway.voice_session_grace_ms`.
+- Swap hysteresis (`gateway.swap_hold_ms`/`swap_quantum_ms`): a queued request
+  whose load would evict a model used within the hold is not actionable until
+  that model is cold or a quantum has passed since max(enqueue, warm model
+  load). Without it, two agents on different large models swap on every turn.
+
+## Providers
+
+Read `docs/providers.md` before adding, upgrading, or swapping a runtime; it
+has copy-paste recipes. `inferdeck-gateway.exe` links **no runtime**: every
+runtime for every modality (llama_cpp, jev_style, stable_diffusion_cpp,
+ltx_video_cpp, ace_step_cpp, whisper_cpp, sherpa_onnx, windows_sapi,
+vllm_radiance) is a `<runtime>.provider.dll` in `<exe dir>/providers/`, built
+by `libs/provider/runtimes` into `build/bin/Release/providers/` whenever the
+gateway target builds. Do not link a runtime library into the gateway or
+`libs/gateway`; gateway features that need a runtime go through
+`model::invoke_provider_operation` (GGUF quantize and GPU device listing call
+the llama_cpp DLL). The build forces `BUILD_SHARED_LIBS=OFF`: each DLL carries
+its own static llama.cpp/ggml, because Windows reuses an already-loaded
+`ggml.dll` by base name. Runtime process init (llama backend, CPython) happens
+in each DLL's `init`, on the gateway startup thread. The C ABI is
+`libs/provider/include/inferdeck/provider_abi.h` (v2 mirrors every
+`IBackend`/`IModel`/media virtual; v1 still loads); C++ runtimes use the SDK
+(`provider/sdk.hpp`, `INFERDECK_PROVIDER_SDK`), and the JSON wire format lives
+only in `libs/provider/src/codec.cpp`. `query`, slot calls and
+`request_cancel` run under the coordinator's global lock and must never block.
+Validate DLLs with `inferdeck-provider-check`; `GET
+/api/inferdeck/v1/providers` reports each runtime's DLL `origin` or
+`not_installed`. Stub-backed ctest checks cannot see a native ABI mismatch, so
+one real GPU request per modality is mandatory after a runtime upgrade.
 
 ## Design rules learned the hard way (do not regress)
 

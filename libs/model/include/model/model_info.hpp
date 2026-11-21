@@ -7,6 +7,10 @@
 
 namespace inferdeck::model {
 
+inline constexpr int k_default_vram_safety_margin_mb = 2048;
+inline constexpr int k_default_mtp_draft_tokens = 2;
+inline constexpr int k_default_dflash_draft_tokens = 3;
+
 enum class ModelRole {
     Conversation,
     Helper,
@@ -76,6 +80,7 @@ struct ModelAlias {
     std::string target{};
     int required_context_size{0};
     std::vector<std::string> required_capabilities{};
+    std::vector<std::string> fallbacks{};
 };
 
 struct ModelInfo {
@@ -113,9 +118,12 @@ struct ModelInfo {
     std::string cache_type_v{};
     std::optional<int> n_gpu_layers{};
     bool mtp_enabled{false};
-    int mtp_draft_tokens{2};
+    int mtp_draft_tokens{k_default_mtp_draft_tokens};
     float mtp_p_min{0.0f};
     int mtp_max_active_requests{1};
+    int max_batch_draft_tokens{8};
+    std::string speculative_type{};
+    std::string draft_model_path{};
     bool has_vision{false};
     std::string reasoning_format{};
     std::string chat_template_path{};

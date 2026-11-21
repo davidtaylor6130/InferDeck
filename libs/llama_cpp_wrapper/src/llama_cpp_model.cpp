@@ -475,12 +475,10 @@ class StreamingChatParserState {
 public:
   explicit StreamingChatParserState(common_chat_parser_params params)
       : parser_params_(std::move(params)) {
-    if (!parser_params_.echo) {
-      try {
-        chat_msg_ = common_chat_parse("", true, parser_params_);
-      } catch (...) {
-        chat_msg_ = common_chat_msg{};
-      }
+    try {
+      chat_msg_ = common_chat_parse(common_chat_input(""), true, parser_params_);
+    } catch (...) {
+      chat_msg_ = common_chat_msg{};
     }
   }
 
@@ -489,7 +487,7 @@ public:
       bool is_partial,
       bool filter_tool_calls) {
     std::vector<common_chat_msg_diff> diffs;
-    generated_text_ += text_added;
+    generated_text_.append(common_chat_input(text_added));
     auto previous = chat_msg_;
     auto next = common_chat_parse(generated_text_, is_partial, parser_params_);
     if (next.empty()) {
@@ -558,7 +556,7 @@ public:
 private:
   common_chat_parser_params parser_params_;
   common_chat_msg chat_msg_;
-  std::string generated_text_;
+  common_chat_input generated_text_;
   std::vector<std::string> generated_tool_call_ids_;
   std::unordered_set<std::size_t> sent_tool_call_names_;
 };
@@ -575,7 +573,7 @@ void apply_parsed_message(InferenceResult& out, const common_chat_msg& msg) {
 common_chat_msg parse_final_message_with_ids(
     const std::string& generated,
     const common_chat_parser_params& parser_params) {
-  auto msg = common_chat_parse(generated, false, parser_params);
+  auto msg = common_chat_parse(common_chat_input(generated), false, parser_params);
   std::vector<std::string> ids;
   msg.set_tool_call_ids(ids, gen_tool_call_id);
   return msg;

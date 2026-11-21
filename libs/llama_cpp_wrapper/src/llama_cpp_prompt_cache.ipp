@@ -51,7 +51,7 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
   adapter_options.supports_thinking =
       common_chat_templates_support_enable_thinking(chat_templates_);
   adapter_options.supports_parallel_tool_calls =
-      caps["supports_parallel_tool_calls"];
+      caps.value("supports_parallel_tool_calls", false);
   adapter_options.default_reasoning_format = info_.reasoning_format.empty()
       ? cfg_.reasoning_format : info_.reasoning_format;
   auto adapted = adapt_generation_request(req, info_, adapter_options);
@@ -99,7 +99,7 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
         [&](const common_chat_templates_inputs& candidate)
         {
           chat_params = common_chat_templates_apply(chat_templates_, candidate);
-          const std::string& prompt = chat_params.prompt;
+          const std::string prompt = chat_params.prompt.str();
           const int count = llama_tokenize(vocab_, prompt.data(),
               static_cast<int>(prompt.size()), nullptr, 0,
               llama_vocab_get_add_bos(vocab_), true);
@@ -125,16 +125,12 @@ Result<ChatTemplateResult> LlamaCppModel::apply_chat_template(
   meta.supports_thinking = chat_params.supports_thinking;
 
   ChatTemplateResult result;
-  result.prompt = chat_params.prompt;
+  result.prompt = chat_params.prompt.str();
   result.media = std::move(media);
   result.stop_strings = chat_params.additional_stops;
   result.parser_params = common_chat_parser_params(chat_params);
-  result.parser_params.reasoning_format = inputs.reasoning_format;
-  result.parser_params.reasoning_in_content = false;
-  result.parser_params.parse_tool_calls = !inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
-  if (!chat_params.parser.empty()) {
-    result.parser_params.parser.load(chat_params.parser);
-  }
+  result.parser_params.parser = std::move(chat_params.parser);
+  result.parse_tool_calls = !inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
   result.stop_strings.insert(result.stop_strings.end(), req.stop.begin(),
                              req.stop.end());
   // Sampler params: explicit per-request values win; otherwise
@@ -234,6 +230,7 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_prompt(
     return Result<PredictSetup>(std::unexpect, tmpl_res.error());
 
   s.parser_params   = std::move(tmpl_res->parser_params);
+  s.parse_tool_calls = tmpl_res->parse_tool_calls;
   s.sampling_params = std::move(tmpl_res->sampling_params);
   s.stop_strings    = std::move(tmpl_res->stop_strings);
   s.stop_tokens     = tokenize_stop_strings(vocab_, s.stop_strings);
@@ -360,7 +357,7 @@ Result<LlamaCppModel::PredictSetup> LlamaCppModel::prepare_prompt(
     s.prompt_position_count = n_tokens;
     s.checkpoint_capture_pos = n_tokens;
   }
-  const auto& generation_prompt = s.parser_params.generation_prompt;
+  const auto& generation_prompt = s.parser_params.generation_prompt.text;
   if (!has_media && !generation_prompt.empty() &&
       prompt.size() >= generation_prompt.size() &&
       prompt.compare(

@@ -92,6 +92,7 @@ mcp/pnpm-lock.yaml
 /.UAM
 /data/*
 !/data/pricing.json
+!/data/model-bundles.json
 
 # Legacy code archive
 .legacy/

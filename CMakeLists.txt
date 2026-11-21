@@ -3,6 +3,7 @@ file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" INFERDECK_VERSION LIMIT_COUNT
 if(NOT INFERDECK_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
     message(FATAL_ERROR "VERSION must contain one semantic version")
 endif()
+list(APPEND VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vcpkg-triplets")
 project(InferDeck VERSION ${INFERDECK_VERSION} LANGUAGES C CXX)
 add_compile_definitions(INFERDECK_VERSION="${PROJECT_VERSION}")
 
@@ -30,7 +31,19 @@ option(INFERDECK_REQUIRE_ACESTEP_CPP
 
 if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" OR
    EXISTS "${INFERDECK_ACESTEP_ROOT}/src/pipeline-synth.cpp")
-    add_compile_definitions(GGML_MAX_NAME=128)
+    add_compile_definitions(GGML_MAX_NAME=160)
+endif()
+# llama.cpp, stable-diffusion.cpp, and ACE-Step share one ggml, so they must
+# agree on GGML_MAX_NAME. A mismatch compiles and links, then corrupts tensor
+# lookups and aborts on the first generation. Fail here instead.
+if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
+    file(STRINGS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" _sd_ggml_max_name
+         REGEX "GGML_MAX_NAME=[0-9]+")
+    if(_sd_ggml_max_name AND NOT _sd_ggml_max_name MATCHES "GGML_MAX_NAME=160")
+        message(FATAL_ERROR
+                "stable-diffusion.cpp sets ${_sd_ggml_max_name}, but InferDeck builds ggml with "
+                "GGML_MAX_NAME=160. Change both values together.")
+    endif()
 endif()
 if(NOT EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt" AND
    INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP)
@@ -133,6 +146,9 @@ endif()
 
 endif()
 
+# The gateway links no runtime: every runtime is a provider DLL with its own
+# static llama.cpp/ggml (libs/provider/runtimes, docs/providers.md).
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Runtimes link ggml statically into their provider DLLs" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_AVX2 ON CACHE BOOL "" FORCE)
 set(GGML_AVX512 OFF CACHE BOOL "" FORCE)
@@ -178,6 +194,7 @@ add_subdirectory(${llama_cpp_SOURCE_DIR}/tools/mtmd EXCLUDE_FROM_ALL)
 add_subdirectory(libs/foundation)
 add_subdirectory(libs/inference)
 add_subdirectory(libs/model)
+add_subdirectory(libs/provider)
 add_subdirectory(libs/native_runtimes)
 add_subdirectory(libs/gateway)
 add_subdirectory(libs/observability)
@@ -189,10 +206,12 @@ if(INFERDECK_BUILD_TESTS)
     add_subdirectory(tests/parity)
 endif()
 add_subdirectory(libs/llama_cpp_wrapper)
+add_subdirectory(libs/decision_runtime)
 if(INFERDECK_VLLM_RADIANCE_ENABLE)
     add_subdirectory(libs/vllm_radiance_wrapper)
 endif()
 add_subdirectory(apps/inferdeck-gateway)
+add_subdirectory(libs/provider/runtimes)
 add_subdirectory(apps/model-tester)
 
 install(TARGETS inferdeck-gateway

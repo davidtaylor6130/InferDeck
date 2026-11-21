@@ -11,14 +11,17 @@
 #include <ctime>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -52,14 +55,15 @@
 #include "gateway/request_security.hpp"
 #include "gateway/route_manifest.hpp"
 #include "gateway/routes.hpp"
+#include "speech_wiring.hpp"
 #include "gateway/shutdown_state.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "httplib.h"
-#include "llama.h"
-#include "llama_cpp_wrapper/llama_cpp_model.hpp"
 #include "model/backend_coordinator.hpp"
 #include "model/model_registry.hpp"
-#include "optional_runtime_factories.hpp"
+#include "model/provider.hpp"
+#include "provider/plugin_provider.hpp"
+#include "gateway/default_model_preload.hpp"
 #include "observability/gpu_telemetry.hpp"
 #include "observability/metrics.hpp"
 #include "observability/stats_db.hpp"
@@ -76,19 +80,23 @@ std::atomic<bool> g_stop{false};
 std::atomic<bool> g_reload{false};
 std::atomic<bool> g_default_model_loading{false};
 httplib::Server* g_server = nullptr;
-std::once_flag g_llama_init_once;
+std::atomic<inferdeck::model::BackendCoordinator*> g_coordinator{nullptr};
+inferdeck::provider::PluginLoadReport g_plugins;
 constexpr int runtime_reload_result = 75;
 
 #include "process_runtime.ipp"
 #include "dashboard_static.ipp"
 #include "profile_benchmark_runtime.ipp"
+#include "provider_runtime.ipp"
 #include "media_control_routes.ipp"
+#include "decision_routes.ipp"
+#include "gateway/health_json.hpp"
+#include "default_model_runtime.ipp"
 int run_gateway(const fs::path& config_path) {
     using namespace inferdeck;
     using namespace inferdeck::foundation;
     using namespace inferdeck::gateway;
 
-    g_stop.store(false);
     g_reload.store(false);
     g_default_model_loading.store(false);
     const auto config_selection = load_config_with_active(config_path);
@@ -98,6 +106,7 @@ int run_gateway(const fs::path& config_path) {
     lc.level = parse_log_level(cfg.log_level);
     if (!cfg.log_file.empty()) lc.log_file = cfg.log_file;
     foundation::Logger::instance().initialize(lc);
+    prune_rotated_service_logs("logs", 10);
 
     LOG_INFO("startup", "inferdeck-gateway {} revision={} dirty={} starting",
              inferdeck::app::build_version, inferdeck::app::build_revision,
@@ -110,22 +119,8 @@ int run_gateway(const fs::path& config_path) {
                   config_selection.fallback_reason,
                   config_path.string());
     }
-    initialize_optional_runtimes(cfg.models);
-    std::call_once(g_llama_init_once, [] {
-        LOG_INFO("vulkan_test", "About to initialize llama backend");
-        llama_backend_init();
-        const char* sys_info = llama_print_system_info();
-        if (sys_info) {
-            LOG_INFO("llama_system_info", "{}", sys_info);
-        }
-    });
-
     model::ModelRegistry registry;
-    registry.register_factory("llama_cpp", [cfg](const model::ModelInfo& info) -> std::unique_ptr<model::IBackend> {
-        return std::make_unique<llama_wrapper::LlamaCppModel>(
-            info, make_llama_config(cfg, info));
-    });
-    register_optional_runtime_factories(registry);
+    install_gateway_providers(cfg, registry);
     for (const auto& m : cfg.models) {
         registry.register_model(m);
         LOG_INFO("model_registered", "name={} vram_mb={} n_slots={}",
@@ -139,13 +134,10 @@ int run_gateway(const fs::path& config_path) {
         }
         LOG_INFO("model_alias_registered", "alias={} target={}", alias.name, alias.target);
     }
-    LOG_INFO("factory_set", "LlamaCppModel factory installed");
 
     model::BackendCoordinator coordinator(registry);
-    coordinator.set_max_queue_size(static_cast<std::size_t>(std::max(1, cfg.max_queue_size)));
-    if (cfg.vram_budget_mb > 0) {
-        coordinator.set_vram_budget(cfg.vram_budget_mb, cfg.vram_safety_margin_mb);
-    }
+    g_coordinator.store(&coordinator);
+    configure_coordinator(coordinator, cfg);
     std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     ModelStore model_store(cfg.model_store_root, cfg.model_store_archive_root,
                            cfg.model_store_hf_token, coordinator, {}, {},
@@ -197,8 +189,10 @@ int run_gateway(const fs::path& config_path) {
     GatewayDeps deps{coordinator, "15", cfg.auto_swap, cfg.default_model,
                      cfg.voice_session_grace_ms, &metrics, &stats_db,
                      &events, &swap_tracker, &maintenance_resource};
+    configure_gpu_lost_backoff(deps);
     deps.media_default_models = cfg.media_default_models;
     deps.api_keys = api_keys;
+    apply_speech_deps(deps, cfg);
     deps.background_idle_after_seconds = cfg.background_idle_after_seconds;
     deps.public_data_plane_access = !cfg.auth_required;
     auto derivative_deps = deps;
@@ -287,11 +281,11 @@ int run_gateway(const fs::path& config_path) {
     const std::string dashboard_session_path =
         std::string(inferdeck::gateway::kControlApiBase) + "/dashboard/session";
 
-    DeadlineServer server(server_request_read_deadline);
+    DeadlineServer server(server_request_read_deadline, std::chrono::milliseconds{cfg.transcription_upload_timeout_ms});
     server.set_read_timeout(server_read_timeout);
     server.set_write_timeout(server_write_timeout);
     server.set_keep_alive_timeout(server_keep_alive_timeout.count());
-    server.set_payload_max_length(server_body_limit);
+    server.set_payload_max_length(std::max(json_body_limit, deps.transcription_max_body_bytes));
     server.new_task_queue = [] {
         return new httplib::ThreadPool(std::max(32u, std::thread::hardware_concurrency() * 2u));
     };
@@ -314,25 +308,6 @@ int run_gateway(const fs::path& config_path) {
             if (req.has_header(header)) return true;
         }
         return false;
-    };
-    const auto write_validation_error = [](httplib::Response& resp,
-                                           RequestValidationStatus validation) {
-        if (validation == RequestValidationStatus::BodyNotAllowed) {
-            write_error(resp, 400, "body_not_allowed",
-                        "request body is not allowed for this endpoint");
-        } else if (validation == RequestValidationStatus::PayloadTooLarge) {
-            write_error(resp, 413, "request_too_large",
-                        "request body exceeds the endpoint limit");
-        } else if (validation == RequestValidationStatus::UnsupportedMediaType) {
-            write_error(resp, 415, "unsupported_media_type",
-                        "request Content-Type is not supported by this endpoint");
-        } else if (validation == RequestValidationStatus::InvalidContentLength) {
-            write_error(resp, 400, "invalid_content_length",
-                        "request Content-Length is invalid");
-        } else if (validation == RequestValidationStatus::UnsupportedTransferEncoding) {
-            write_error(resp, 411, "content_length_required",
-                        "request Transfer-Encoding is not supported for this endpoint");
-        }
     };
 
     server.set_expect_100_continue_handler(
@@ -430,12 +405,14 @@ int run_gateway(const fs::path& config_path) {
             }
         }
         const auto policy = request_policy(
-            req.method, req.path, principal == RoutePrincipal::ControlWrite);
+            req.method, req.path, principal == RoutePrincipal::ControlWrite,
+            deps.transcription_max_body_bytes);
         const auto validation = validate_request_headers(req, policy);
         if (validation != RequestValidationStatus::Allowed) {
             write_validation_error(resp, validation);
             return httplib::Server::HandlerResponse::Handled;
         }
+        DeadlineServer::extend_upload_deadline(req);
         return httplib::Server::HandlerResponse::Unhandled;
     });
     server.set_logger([](const httplib::Request& req,
@@ -453,7 +430,8 @@ int run_gateway(const fs::path& config_path) {
             const auto principal = classify_route(req.method, req.path);
             const auto validation = validate_request(
                 req, request_policy(req.method, req.path,
-                                    principal == RoutePrincipal::ControlWrite));
+                                    principal == RoutePrincipal::ControlWrite,
+                                    deps.transcription_max_body_bytes));
             if (validation != RequestValidationStatus::Allowed) {
                 write_validation_error(resp, validation);
                 return;
@@ -587,6 +565,7 @@ int run_gateway(const fs::path& config_path) {
         handle_audio_generations(req, resp, deps);
     }));
     register_media_control_routes(server, wrap, deps);
+    register_decision_routes(server, wrap, deps);
     if (cfg.openai_derivative_compatibility_enabled) {
         server.Post(std::string(openai_derivative_route(
                         OpenAIDerivativeRoute::ChatCompletions).pattern),
@@ -629,13 +608,7 @@ int run_gateway(const fs::path& config_path) {
     server.Get(control_api_pattern("/health"),
                wrap([&](const httplib::Request&,
                         httplib::Response& resp) {
-        resp.set_content(nlohmann::json{
-                             {"ok", true},
-                             {"db_healthy", stats_db.healthy()},
-                             {"version", inferdeck::app::build_version},
-                             {"build_revision", inferdeck::app::build_revision},
-                             {"build_dirty", inferdeck::app::build_dirty}}.dump(),
-                         "application/json");
+        resp.set_content(build_health_json(coordinator, stats_db.healthy()).dump(), "application/json");
     }));
     auto request_config_reload = [] {
         g_reload.store(true);
@@ -692,40 +665,15 @@ int run_gateway(const fs::path& config_path) {
     if (bound) {
         if (!cfg.default_model.empty() && registry.has(cfg.default_model)) {
             g_default_model_loading.store(true);
-            default_model_loader = std::thread(
-                [&coordinator, default_model = cfg.default_model] {
-                    LOG_INFO("default_model_load_begin", "name={}", default_model);
-                    model::AcquireSlotOptions options;
-                    options.timeout = std::chrono::minutes{5};
-                    options.priority = -100;
-                    options.cancelled = [] {
-                        return g_stop.load() || g_reload.load();
-                    };
-                    options.prepare = [&coordinator, default_model] {
-                        return coordinator.swap_to_cancellable(
-                            default_model, std::chrono::minutes{5}, [] {
-                                return g_stop.load() || g_reload.load();
-                            });
-                    };
-                    auto slot = coordinator.acquire_slot(default_model, options);
-                    auto loaded = slot
-                        ? coordinator.release_slot(default_model, *slot)
-                        : foundation::Err<void>(slot.error().code, slot.error().message);
-                    if (loaded) {
-                        LOG_INFO("default_model_load_complete", "name={}", default_model);
-                    } else {
-                        LOG_ERROR("default_model_load_failed", "name={} error={}",
-                                  default_model, loaded.error().message);
-                    }
-                    g_default_model_loading.store(false);
-                });
+            default_model_loader = start_default_model_loader(
+                coordinator, cfg.default_model, cfg.default_model_preload_delay_ms);
         }
         LOG_INFO("server_listening", "host={} port={}", cfg.host, cfg.port);
         listen_ok = server.listen_after_bind();
     }
     reload_monitor_stop.store(true);
     if (reload_monitor.joinable()) reload_monitor.join();
-    g_server = nullptr;
+    g_server = nullptr; g_coordinator.store(nullptr);
 
     ShutdownStateMachine shutdown;
     const auto shutdown_phase = shutdown.run(
@@ -740,7 +688,7 @@ int run_gateway(const fs::path& config_path) {
         LOG_FATAL("shutdown_deadline_exceeded",
                   "backend lifecycle did not quiesce within 120 seconds");
         foundation::Logger::instance().shutdown();
-        std::quick_exit(2);
+        std::quick_exit(g_gpu_lost_restart.load() ? gpu_lost_exit_code : 2);
     }
     if (default_model_loader.joinable()) default_model_loader.join();
     swap_tracker.join();
@@ -768,17 +716,20 @@ int run_gateway(const fs::path& config_path) {
         return runtime_reload_result;
     }
     LOG_INFO("server_stopped", "graceful shutdown");
-    return 0;
+    return g_gpu_lost_restart.load() ? gpu_lost_exit_code : 0;
 }
 
 int main(int argc, char** argv) {
     fs::path config_path = inferdeck::gateway::default_config_path();
+    fs::path provider_dir = executable_dir() / "providers";
     for (int i = 1; i < argc; ++i) {
         std::string argument = argv[i];
         if (argument == "-c" || argument == "--config") {
             if (i + 1 < argc) config_path = argv[++i];
+        } else if (argument == "--providers") {
+            if (i + 1 < argc) provider_dir = argv[++i];
         } else if (argument == "-h" || argument == "--help") {
-            std::cout << "Usage: " << argv[0] << " [-c config.yml]\n";
+            std::cout << "Usage: " << argv[0] << " [-c config.yml] [--providers directory]\n";
             return 0;
         } else if (argument == "-v" || argument == "--version") {
             std::cout << inferdeck::app::build_identity() << "\n";
@@ -789,12 +740,20 @@ int main(int argc, char** argv) {
     std::set_terminate(my_terminate_handler);
 #ifdef _WIN32
     SymInitialize(GetCurrentProcess(), NULL, TRUE);
-    AddVectoredExceptionHandler(0, CrashHandler);
+    SetUnhandledExceptionFilter(CrashHandler);
+    SetConsoleCtrlHandler(console_control_handler, TRUE);
 #endif
     std::signal(SIGINT, signal_handler); std::signal(SIGTERM, signal_handler);
 
+    install_gpu_lost_handler();
+    g_plugins = inferdeck::provider::load_plugin_providers(provider_dir);
     while (true) {
-        const int result = run_gateway(config_path);
-        if (result != runtime_reload_result) return result;
+        int result = 1;
+        try { result = run_gateway(config_path); } catch (const std::exception& error) {
+            std::cerr << "fatal: " << error.what() << '\n';
+            if (FILE* f = open_crash_log()) { fprintf(f, "fatal: %s\n", error.what()); fclose(f); }
+            return 1;
+        }
+        if (result != runtime_reload_result || g_stop.load()) return result;
     }
 }

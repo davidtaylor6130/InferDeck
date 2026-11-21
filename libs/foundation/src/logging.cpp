@@ -84,6 +84,10 @@ void Logger::set_level(LogLevel level) {
 
 void Logger::log(LogLevel lvl, std::string_view event, std::string_view message) {
     std::lock_guard<std::mutex> lock(state_mu_);
+    if (forward_) {
+        forward_(lvl, event, message);
+        return;
+    }
     if (!logger_) {
         return;
     }
@@ -97,6 +101,11 @@ void Logger::log(LogLevel lvl, std::string_view event, std::string_view message)
         case LogLevel::Fatal: logger_->critical("{}", line); break;
         case LogLevel::Off: break;
     }
+}
+
+void Logger::set_forwarder(std::function<void(LogLevel, std::string_view, std::string_view)> forward) {
+    std::lock_guard<std::mutex> lock(state_mu_);
+    forward_ = std::move(forward);
 }
 
 } // namespace inferdeck::foundation

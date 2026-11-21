@@ -4,6 +4,7 @@
 #include "foundation/result.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
+#include "gateway/health_json.hpp"
 #include "gateway/openai_routes.hpp"
 #include "gateway/media_routes.hpp"
 #include "gateway/openai_adapter.hpp"
@@ -321,8 +322,25 @@ namespace {
 
 class IModelMock : public IModel, public IEmbeddingBackend, public IImageBackend,
                    public IAudioGenerationBackend, public IVideoBackend, public ISpeechBackend,
-                   public ITranscriptionBackend {
+                   public ITranscriptionBackend, public IDecisionBackend {
 public:
+    DecisionRequest last_decision_request;
+
+    // Gives the first option 0.7 and splits the rest evenly, so answers are predictable.
+    Result<DecisionResult> decide(int, const DecisionRequest& request,
+                                  const std::function<bool()>& = {}) override {
+        last_decision_request = request;
+        DecisionResult result;
+        result.input_tokens = 42;
+        for (const auto& question : request.questions) {
+            const std::size_t count = question.kind == DecisionKind::Predicate ? 2 : question.options.size();
+            std::vector<double> probabilities(count, 0.3 / static_cast<double>(count - 1));
+            probabilities[0] = 0.7;
+            result.answers.push_back({std::move(probabilities)});
+        }
+        return Ok(std::move(result));
+    }
+
     ModelInfo model_info{};
     std::atomic<bool> loaded{false};
     std::atomic<int> vram_mb{4096};
@@ -607,9 +625,12 @@ public:
         return Ok(std::move(result));
     }
 
+    ImageGenerationRequest last_image_request;
+
     Result<ImageGenerationResult> generate_images(
         int, const ImageGenerationRequest& request,
         const std::function<bool(int)>& progress = {}) override {
+        last_image_request = request;
         if (block_media_until_cancel.load()) {
             while (!progress || progress(50)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
             return inferdeck::foundation::Err<ImageGenerationResult>(ErrorCode::Cancelled, "cancelled");
@@ -858,6 +879,10 @@ struct TestServer {
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_chat_completions(req, resp, make_deps());
                     });
+        server.Post("/v1/decisions",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_decisions(req, resp, make_deps());
+                    });
         server.Post("/v1/embeddings",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_embeddings(req, resp, make_deps());
@@ -869,6 +894,14 @@ struct TestServer {
         server.Post("/v1/images/generations",
                     [this](const httplib::Request& req, httplib::Response& resp) {
                         handle_image_generations(req, resp, make_deps());
+                    });
+        server.Post("/v1/images/edits",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_image_edits(req, resp, make_deps());
+                    });
+        server.Post("/api/inferdeck/v1/media/images/edits",
+                    [this](const httplib::Request& req, httplib::Response& resp) {
+                        handle_image_edits(req, resp, make_deps());
                     });
         server.Post("/v1/audio/speech",
                     [this](const httplib::Request& req, httplib::Response& resp) {
@@ -2579,6 +2612,267 @@ TEST_CASE("Routes: POST /v1/images/generations returns base64 images", "[routes]
     CHECK(rows[0].output_image_count == 2);
     CHECK(rows[0].generation_duration_ms == Catch::Approx(12.0));
     CHECK_FALSE(rows[0].request_id.empty());
+    ts.stop();
+}
+
+TEST_CASE("Routes: POST /v1/decisions answers typed questions in the OpenAI shape",
+          "[routes][decisions]") {
+    TestServer ts;
+    auto info = make_info("decision-model");
+    info.runtime = "jev_style";
+    info.modality = "decision";
+    info.capabilities = {"decisions"};
+    ts.registry.register_factory("jev_style", [](const ModelInfo& model) {
+        return std::make_unique<IModelMock>(model);
+    });
+    ts.registry.register_model(info);
+    ts.registry.register_model(make_info("chat-only"));
+    REQUIRE(ts.coordinator.load("decision-model"));
+    REQUIRE(ts.coordinator.load("chat-only"));
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+    const auto post = [&](const nlohmann::json& body) {
+        auto response = client.Post("/v1/decisions", body.dump(), "application/json");
+        REQUIRE(response);
+        return *response;
+    };
+    const nlohmann::json questions = nlohmann::json::array({
+        {{"type", "predicate"}, {"name", "damaged"}, {"instructions", "Is the item damaged?"}},
+        {{"type", "choice"}, {"name", "team"}, {"instructions", "Which team?"},
+         {"choices", {{{"value", "billing"}, {"description", "payments"}}, {{"value", true}}, {{"value", "other"}}}}},
+        {{"type", "score"}, {"instructions", "How severe?"},
+         {"levels", {{{"label", "Cosmetic"}}, {{"label", "Blocking"}, {"description", "cannot work"}}}}},
+    });
+    const auto ok = post({{"model", "decision-model"},
+                          {"input", {{{"role", "user"}, {"content", "The screen arrived cracked."}}}},
+                          {"questions", questions}, {"prompt_cache_key", "k"}});
+    REQUIRE(ok.status == 200);
+    const auto body = nlohmann::json::parse(ok.body);
+    CHECK(body["model"] == "decision-model");
+    REQUIRE(body["answers"].size() == 3);
+    CHECK(body["answers"][0] == nlohmann::json{{"type", "predicate"}, {"name", "damaged"},
+                                               {"probability", 0.3}});
+    const auto& choice = body["answers"][1];
+    CHECK(choice["choice"] == "billing");
+    CHECK(choice["confidence"].get<double>() == Catch::Approx(0.55));
+    CHECK(choice["probabilities"][1] == nlohmann::json{{"value", true}, {"probability", 0.15}});
+    const auto& score = body["answers"][2];
+    CHECK(score["name"].is_null());
+    CHECK(score["score"].get<double>() == Catch::Approx(0.3));
+    CHECK(score["probabilities"][1]["label"] == "Blocking");
+    CHECK(score["probabilities"][1]["value"] == 1);
+    CHECK(body["usage"]["input_tokens"] == 42);
+    CHECK(body["usage"]["output_tokens"] == 0);
+    CHECK(body["usage"]["total_tokens"] == 42);
+    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("decision-model"));
+    REQUIRE(backend != nullptr);
+    CHECK(backend->last_decision_request.input == "user: The screen arrived cracked.");
+    CHECK(backend->last_decision_request.questions[1].options[1].label == "true");
+    CHECK(backend->last_decision_request.questions[2].options[1].description == "cannot work");
+
+    const auto single = nlohmann::json::array({questions[0]});
+    CHECK(post({{"model", "chat-only"}, {"input", "x"}, {"questions", single}}).status == 400);
+    CHECK(post({{"model", "missing"}, {"input", "x"}, {"questions", single}}).status == 404);
+    CHECK(post({{"model", "decision-model"}, {"input", "x"}, {"questions", nlohmann::json::array()}}).status == 400);
+    CHECK(post({{"model", "decision-model"}, {"input", "x"}, {"questions", single}, {"stream", true}}).status == 400);
+    CHECK(post({{"model", "decision-model"}, {"input", "x"},
+                {"questions", {{{"type", "choice"}, {"instructions", "?"},
+                                {"choices", {{{"value", "a"}}, {{"value", "a"}}}}}}}}).status == 400);
+    CHECK(post({{"model", "decision-model"},
+                {"input", {{{"role", "user"}, {"content", {{{"type", "input_image"}, {"image_url", "data:,"}}}}}}},
+                {"questions", single}}).status == 400);
+    CHECK(ts.coordinator.active_request_count() == 0);
+    ts.stop();
+}
+
+TEST_CASE("Image editing accepts reference images only on InferDeck routes for capable models",
+          "[routes][images][edit]") {
+    TestServer ts;
+    auto editor = make_info("edit-model");
+    editor.runtime = "stable_diffusion_cpp";
+    editor.modality = "image";
+    editor.capabilities = {"image_generation", "image_editing"};
+    ts.registry.register_model(editor);
+    auto generator = editor;
+    generator.name = "generate-only";
+    generator.capabilities = {"image_generation"};
+    ts.registry.register_model(generator);
+    REQUIRE(ts.coordinator.load("edit-model"));
+    REQUIRE(ts.coordinator.load("generate-only"));
+
+    const auto post = [&](const std::string& path, const std::string& model,
+                          nlohmann::json references) {
+        httplib::Request request;
+        request.is_connection_closed = [] { return false; };
+        request.path = path;
+        request.body = nlohmann::json{{"model", model}, {"prompt", "make the sign red"},
+                                      {"size", "512x512"},
+                                      {"reference_images", std::move(references)}}.dump();
+        httplib::Response response;
+        handle_image_generations(request, response, ts.make_deps());
+        return response;
+    };
+    const std::string control = "/api/inferdeck/v1/media/images/generations";
+    const nlohmann::json one = nlohmann::json::array({"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABAAAAAAAAAAAA="});
+
+    const auto edited = post(control, "edit-model", one);
+    REQUIRE(edited.status == 200);
+    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("edit-model"));
+    REQUIRE(backend != nullptr);
+    REQUIRE(backend->last_image_request.reference_images.size() == 1);
+    CHECK(backend->last_image_request.reference_images[0] ==
+          std::vector<std::byte>{std::byte{0x89}, std::byte{0x50}, std::byte{0x4e}, std::byte{0x47}, std::byte{0x0d}, std::byte{0x0a}, std::byte{0x1a}, std::byte{0x0a}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x0d}, std::byte{0x49}, std::byte{0x48}, std::byte{0x44}, std::byte{0x52}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x40}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}});
+
+    const auto strict = post("/v1/images/generations", "edit-model", one);
+    CHECK(strict.status == 400);
+    CHECK(nlohmann::json::parse(strict.body)["error"]["code"] == "unsupported_parameter");
+
+    const auto incapable = post(control, "generate-only", one);
+    CHECK(incapable.status == 400);
+    CHECK(nlohmann::json::parse(incapable.body)["error"]["message"] ==
+          "model does not support image editing");
+
+    CHECK(post(control, "edit-model", nlohmann::json::array({"not-a-data-url"})).status == 400);
+    CHECK(post(control, "edit-model", nlohmann::json::array({"data:image/png;base64,AQID"})).status == 400);
+    CHECK(post(control, "edit-model", nlohmann::json::array({"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgABhqAAAYagAAAAAAAAAAA="})).status == 400);
+    CHECK(post(control, "edit-model", nlohmann::json::array({one[0], one[0], one[0], one[0], one[0]})).status == 400);
+    CHECK(ts.coordinator.active_request_count() == 0);
+}
+
+TEST_CASE("Image edits route accepts multipart uploads over HTTP",
+          "[routes][images][edit]") {
+    TestServer ts;
+    auto editor = make_info("edit-model");
+    editor.runtime = "stable_diffusion_cpp";
+    editor.modality = "image";
+    editor.capabilities = {"image_generation", "image_editing"};
+    ts.registry.register_model(editor);
+    auto generator = editor;
+    generator.name = "generate-only";
+    generator.capabilities = {"image_generation"};
+    ts.registry.register_model(generator);
+    REQUIRE(ts.coordinator.load("edit-model"));
+    REQUIRE(ts.coordinator.load("generate-only"));
+    REQUIRE(ts.start());
+    httplib::Client client("127.0.0.1", ts.port);
+
+    const auto png = [](std::uint32_t width, std::uint32_t height) {
+        std::string bytes("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR", 16);
+        for (const std::uint32_t value : {width, height}) {
+            for (int shift = 24; shift >= 0; shift -= 8) {
+                bytes.push_back(static_cast<char>((value >> shift) & 0xFF));
+            }
+        }
+        bytes.append(8, '\0');
+        return bytes;
+    };
+    const std::string image = png(64, 64);
+    using Items = httplib::UploadFormDataItems;
+    const auto fields = [] {
+        return Items{{"model", "edit-model", "", ""}, {"prompt", "make it red", "", ""},
+                     {"size", "512x512", "", ""}};
+    };
+    const auto post = [&](Items items, const std::string& path = "/v1/images/edits") {
+        return client.Post(path, items);
+    };
+    const auto code = [](const httplib::Result& response) {
+        return nlohmann::json::parse(response->body)["error"]["code"].get<std::string>();
+    };
+
+    auto items = fields();
+    items.push_back({"image[]", image, "a.png", "image/png"});
+    items.push_back({"image[]", image, "b.bin", "application/octet-stream"});
+    auto ok = post(items);
+    REQUIRE(ok);
+    REQUIRE(ok->status == 200);
+    const auto parsed = nlohmann::json::parse(ok->body);
+    CHECK(parsed["output_format"] == "png");
+    CHECK(parsed["data"].size() == 1);
+    CHECK(parsed["data"][0].contains("b64_json"));
+    const auto* backend = dynamic_cast<const IModelMock*>(ts.coordinator.get_backend("edit-model"));
+    REQUIRE(backend != nullptr);
+    REQUIRE(backend->last_image_request.reference_images.size() == 2);
+    CHECK(backend->last_image_request.reference_images[0].size() == image.size());
+
+    items = fields();
+    items.push_back({"image", image, "a.jpg", "image/jpeg"});
+    CHECK(post(items)->status == 200);
+    CHECK(post(items, "/api/inferdeck/v1/media/images/edits")->status == 200);
+
+    CHECK(post(fields())->status == 400);
+    items = fields();
+    items.push_back({"image", "not an image", "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"image", png(100000, 100000), "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"image", png(8192, 8192), "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    for (int index = 0; index < 5; ++index) items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"photo", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_parameter");
+    items = fields();
+    items.push_back({"mask", image, "m.png", "image/png"});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_capability");
+    items = fields();
+    items.push_back({"mask", "x", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_capability");
+    items = fields();
+    items.push_back({"image", "text", "", ""});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"model", "edit-model", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"n", "two", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"stream", "true", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    items.push_back({"reference_images", "x", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_parameter");
+    items = fields();
+    items.push_back({"input_fidelity", "high", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(code(post(items)) == "unsupported_capability");
+    items = fields();
+    items.push_back({"input_fidelity", "low", "", ""});
+    items.push_back({"image", image, "a.png", "image/png"});
+    CHECK(post(items)->status == 200);
+
+    items = {{"model", "generate-only", "", ""}, {"prompt", "x", "", ""},
+             {"image", image, "a.png", "image/png"}};
+    CHECK(post(items)->status == 400);
+
+    items = fields();
+    items.push_back({"image", std::string(13U * 1024U * 1024U, 'x'), "a.png", "image/png"});
+    CHECK(post(items)->status == 400);
+    items = fields();
+    for (int index = 0; index < 2; ++index) {
+        std::string large = png(64, 64);
+        large.resize(11U * 1024U * 1024U, '\0');
+        items.push_back({"image", large, "a.png", "image/png"});
+    }
+    const auto too_large = post(items);
+    REQUIRE(too_large);
+    CHECK(too_large->status == 413);
+    CHECK(code(too_large) == "request_too_large");
+
+    const auto json_body = client.Post("/v1/images/edits", "{}", "application/json");
+    REQUIRE(json_body);
+    CHECK(json_body->status == 400);
+    CHECK(ts.coordinator.active_request_count() == 0);
     ts.stop();
 }
 
@@ -4746,4 +5040,190 @@ TEST_CASE("predict_stream honors the cancel flag and returns promptly", "[routes
     worker.join();
     REQUIRE(done.load());
     REQUIRE(coordinator.release_slot("a", *slot));
+}
+
+#include "../src/transcription_chunking.hpp"
+
+TEST_CASE("long transcription is chunked in order with offsets and cancellation",
+          "[gateway][transcription]") {
+    using namespace inferdeck;
+    model::TranscriptionRequest request;
+    request.sample_rate = 100;
+    request.pcm.assign(100 * 700, 0.5f);
+    request.prompt = "base";
+    request.language = "auto";
+    std::vector<std::size_t> sizes;
+    std::vector<std::string> prompts;
+    std::vector<std::string> languages;
+    int calls = 0;
+    auto run = [&](const model::TranscriptionRequest& chunk, const std::function<bool(int)>& progress) {
+        sizes.push_back(chunk.pcm.size());
+        prompts.push_back(chunk.prompt);
+        languages.push_back(chunk.language);
+        progress(100);
+        model::TranscriptionResult part;
+        part.text = "part" + std::to_string(calls);
+        part.language = "en";
+        part.segments.push_back({0, 0.0f, 1.0f, part.text, {}, 0.0f, 0.0f});
+        ++calls;
+        return foundation::Ok(std::move(part));
+    };
+    auto merged = gateway::transcribe_in_chunks(request, 300, nullptr, run);
+    REQUIRE(merged.has_value());
+    CHECK(calls == 3);
+    CHECK(merged->text == "part0 part1 part2");
+    REQUIRE(merged->segments.size() == 3);
+    CHECK(merged->segments[2].id == 2);
+    CHECK(merged->segments[1].start_seconds > 250.0f);
+    CHECK(merged->segments[2].start_seconds > merged->segments[1].start_seconds);
+    CHECK(merged->duration_seconds == 700.0f);
+    std::size_t total = 0;
+    for (auto size : sizes) { CHECK(size <= 100 * 310); total += size; }
+    CHECK(total == request.pcm.size());
+    CHECK(prompts[0] == "base");
+    CHECK(prompts[1] == "base part0");
+    CHECK(languages[0] == "auto");
+    CHECK(languages[1] == "en");
+
+    calls = 0;
+    auto cancelled = gateway::transcribe_in_chunks(request, 300,
+        [&](int) { return calls < 1; }, run);
+    REQUIRE_FALSE(cancelled.has_value());
+    CHECK(cancelled.error().code == foundation::ErrorCode::Cancelled);
+    CHECK(calls == 1);
+}
+
+TEST_CASE("chunking splits at the quietest window and skips silent chunks",
+          "[gateway][transcription]") {
+    using namespace inferdeck;
+    model::TranscriptionRequest request;
+    request.sample_rate = 100;
+    request.pcm.assign(100 * 400, 0.5f);
+    for (std::size_t i = 100 * 295; i < 100 * 297; ++i) request.pcm[i] = 0.0f;
+    std::vector<std::size_t> sizes;
+    auto run = [&](const model::TranscriptionRequest& chunk, const std::function<bool(int)>&) {
+        sizes.push_back(chunk.pcm.size());
+        model::TranscriptionResult part;
+        part.text = "x";
+        return foundation::Ok(std::move(part));
+    };
+    REQUIRE(gateway::transcribe_in_chunks(request, 300, nullptr, run).has_value());
+    REQUIRE(sizes.size() == 2);
+    CHECK(sizes[0] >= 100 * 294);
+    CHECK(sizes[0] <= 100 * 298);
+
+    model::TranscriptionRequest silent_tail;
+    silent_tail.sample_rate = 100;
+    silent_tail.pcm.assign(100 * 700, 0.0f);
+    std::fill(silent_tail.pcm.begin(), silent_tail.pcm.begin() + 100 * 100, 0.5f);
+    sizes.clear();
+    REQUIRE(gateway::transcribe_in_chunks(silent_tail, 300, nullptr, run).has_value());
+    CHECK(sizes.size() == 1);
+}
+
+TEST_CASE("decoded audio budget admits one oversized job and bounds the rest",
+          "[gateway][transcription]") {
+    CHECK(inferdeck::gateway::transcription_budget_admits(0, 500, 100));
+    CHECK_FALSE(inferdeck::gateway::transcription_budget_admits(60, 50, 100));
+    CHECK(inferdeck::gateway::transcription_budget_admits(40, 50, 100));
+}
+
+TEST_CASE("Routes: POST /v1/audio/transcriptions accepts audio above 25 MB in chunks",
+          "[routes][transcriptions]") {
+    TestServer ts;
+    auto info = make_info("whisper-model");
+    info.runtime = "whisper_cpp";
+    info.modality = "audio_transcription";
+    info.capabilities = {"audio_transcription"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("whisper-model"));
+    REQUIRE(ts.start());
+    constexpr std::size_t data_bytes = 30ULL * 1024ULL * 1024ULL;
+    std::string wav = test_wav().substr(0, 44);
+    wav.resize(44 + data_bytes);
+    for (std::size_t i = 44; i + 1 < wav.size(); i += 2) {
+        wav[i] = 0;
+        wav[i + 1] = 4;
+    }
+    for (int byte = 0; byte < 4; ++byte) {
+        wav[4 + byte] = static_cast<char>(((wav.size() - 8) >> (8 * byte)) & 0xff);
+        wav[40 + byte] = static_cast<char>((data_bytes >> (8 * byte)) & 0xff);
+    }
+    httplib::Client client("127.0.0.1", ts.port);
+    client.set_read_timeout(120, 0);
+    auto response = client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+        {"file", wav, "long.wav", "audio/wav"},
+        {"model", "whisper-model", "", ""},
+        {"language", "en", "", ""},
+    });
+    REQUIRE(response);
+    CHECK(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body)["text"].get<std::string>().starts_with("test transcript"));
+    ts.stop();
+}
+
+#include "gateway/default_model_preload.hpp"
+
+TEST_CASE("default model preload waits, then yields to aborts and resident models",
+          "[gateway][preload]") {
+    using inferdeck::gateway::wait_for_default_preload;
+    const auto never = [] { return false; };
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(wait_for_default_preload(std::chrono::milliseconds{120}, never, never));
+    CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds{100});
+    CHECK_FALSE(wait_for_default_preload(std::chrono::milliseconds{10}, [] { return true; }, never));
+    CHECK_FALSE(wait_for_default_preload(std::chrono::milliseconds{10}, never, [] { return true; }));
+    const auto early = std::chrono::steady_clock::now();
+    CHECK_FALSE(wait_for_default_preload(std::chrono::seconds{30}, [] { return true; }, never));
+    CHECK(std::chrono::steady_clock::now() - early < std::chrono::seconds{1});
+}
+
+TEST_CASE("ensure_model_loaded: GPU-lost backoff pauses automatic GPU loads", "[gateway][backoff]") {
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) {
+        return std::make_unique<IModelMock>(info);
+    });
+    registry.register_model(make_info("a"));
+    BackendCoordinator coordinator(registry);
+    SwapTracker tracker;
+    GatewayDeps deps{coordinator, "10"};
+    deps.auto_swap = true;
+    deps.swap_tracker = &tracker;
+    deps.auto_load_blocked = [] { return true; };
+
+    const auto result = ensure_model_loaded(deps, "a");
+
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.code == "gpu_lost_backoff");
+    REQUIRE_FALSE(coordinator.is_loaded("a"));
+}
+
+TEST_CASE("gpu_backoff_until needs two recent restarts and ignores bad stamps", "[gateway][backoff]") {
+    using inferdeck::gateway::gpu_backoff_until;
+    const long long now = 100000;
+    CHECK_FALSE(gpu_backoff_until({now - 60}, now));
+    CHECK(gpu_backoff_until({now - 500, now - 60}, now) == now - 60 + 1800);
+    CHECK_FALSE(gpu_backoff_until({now - 5000, now - 4000}, now));
+    CHECK_FALSE(gpu_backoff_until({now - 60, now + 5000}, now));
+    CHECK(gpu_backoff_until({now - 500, now - 60, now + 5000}, now) == now - 60 + 1800);
+}
+
+TEST_CASE("health body keeps ok true for CPU fallback and ranks reasons", "[health]") {
+  using inferdeck::gateway::health_body;
+  auto healthy = health_body({}, {}, false, true);
+  CHECK(healthy["ok"] == true);
+  CHECK(healthy["status"] == "ok");
+  CHECK_FALSE(healthy.contains("reason"));
+  auto degraded = health_body({}, {"m"}, false, true);
+  CHECK(degraded["ok"] == true);
+  CHECK(degraded["status"] == "degraded");
+  CHECK(degraded["reason"] == "gpu_unavailable");
+  CHECK(degraded["compute_degraded"] == true);
+  CHECK(degraded["degraded_models"] == nlohmann::json::array({"m"}));
+  auto unhealthy = health_body({"u"}, {"m"}, false, true);
+  CHECK(unhealthy["ok"] == false);
+  CHECK(unhealthy["reason"] == "execution_unhealthy");
+  auto backoff = health_body({"u"}, {"m"}, true, true);
+  CHECK(backoff["ok"] == false);
+  CHECK(backoff["reason"] == "gpu_lost_backoff");
 }

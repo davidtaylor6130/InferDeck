@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -13,6 +14,7 @@
 
 #include "config_schema.hpp"
 #include "foundation/result.hpp"
+#include "model/model_info.hpp"
 #include "model/model_registry.hpp"
 #include "model/runtime_contract.hpp"
 
@@ -62,7 +64,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
     try {
         auto schema = validate_config_schema(root);
         if (!schema) return schema;
-        const auto runtime_contracts = model::standard_runtime_contracts();
+        const auto& runtime_contracts = model::runtime_contracts();
         if (root["server"] && root["server"]["port"]) {
             const int port = root["server"]["port"].as<int>();
             if (port < 1 || port > 65535) {
@@ -183,12 +185,50 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                              "gateway.voice_session_grace_ms must be between 1000 and 120000");
             }
+            if (gateway["transcription_upload_timeout_ms"] &&
+                (gateway["transcription_upload_timeout_ms"].as<int>() < 30000 ||
+                 gateway["transcription_upload_timeout_ms"].as<int>() > 3600000)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.transcription_upload_timeout_ms must be between 30000 and 3600000");
+            }
+            if (gateway["transcription_decoded_budget_mb"] &&
+                (gateway["transcription_decoded_budget_mb"].as<int>() < 64 ||
+                 gateway["transcription_decoded_budget_mb"].as<int>() > 65536)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.transcription_decoded_budget_mb must be between 64 and 65536");
+            }
+            if (gateway["transcription_max_body_mb"] &&
+                (gateway["transcription_max_body_mb"].as<int>() < 1 ||
+                 gateway["transcription_max_body_mb"].as<int>() > 4096)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.transcription_max_body_mb must be between 1 and 4096");
+            }
+            if (gateway["speech_admission_timeout_ms"] &&
+                (gateway["speech_admission_timeout_ms"].as<int>() < 1000 ||
+                 gateway["speech_admission_timeout_ms"].as<int>() > 600000)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.speech_admission_timeout_ms must be between 1000 and 600000");
+            }
+            if (gateway["default_model_preload_delay_ms"] &&
+                (gateway["default_model_preload_delay_ms"].as<int>() < 0 ||
+                 gateway["default_model_preload_delay_ms"].as<int>() > 3600000)) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "gateway.default_model_preload_delay_ms must be between 0 and 3600000");
+            }
             if (gateway["background_idle_after_seconds"] &&
                 (gateway["background_idle_after_seconds"].as<int>() < 60 ||
                  gateway["background_idle_after_seconds"].as<int>() > 86400)) {
                 return foundation::Err<void>(
                     foundation::ErrorCode::InvalidArgument,
                     "gateway.background_idle_after_seconds must be between 60 and 86400");
+            }
+            const int swap_hold = gateway["swap_hold_ms"] ? gateway["swap_hold_ms"].as<int>() : 15000;
+            const int swap_quantum = gateway["swap_quantum_ms"] ? gateway["swap_quantum_ms"].as<int>() : 180000;
+            if (swap_hold < 0 || swap_quantum < swap_hold || swap_quantum > 300000) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "gateway.swap_hold_ms and gateway.swap_quantum_ms must satisfy 0 <= hold <= quantum <= 300000");
             }
             if (gateway["n_batch"] && gateway["n_ubatch"] &&
                 gateway["n_ubatch"].as<int>() > gateway["n_batch"].as<int>()) {
@@ -401,15 +441,17 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                         ? entry["context_size"].as<int>() : 65536;
                     const bool unified = entry["kv_unified"] && entry["kv_unified"].as<bool>();
                     const YAML::Node speculative = entry["speculative"];
-                    const bool mtp = speculative && speculative.IsMap() && speculative["type"] &&
-                        speculative["type"].as<std::string>() == "mtp";
-                    const int draft_margin = mtp
-                        ? (speculative["draft_tokens"] ? speculative["draft_tokens"].as<int>() : 2) : 0;
+                    const std::string speculative_type = speculative && speculative.IsMap() && speculative["type"]
+                        ? speculative["type"].as<std::string>() : "none";
+                    const int draft_margin = speculative_type == "none" ? 0
+                        : (speculative["draft_tokens"] ? speculative["draft_tokens"].as<int>()
+                                                       : (speculative_type == "mtp" ? model::k_default_mtp_draft_tokens
+                                                                                   : model::k_default_dflash_draft_tokens));
                     if (pool_size < 0 || (pool_size > 0 &&
                         (!unified || static_cast<std::int64_t>(pool_size) <
                             static_cast<std::int64_t>(std::max(512, context_size)) + draft_margin))) {
                         return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
-                            "context_pool_size requires unified KV and capacity for one full request plus MTP draft tokens: " + name);
+                            "context_pool_size requires unified KV and capacity for one full request plus speculative draft tokens: " + name);
                     }
                 }
                 const int model_batch = entry["n_batch"]
@@ -555,36 +597,53 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     }
                     const std::string type = speculative["type"]
                         ? speculative["type"].as<std::string>() : "none";
-                    if (type != "none" && type != "mtp") {
+                    const bool dflash = type == "dflash" || type == "dflash2";
+                    if (type != "none" && !runtime_contract->speculative_types.contains(type)) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "unsupported speculative type for model: " + name);
+                            "runtime does not declare speculative type " + type + ": " + name);
                     }
-                    if (type == "mtp" && !runtime_contract->speculative) {
+                    const std::string draft_model = speculative["draft_model"]
+                        ? speculative["draft_model"].as<std::string>() : "";
+                    if (dflash && (draft_model.empty() || !std::filesystem::is_regular_file(draft_model))) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP requires a runtime with speculative support: " + name);
+                            "DFlash requires an existing draft_model GGUF: " + name);
                     }
+                    if (!dflash && !draft_model.empty()) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "draft_model is only used by dflash and dflash2: " + name);
+                    }
+                    const int max_draft_tokens = dflash ? 16 : 4;
                     const int draft_tokens = speculative["draft_tokens"]
-                        ? speculative["draft_tokens"].as<int>() : 2;
-                    if (draft_tokens < 1 || draft_tokens > 4) {
+                        ? speculative["draft_tokens"].as<int>() : (dflash ? model::k_default_dflash_draft_tokens : model::k_default_mtp_draft_tokens);
+                    if (draft_tokens < 1 || draft_tokens > max_draft_tokens) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP draft_tokens must be between 1 and 4: " + name);
+                            "speculative draft_tokens must be between 1 and " +
+                                std::to_string(max_draft_tokens) + ": " + name);
                     }
                     const float p_min = speculative["p_min"]
                         ? speculative["p_min"].as<float>() : 0.0f;
                     if (!std::isfinite(p_min) || p_min < 0.0f || p_min > 1.0f) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP p_min must be between 0 and 1: " + name);
+                            "speculative p_min must be between 0 and 1: " + name);
                     }
                     const int max_active = speculative["max_active_requests"]
                         ? speculative["max_active_requests"].as<int>() : 1;
                     if (max_active < 1 || max_active > slots) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "MTP max_active_requests exceeds slot bounds: " + name);
+                            "speculative max_active_requests exceeds slot bounds: " + name);
+                    }
+                    const int max_batch_draft = speculative["max_batch_draft_tokens"]
+                        ? speculative["max_batch_draft_tokens"].as<int>() : 8;
+                    if (max_batch_draft < 1 || max_batch_draft > 64) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "speculative max_batch_draft_tokens must be between 1 and 64: " + name);
                     }
                 }
                 auto sampling = validate_sampling_node(
@@ -637,6 +696,24 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 if (!names.contains(target)) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "model alias target must be concrete: " + name);
+                }
+                if (alias["fallbacks"]) {
+                    if (!alias["fallbacks"].IsSequence()) {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                     "model alias fallbacks must be a sequence: " + name);
+                    }
+                    std::unordered_set<std::string> fallbacks{target};
+                    for (const auto& fallback : alias["fallbacks"]) {
+                        if (!fallback.IsScalar()) {
+                            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                "model alias fallbacks must be model IDs: " + name);
+                        }
+                        const auto value = fallback.as<std::string>();
+                        if (!names.contains(value) || !fallbacks.insert(value).second) {
+                            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                "model alias fallbacks must be distinct concrete models: " + name);
+                        }
+                    }
                 }
                 const int required_context = alias["required_context_size"]
                     ? alias["required_context_size"].as<int>() : 0;

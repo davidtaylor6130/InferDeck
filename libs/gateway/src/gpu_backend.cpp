@@ -1,50 +1,27 @@
 #include "gateway/gpu_backend.hpp"
 
-#include "ggml-backend.h"
+#include "model/provider.hpp"
 
 namespace inferdeck::gateway {
 
 std::string compiled_gpu_backend() {
 #ifdef INFERDECK_COMPILED_GPU_BACKEND
     return INFERDECK_COMPILED_GPU_BACKEND;
-#elif defined(GGML_BACKEND_DL)
-    return "dynamic";
-#elif defined(GGML_USE_HIP)
-    return "HIP";
 #else
     return "VULKAN";
 #endif
 }
 
-namespace {
-
-std::string device_type_name(enum ggml_backend_dev_type type) {
-    switch (type) {
-        case GGML_BACKEND_DEVICE_TYPE_CPU: return "cpu";
-        case GGML_BACKEND_DEVICE_TYPE_GPU: return "gpu";
-        case GGML_BACKEND_DEVICE_TYPE_IGPU: return "igpu";
-        case GGML_BACKEND_DEVICE_TYPE_ACCEL: return "accel";
-        default: return "unknown";
-    }
-}
-
-}
-
 nlohmann::json gpu_backend_diagnostics() {
     nlohmann::json devices = nlohmann::json::array();
-    const size_t count = ggml_backend_dev_count();
-    for (size_t i = 0; i < count; ++i) {
-        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-        if (dev == nullptr) continue;
-        const char* name = ggml_backend_dev_name(dev);
-        const char* description = ggml_backend_dev_description(dev);
-        devices.push_back({
-            {"index", i},
-            {"name", name != nullptr ? name : "unknown"},
-            {"description", description != nullptr ? description : ""},
-            {"type", device_type_name(ggml_backend_dev_type(dev))},
-        });
+    const auto reply = model::invoke_provider_operation("llama_cpp", "devices", "{}");
+    if (reply) {
+        const nlohmann::json parsed = nlohmann::json::parse(*reply, nullptr, false);
+        if (parsed.is_object() && parsed.contains("devices") && parsed["devices"].is_array()) {
+            devices = parsed["devices"];
+        }
     }
+    const std::size_t count = devices.size();
     return {
         {"compiledBackend", compiled_gpu_backend()},
         {"deviceCount", count},

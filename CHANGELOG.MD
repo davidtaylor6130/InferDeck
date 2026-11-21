@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+---
+
+## [1.2.0] - 2026-11-21
+
+### Added
+- Provider plugins: runtimes can be added or swapped by dropping a shared
+  library into `providers/`. The C ABI and every payload are documented in
+  `docs/providers.md`, with a reference provider under `libs/provider/examples`.
+- Model discovery (`GET /api/inferdeck/v1/models`) reports token `limits` for
+  every entry, and `resolved_model` plus `alias_contract` for aliases (#195).
+- Qwen-Image-2.1 runtime support and reference-image editing through
+  `reference_images` on the InferDeck image routes and in the dashboard
+  (#189). Validated on the R9700; see `docs/qwen-image-2.1.md`.
+- Image models can set default `steps` and `guidance_scale` artifacts.
+- `POST /v1/decisions` in the OpenAI Decisions shape, served by the new
+  `jev_style` runtime for Jev-Style decision models (`docs/decisions.md`).
+- Model installs from multi-repo bundle recipes.
+- `GET /api/inferdeck/v1/providers` and the `inferdeck-provider-check` tool for
+  validating provider libraries.
+- The build fails at configure time when stable-diffusion.cpp and InferDeck
+  disagree on `GGML_MAX_NAME`.
+- stable-diffusion.cpp warnings and errors now reach the gateway log.
+- DFlash/DFlash2 speculative decoding in the llama_cpp runtime; `draft_tokens` defaults to 3.
+- Batched speculative drafts share a per-step token budget across concurrent requests.
+- Provider ABI v2 with a shared codec and C++ SDK; every built-in runtime ships as a provider DLL.
+- Multipart `POST /v1/images/edits` for Qwen-Image-2.1 reference-image editing (#189).
+- Swap hysteresis (`gateway.swap_hold_ms`, `gateway.swap_quantum_ms`, default 15 s / 180 s) (#196).
+- Resident-first alias fallbacks, lender context restore after co-resident use, and guaranteed alias limits in discovery.
+- Long-audio speech-to-text in 1-minute chunks with a configurable 200 MB upload limit, a separate upload read deadline and a 4 hour cap.
+- `gateway.default_model_preload_delay_ms` to delay the boot preload of the default model.
+- GPU hang recovery task script and 50 MB NSSM service log rotation.
+
+### Changed
+- Built-in runtimes register through one provider descriptor list instead of
+  being wired individually in the gateway entry point.
+- The MCP OpenCode config tool reads context limits from discovery `limits`.
+- llama.cpp `73a43d1f6` to `d92ea9bb1`; stable-diffusion.cpp to `01c463a`; acestep.cpp to `973517b`.
+- Default GPU VRAM reserve is 2048 MB.
+- Configuration errors are reported at startup; invalid chat input returns 400.
+
+### Fixed
+- GPU device loss marks the model unhealthy and restarts the gateway; `/health` reports `degraded`; two GPU-lost restarts within 10 minutes back off GPU auto-loads for 30 minutes (#198).
+- Each swap has its own cancellation token.
+- Only WARN/ERROR llama.cpp native logs are forwarded to the service log.
+- The coordinator waits for the driver to release GPU memory before the next load; a hung Radiance Python call no longer freezes the gateway.
+- Desktop VRAM was reserved twice under live telemetry, which blocked loads that should fit (#210).
+- A GPU model that falls back to CPU is reported as `degraded` with reason `gpu_unavailable` in `/health` (#211).
+- Co-residency lenders regrow their context pool after borrowers leave or demand exceeds the lent pool.
+- Radiance releases its kernel scratch on unload and partially loaded weights on a failed load.
+- Long speech-to-text no longer stalls other requests; admission is bounded and cancellation is responsive (#205).
+
 ### Removed
 - The standalone OpenCode config exporter and its dedicated CI test. OpenCode
   continues to use the stable model aliases published by InferDeck.

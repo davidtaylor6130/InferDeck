@@ -47,6 +47,10 @@ slot once, and does not retain response state.
 Runtime availability, residency, VRAM, slots, pricing, aliases, and optimization
 metadata belong to authenticated control routes.
 
+`POST /v1/decisions` follows the OpenAI Decisions API, which postdates the
+pinned SDK versions, so it has no SDK contract coverage. Its supported subset
+and differences are listed in [decisions.md](decisions.md).
+
 `POST /v1/embeddings` accepts a string, string array, token-ID array, or
 token-ID matrix. Float output and little-endian base64 float encoding are
 supported. Unsupported dimensions, encoding formats, extra fields, and input
@@ -140,6 +144,16 @@ for another format, quality/style/background semantics, compression, URL output,
 or image streaming return `unsupported_capability`; invalid enum/range values
 remain request errors. Native-only sampler controls remain available only in the
 explicitly enabled derivative profile.
+
+POST /v1/images/edits accepts multipart `image`/`image[]` uploads (one to four
+files, at most 12 MiB each, PNG, JPEG or BMP detected from the bytes; at most
+8192 pixels per side and 16 megapixels) with `model` and `prompt`, for models
+that declare `image_editing`. The total multipart size is limited to 16 MiB
+(413 `request_too_large`) and chunked bodies are refused. Field rules and
+`b64_json` PNG output match generations; `url` output returns
+`unsupported_capability`, as do `mask` and `input_fidelity: high`. The mirror
+`/api/inferdeck/v1/media/images/edits` is a control-plane route and uses
+control-write authentication.
 
 ## Stateless Responses contract
 

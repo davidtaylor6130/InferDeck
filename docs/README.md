@@ -9,6 +9,9 @@
 - [`migration-0.8.md`](migration-0.8.md) - breaking routes, consumers, backups, activation, and rollback
 - [`release-reproducibility.md`](release-reproducibility.md) - pinned inputs, manifests, checksums, SBOM, and signing
 - [`architecture-change-checklist.md`](architecture-change-checklist.md) - required review gates for architecture changes
+- [`decisions.md`](decisions.md) - `POST /v1/decisions`, decision models, and the Jev-Style runtime
+- [`providers.md`](providers.md) - how runtimes plug in; recipes to add or upgrade a runtime as a provider DLL; the C ABI
+- [`qwen-image-2.1.md`](qwen-image-2.1.md) - Qwen-Image-2.1 weights, configuration, image-edit API, and runtime pin
 - [`architecture.md`](architecture.md) — system architecture, layer by layer
 - [`DEPLOY.md`](DEPLOY.md) — unattended Windows deployment (scheduled tasks + watchdog)
 - [`opencode-setup-guide.md`](opencode-setup-guide.md) — pointing opencode at InferDeck

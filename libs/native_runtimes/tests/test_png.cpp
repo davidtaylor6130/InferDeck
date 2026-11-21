@@ -94,3 +94,26 @@ TEST_CASE("Native PNG encoder compresses and preserves RGB and RGBA pixels",
     }
 }
 #endif
+
+#ifdef INFERDECK_HAS_STABLE_DIFFUSION_CPP
+TEST_CASE("Reference images decode to RGB and reject unreadable bytes",
+          "[native-runtimes][image]") {
+    const std::uint8_t pixels[] = {255, 0, 0, 0, 255, 0};
+    const auto png = inferdeck::native_runtimes::encode_png(pixels, 2, 1, 3);
+    REQUIRE(png);
+    const auto decoded = inferdeck::native_runtimes::decode_image_rgb(*png);
+    REQUIRE(decoded);
+    CHECK(decoded->width == 2);
+    CHECK(decoded->height == 1);
+    CHECK(decoded->rgb == std::vector<std::uint8_t>{255, 0, 0, 0, 255, 0});
+    const std::vector<std::byte> junk(16, std::byte{7});
+    CHECK_FALSE(inferdeck::native_runtimes::decode_image_rgb(junk));
+    CHECK_FALSE(inferdeck::native_runtimes::decode_image_rgb({}));
+    auto bomb = *png;
+    const std::uint8_t huge[] = {0x00, 0x01, 0x86, 0xA0, 0x00, 0x01, 0x86, 0xA0};
+    for (std::size_t index = 0; index < sizeof(huge); ++index) {
+        bomb[16 + index] = std::byte{huge[index]};
+    }
+    CHECK_FALSE(inferdeck::native_runtimes::decode_image_rgb(bomb));
+}
+#endif

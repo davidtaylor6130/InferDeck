@@ -7,6 +7,7 @@
 #include <cctype>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -68,6 +69,11 @@ std::string safe_name(const std::string& value) {
     }
     while (!output.empty() && output.front() == '.') output.erase(output.begin());
     return output.empty() ? "model" : output;
+}
+
+bool valid_model_name(const std::string& name) {
+    return !name.empty() && name.size() <= 160 && name.back() != '.' &&
+           safe_name(name) == name;
 }
 
 bool valid_repo(const std::string& repo) {
@@ -603,7 +609,8 @@ nlohmann::json to_json(const StoreDownload& download) {
         {"modality", download.file.modality}, {"state", download.state},
         {"error", download.error}, {"bytesDownloaded", download.bytes_downloaded},
         {"bytesTotal", download.bytes_total}, {"installedPath", download.installed_path},
-        {"artifactCount", download.artifacts.empty() ? 1 : download.artifacts.size()}
+        {"artifactCount", download.artifacts.empty() ? 1 : download.artifacts.size()},
+        {"bundle", download.bundle ? download.bundle->id : std::string{}}
     };
 }
 
@@ -674,6 +681,8 @@ void ModelStore::release_quantization_resource() noexcept {
 #include "model_store_discovery.ipp"
 
 #include "model_store_downloads.ipp"
+
+#include "model_store_bundles.ipp"
 
 #include "model_store_quantization.ipp"
 

@@ -3,8 +3,7 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
                                           const std::string& runtime,
                                           const std::string& modality,
                                           const std::string& model_name) {
-    if (model_name.empty() || model_name.size() > 160 || model_name.back() == '.' ||
-        safe_name(model_name) != model_name) {
+    if (!valid_model_name(model_name)) {
         return Err<std::uint64_t>(ErrorCode::InvalidArgument, "invalid model name");
     }
     std::vector<StoreFile> artifacts;
@@ -26,6 +25,13 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
         if (!file) return Err<std::uint64_t>(file.error().code, file.error().message);
         artifacts.push_back(std::move(*file));
     }
+    return enqueue(std::move(artifacts), filename, model_name, std::nullopt);
+}
+
+Result<std::uint64_t> ModelStore::enqueue(std::vector<StoreFile> artifacts,
+                                          const std::string& filename,
+                                          const std::string& model_name,
+                                          std::optional<StoreBundle> bundle) {
     const auto total_size = std::accumulate(
         artifacts.begin(), artifacts.end(), std::uint64_t{0},
         [](std::uint64_t total, const StoreFile& artifact) { return total + artifact.size; });
@@ -77,12 +83,13 @@ Result<std::uint64_t> ModelStore::install(const std::string& repo,
         StoreDownload job;
         job.id = id;
         job.file = artifacts.front();
-        if (artifacts.size() > 1) {
+        if (artifacts.size() > 1 || bundle) {
             job.file.name = filename;
             job.file.size = total_size;
             job.file.sha256.clear();
         }
         job.artifacts = std::move(artifacts);
+        job.bundle = std::move(bundle);
         job.model_name = model_name;
         job.bytes_total = total_size;
         downloads_[id] = std::move(job);
@@ -269,7 +276,7 @@ void ModelStore::run(std::uint64_t id) {
         cancelled = cancellations_.at(id);
         downloads_.at(id).state = "downloading";
     }
-    if (job.artifacts.size() > 1) {
+    if (job.artifacts.size() > 1 || job.bundle) {
         run_bundle(id, job, cancelled);
         return;
     }
@@ -399,7 +406,8 @@ void ModelStore::run(std::uint64_t id) {
 void ModelStore::run_bundle(
     std::uint64_t id, const StoreDownload& job,
     const std::shared_ptr<std::atomic<bool>>& cancelled) {
-    const auto directory = root_ / safe_name(job.file.runtime) / safe_name(job.file.repo);
+    const auto directory = root_ / safe_name(job.file.runtime) /
+        safe_name(job.bundle ? job.bundle->id : job.file.repo);
     const auto staging = directory / (safe_name(job.model_name) + ".bundle.partial");
     const auto destination = directory / safe_name(job.model_name);
     std::error_code error;
@@ -493,21 +501,26 @@ void ModelStore::run_bundle(
     }
     model::ModelInfo info;
     info.name = job.model_name;
-    info.family = job.file.repo;
+    info.family = job.bundle ? job.bundle->family : job.file.repo;
     info.runtime = job.file.runtime;
     info.modality = job.file.modality;
     info.capabilities = job.file.capabilities;
-    info.vram_required_mb = (job.file.runtime == "ace_step_cpp" || job.file.runtime == "ltx_video_cpp")
+    info.vram_required_mb = job.bundle && job.bundle->vram_required_mb > 0
+        ? job.bundle->vram_required_mb
+        : (job.bundle || job.file.runtime == "ace_step_cpp" || job.file.runtime == "ltx_video_cpp")
         ? static_cast<int>((job.file.size + 1024 * 1024 - 1) /
                            (1024 * 1024))
         : 0;
     nlohmann::json artifact_manifest = nlohmann::json::object();
     for (const auto& artifact : job.artifacts) {
-        const std::string base_key = job.file.runtime == "ltx_video_cpp"
-            ? ltx_artifact_key(artifact.name) : artifact_key(artifact.name);
+        const std::string base_key = !artifact.artifact_key.empty()
+            ? artifact.artifact_key
+            : job.file.runtime == "ltx_video_cpp"
+                ? ltx_artifact_key(artifact.name) : artifact_key(artifact.name);
         std::string key = base_key;
         const auto extension = lower(std::filesystem::path(artifact.name).extension().string());
-        if (job.file.modality == "audio_speech" && !info.artifacts.contains("model") &&
+        if (artifact.artifact_key.empty() && job.file.modality == "audio_speech" &&
+            !info.artifacts.contains("model") &&
             (extension == ".onnx" || extension == ".ort") &&
             key != "duration_predictor" && key != "text_encoder" &&
             key != "vector_estimator" && key != "vocoder") {
@@ -520,6 +533,13 @@ void ModelStore::run_bundle(
         info.artifacts[key] = path.string();
         artifact_manifest[key] = path.string();
     }
+    nlohmann::json settings = nlohmann::json::object();
+    if (job.bundle) {
+        for (const auto& [key, value] : job.bundle->settings) {
+            info.artifacts.try_emplace(key, value);
+            settings[key] = value;
+        }
+    }
     {
         std::lock_guard lock(mutex_);
         installed_[job.model_name] = {
@@ -529,6 +549,10 @@ void ModelStore::run_bundle(
             {"artifacts", artifact_manifest}, {"artifactCount", job.artifacts.size()},
             {"vramRequiredMb", info.vram_required_mb}
         };
+        if (job.bundle) {
+            installed_[job.model_name]["bundle"] = job.bundle->id;
+            installed_[job.model_name]["settings"] = std::move(settings);
+        }
         downloads_.at(id).installed_path = destination.string();
     }
     const auto saved = save_manifest();

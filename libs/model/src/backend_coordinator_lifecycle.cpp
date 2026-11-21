@@ -1,6 +1,8 @@
 #include "model/backend_coordinator.hpp"
+#include "foundation/logging.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -142,6 +144,11 @@ foundation::Result<void> BackendCoordinator::load_with_lock_deadline(
         if (is_primary_model(instance->info())) {
             current_loaded_ = name;
         }
+        const auto loaded_at = clock::now();
+        model_use_[name] = ModelUse{loaded_at, loaded_at, 0};
+        context_borrowers_.erase(name);
+        reduced_lenders_.erase(name);
+        restore_wanted_.erase(name);
         if (instance->estimate_vram_mb(instance->n_slots()) > 0) {
             invalidate_vram_observation_locked();
             ++resource_generation_;
@@ -164,7 +171,30 @@ foundation::Result<void> BackendCoordinator::unload_current() {
 }
 
 foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
-    return unload_with_control(name, {});
+    std::vector<std::string> lenders;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& [lender, borrowers] : context_borrowers_) {
+            if (borrowers.contains(name)) lenders.push_back(lender);
+        }
+    }
+    auto result = unload_with_control(name, {});
+    if (!result) return result;
+    for (const auto& lender : lenders) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto active = active_requests_by_model_.find(lender);
+            if (!restore_wanted_.contains(lender) ||
+                (active != active_requests_by_model_.end() && active->second > 0)) continue;
+        }
+        const auto restored = prepare_request_capacity(lender, RequestDemand{0, 0, 1, 1, 0, 0},
+            LifecycleControl{clock::now() + std::chrono::seconds{5}, {}}, false);
+        if (!restored) {
+            foundation::LOG_WARN("context_restore_failed", "model={} error={}",
+                                 lender, restored.error().message);
+        }
+    }
+    return result;
 }
 
 foundation::Result<void> BackendCoordinator::unload_with_control(
@@ -195,7 +225,9 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
         draining_models_.insert(name);
         const auto has_active_requests = [&] {
             const auto active = active_requests_by_model_.find(name);
-            return active != active_requests_by_model_.end() && active->second > 0;
+            const auto pins = validation_pins_.find(name);
+            return (active != active_requests_by_model_.end() && active->second > 0) ||
+                   (pins != validation_pins_.end() && pins->second > 0);
         };
         while (has_active_requests() && clock::now() < drain_deadline &&
                !control.is_cancelled()) {
@@ -228,6 +260,11 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
         }
     }
 
+    int used_before_unload = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        used_before_unload = observed_vram_used_mb_;
+    }
     auto r = instance ? instance->unload(control) : foundation::Ok();
 
     {
@@ -236,14 +273,50 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
             instances_[name] = std::move(instance);
             if (was_primary) current_loaded_ = name;
         }
-        if (r) active_requests_by_model_.erase(name);
+        if (r) {
+            active_requests_by_model_.erase(name);
+            model_use_.erase(name);
+            background_requests_by_model_.erase(name);
+        }
         draining_models_.erase(name);
+        if (r) {
+            context_borrowers_.erase(name);
+            reduced_lenders_.erase(name);
+            restore_wanted_.erase(name);
+            for (auto& [lender, borrowers] : context_borrowers_) {
+                if (borrowers.erase(name) && reduced_lenders_.contains(lender)) restore_wanted_.insert(lender);
+            }
+            std::erase_if(context_borrowers_, [](const auto& entry) { return entry.second.empty(); });
+        }
         if (r && released_vram > 0) {
             invalidate_vram_observation_locked();
             ++resource_generation_;
         }
     }
     cv_.notify_all();
+    if (r && released_vram > 0) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (observed_vram_total_mb_ > 0 && used_before_unload > 0) {
+            const int released_target = used_before_unload - released_vram / 2;
+            const auto deadline = std::min(control.deadline, clock::now() + std::chrono::seconds{30});
+            auto last_sample = observed_vram_at_;
+            int last_used = -1;
+            int stable_samples = 0;
+            bool settled = false;
+            while (!settled && !shutting_down_.load() && clock::now() < deadline) {
+                cv_.wait_for(lock, std::chrono::milliseconds{250});
+                if (!live_vram_observation_fresh_locked() || observed_vram_at_ == last_sample) continue;
+                last_sample = observed_vram_at_;
+                stable_samples = last_used >= 0 && std::abs(last_used - observed_vram_used_mb_) < 256
+                    ? stable_samples + 1 : 0;
+                settled = stable_samples >= 1 &&
+                    (observed_vram_used_mb_ <= released_target || stable_samples >= 3);
+                last_used = observed_vram_used_mb_;
+            }
+            foundation::LOG_INFO("gpu_release_settled", "model={} settled={} used_before_mb={} used_now_mb={}",
+                                 name, settled, used_before_unload, observed_vram_used_mb_);
+        }
+    }
     return r;
 }
 
@@ -347,45 +420,69 @@ foundation::Result<void> BackendCoordinator::swap_to_with_control(
   return loaded;
 }
 
+void BackendCoordinator::request_swap_cancel(const std::string& target) {
+  std::lock_guard<std::mutex> lock(swap_tokens_mutex_);
+  bool matched = false;
+  for (auto& [name, token] : swap_tokens_) {
+    if (target.empty() || name == target) {
+      token->store(true);
+      matched = true;
+    }
+  }
+  if (matched) return;
+  if (target.empty()) swap_cancel_.store(true);
+  else pending_cancel_ = {target, clock::now() + std::chrono::seconds{5}};
+}
+
 foundation::Result<void> BackendCoordinator::swap_to_cancellable(
     const std::string& name, std::chrono::milliseconds timeout,
     std::function<bool()> cancelled) {
+  auto token = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(swap_tokens_mutex_);
+    bool cancelled_early = swap_cancel_.exchange(false);
+    if (pending_cancel_) {
+      cancelled_early = cancelled_early ||
+          (pending_cancel_->first == name && clock::now() < pending_cancel_->second);
+      if (cancelled_early || clock::now() >= pending_cancel_->second) pending_cancel_.reset();
+    }
+    if (cancelled_early) token->store(true);
+    swap_tokens_.emplace_back(name, token);
+  }
+  struct TokenGuard {
+    BackendCoordinator& self;
+    std::shared_ptr<std::atomic<bool>> token;
+    ~TokenGuard() {
+      std::lock_guard<std::mutex> lock(self.swap_tokens_mutex_);
+      std::erase_if(self.swap_tokens_, [&](const auto& e) { return e.second == token; });
+    }
+  } guard{*this, token};
   const LifecycleControl control{
       clock::now() + timeout,
-      [this, cancelled = std::move(cancelled)] {
-        return swap_cancel_.load() || (cancelled && cancelled());
+      [this, token, cancelled = std::move(cancelled)] {
+        return token->load() || shutting_down_.load() || (cancelled && cancelled());
       }};
   auto info = registry_.get_info_result(name);
   if (!info) return foundation::Err<void>(info.error().code, info.error().message);
   if (is_independent_sidecar(*info)) {
-    if (swap_cancel_.load()) {
-      reset_swap_cancel();
+    if (token->load()) {
       return foundation::Err(foundation::ErrorCode::Cancelled,
                              "swap cancelled before sidecar load");
     }
-    auto result = load_with_lock_deadline(
-        name, control.deadline, control.cancelled);
-    reset_swap_cancel();
-    return result;
+    return load_with_lock_deadline(name, control.deadline, control.cancelled);
   }
   if (is_ready(name)) return foundation::Ok();
-  if (swap_cancel_.load()) {
-    reset_swap_cancel();
+  if (token->load()) {
     return foundation::Err(foundation::ErrorCode::Cancelled, "swap cancelled before start");
   }
   swap_in_progress_.store(true);
   foundation::Result<void> result;
   try {
-    if (swap_cancel_.load()) {
-      result = foundation::Err(foundation::ErrorCode::Cancelled, "swap cancelled before load");
-    } else {
-      result = swap_to_with_control(name, control);
-    }
+    result = swap_to_with_control(name, control);
   } catch (...) {
     result = foundation::Err(foundation::ErrorCode::Internal, "swap threw");
   }
   swap_in_progress_.store(false);
-  reset_swap_cancel();
   return result;
 }
 

@@ -28,6 +28,7 @@ if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
     set(SD_WEBP OFF CACHE BOOL "" FORCE)
     set(SD_WEBM OFF CACHE BOOL "" FORCE)
     set(SD_VULKAN ON CACHE BOOL "" FORCE)
+    set(SD_USE_UPSTREAM_GGML ON CACHE BOOL "" FORCE)
     set(SD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     add_subdirectory("${INFERDECK_STABLE_DIFFUSION_ROOT}"
                      "${CMAKE_BINARY_DIR}/native/stable-diffusion" EXCLUDE_FROM_ALL)
@@ -35,16 +36,15 @@ if(EXISTS "${INFERDECK_STABLE_DIFFUSION_ROOT}/CMakeLists.txt")
         "${CMAKE_SOURCE_DIR}/libs/third_party/llama.cpp")
     add_library(inferdeck-video-encoding STATIC
         "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common/media_io.cpp"
-        "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common/log.cpp")
+        "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common/log.cpp" "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common/generation_metadata.cpp" "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common/media_metadata.cpp")
     target_include_directories(inferdeck-video-encoding PUBLIC
         "${INFERDECK_STABLE_DIFFUSION_ROOT}/examples/common"
         "${INFERDECK_STABLE_DIFFUSION_ROOT}/include"
         PRIVATE "${INFERDECK_STABLE_DIFFUSION_ROOT}/thirdparty")
-    target_compile_features(inferdeck-video-encoding PUBLIC cxx_std_17)
+    set_target_properties(inferdeck-video-encoding PROPERTIES CXX_STANDARD 17)
     target_sources(native_runtimes PRIVATE
-        src/stable_diffusion_backend.cpp
-        src/ltx_video_backend.cpp
-        src/ltx_video_encoder.cpp)
+        src/stable_diffusion_backend.cpp src/image_decode.cpp
+        src/ltx_video_backend.cpp src/ltx_video_encoder.cpp src/ggml_graph_view_shim.cpp)
     target_link_libraries(native_runtimes PRIVATE inferdeck-video-encoding)
     if(MSVC)
         set_property(SOURCE src/ltx_video_backend.cpp APPEND PROPERTY COMPILE_OPTIONS /EHsc-)
@@ -142,7 +142,7 @@ if(INFERDECK_SHERPA_ONNX_INCLUDE AND INFERDECK_SHERPA_ONNX_LIBRARY)
     target_link_libraries(native_runtimes PRIVATE ${INFERDECK_SHERPA_ONNX_LIBRARY} mp3lame::mp3lame)
     target_compile_definitions(native_runtimes PUBLIC INFERDECK_HAS_SHERPA_ONNX=1)
     if(WIN32)
-        install(FILES "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/libmp3lame.DLL" DESTINATION .)
+        install(FILES "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/libmp3lame.DLL" DESTINATION providers)
         install(FILES "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/mp3lame/copyright" DESTINATION licenses/mp3lame-3.100 RENAME LICENSE)
     endif()
 elseif(INFERDECK_REQUIRE_SHERPA_ONNX)

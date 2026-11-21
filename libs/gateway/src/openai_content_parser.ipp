@@ -75,6 +75,35 @@ foundation::Result<std::vector<std::byte>> decode_base64(
     return foundation::Ok(std::move(output));
 }
 
+}
+
+foundation::Result<inference::ImageContent> parse_data_image_url(
+    const std::string& url) {
+    const auto comma = url.find(',');
+    if (comma == std::string::npos || !url.starts_with("data:image/") ||
+        url.substr(0, comma).find(";base64") == std::string::npos) {
+        return foundation::Err<inference::ImageContent>(
+            foundation::ErrorCode::InvalidArgument,
+            "image_url must be a base64 data:image URL");
+    }
+    if (url.size() - comma - 1 > 32U * 1024U * 1024U) {
+        return foundation::Err<inference::ImageContent>(
+            foundation::ErrorCode::InvalidArgument,
+            "image payload exceeds 32 MiB encoded");
+    }
+    auto bytes = decode_base64(std::string_view(url).substr(comma + 1));
+    if (!bytes) {
+        return foundation::Err<inference::ImageContent>(bytes.error().code,
+                                                   bytes.error().message);
+    }
+    inference::ImageContent content;
+    content.bytes = std::move(*bytes);
+    content.media_type = url.substr(5, url.find(';') - 5);
+    return foundation::Ok(std::move(content));
+}
+
+namespace {
+
 foundation::Result<inference::Content> parse_image(
     const nlohmann::json& part) {
     if (!part.contains("image_url")) {
@@ -101,28 +130,13 @@ foundation::Result<inference::Content> parse_image(
             foundation::ErrorCode::InvalidArgument,
             "image_url must be a string or object with string url");
     }
-    const auto comma = url.find(',');
-    if (comma == std::string::npos || !url.starts_with("data:image/") ||
-        url.substr(0, comma).find(";base64") == std::string::npos) {
-        return foundation::Err<inference::Content>(
-            foundation::ErrorCode::InvalidArgument,
-            "image_url must be a base64 data:image URL");
+    auto content = parse_data_image_url(url);
+    if (!content) {
+        return foundation::Err<inference::Content>(content.error().code,
+                                                   content.error().message);
     }
-    if (url.size() - comma - 1 > 32U * 1024U * 1024U) {
-        return foundation::Err<inference::Content>(
-            foundation::ErrorCode::InvalidArgument,
-            "image payload exceeds 32 MiB encoded");
-    }
-    auto bytes = decode_base64(std::string_view(url).substr(comma + 1));
-    if (!bytes) {
-        return foundation::Err<inference::Content>(bytes.error().code,
-                                                   bytes.error().message);
-    }
-    inference::ImageContent content;
-    content.bytes = std::move(*bytes);
-    content.media_type = url.substr(5, url.find(';') - 5);
-    content.detail = std::move(detail);
-    return foundation::Ok(inference::Content{std::move(content)});
+    content->detail = std::move(detail);
+    return foundation::Ok(inference::Content{std::move(*content)});
 }
 
 foundation::Result<inference::Message> parse_message(

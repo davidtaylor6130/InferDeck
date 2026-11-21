@@ -12,7 +12,7 @@ import gc
 import hashlib
 import math
 import re
-from inferdeck_vllm_radiance_lifecycle import release_language_model_cache, capture_lifecycle_refs, lifecycle_diagnostics, finalize_engine_caches, release_model_compilation_hooks
+from inferdeck_vllm_radiance_lifecycle import release_language_model_cache, capture_lifecycle_refs, lifecycle_diagnostics, finalize_engine_caches, release_model_compilation_hooks, release_kernel_scratch, release_exception_frames
 import os
 import sys
 import threading
@@ -586,6 +586,7 @@ def _create(c:dict[str,Any])->dict[str,Any]:
         print(f"event=hillclimb_sampling_profile enabled={str(hillclimb_sampling).lower()} temperature=0 top_p=1 top_k=20 min_p=0 repeat_penalty=1", file=sys.stderr, flush=True)
         return {"engine":engine,"engine_lock":threading.RLock(),"tokenizer":tokenizer,"SamplingParams":SamplingParams,"active":set(),"requests":{},"contexts":tuple(contexts),"prefill_attention":prefill_attention,"int4_decode_kernel":decode_kernel_enabled,"speculative":speculative_config is not None,"radiance_env":_radiance_env(c),"hillclimb_sampling":hillclimb_sampling}
     except Exception as load_error:
+        release_exception_frames(load_error)
         try:
             shutdown({"engine": engine, "active": set(), "requests": {},
                       "contexts": tuple(contexts)})
@@ -828,6 +829,11 @@ def _shutdown(s: dict[str, Any]) -> None:
             errors.append(str(error))
     s["engine"] = None
     del engine
+    try:
+        released_scratch = release_kernel_scratch()
+        print(f"event=radiance_kernel_scratch_released bytes={released_scratch}", file=sys.stderr, flush=True)
+    except Exception as error:
+        errors.append(str(error))
     s["active"].clear()
     s["requests"].clear()
     for context in s.pop("contexts", ()):

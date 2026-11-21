@@ -13,7 +13,7 @@ import type { ProfileOptimizationCandidate } from '../api';
 import { UsagePage } from './UsagePage';
 import { parseDashboardLogLine, SystemPage } from './SystemPage';
 import { FutureWorkspacePage } from './FutureWorkspacePage';
-import { ImagePage } from './ImagePage';
+import { ImagePage, mergeReferences } from './ImagePage';
 import { MusicPage } from './MusicPage';
 import { VIDEO_JOB_MODALITIES } from './VideoPage';
 import type { StatsEvent, StatusPayload } from '../types';
@@ -286,6 +286,18 @@ describe('pages', () => {
     })).toBe('ACE-Step-1.5-GGUF-acestep-v15-turbo-Q4_K_M');
   });
 
+  it('limits image-edit references by type and count', async () => {
+    const png = (name: string) => new File(['x'], name, { type: 'image/png' });
+    const mixed = await mergeReferences([], [png('a.png'), new File(['x'], 'notes.txt', { type: 'text/plain' })]);
+    expect(mixed.references.map(entry => entry.name)).toEqual(['a.png']);
+    expect(mixed.references[0].dataUrl.startsWith('data:image/png;base64,')).toBe(true);
+    expect(mixed.error).toContain('PNG and JPEG');
+
+    const full = await mergeReferences(mixed.references, [png('b.png'), png('c.png'), png('d.png'), png('e.png')]);
+    expect(full.references).toHaveLength(4);
+    expect(full.error).toContain('Up to 4');
+  });
+
   it('renders functional image and music generation workspaces with history', () => {
     const image = renderWith(<ImagePage />);
     const music = renderWith(<MusicPage />);
@@ -293,6 +305,7 @@ describe('pages', () => {
     expect(image).toContain('Generate image');
     expect(image).toContain('Describe the image to generate');
     expect(image).toContain('stable-diffusion-v1-5-fp16');
+    expect(image).toContain('This model cannot edit images');
     expect(image).toContain('Image history');
     expect(image).toContain('No image attempts yet');
     expect(image).not.toContain('Planned workflow');

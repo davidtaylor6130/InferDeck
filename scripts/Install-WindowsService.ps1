@@ -37,5 +37,10 @@ Invoke-Nssm @('set', 'InferDeck', 'AppParameters', '-c config\gateway.yml')
 Invoke-Nssm @('set', 'InferDeck', 'Start', 'SERVICE_AUTO_START')
 Invoke-Nssm @('set', 'InferDeck', 'AppStdout', (Join-Path $root 'logs\service-out.log'))
 Invoke-Nssm @('set', 'InferDeck', 'AppStderr', (Join-Path $root 'logs\service-err.log'))
+Invoke-Nssm @('set', 'InferDeck', 'AppStopMethodConsole', '150000')
+Invoke-Nssm @('set', 'InferDeck', 'AppThrottle', '60000')
+Invoke-Nssm @('set', 'InferDeck', 'AppRotateFiles', '1')
+Invoke-Nssm @('set', 'InferDeck', 'AppRotateOnline', '1')
+Invoke-Nssm @('set', 'InferDeck', 'AppRotateBytes', '52428800')
 & $recoveryScript -NssmPath $nssm
 Write-Output 'InferDeck service installation and crash recovery are configured.'

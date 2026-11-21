@@ -20,6 +20,19 @@ using inferdeck::foundation::LOG_DEBUG;
 using inferdeck::foundation::LOG_INFO;
 using inferdeck::foundation::LOG_WARN;
 
+namespace {
+
+common_batch common_batch_from(const llama_batch& batch)
+{
+    common_batch out;
+    out.tokens.reserve(static_cast<std::size_t>(batch.n_tokens));
+    for (int32_t i = 0; i < batch.n_tokens; ++i)
+        out.add(batch.token[i], batch.pos[i], batch.seq_id[i][0], batch.logits[i] != 0);
+    return out;
+}
+
+}
+
 int detail::prepare_batch_order(std::vector<SlotTask*>& tasks, int capacity, std::size_t turn)
 {
     if (tasks.empty()) return 0;
@@ -110,7 +123,8 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(
     int n_batch,
     int mtp_max_active_requests,
     common_context_seq_rm_type draft_seq_rm_type,
-    bool bounded_pool)
+    bool bounded_pool,
+    int max_batch_draft_tokens)
     : ctx_(ctx),
       draft_ctx_(draft_ctx),
       speculative_(speculative),
@@ -121,9 +135,12 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(
       mtp_max_active_requests_(std::max(1, mtp_max_active_requests)),
       draft_seq_rm_type_(draft_seq_rm_type),
       bounded_pool_(bounded_pool),
+      max_batch_draft_tokens_(std::max(1, max_batch_draft_tokens)),
       context_capacity_(ctx ? static_cast<int>(llama_n_ctx(ctx)) : 0),
       draft_context_capacity_(draft_ctx ? static_cast<int>(llama_n_ctx(draft_ctx)) : 0),
-      draft_margin_(speculative ? std::max(0, common_speculative_n_max(speculative)) : 0) {
+      draft_margin_(speculative ? std::max(0, common_speculative_n_max(speculative)) : 0),
+      block_draft_(draft_ctx &&
+                   llama_model_dflash_variant(llama_get_model(draft_ctx)) != LLAMA_DFLASH_VARIANT_NONE) {
     thread_ = std::thread([this] { run_loop(); });
 }
 
@@ -168,6 +185,7 @@ void ContinuousBatchScheduler::submit(SlotTask* task) {
 bool ContinuousBatchScheduler::should_cancel(const SlotTask* task) const noexcept {
     if (task->caller_cancel.load()) return true;
     if (task->ext_cancel && task->ext_cancel->load()) return true;
+    if (cancel_all_ && cancel_all_->load()) return true;
     return false;
 }
 
@@ -314,7 +332,7 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
             task->checkpoint_pos,
             n_past,
             static_cast<int>(task->prompt_tokens.size())) &&
-        (!draft_mem ||
+        (!draft_mem || block_draft_ ||
          (llama_get_ctx_other(draft_ctx_) != ctx_ &&
           task->checkpoint_pos > 1 &&
           detail::recurrent_checkpoint_usable(
@@ -334,9 +352,9 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
     if (task->checkpoint_pos == task->checkpoint_capture_pos &&
         checkpoint_usable) {
         task->out_recurrent_checkpoint = task->recurrent_checkpoint;
-        task->out_recurrent_draft_checkpoint = draft_mem
+        task->out_recurrent_draft_checkpoint = draft_mem && !block_draft_
             ? task->recurrent_draft_checkpoint : nullptr;
-        task->out_recurrent_replay_checkpoint = draft_mem
+        task->out_recurrent_replay_checkpoint = draft_mem && !block_draft_
             ? task->recurrent_replay_checkpoint : nullptr;
         task->out_checkpoint_pos = task->checkpoint_pos;
     }
@@ -365,12 +383,13 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
         !draft_mem || llama_memory_seq_rm(draft_mem, seq_id, n_past, -1);
     if (!target_trimmed || !draft_trimmed) {
         if (checkpoint_usable) {
-            const auto& initial_checkpoint = draft_mem
+            const bool replay_draft = draft_mem && !block_draft_;
+            const auto& initial_checkpoint = replay_draft
                 ? task->recurrent_replay_checkpoint : task->recurrent_checkpoint;
             bool restored = llama_state_seq_set_data_ext(
                 ctx_, initial_checkpoint->data(), initial_checkpoint->size(),
                 seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == initial_checkpoint->size();
-            if (restored && draft_mem) {
+            if (restored && replay_draft) {
                 llama_token token = task->prompt_tokens[task->checkpoint_pos - 1];
                 llama_pos position = task->checkpoint_pos - 1;
                 int32_t sequence_count = 1;
@@ -383,7 +402,7 @@ void ContinuousBatchScheduler::init_task(SlotTask* task) {
                     mem, seq_id, task->checkpoint_pos - 1, -1) &&
                     llama_memory_seq_rm(draft_mem, seq_id, 0, -1) &&
                     llama_decode(ctx_, replay) == 0 &&
-                    common_speculative_process(speculative_, replay);
+                    common_speculative_process(speculative_, common_batch_from(replay));
                 if (restored) {
                     restored = llama_state_seq_set_data_ext(
                         ctx_, task->recurrent_checkpoint->data(),
@@ -647,8 +666,36 @@ void ContinuousBatchScheduler::run_loop() {
 
         std::vector<SlotTask*> drafting;
         if (mtp_window) {
+            std::vector<SlotTask*> candidates;
             for (auto* t : runnable) {
-                if (!t->mtp_eligible || !t->prompt_done || !draft_ctx_) continue;
+                t->spec_batched = false;
+                if (t->mtp_eligible && t->prompt_done && draft_ctx_) {
+                    candidates.push_back(t);
+                }
+            }
+            const bool batched = candidates.size() > 1;
+            std::vector<SlotTask*> allowed;
+            for (auto* t : candidates) {
+                if (!batched) {
+                    t->spec_gate = {};
+                    allowed.push_back(t);
+                } else if (detail::speculation_gate_step(t->spec_gate)) {
+                    allowed.push_back(t);
+                }
+            }
+            const int candidate_count = static_cast<int>(allowed.size());
+            for (int index = 0; index < candidate_count; ++index) {
+                auto* t = allowed[static_cast<std::size_t>(index)];
+                const int allotment = batched
+                    ? detail::batch_draft_allotment(
+                          index,
+                          candidate_count,
+                          draft_margin_,
+                          max_batch_draft_tokens_,
+                          batch_turn)
+                    : -1;
+                if (allotment == 0) continue;
+                t->spec_batched = batched;
                 auto* draft_mem = llama_get_memory(draft_ctx_);
                 t->spec_draft_pos_max = draft_mem
                     ? static_cast<int>(
@@ -675,7 +722,7 @@ void ContinuousBatchScheduler::run_loop() {
                 common_speculative_get_draft_params(
                     speculative_, t->slot_id) = {
                         true,
-                        -1,
+                        allotment,
                         t->n_pos,
                         t->last_token,
                         &t->prompt_tokens,
@@ -939,8 +986,8 @@ void ContinuousBatchScheduler::run_loop() {
             detail::record_prompt_decode(*task, tokens, batch.n_tokens, decode_ms);
         }
         if (speculative_ && process_mtp &&
-            !common_speculative_process(speculative_, batch)) {
-            fail_all("MTP draft context decode failed");
+            !common_speculative_process(speculative_, common_batch_from(batch))) {
+            fail_all("speculative draft context decode failed");
             break;
         }
 
@@ -963,7 +1010,7 @@ void ContinuousBatchScheduler::run_loop() {
                 capture_context(ctx_, task->slot_id);
             if (!target_checkpoint) continue;
             std::shared_ptr<const std::vector<uint8_t>> draft_checkpoint;
-            if (draft_ctx_ && task->mtp_eligible) {
+            if (draft_ctx_ && task->mtp_eligible && !block_draft_) {
                 if (llama_get_ctx_other(draft_ctx_) == ctx_ ||
                     !task->out_recurrent_replay_checkpoint) continue;
                 draft_checkpoint = capture_context(draft_ctx_, task->slot_id);
@@ -1081,6 +1128,12 @@ void ContinuousBatchScheduler::run_loop() {
                 t->slot_id,
                 static_cast<uint16_t>(accepted_drafts));
             t->n_draft_accepted += accepted_drafts;
+            if (t->spec_batched) {
+                detail::speculation_gate_record(
+                    t->spec_gate,
+                    static_cast<int>(t->spec_draft.size()),
+                    accepted_drafts);
+            }
             t->n_pos += static_cast<int>(accepted.size());
 
             auto* target_mem = llama_get_memory(ctx_);
@@ -1172,7 +1225,7 @@ void ContinuousBatchScheduler::run_loop() {
                 }
                 if (t->n_drafted > 0) {
                     LOG_INFO(
-                        "scheduler_mtp_stats",
+                        "scheduler_speculative_stats",
                         "slot={} drafted={} accepted={} acceptance_pct={:.2f}",
                         t->slot_id,
                         t->n_drafted,

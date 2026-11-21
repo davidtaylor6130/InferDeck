@@ -31,20 +31,16 @@ target_link_libraries(inferdeck-gateway PRIVATE
     gateway
     model
     foundation
-    llama_cpp_wrapper
-    native_runtimes
-    llama
+    provider
     yaml-cpp::yaml-cpp
     ${CMAKE_DL_LIBS}
 )
 
+# The gateway links no runtime. Runtimes are provider DLLs built into
+# $<TARGET_FILE_DIR:inferdeck-gateway>/providers by libs/provider/runtimes.
+# Radiance's Python modules stay next to the exe, where it looks for them.
 if(INFERDECK_VLLM_RADIANCE_ENABLE)
-    target_link_libraries(inferdeck-gateway PRIVATE vllm_radiance_wrapper)
-    target_compile_definitions(inferdeck-gateway PRIVATE INFERDECK_VLLM_RADIANCE_ENABLE=1)
     add_custom_command(TARGET inferdeck-gateway POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${INFERDECK_PYTHON312_ROOT}/python312.dll"
-                "$<TARGET_FILE_DIR:inferdeck-gateway>/python312.dll"
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 "$<TARGET_FILE_DIR:inferdeck-gateway>/python"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -57,7 +53,7 @@ endif()
 
 if(INFERDECK_VLLM_RADIANCE_ENABLE)
     install(FILES "${INFERDECK_PYTHON312_ROOT}/python312.dll"
-            DESTINATION .)
+            DESTINATION providers)
     install(FILES
                 "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_profile.py"
                 "${CMAKE_SOURCE_DIR}/libs/vllm_radiance_wrapper/python/inferdeck_vllm_radiance_lifecycle.py"
@@ -69,15 +65,6 @@ endif()
 if(WIN32)
     target_link_libraries(inferdeck-gateway PRIVATE dbghelp)
     target_link_options(inferdeck-gateway PRIVATE /STACK:33554432)
-    if(INFERDECK_SHERPA_ONNX_INCLUDE AND INFERDECK_SHERPA_ONNX_LIBRARY)
-        add_custom_command(TARGET inferdeck-gateway POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${INFERDECK_SHERPA_ONNX_RUNTIME_DIR}/sherpa-onnx-c-api.dll"
-                    "${INFERDECK_SHERPA_ONNX_RUNTIME_DIR}/onnxruntime.dll"
-                    "${INFERDECK_SHERPA_ONNX_RUNTIME_DIR}/onnxruntime_providers_shared.dll"
-                    "$<TARGET_FILE_DIR:inferdeck-gateway>"
-            COMMENT "Copying sherpa-onnx runtime libraries")
-    endif()
 endif()
 
 set_target_properties(inferdeck-gateway PROPERTIES

@@ -28,7 +28,7 @@ struct GatewayConfig {
     std::vector<model::ModelInfo> models{};
     std::string stats_db_path{};
     std::string adlx_helper_path{};
-    int telemetry_poll_ms{100};
+    int telemetry_poll_ms{1000};
     bool auto_swap{true};
     int n_batch{512};
     int n_ubatch{512};
@@ -43,10 +43,17 @@ struct GatewayConfig {
     bool swa_full{false};
     bool truncate_prompt{true};
     int vram_budget_mb{0};
-    int vram_safety_margin_mb{1024};
+    int vram_safety_margin_mb{model::k_default_vram_safety_margin_mb};
     int max_queue_size{128};
     int voice_session_grace_ms{15000};
+    int speech_admission_timeout_ms{30000};
+    int transcription_max_body_mb{200};
+    int transcription_decoded_budget_mb{1024};
+    int transcription_upload_timeout_ms{600000};
+    int swap_hold_ms{15000};
+    int swap_quantum_ms{180000};
     int background_idle_after_seconds{900};
+    int default_model_preload_delay_ms{0};
     model::SamplingConfig sampling{};
     bool openai_derivative_compatibility_enabled{false};
     std::vector<model::ModelAlias> model_aliases{};

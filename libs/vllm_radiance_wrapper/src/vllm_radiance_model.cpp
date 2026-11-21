@@ -1,4 +1,5 @@
 #include "vllm_radiance_wrapper/vllm_radiance_model.hpp"
+#include "foundation/logging.hpp"
 
 #include <Python.h>
 #ifndef NOMINMAX
@@ -11,6 +12,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <condition_variable>
 #include <mutex>
 #include <map>
@@ -23,6 +25,36 @@ namespace inferdeck::vllm_radiance_wrapper {
 namespace {
 
 std::mutex g_python_interpreter_mutex;
+
+class LifecycleWatchdog {
+public:
+    LifecycleWatchdog(const char* stage, std::chrono::seconds limit)
+        : thread_([this, stage, limit] {
+              std::unique_lock lock(mutex_);
+              if (cv_.wait_for(lock, limit, [this] { return done_; })) return;
+              foundation::LOG_FATAL("radiance_lifecycle_hung",
+                  "stage={} limit_s={} exiting so the service manager restarts a clean process",
+                  stage, limit.count());
+              foundation::Logger::instance().shutdown();
+              std::quick_exit(3);
+          }) {}
+    ~LifecycleWatchdog() {
+        {
+            std::lock_guard lock(mutex_);
+            done_ = true;
+        }
+        cv_.notify_all();
+        thread_.join();
+    }
+    LifecycleWatchdog(const LifecycleWatchdog&) = delete;
+    LifecycleWatchdog& operator=(const LifecycleWatchdog&) = delete;
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool done_{false};
+    std::thread thread_;
+};
 
 foundation::Result<void> fail(const std::string& message) {
     return foundation::Err<void>(foundation::ErrorCode::Unavailable, message);
@@ -235,8 +267,8 @@ foundation::Result<void> initialize_python_runtime(const std::string& python_roo
 class VllmRadianceModel::State {
 public:
     explicit State(model::ModelInfo value) : info(std::move(value)) {}
-    model::ModelInfo info; mutable std::mutex mutex; std::condition_variable cv;
-    bool loaded{false}; bool unloading{false}; std::array<bool, 4> slots{}; int active_slots{0};
+    model::ModelInfo info; mutable std::mutex mutex; std::mutex lifecycle; std::condition_variable cv;
+    std::atomic<bool> loaded{false}; bool unloading{false}; std::array<bool, 4> slots{}; int active_slots{0};
     std::atomic<bool> healthy{true}; std::atomic<bool> cancel{false};
     PyObject* module{nullptr}; PyObject* engine{nullptr};
 };
@@ -247,7 +279,7 @@ const model::ModelInfo& VllmRadianceModel::info() const { return state_->info; }
 
 foundation::Result<void> VllmRadianceModel::load()
 {
-    std::lock_guard lock(state_->mutex);
+    std::lock_guard lifecycle(state_->lifecycle);
     if (state_->loaded) return foundation::Ok();
     const auto attention = state_->info.artifacts.find("prefill_attention");
     const bool int4 = attention != state_->info.artifacts.end() && attention->second == "r4d_int4";
@@ -294,16 +326,21 @@ foundation::Result<void> VllmRadianceModel::load()
         set_owned(config.get(), "context_size", owned(PyLong_FromLong(state_->info.context_size)));
         set_owned(config.get(), "n_slots", owned(PyLong_FromLong(state_->info.n_slots)));
         set_owned(config.get(), "min_slots", owned(PyLong_FromLong(state_->info.min_slots)));
-        PyPtr created = owned(PyObject_CallMethod(module.get(), "create", "O", config.get()));
+        PyPtr created(nullptr, &Py_DecRef);
+        {
+            LifecycleWatchdog watchdog("load", std::chrono::seconds{1200});
+            created = owned(PyObject_CallMethod(module.get(), "create", "O", config.get()));
+        }
         if (!created) return fail(python_error());
+        std::lock_guard lock(state_->mutex);
         state_->module = module.release();
         state_->engine = created.release();
-        state_->loaded = true;
         state_->unloading = false;
         state_->slots.fill(false);
         state_->active_slots = 0;
         state_->healthy.store(true);
         state_->cancel.store(false);
+        state_->loaded = true;
         return foundation::Ok();
     }
     catch (const std::exception& error) { return fail(error.what()); }
@@ -323,6 +360,7 @@ foundation::Result<void> VllmRadianceModel::unload()
 
 foundation::Result<void> VllmRadianceModel::unload(const model::LifecycleControl& control)
 {
+    std::lock_guard lifecycle(state_->lifecycle);
     std::unique_lock lock(state_->mutex);
     if (!state_->loaded) return foundation::Ok();
     state_->unloading = true;
@@ -344,30 +382,36 @@ foundation::Result<void> VllmRadianceModel::unload(const model::LifecycleControl
         }
         state_->cv.wait_for(lock, std::chrono::milliseconds(25));
     }
-    GIL gil;
-    if (state_->engine)
+    lock.unlock();
+    std::string error;
     {
-        PyPtr ignored = owned(PyObject_CallMethod(state_->module, "shutdown", "O", state_->engine));
-        if (!ignored)
+        LifecycleWatchdog watchdog("unload", std::chrono::seconds{180});
+        GIL gil;
+        if (state_->engine)
         {
-            state_->healthy.store(false);
-            return fail(python_error());
+            PyPtr ignored = owned(PyObject_CallMethod(state_->module, "shutdown", "O", state_->engine));
+            if (!ignored) error = python_error();
+            Py_CLEAR(state_->engine);
         }
-        Py_CLEAR(state_->engine);
+        if (error.empty())
+        {
+            PyPtr collected = owned(PyObject_CallMethod(state_->module, "collect_released_resources", nullptr));
+            if (!collected) error = python_error();
+        }
+        Py_CLEAR(state_->module);
     }
-    PyPtr collected = owned(PyObject_CallMethod(state_->module, "collect_released_resources", nullptr));
-    if (!collected)
-    {
-        state_->healthy.store(false);
-        return fail(python_error());
-    }
-    Py_CLEAR(state_->module);
+    lock.lock();
     state_->loaded = false;
     state_->unloading = false;
     state_->cancel.store(false);
+    if (!error.empty())
+    {
+        state_->healthy.store(false);
+        return fail(error);
+    }
     return foundation::Ok();
 }
-bool VllmRadianceModel::is_loaded() const { std::lock_guard lock(state_->mutex); return state_->loaded; }
+bool VllmRadianceModel::is_loaded() const { return state_->loaded.load(); }
 bool VllmRadianceModel::execution_healthy() const { return state_->healthy.load(); }
 int VllmRadianceModel::vram_usage_mb() const { return is_loaded() ? state_->info.vram_required_mb : 0; }
 int VllmRadianceModel::n_slots() const { return state_->info.n_slots; }

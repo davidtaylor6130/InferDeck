@@ -25,6 +25,7 @@ struct RuntimeContract {
     bool vision{false};
     bool reasoning{false};
     bool speculative{false};
+    std::unordered_set<std::string> speculative_types;
 };
 
 class RuntimeContractRegistry {
@@ -166,6 +167,7 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         true,
         true,
         true,
+        {"mtp", "dflash", "dflash2"},
     });
     registry.register_runtime(RuntimeContract{
         "vllm_radiance",
@@ -174,10 +176,16 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         true,
         true,
         true,
+        {"mtp"},
+    });
+    registry.register_runtime(RuntimeContract{
+        "jev_style",
+        {{"decision", {"decisions"}}},
+        RuntimeArtifactPolicy::Gguf,
     });
     registry.register_runtime(RuntimeContract{
         "stable_diffusion_cpp",
-        {{"image", {"image_generation"}}},
+        {{"image", {"image_generation", "image_editing"}}},
         RuntimeArtifactPolicy::ArtifactMap,
     });
     registry.register_runtime(RuntimeContract{
@@ -208,6 +216,19 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         {{"audio_speech", {"audio_speech"}}},
         RuntimeArtifactPolicy::None,
     });
+    return registry;
+}
+
+/// <summary>
+/// Process-wide contract registry: the standard runtimes plus any provider
+/// registered at startup. Config validation reads it.
+/// </summary>
+/// <remarks>
+/// Register contracts before the HTTP server starts. Later access is read-only
+/// and therefore unsynchronised.
+/// </remarks>
+inline RuntimeContractRegistry& runtime_contracts() {
+    static RuntimeContractRegistry registry = standard_runtime_contracts();
     return registry;
 }
 

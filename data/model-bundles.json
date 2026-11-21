@@ -1,0 +1,93 @@
+{
+  "bundles": [
+    {
+      "id": "qwen-image-2.1-q8",
+      "name": "Qwen-Image-2.1 Q8_0",
+      "family": "qwen-image-2.1",
+      "runtime": "stable_diffusion_cpp",
+      "modality": "image",
+      "capabilities": ["image_generation", "image_editing"],
+      "license": "Qwen Research License (not open source)",
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE",
+      "vramRequiredMb": 20000,
+      "artifacts": {
+        "guidance_scale": "6.0",
+        "backend": "vulkan"
+      },
+      "components": [
+        {
+          "key": "diffusion_model",
+          "repo": "leejet/Qwen-Image-2.1-GGUF",
+          "file": "qwen_image_2.1-Q8_0.gguf",
+          "revision": "cc11433936a06e9765f7c0c0b1f0436cfd2b9856",
+          "required": true
+        },
+        {
+          "key": "vae",
+          "repo": "Comfy-Org/Qwen-Image-2.1",
+          "file": "vae/qwen_image_2.1_vae_bf16.safetensors",
+          "revision": "aacf31a6d48e707f352ecba714cee0680da3479b",
+          "required": true
+        },
+        {
+          "key": "llm",
+          "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+          "file": "Qwen3VL-8B-Instruct-Q8_0.gguf",
+          "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+          "required": true
+        },
+        {
+          "key": "llm_vision",
+          "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+          "file": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+          "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "qwen-image-2.1-q4",
+      "name": "Qwen-Image-2.1 Q4_K",
+      "family": "qwen-image-2.1",
+      "runtime": "stable_diffusion_cpp",
+      "modality": "image",
+      "capabilities": ["image_generation", "image_editing"],
+      "license": "Qwen Research License (not open source)",
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE",
+      "artifacts": {
+        "guidance_scale": "6.0",
+        "backend": "vulkan"
+      },
+      "components": [
+        {
+          "key": "diffusion_model",
+          "repo": "leejet/Qwen-Image-2.1-GGUF",
+          "file": "qwen_image_2.1-Q4_K.gguf",
+          "revision": "cc11433936a06e9765f7c0c0b1f0436cfd2b9856",
+          "required": true
+        },
+        {
+          "key": "vae",
+          "repo": "Comfy-Org/Qwen-Image-2.1",
+          "file": "vae/qwen_image_2.1_vae_bf16.safetensors",
+          "revision": "aacf31a6d48e707f352ecba714cee0680da3479b",
+          "required": true
+        },
+        {
+          "key": "llm",
+          "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+          "file": "Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+          "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+          "required": true
+        },
+        {
+          "key": "llm_vision",
+          "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+          "file": "mmproj-Qwen3VL-8B-Instruct-F16.gguf",
+          "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+          "required": true
+        }
+      ]
+    }
+  ]
+}

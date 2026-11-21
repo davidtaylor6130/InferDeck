@@ -68,7 +68,8 @@ function Test-StrictPath([string]$Path) {
         '/v1/embeddings',
         '/v1/images/generations',
         '/v1/audio/speech',
-        '/v1/audio/transcriptions'
+        '/v1/audio/transcriptions',
+        '/v1/decisions'
     )
     if ($Path.StartsWith('/v1/') -and $Path -notin $allowed) {
         Add-Failure "${Path}: non-OpenAI route in strict Core"
@@ -115,7 +116,7 @@ function Test-ImageBuildDefinition(
     $valid =
         $RootCmake -match [regex]::Escape('libs/third_party/stable-diffusion.cpp') -and
         $RootCmake -match [regex]::Escape('INFERDECK_REQUIRE_STABLE_DIFFUSION_CPP') -and
-        $RootCmake -match [regex]::Escape('add_compile_definitions(GGML_MAX_NAME=128)') -and
+        $RootCmake -match [regex]::Escape('add_compile_definitions(GGML_MAX_NAME=160)') -and
         $NativeCmake -match [regex]::Escape('set(SD_WEBP OFF CACHE BOOL "" FORCE)') -and
         $NativeCmake -match [regex]::Escape('set(SD_WEBM OFF CACHE BOOL "" FORCE)') -and
         $NativeCmake -match [regex]::Escape('target_include_directories(stable-diffusion BEFORE PRIVATE') -and
@@ -151,7 +152,7 @@ foreach ($relativeRoot in $scanRoots) {
 
 $manifest = Get-Content -LiteralPath (Join-Path $repoRoot 'tests/fixtures/openai_route_manifest.json') -Raw | ConvertFrom-Json
 foreach ($route in $manifest.routes) { Test-StrictPath $route.path }
-if ($manifest.profile -ne 'strict_openai' -or $manifest.routes.Count -ne 7) {
+if ($manifest.profile -ne 'strict_openai' -or $manifest.routes.Count -ne 8) {
     Add-Failure 'strict route manifest identity or count changed'
 }
 

@@ -4,6 +4,7 @@ project(model LANGUAGES CXX)
 set(MODEL_SOURCES
     src/model_info.cpp
     src/model_registry.cpp
+    src/provider.cpp
     src/backend_coordinator_lifecycle.cpp
     src/backend_coordinator_queue.cpp
     src/backend_coordinator_execution.cpp

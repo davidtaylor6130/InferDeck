@@ -125,6 +125,13 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["vram_safety_margin_mb"]) cfg.vram_safety_margin_mb = g["vram_safety_margin_mb"].as<int>();
         if (g["max_queue_size"]) cfg.max_queue_size = g["max_queue_size"].as<int>();
         if (g["voice_session_grace_ms"]) cfg.voice_session_grace_ms = g["voice_session_grace_ms"].as<int>();
+        if (g["transcription_upload_timeout_ms"]) cfg.transcription_upload_timeout_ms = g["transcription_upload_timeout_ms"].as<int>();
+        if (g["transcription_decoded_budget_mb"]) cfg.transcription_decoded_budget_mb = g["transcription_decoded_budget_mb"].as<int>();
+        if (g["transcription_max_body_mb"]) cfg.transcription_max_body_mb = g["transcription_max_body_mb"].as<int>();
+        if (g["speech_admission_timeout_ms"]) cfg.speech_admission_timeout_ms = g["speech_admission_timeout_ms"].as<int>();
+        if (g["swap_hold_ms"]) cfg.swap_hold_ms = g["swap_hold_ms"].as<int>();
+        if (g["swap_quantum_ms"]) cfg.swap_quantum_ms = g["swap_quantum_ms"].as<int>();
+        if (g["default_model_preload_delay_ms"]) cfg.default_model_preload_delay_ms = g["default_model_preload_delay_ms"].as<int>();
         if (g["background_idle_after_seconds"]) {
             cfg.background_idle_after_seconds =
                 g["background_idle_after_seconds"].as<int>();
@@ -213,16 +220,24 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             }
             if (m["speculative"] && m["speculative"].IsMap()) {
                 const auto speculative = m["speculative"];
-                info.mtp_enabled =
-                    speculative["type"] &&
-                    speculative["type"].as<std::string>() == "mtp";
+                info.speculative_type = speculative["type"]
+                    ? speculative["type"].as<std::string>() : "";
+                if (info.speculative_type == "none") info.speculative_type.clear();
+                info.mtp_enabled = info.speculative_type == "mtp";
+                info.draft_model_path = speculative["draft_model"]
+                    ? speculative["draft_model"].as<std::string>() : "";
                 info.mtp_draft_tokens = speculative["draft_tokens"]
-                    ? speculative["draft_tokens"].as<int>() : 2;
+                    ? speculative["draft_tokens"].as<int>()
+                    : (info.speculative_type.starts_with("dflash") ? model::k_default_dflash_draft_tokens
+                                                                 : model::k_default_mtp_draft_tokens);
                 info.mtp_p_min = speculative["p_min"]
                     ? speculative["p_min"].as<float>() : 0.0f;
                 info.mtp_max_active_requests =
                     speculative["max_active_requests"]
                         ? speculative["max_active_requests"].as<int>() : 1;
+                info.max_batch_draft_tokens =
+                    speculative["max_batch_draft_tokens"]
+                        ? speculative["max_batch_draft_tokens"].as<int>() : 8;
             }
             info.has_vision = m["has_vision"] ? m["has_vision"].as<bool>() : false;
             info.reasoning_format = m["reasoning_format"] ? m["reasoning_format"].as<std::string>() : "";
@@ -299,6 +314,11 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
             if (entry["required_capabilities"] && entry["required_capabilities"].IsSequence()) {
                 for (const auto& capability : entry["required_capabilities"]) {
                     alias.required_capabilities.push_back(capability.as<std::string>());
+                }
+            }
+            if (entry["fallbacks"] && entry["fallbacks"].IsSequence()) {
+                for (const auto& fallback : entry["fallbacks"]) {
+                    alias.fallbacks.push_back(fallback.as<std::string>());
                 }
             }
             cfg.model_aliases.push_back(std::move(alias));

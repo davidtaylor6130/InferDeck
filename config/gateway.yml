@@ -42,10 +42,11 @@ observability:
   # Keep lifetime usage independent of the Windows service account and cwd.
   stats_db: "C:/InferDeck/data/stats.db"
   adlx_helper: ""
-  telemetry_poll_ms: 100
+  telemetry_poll_ms: 1000
 
 gateway:
   auto_swap: true
+  default_model_preload_delay_ms: 60000
   n_batch: 2048
   n_ubatch: 2048
   use_mmap: false
@@ -59,6 +60,14 @@ gateway:
   swa_full: false
   truncate_prompt: true
   voice_session_grace_ms: 15000
+  speech_admission_timeout_ms: 30000
+  transcription_max_body_mb: 200
+  transcription_decoded_budget_mb: 1024
+  transcription_upload_timeout_ms: 600000
+  # Keep a recently used model resident across agent tool-call gaps instead of
+  # swapping on every turn. 0 hold disables. quantum = minimum residency per swap.
+  swap_hold_ms: 15000
+  swap_quantum_ms: 180000
   background_idle_after_seconds: 900
 
   # Server-side sampler defaults (issue #42). These mirror stock llama-server:
