@@ -656,6 +656,20 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "model alias target must be concrete: " + name);
                 }
+                if (alias["fallbacks"]) {
+                    if (!alias["fallbacks"].IsSequence()) {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                     "model alias fallbacks must be a sequence: " + name);
+                    }
+                    std::unordered_set<std::string> fallbacks{target};
+                    for (const auto& fallback : alias["fallbacks"]) {
+                        const auto value = fallback.as<std::string>();
+                        if (!names.contains(value) || !fallbacks.insert(value).second) {
+                            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                "model alias fallbacks must be distinct concrete models: " + name);
+                        }
+                    }
+                }
                 const int required_context = alias["required_context_size"]
                     ? alias["required_context_size"].as<int>() : 0;
                 if (required_context < 0 ||

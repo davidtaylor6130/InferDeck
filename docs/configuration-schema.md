@@ -88,6 +88,44 @@ On this GPU a target verification batch of five or more tokens costs about
 twice a four-token batch, so `draft_tokens: 3` is fastest here even though the
 drafter's upstream recommendation is 7. Measure before raising it.
 
+## Co-residency and alias fallbacks
+
+When a request needs a model that does not fit beside the resident ones, the
+coordinator frees memory in this order: idle context reclamation, calibrated
+slot reduction, then eviction. Context reclamation applies to a resident
+llama.cpp model with `kv_unified: true`, `context_pool_auto: true` and
+`context_pool_size: 0`. It rebuilds that model's KV pool smaller without
+unloading its weights, down to one request's `context_size`, so the incoming
+model can load beside it. `n_slots` is unchanged; the slots share the smaller
+pool and wait for each other when their combined demand exceeds it. The rebuild
+clears that model's prompt cache. It only runs while the model is idle.
+
+The model that gave up context is the lender; the model admitted into that space
+is its borrower. When a request for the lender needs more context than its
+reduced pool holds, the coordinator evicts its idle borrowers and rebuilds the
+pool at full size, again without reloading weights. If a borrower is still
+running, the lender's request waits and retries when that work ends. A model
+marked `residency: always` or `eviction_eligible: false` is never evicted for a
+restore. Models without `context_pool_auto` keep the previous behaviour and are
+evicted when the incoming model does not fit.
+
+`model_aliases[].fallbacks` is an optional ordered list of concrete models:
+
+```yaml
+model_aliases:
+  - name: everyday
+    target: qwen3.5-4b
+    fallbacks: [qwen3.8-27b]
+    required_context_size: 16384
+```
+
+A request for the alias uses `target` when it is resident and ready. Otherwise
+it uses the first listed fallback that is resident and ready. If none is, it
+loads `target`. Every fallback must be a distinct registered model that
+satisfies the alias's `required_context_size` and `required_capabilities`.
+A model named by an alias fallback cannot be unregistered. Aliases without
+`fallbacks` behave as before.
+
 ## Files and selection
 
 - The stable base is the requested `gateway.yml`.

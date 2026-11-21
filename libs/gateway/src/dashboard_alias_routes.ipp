@@ -47,6 +47,11 @@
             for (const auto& alias : deps.gw.coordinator.registry().aliases()) {
                 if (alias.name == name) previous = alias;
             }
+            if (body.contains("fallbacks")) {
+                requested.fallbacks = body["fallbacks"].get<std::vector<std::string>>();
+            } else if (previous) {
+                requested.fallbacks = previous->fallbacks;
+            }
             std::optional<model::ModelAlias> committed;
             const auto persisted = deps.config_repository->transact_active(
                 body["revision"].get<std::string>(),

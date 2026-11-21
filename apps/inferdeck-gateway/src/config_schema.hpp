@@ -113,7 +113,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
             if (!(result = reject_unknown_config_keys(
                     alias, "model_aliases[" + std::to_string(index) + "]", {
                         "name", "target", "required_context_size",
-                        "required_capabilities"}))) return result;
+                        "required_capabilities", "fallbacks"}))) return result;
             ++index;
         }
     }

@@ -6,6 +6,7 @@ nlohmann::json alias_json(const model::ModelAlias& alias) {
         {"target", alias.target},
         {"requiredContextSize", alias.required_context_size},
         {"requiredCapabilities", alias.required_capabilities},
+        {"fallbacks", alias.fallbacks},
     };
 }
 
@@ -150,6 +151,9 @@ foundation::Result<std::string> render_aliases(
             entry["required_context_size"] = alias.required_context_size;
             for (const auto& capability : alias.required_capabilities) {
                 entry["required_capabilities"].push_back(capability);
+            }
+            for (const auto& fallback : alias.fallbacks) {
+                entry["fallbacks"].push_back(fallback);
             }
             entries.push_back(entry);
         }

@@ -11,6 +11,7 @@
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 using namespace inferdeck::model;
@@ -2703,6 +2704,49 @@ TEST_CASE("ModelRegistry: stable aliases enforce their compatibility contract", 
     CHECK(*registry.resolve("production") == "compatible");
     REQUIRE_FALSE(registry.set_alias({"nested", "production"}));
     REQUIRE_FALSE(registry.set_alias({"primary", "compatible"}));
+}
+
+TEST_CASE("ModelRegistry: alias fallbacks prefer a resident candidate", "[model][alias]") {
+    ModelRegistry registry;
+    auto compact = make_info("small");
+    compact.context_size = 16384;
+    auto large = make_info("large");
+    large.context_size = 100000;
+    auto tiny = make_info("tiny");
+    tiny.context_size = 4096;
+    registry.register_model(compact);
+    registry.register_model(large);
+    registry.register_model(tiny);
+
+    ModelAlias everyday{"everyday", "small"};
+    everyday.fallbacks = {"large"};
+    REQUIRE(registry.set_alias(everyday));
+    std::unordered_set<std::string> resident;
+    const auto ready = [&](const std::string& name) { return resident.contains(name); };
+
+    CHECK(*registry.resolve("everyday", ready) == "small");
+    resident = {"large"};
+    CHECK(*registry.resolve("everyday", ready) == "large");
+    CHECK(*registry.resolve("everyday") == "small");
+    resident = {"large", "small"};
+    CHECK(*registry.resolve("everyday", ready) == "small");
+    CHECK(*registry.resolve("large", ready) == "large");
+    CHECK_THROWS_AS(registry.unregister_model("large"), std::invalid_argument);
+
+    ModelAlias narrow{"narrow", "small"};
+    narrow.fallbacks = {"tiny"};
+    const auto incompatible = registry.set_alias(narrow);
+    REQUIRE_FALSE(incompatible);
+    CHECK(incompatible.error().message.find("fallback tiny") != std::string::npos);
+    ModelAlias duplicate{"duplicate", "small"};
+    duplicate.fallbacks = {"large", "large"};
+    REQUIRE_FALSE(registry.set_alias(duplicate));
+    ModelAlias self{"self", "small"};
+    self.fallbacks = {"small"};
+    REQUIRE_FALSE(registry.set_alias(self));
+    ModelAlias missing{"missing", "small"};
+    missing.fallbacks = {"absent"};
+    REQUIRE_FALSE(registry.set_alias(missing));
 }
 
 TEST_CASE("BackendCoordinator: explicit CPU helper never becomes selected",
