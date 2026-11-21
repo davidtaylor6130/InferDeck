@@ -365,7 +365,7 @@ TEST_CASE("BackendCoordinator: targeted cancel leaves a concurrent swap running"
   }
   BackendCoordinator c(reg);
   auto first = std::async(std::launch::async, [&] {
-    return c.swap_to_cancellable("a", std::chrono::milliseconds{400});
+    return c.swap_to_cancellable("a", std::chrono::seconds{30});
   });
   const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds{250};
   while (!entered.load() && std::chrono::steady_clock::now() < until) {
@@ -380,9 +380,11 @@ TEST_CASE("BackendCoordinator: targeted cancel leaves a concurrent swap running"
   const auto b = second.get();
   REQUIRE_FALSE(b);
   REQUIRE(b.error().code == ErrorCode::Cancelled);
+  REQUIRE(first.wait_for(std::chrono::milliseconds{50}) == std::future_status::timeout);
+  c.request_swap_cancel("a");
   const auto a = first.get();
   REQUIRE_FALSE(a);
-  REQUIRE(a.error().code == ErrorCode::Timeout);
+  REQUIRE(a.error().code == ErrorCode::Cancelled);
 }
 
 TEST_CASE("BackendCoordinator: a cancel that beats swap registration is honored",

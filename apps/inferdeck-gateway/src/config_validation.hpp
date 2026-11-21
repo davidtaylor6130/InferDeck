@@ -184,11 +184,12 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                              "gateway.voice_session_grace_ms must be between 1000 and 120000");
             }
-            for (const char* key : {"default_model_preload_delay_ms"}) {
-                if (gateway[key] && (gateway[key].as<int>() < 0 || gateway[key].as<int>() > 3600000)) {
-                    return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
-                                                 std::string("gateway.") + key + " must be between 0 and 3600000");
-                }
+            if (gateway["default_model_preload_delay_ms"] &&
+                (gateway["default_model_preload_delay_ms"].as<int>() < 0 ||
+                 gateway["default_model_preload_delay_ms"].as<int>() > 3600000)) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "gateway.default_model_preload_delay_ms must be between 0 and 3600000");
             }
             if (gateway["background_idle_after_seconds"] &&
                 (gateway["background_idle_after_seconds"].as<int>() < 60 ||
