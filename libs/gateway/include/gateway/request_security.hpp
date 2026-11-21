@@ -14,8 +14,8 @@ namespace inferdeck::gateway {
 
 inline constexpr std::size_t json_body_limit = 16ULL * 1024ULL * 1024ULL;
 inline constexpr std::size_t control_body_limit = 2ULL * 1024ULL * 1024ULL;
-inline constexpr std::size_t audio_body_limit = 26ULL * 1024ULL * 1024ULL;
-inline constexpr std::size_t server_body_limit = audio_body_limit;
+inline std::size_t audio_body_limit = 200ULL * 1024ULL * 1024ULL;
+inline std::size_t server_body_limit() { return std::max(audio_body_limit, json_body_limit); }
 inline constexpr auto server_read_timeout = std::chrono::seconds{30};
 inline constexpr auto server_request_read_deadline = std::chrono::seconds{30};
 inline constexpr auto server_write_timeout = std::chrono::seconds{30};

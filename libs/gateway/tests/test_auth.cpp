@@ -426,3 +426,18 @@ TEST_CASE("CorsMiddleware: wildcard emits one valid wildcard origin", "[cors]") 
     CHECK(response.get_header_value("Access-Control-Allow-Headers").find("X-Api-Key") ==
           std::string::npos);
 }
+
+TEST_CASE("transcription body limit is separate from chat and configurable",
+          "[gateway][security]") {
+    using namespace inferdeck::gateway;
+    CHECK(request_policy("POST", "/v1/audio/transcriptions").max_body_bytes ==
+          audio_body_limit);
+    CHECK(audio_body_limit >= 200ULL * 1024ULL * 1024ULL);
+    CHECK(request_policy("POST", "/v1/chat/completions").max_body_bytes ==
+          json_body_limit);
+    const auto saved = audio_body_limit;
+    audio_body_limit = 300ULL << 20;
+    CHECK(request_policy("POST", "/v1/audio/transcriptions").max_body_bytes == (300ULL << 20));
+    CHECK(server_body_limit() == (300ULL << 20));
+    audio_body_limit = saved;
+}

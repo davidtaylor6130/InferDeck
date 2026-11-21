@@ -4893,3 +4893,43 @@ TEST_CASE("predict_stream honors the cancel flag and returns promptly", "[routes
     REQUIRE(done.load());
     REQUIRE(coordinator.release_slot("a", *slot));
 }
+
+#include "../src/transcription_chunking.hpp"
+
+TEST_CASE("long transcription is chunked in order with offsets and cancellation",
+          "[gateway][transcription]") {
+    using namespace inferdeck;
+    model::TranscriptionRequest request;
+    request.sample_rate = 100;
+    request.pcm.assign(100 * 700, 0.5f);
+    std::vector<std::size_t> sizes;
+    int calls = 0;
+    auto run = [&](const model::TranscriptionRequest& chunk, const std::function<bool(int)>& progress) {
+        sizes.push_back(chunk.pcm.size());
+        progress(100);
+        model::TranscriptionResult part;
+        part.text = "part" + std::to_string(calls);
+        part.segments.push_back({0, 0.0f, 1.0f, part.text, {}, 0.0f, 0.0f});
+        ++calls;
+        return foundation::Ok(std::move(part));
+    };
+    auto merged = gateway::transcribe_in_chunks(request, 300, nullptr, run);
+    REQUIRE(merged.has_value());
+    CHECK(calls == 3);
+    CHECK(merged->text == "part0 part1 part2");
+    REQUIRE(merged->segments.size() == 3);
+    CHECK(merged->segments[2].id == 2);
+    CHECK(merged->segments[1].start_seconds > 250.0f);
+    CHECK(merged->segments[2].start_seconds > merged->segments[1].start_seconds);
+    CHECK(merged->duration_seconds == 700.0f);
+    std::size_t total = 0;
+    for (auto size : sizes) { CHECK(size <= 100 * 310); total += size; }
+    CHECK(total == request.pcm.size());
+
+    calls = 0;
+    auto cancelled = gateway::transcribe_in_chunks(request, 300,
+        [&](int) { return calls < 1; }, run);
+    REQUIRE_FALSE(cancelled.has_value());
+    CHECK(cancelled.error().code == foundation::ErrorCode::Cancelled);
+    CHECK(calls == 1);
+}

@@ -4,6 +4,7 @@
 
 #include "gateway/auth.hpp"
 #include "audio_decoder.hpp"
+#include "transcription_chunking.hpp"
 #include "foundation/json_utils.hpp"
 #include "foundation/logging.hpp"
 
@@ -645,9 +646,9 @@ foundation::Result<model::TranscriptionRequest> decode_wav(
                                                              "WAVE data is not aligned to complete sample frames");
     }
     const std::size_t frames = sample_bytes / frame_size;
-    if (frames == 0 || frames > static_cast<std::size_t>(sample_rate) * 60ULL * 30ULL) {
+    if (frames == 0 || frames > static_cast<std::size_t>(sample_rate) * 60ULL * 240ULL) {
         return foundation::Err<model::TranscriptionRequest>(foundation::ErrorCode::InvalidArgument,
-                                                             "audio duration is invalid or exceeds 30 minutes");
+                                                             "audio duration is invalid or exceeds 4 hours");
     }
     model::TranscriptionRequest request;
     request.sample_rate = static_cast<int>(sample_rate);

@@ -47,6 +47,7 @@ struct GatewayConfig {
     int max_queue_size{128};
     int voice_session_grace_ms{15000};
     int speech_admission_timeout_ms{30000};
+    int transcription_max_body_mb{200};
     int background_idle_after_seconds{900};
     model::SamplingConfig sampling{};
     bool openai_derivative_compatibility_enabled{false};

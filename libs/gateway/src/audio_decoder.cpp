@@ -21,7 +21,7 @@ foundation::Result<model::TranscriptionRequest> decode_compressed_audio(
     std::string_view content) {
     constexpr ma_uint32 sample_rate = 16000;
     constexpr ma_uint64 max_frames =
-        static_cast<ma_uint64>(sample_rate) * 60ULL * 30ULL;
+        static_cast<ma_uint64>(sample_rate) * 60ULL * 240ULL;
     ma_decoder_config config =
         ma_decoder_config_init(ma_format_f32, 1, sample_rate);
     ma_decoder decoder{};
@@ -42,7 +42,7 @@ foundation::Result<model::TranscriptionRequest> decode_compressed_audio(
         ma_decoder_uninit(&decoder);
         return foundation::Err<model::TranscriptionRequest>(
             foundation::ErrorCode::InvalidArgument,
-            "audio duration is invalid or exceeds 30 minutes");
+            "audio duration is invalid or exceeds 4 hours");
     }
 
     model::TranscriptionRequest request;

@@ -227,10 +227,13 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         finish_job(job, "failed");
         return;
     }
-    auto result = deps.coordinator.transcribe(runtime_model, *slot, *decoded,
-        [&req, &deps, &model_name, job](int progress) {
-            if (update_job(job, progress) && deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "audio_transcription"}, {"progress", progress}}.dump());
-            return !req.is_connection_closed() && !job->cancelled->load();
+    const std::function<bool(int)> report = [&req, &deps, &model_name, job](int progress) {
+        if (update_job(job, progress) && deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "audio_transcription"}, {"progress", progress}}.dump());
+        return !req.is_connection_closed() && !job->cancelled->load();
+    };
+    auto result = transcribe_in_chunks(*decoded, 300, report,
+        [&](const model::TranscriptionRequest& chunk, const std::function<bool(int)>& chunk_progress) {
+            return deps.coordinator.transcribe(runtime_model, *slot, chunk, chunk_progress);
         });
     if (!result) {
         const bool cancelled = job->cancelled->load() ||

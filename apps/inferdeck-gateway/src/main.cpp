@@ -187,7 +187,7 @@ int run_gateway(const fs::path& config_path) {
                      cfg.voice_session_grace_ms, &metrics, &stats_db,
                      &events, &swap_tracker, &maintenance_resource};
     deps.media_default_models = cfg.media_default_models;
-    deps.api_keys = api_keys; deps.speech_admission_timeout_ms = cfg.speech_admission_timeout_ms;
+    deps.api_keys = api_keys; deps.speech_admission_timeout_ms = cfg.speech_admission_timeout_ms; audio_body_limit = static_cast<std::size_t>(cfg.transcription_max_body_mb) << 20;
     deps.background_idle_after_seconds = cfg.background_idle_after_seconds;
     deps.public_data_plane_access = !cfg.auth_required;
     auto derivative_deps = deps;
@@ -280,7 +280,7 @@ int run_gateway(const fs::path& config_path) {
     server.set_read_timeout(server_read_timeout);
     server.set_write_timeout(server_write_timeout);
     server.set_keep_alive_timeout(server_keep_alive_timeout.count());
-    server.set_payload_max_length(server_body_limit);
+    server.set_payload_max_length(server_body_limit());
     server.new_task_queue = [] {
         return new httplib::ThreadPool(std::max(32u, std::thread::hardware_concurrency() * 2u));
     };
