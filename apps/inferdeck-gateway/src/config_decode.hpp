@@ -131,6 +131,7 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["speech_admission_timeout_ms"]) cfg.speech_admission_timeout_ms = g["speech_admission_timeout_ms"].as<int>();
         if (g["swap_hold_ms"]) cfg.swap_hold_ms = g["swap_hold_ms"].as<int>();
         if (g["swap_quantum_ms"]) cfg.swap_quantum_ms = g["swap_quantum_ms"].as<int>();
+        if (g["default_model_preload_delay_ms"]) cfg.default_model_preload_delay_ms = g["default_model_preload_delay_ms"].as<int>();
         if (g["background_idle_after_seconds"]) {
             cfg.background_idle_after_seconds =
                 g["background_idle_after_seconds"].as<int>();

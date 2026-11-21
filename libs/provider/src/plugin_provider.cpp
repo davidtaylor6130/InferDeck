@@ -52,6 +52,7 @@ struct Library
     std::string host_json;
     inferdeck_host_v2 host{};
     bool initialized{false};
+    mutable std::atomic<bool> device_failed{false};
 };
 
 std::mutex g_libraries_mutex;
@@ -196,6 +197,9 @@ foundation::Result<void> to_result(int32_t status, const CallState& state, const
         : "provider " + action + " failed with status " + std::to_string(status));
 }
 
+std::mutex g_fatal_handler_mutex;
+FatalDeviceHandler g_fatal_handler;
+
 template <typename T>
 foundation::Result<T> forward_error(const foundation::Result<void>& failed)
 {
@@ -273,6 +277,11 @@ public:
 
     foundation::Result<void> load(const model::LifecycleControl& control) override
     {
+        if (library_->device_failed.load())
+        {
+            return foundation::Err<void>(ErrorCode::Unavailable,
+                                         "GPU device lost; the gateway must restart before this runtime can load");
+        }
         cancel_all_.store(false);
         CallState state;
         lifecycle(state, control);
@@ -304,7 +313,10 @@ public:
     }
 
     bool is_loaded() const override { return query(INFERDECK_QUERY_LOADED, 0, loaded_.load() ? 1 : 0) != 0; }
-    bool execution_healthy() const override { return query(INFERDECK_QUERY_HEALTHY, 0, 1) != 0; }
+    bool execution_healthy() const override
+    {
+        return !library_->device_failed.load() && query(INFERDECK_QUERY_HEALTHY, 0, 1) != 0;
+    }
 
     int vram_usage_mb() const override
     {
@@ -751,7 +763,20 @@ private:
     foundation::Result<void> run(const char* operation, const json& body,
                                  std::span<const inferdeck_blob> blobs, CallState& state)
     {
-        return to_result(invoke(operation, body, blobs, state), state, operation);
+        foundation::Result<void> result = to_result(invoke(operation, body, blobs, state), state, operation);
+        if (!result && (result.error().code == ErrorCode::Internal || result.error().code == ErrorCode::Unavailable) &&
+            is_fatal_device_error(result.error().message) && !library_->device_failed.exchange(true))
+        {
+            foundation::LOG_ERROR("provider_device_failed", "runtime={} model={} operation={} error={}",
+                                  info_.runtime, info_.name, operation, result.error().message);
+            FatalDeviceHandler handler;
+            {
+                std::lock_guard lock(g_fatal_handler_mutex);
+                handler = g_fatal_handler;
+            }
+            if (handler) handler(info_.runtime, result.error().message);
+        }
+        return result;
     }
 
     /// <summary>Media progress: {"type":"progress","percent":n}. A false from the caller stops the call.</summary>
@@ -1173,6 +1198,25 @@ PluginLoadReport load_plugin_providers(const std::filesystem::path& directory)
         report.providers.push_back(std::move(*loaded));
     }
     return report;
+}
+
+bool is_fatal_device_error(std::string_view message)
+{
+    std::string lowered(message);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (const char* marker : {"device lost", "device_lost", "devicelost", "device hung", "device_hung",
+                               "device removed", "device_removed", "gpu hang", "hiperrorlaunchfailure"})
+    {
+        if (lowered.find(marker) != std::string::npos) return true;
+    }
+    return false;
+}
+
+void set_fatal_device_handler(FatalDeviceHandler handler)
+{
+    std::lock_guard lock(g_fatal_handler_mutex);
+    g_fatal_handler = std::move(handler);
 }
 
 }

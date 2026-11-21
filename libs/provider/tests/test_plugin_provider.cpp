@@ -5,6 +5,7 @@
 
 #include "model/imodel.hpp"
 #include "provider/codec.hpp"
+#include "provider/native_log.hpp"
 #include "provider/plugin_provider.hpp"
 
 using namespace inferdeck;
@@ -304,4 +305,51 @@ TEST_CASE("Provider errors and bad libraries are reported, not thrown", "[provid
     CHECK(report.rejected[0].find("broken.provider") != std::string::npos);
     CHECK(model::runtime_contracts().find("echo") != nullptr);
     CHECK(provider::load_plugin_providers(directory / "missing").providers.empty());
+}
+
+TEST_CASE("Fatal device errors are recognised strictly", "[provider][health]") {
+    CHECK(provider::is_fatal_device_error("vk::DeviceLostError: ErrorDeviceLost"));
+    CHECK(provider::is_fatal_device_error("DXGI_ERROR_DEVICE_HUNG"));
+    CHECK(provider::is_fatal_device_error("DXGI_ERROR_DEVICE_REMOVED"));
+    CHECK(provider::is_fatal_device_error("hipErrorLaunchFailure"));
+    CHECK_FALSE(provider::is_fatal_device_error("llama_decode failed (rc=1)"));
+    CHECK_FALSE(provider::is_fatal_device_error("context length exceeded"));
+}
+
+TEST_CASE("A fatal device error fails the whole provider library until restart", "[provider][health]") {
+    const auto descriptor = provider::load_plugin_provider(INFERDECK_ECHO_PROVIDER);
+    REQUIRE(descriptor);
+    REQUIRE(descriptor->initialize({echo_model("echo")}));
+    int notified = 0;
+    provider::set_fatal_device_handler([&](const std::string&, const std::string&) { ++notified; });
+    auto lost = descriptor->factory(echo_model("echo", {{"device_lost", "true"}}));
+    auto peer = descriptor->factory(echo_model("echo"));
+    REQUIRE(lost);
+    REQUIRE(peer);
+    REQUIRE(lost->load());
+    REQUIRE(peer->load());
+    CHECK(peer->execution_healthy());
+    auto* text = dynamic_cast<model::IModel*>(lost.get());
+    REQUIRE(text);
+    const auto slot = lost->acquire_slot();
+    REQUIRE(slot);
+    CHECK_FALSE(text->predict(*slot, user_request("hello")));
+    CHECK_FALSE(lost->execution_healthy());
+    CHECK_FALSE(peer->execution_healthy());
+    CHECK(notified == 1);
+    const auto reload = peer->load();
+    REQUIRE_FALSE(reload);
+    CHECK_FALSE(peer->execution_healthy());
+    provider::set_fatal_device_handler({});
+}
+
+TEST_CASE("Native llama logs forward only warnings and errors", "[provider][log]") {
+    int previous = 2;
+    CHECK_FALSE(provider::native_log_level(1, previous));
+    CHECK_FALSE(provider::native_log_level(2, previous));
+    CHECK(provider::native_log_level(3, previous) == foundation::LogLevel::Warn);
+    CHECK(provider::native_log_level(5, previous) == foundation::LogLevel::Warn);
+    CHECK(provider::native_log_level(4, previous) == foundation::LogLevel::Error);
+    CHECK_FALSE(provider::native_log_level(2, previous));
+    CHECK_FALSE(provider::native_log_level(5, previous));
 }

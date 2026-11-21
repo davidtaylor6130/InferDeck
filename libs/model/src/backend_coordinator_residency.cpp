@@ -82,6 +82,16 @@ std::vector<std::string> BackendCoordinator::get_loaded_models() const {
     return loaded;
 }
 
+std::vector<std::string> BackendCoordinator::unhealthy_models() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> names;
+    for (const auto& [name, backend] : instances_) {
+        if (backend && backend->is_loaded() && !resizing_models_.contains(name) && !backend->execution_healthy()) names.push_back(name);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
 std::vector<ResidencyInfo> BackendCoordinator::residency() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ResidencyInfo> out;
@@ -100,7 +110,8 @@ std::vector<ResidencyInfo> BackendCoordinator::residency() const {
                        backend->estimate_vram_mb(backend->n_slots()),
                        current_loaded_ && *current_loaded_ == name,
                        resizing_models_.contains(name),
-                       info.concurrency_auto, backend->context_pool_capacity()});
+                       info.concurrency_auto, backend->context_pool_capacity(),
+                       resizing_models_.contains(name) || backend->execution_healthy()});
     }
     std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
     return out;

@@ -90,6 +90,7 @@ inline foundation::Result<void> validate_config_schema(const YAML::Node& root) {
             "vram_budget_mb", "vram_safety_margin_mb", "max_queue_size",
             "voice_session_grace_ms", "speech_admission_timeout_ms", "transcription_max_body_mb", "transcription_decoded_budget_mb", "transcription_upload_timeout_ms", "background_idle_after_seconds",
             "swap_hold_ms", "swap_quantum_ms",
+            "default_model_preload_delay_ms",
             "sampling"}))) return result;
     if (!(result = check("compatibility", {
             "openai_derivative"}))) return result;

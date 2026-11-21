@@ -11,6 +11,7 @@
 #include "ggml-backend.h"
 #include "llama.h"
 #include "llama_cpp_wrapper/llama_cpp_model.hpp"
+#include "provider/native_log.hpp"
 #include "provider/sdk.hpp"
 
 namespace {
@@ -81,6 +82,11 @@ const char* device_type_name(enum ggml_backend_dev_type type)
     }
 }
 
+void forward_native_log(ggml_log_level level, const char* text, void*)
+{
+    inferdeck::provider::forward_native_log(static_cast<int>(level), text);
+}
+
 /// <summary>"quantize" {source, destination, quantization, threads} and "devices" {}.</summary>
 inferdeck::foundation::Result<json> operation(const std::string& name, const json& request)
 {
@@ -134,6 +140,7 @@ inferdeck::provider::sdk::Definition define()
             },
             [](const json&) -> inferdeck::foundation::Result<void>
             {
+                llama_log_set(forward_native_log, nullptr);
                 inferdeck::llama_wrapper::LlamaCppModel::init_backend();
                 return inferdeck::foundation::Ok();
             },

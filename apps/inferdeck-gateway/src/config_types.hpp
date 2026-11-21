@@ -53,6 +53,7 @@ struct GatewayConfig {
     int swap_hold_ms{15000};
     int swap_quantum_ms{180000};
     int background_idle_after_seconds{900};
+    int default_model_preload_delay_ms{0};
     model::SamplingConfig sampling{};
     bool openai_derivative_compatibility_enabled{false};
     std::vector<model::ModelAlias> model_aliases{};

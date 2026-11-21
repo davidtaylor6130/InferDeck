@@ -138,6 +138,10 @@ public:
         int, const model::InferenceRequest& request, const TokenCallback& callback,
         const std::atomic<bool>* cancel) override
     {
+        if (info_.artifacts.contains("device_lost"))
+        {
+            return foundation::Err<model::InferenceResult>(ErrorCode::Internal, "vk::DeviceLostError: ErrorDeviceLost");
+        }
         const std::string text = last_user_text(request);
         const std::vector<std::string> words = words_of(text);
         model::InferenceResult result;

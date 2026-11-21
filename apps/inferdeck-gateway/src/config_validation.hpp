@@ -208,6 +208,13 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                              "gateway.speech_admission_timeout_ms must be between 1000 and 600000");
             }
+            if (gateway["default_model_preload_delay_ms"] &&
+                (gateway["default_model_preload_delay_ms"].as<int>() < 0 ||
+                 gateway["default_model_preload_delay_ms"].as<int>() > 3600000)) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "gateway.default_model_preload_delay_ms must be between 0 and 3600000");
+            }
             if (gateway["background_idle_after_seconds"] &&
                 (gateway["background_idle_after_seconds"].as<int>() < 60 ||
                  gateway["background_idle_after_seconds"].as<int>() > 86400)) {

@@ -60,6 +60,7 @@ struct ResidencyInfo {
     bool resizing{false};
     bool concurrency_auto{false};
     int context_pool_capacity{0};
+    bool healthy{true};
 };
 
 struct ModelIdentitySnapshot {
@@ -96,6 +97,7 @@ public:
         std::string requested = {}, std::string resolved = {}) const;
     [[nodiscard]] std::vector<std::string> get_loaded_models() const;
     [[nodiscard]] std::vector<ResidencyInfo> residency() const;
+    [[nodiscard]] std::vector<std::string> unhealthy_models() const;
     [[nodiscard]] int get_vram_usage() const;
     void set_vram_budget(int total_mb, int safety_margin_mb = 2048);
     void update_vram_observation(int used_mb, int total_mb);
@@ -182,7 +184,7 @@ public:
     int active_request_count(const std::string& name) const;
 
     bool swap_in_progress() const noexcept { return swap_in_progress_.load(); }
-    void request_swap_cancel() noexcept { swap_cancel_.store(true); }
+    void request_swap_cancel(const std::string& target = {});
     void request_shutdown();
     bool shutting_down() const noexcept { return shutting_down_.load(); }
     void reset_swap_cancel() noexcept { swap_cancel_.store(false); }
@@ -314,6 +316,9 @@ private:
     std::recursive_mutex sidecar_mutex_;
     std::atomic<bool> swap_in_progress_{false};
     std::atomic<bool> swap_cancel_{false};
+    std::mutex swap_tokens_mutex_;
+    std::optional<std::pair<std::string, time_point>> pending_cancel_;
+    std::vector<std::pair<std::string, std::shared_ptr<std::atomic<bool>>>> swap_tokens_;
     std::atomic<bool> shutting_down_{false};
 };
 
