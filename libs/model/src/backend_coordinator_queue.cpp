@@ -401,9 +401,16 @@ std::uint64_t BackendCoordinator::reserve_priority_session(
         std::erase_if(priority_sessions_, [now](const auto& entry) {
             return entry.second.active_holds == 0 && entry.second.deadline <= now;
         });
-        token = next_priority_session_token_++;
-        priority_sessions_[key] = PrioritySession{
-            model, now + duration, token, 0};
+        const auto live = priority_sessions_.find(key);
+        if (live != priority_sessions_.end() && live->second.model == model) {
+            ++live->second.refs;
+            live->second.deadline = std::max(live->second.deadline, now + duration);
+            token = live->second.token;
+        } else {
+            token = next_priority_session_token_++;
+            priority_sessions_[key] = PrioritySession{
+                model, now + duration, token, 0, 1};
+        }
     }
     cv_.notify_all();
     return token;
@@ -419,6 +426,7 @@ bool BackendCoordinator::refresh_priority_session(
         if (session != priority_sessions_.end() &&
             session->second.token == token) {
             session->second.deadline = clock::now() + duration;
+            if (session->second.refs > 0) --session->second.refs;
             refreshed = true;
         }
     }
@@ -465,7 +473,11 @@ void BackendCoordinator::release_priority_session(
         const auto session = priority_sessions_.find(key);
         if (session != priority_sessions_.end() &&
             session->second.token == token) {
-            priority_sessions_.erase(session);
+            if (session->second.refs > 1) {
+                --session->second.refs;
+            } else {
+                priority_sessions_.erase(session);
+            }
             released = true;
         }
     }

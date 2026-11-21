@@ -3565,3 +3565,23 @@ TEST_CASE("BackendCoordinator: speech validation reuses the resident backend",
     CHECK(created.load() == after_load);
     CHECK(speech_validations.load() == 3);
 }
+
+TEST_CASE("BackendCoordinator: concurrent voice reservations release independently",
+          "[model][coordinator][voice]") {
+    ModelRegistry reg;
+    BackendCoordinator coordinator(reg);
+    const auto grace = std::chrono::milliseconds{60000};
+    const auto first = coordinator.reserve_priority_session("client", "chat", grace);
+    const auto second = coordinator.reserve_priority_session("client", "chat", grace);
+    REQUIRE(first != 0);
+    coordinator.release_priority_session("client", second);
+    CHECK(coordinator.priority_session_matches("client", "chat"));
+    coordinator.release_priority_session("client", first);
+    CHECK_FALSE(coordinator.priority_session_matches("client", "chat"));
+
+    const auto kept = coordinator.reserve_priority_session("client", "chat", grace);
+    CHECK(coordinator.refresh_priority_session("client", kept, grace));
+    const auto failing = coordinator.reserve_priority_session("client", "chat", grace);
+    coordinator.refresh_priority_session("client", failing, grace);
+    CHECK(coordinator.priority_session_matches("client", "chat"));
+}

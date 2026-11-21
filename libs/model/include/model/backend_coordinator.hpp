@@ -286,6 +286,7 @@ private:
         time_point deadline{};
         std::uint64_t token{0};
         std::size_t active_holds{0};
+        std::size_t refs{1};
     };
     std::unordered_map<std::string, PrioritySession> priority_sessions_;
     std::uint64_t next_priority_session_token_{1};
