@@ -369,6 +369,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
             if (reclaimed && *reclaimed) {
                 last_resource_decision_ = "reclaimed idle context from " + candidate + " for " + name;
                 context_borrowers_[candidate].insert(name);
+                reduced_lenders_.insert(candidate);
                 invalidate_vram_observation_locked();
                 ++resource_generation_;
                 if (had_observation) {

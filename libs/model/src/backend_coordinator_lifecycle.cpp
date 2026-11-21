@@ -147,6 +147,8 @@ foundation::Result<void> BackendCoordinator::load_with_lock_deadline(
         const auto loaded_at = clock::now();
         model_use_[name] = ModelUse{loaded_at, loaded_at, 0};
         context_borrowers_.erase(name);
+        reduced_lenders_.erase(name);
+        restore_wanted_.erase(name);
         if (instance->estimate_vram_mb(instance->n_slots()) > 0) {
             invalidate_vram_observation_locked();
             ++resource_generation_;
@@ -169,7 +171,21 @@ foundation::Result<void> BackendCoordinator::unload_current() {
 }
 
 foundation::Result<void> BackendCoordinator::unload(const std::string& name) {
-    return unload_with_control(name, {});
+    auto result = unload_with_control(name, {});
+    if (!result) return result;
+    std::vector<std::string> lenders;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& lender : restore_wanted_) {
+            const auto active = active_requests_by_model_.find(lender);
+            if (active == active_requests_by_model_.end() || active->second == 0) lenders.push_back(lender);
+        }
+    }
+    for (const auto& lender : lenders) {
+        (void)prepare_request_capacity(lender, RequestDemand{0, 0, 1, 1, 0, 0},
+            LifecycleControl{clock::now() + std::chrono::seconds{30}, {}});
+    }
+    return result;
 }
 
 foundation::Result<void> BackendCoordinator::unload_with_control(
@@ -256,7 +272,11 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
         draining_models_.erase(name);
         if (r) {
             context_borrowers_.erase(name);
-            for (auto& [_, borrowers] : context_borrowers_) borrowers.erase(name);
+            reduced_lenders_.erase(name);
+            restore_wanted_.erase(name);
+            for (auto& [lender, borrowers] : context_borrowers_) {
+                if (borrowers.erase(name) && reduced_lenders_.contains(lender)) restore_wanted_.insert(lender);
+            }
             std::erase_if(context_borrowers_, [](const auto& entry) { return entry.second.empty(); });
         }
         if (r && released_vram > 0) {

@@ -132,10 +132,22 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             waiter->retry_after_generation.reset();
             waiter->preparing = true;
             waiter->resource_blocked = true;
+            std::int64_t queued_context = 0;
+            std::int64_t queued_sequences = 0;
+            if (reduced_lenders_.contains(name)) {
+                for (const auto& other : waiters_) {
+                    if (other.id == waiter_id || other.model != name || !other.demand ||
+                        !(other.capacity_prepared || other.preparing)) continue;
+                    queued_context += other.demand->required_context;
+                    queued_sequences += other.demand->required_sequences;
+                }
+            }
             const auto aggregate_context = static_cast<std::int64_t>(
-                active_context_reservation_by_model_[name]) + waiter->demand->required_context;
+                active_context_reservation_by_model_[name]) + waiter->demand->required_context +
+                queued_context;
             const auto aggregate_sequences = static_cast<std::int64_t>(
-                active_sequence_reservation_by_model_[name]) + waiter->demand->required_sequences;
+                active_sequence_reservation_by_model_[name]) + waiter->demand->required_sequences +
+                queued_sequences;
             if (aggregate_context > std::numeric_limits<int>::max() ||
                 aggregate_sequences > std::numeric_limits<int>::max()) {
                 erase_waiter_locked(waiter_id);
