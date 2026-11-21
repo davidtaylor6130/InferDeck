@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -15,6 +17,7 @@
 #include <vector>
 
 #include "foundation/logging.hpp"
+#include "foundation/result.hpp"
 #include "inferdeck/provider_abi.h"
 #include "model/imodel.hpp"
 #include "provider/codec.hpp"
@@ -31,25 +34,44 @@
 
 namespace inferdeck::provider {
 
+static_assert(INFERDECK_PROVIDER_V2_MIN_SIZE == offsetof(inferdeck_provider_v2, invoke) + sizeof(void*));
+static_assert(sizeof(inferdeck_provider_v2) == INFERDECK_PROVIDER_V2_MIN_SIZE + sizeof(void*));
+static_assert(offsetof(inferdeck_provider_v2, struct_size) == 0);
+static_assert(offsetof(inferdeck_call_v2, struct_size) == 0);
+static_assert(offsetof(inferdeck_host_v2, struct_size) == 0);
+static_assert(static_cast<int>(foundation::ErrorCode::Ok) == INFERDECK_OK);
+static_assert(static_cast<int>(foundation::ErrorCode::InvalidArgument) == INFERDECK_INVALID_ARGUMENT);
+static_assert(static_cast<int>(foundation::ErrorCode::ContextLengthExceeded) == INFERDECK_CONTEXT_LENGTH_EXCEEDED);
+static_assert(static_cast<int>(foundation::ErrorCode::NotFound) == INFERDECK_NOT_FOUND);
+static_assert(static_cast<int>(foundation::ErrorCode::NotLoaded) == INFERDECK_NOT_LOADED);
+static_assert(static_cast<int>(foundation::ErrorCode::AlreadyExists) == INFERDECK_ALREADY_EXISTS);
+static_assert(static_cast<int>(foundation::ErrorCode::IoError) == INFERDECK_IO_ERROR);
+static_assert(static_cast<int>(foundation::ErrorCode::ParseError) == INFERDECK_PARSE_ERROR);
+static_assert(static_cast<int>(foundation::ErrorCode::OutOfMemory) == INFERDECK_OUT_OF_MEMORY);
+static_assert(static_cast<int>(foundation::ErrorCode::ResourceBusy) == INFERDECK_RESOURCE_BUSY);
+static_assert(static_cast<int>(foundation::ErrorCode::Timeout) == INFERDECK_TIMEOUT);
+static_assert(static_cast<int>(foundation::ErrorCode::Cancelled) == INFERDECK_CANCELLED);
+static_assert(static_cast<int>(foundation::ErrorCode::Unavailable) == INFERDECK_UNAVAILABLE);
+static_assert(static_cast<int>(foundation::ErrorCode::Internal) == INFERDECK_INTERNAL);
+
 namespace {
 
 using json = nlohmann::json;
 using foundation::ErrorCode;
 using Clock = std::chrono::steady_clock;
 
-/// <summary>Options a v1 provider cannot receive: its JSON predates them.</summary>
 const std::vector<std::string> k_v1_unsupported = {
     "logprobs", "logit_bias", "mirostat", "tfs_z", "prompt_keep_tokens",
     "add_generation_prompt", "reasoning_format"};
 
-/// <summary>One loaded library. Shared by its descriptor and every backend it creates.</summary>
 struct Library
 {
     const inferdeck_provider* v1{nullptr};
+    inferdeck_provider_v2 table{};
     const inferdeck_provider_v2* v2{nullptr};
     std::string runtime;
     std::vector<std::string> unsupported;
-    std::string host_json;
+    std::deque<std::string> host_jsons;
     inferdeck_host_v2 host{};
     bool initialized{false};
 };
@@ -58,7 +80,6 @@ std::mutex g_libraries_mutex;
 std::vector<std::shared_ptr<Library>> g_libraries;
 json g_gateway_settings = json::object();
 
-/// <summary>Host side of one ABI call: cancellation, deadline, streaming events, and the copied reply.</summary>
 struct CallState
 {
     CallState();
@@ -231,11 +252,6 @@ std::string event_type(const json& event)
     return type != event.end() && type->is_string() ? type->get<std::string>() : std::string{};
 }
 
-/// <summary>
-/// Adapts one provider instance to every backend interface the coordinator
-/// uses, so a plugin is indistinguishable from a built-in runtime. Optional v2
-/// members that are missing, and all of v1, fall back to the IBackend defaults.
-/// </summary>
 class PluginBackend final : public model::IModel,
                             public model::IEmbeddingBackend,
                             public model::IImageBackend,
@@ -754,7 +770,6 @@ private:
         return to_result(invoke(operation, body, blobs, state), state, operation);
     }
 
-    /// <summary>Media progress: {"type":"progress","percent":n}. A false from the caller stops the call.</summary>
     void track_progress(CallState& state, const std::function<bool(int)>& progress)
     {
         state.cancelled = [this] { return cancel_all_.load(); };
@@ -886,7 +901,6 @@ void shutdown_libraries()
     }
 }
 
-/// <summary>Runs the provider's init hook on the calling (gateway startup) thread.</summary>
 foundation::Result<void> initialize_library(Library& library, const std::vector<model::ModelInfo>& models)
 {
     if (!library.v2 || !library.v2->init)
@@ -903,10 +917,10 @@ foundation::Result<void> initialize_library(Library& library, const std::vector<
     }
     {
         std::lock_guard lock(g_libraries_mutex);
-        library.host_json = dump({{"abi_version", INFERDECK_PROVIDER_ABI_VERSION_2},
-                                  {"gateway", g_gateway_settings}, {"models", std::move(configured)}});
+        library.host_jsons.push_back(dump({{"abi_version", INFERDECK_PROVIDER_ABI_VERSION_2},
+                                           {"gateway", g_gateway_settings}, {"models", std::move(configured)}}));
     }
-    library.host = {sizeof(inferdeck_host_v2), library.host_json.c_str(), nullptr, host_log};
+    library.host = {sizeof(inferdeck_host_v2), library.host_jsons.back().c_str(), nullptr, host_log};
     CallState state;
     const foundation::Result<void> initialized =
         to_result(guard([&] { return library.v2->init(&library.host, &state.v2); }), state, "init");
@@ -919,16 +933,48 @@ foundation::Result<void> initialize_library(Library& library, const std::vector<
     return initialized;
 }
 
-/// <summary>Opens the library and returns its v2 and v1 entry points (either may be null).</summary>
-foundation::Result<std::pair<void*, void*>> open_library(const std::filesystem::path& library)
+struct OpenedLibrary
 {
-    using EntryResult = foundation::Result<std::pair<void*, void*>>;
+    void* module{nullptr};
+    void* v2{nullptr};
+    void* v1{nullptr};
+};
+
+void close_library(void* module)
+{
+    if (!module)
+    {
+        return;
+    }
+#ifdef _WIN32
+    FreeLibrary(static_cast<HMODULE>(module));
+#else
+    dlclose(module);
+#endif
+}
+
+class ModuleGuard
+{
+public:
+    explicit ModuleGuard(void* module) : module_(module) {}
+    ModuleGuard(const ModuleGuard&) = delete;
+    ModuleGuard& operator=(const ModuleGuard&) = delete;
+    ~ModuleGuard() { close_library(module_); }
+    void release() { module_ = nullptr; }
+
+private:
+    void* module_;
+};
+
+foundation::Result<OpenedLibrary> open_library(const std::filesystem::path& library)
+{
     std::error_code error;
     const std::filesystem::path absolute = std::filesystem::absolute(library, error);
     if (error)
     {
-        return foundation::Err<std::pair<void*, void*>>(ErrorCode::IoError, error.message());
+        return foundation::Err<OpenedLibrary>(ErrorCode::IoError, error.message());
     }
+    OpenedLibrary opened;
 #ifdef _WIN32
     DWORD previous_mode = 0;
     SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &previous_mode);
@@ -937,31 +983,30 @@ foundation::Result<std::pair<void*, void*>> open_library(const std::filesystem::
     SetThreadErrorMode(previous_mode, nullptr);
     if (!module)
     {
-        return foundation::Err<std::pair<void*, void*>>(
+        return foundation::Err<OpenedLibrary>(
             ErrorCode::IoError, "LoadLibrary failed with error " + std::to_string(load_error));
     }
-    void* v2 = reinterpret_cast<void*>(GetProcAddress(module, INFERDECK_PROVIDER_ENTRY_POINT_V2));
-    void* v1 = reinterpret_cast<void*>(GetProcAddress(module, INFERDECK_PROVIDER_ENTRY_POINT));
-    if (!v2 && !v1)
-    {
-        FreeLibrary(module);
-    }
+    opened.module = module;
+    opened.v2 = reinterpret_cast<void*>(GetProcAddress(module, INFERDECK_PROVIDER_ENTRY_POINT_V2));
+    opened.v1 = reinterpret_cast<void*>(GetProcAddress(module, INFERDECK_PROVIDER_ENTRY_POINT));
 #else
     void* module = dlopen(absolute.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!module)
     {
-        return foundation::Err<std::pair<void*, void*>>(ErrorCode::IoError, dlerror());
+        return foundation::Err<OpenedLibrary>(ErrorCode::IoError, dlerror());
     }
-    void* v2 = dlsym(module, INFERDECK_PROVIDER_ENTRY_POINT_V2);
-    void* v1 = dlsym(module, INFERDECK_PROVIDER_ENTRY_POINT);
+    opened.module = module;
+    opened.v2 = dlsym(module, INFERDECK_PROVIDER_ENTRY_POINT_V2);
+    opened.v1 = dlsym(module, INFERDECK_PROVIDER_ENTRY_POINT);
 #endif
-    if (!v2 && !v1)
+    if (!opened.v2 && !opened.v1)
     {
-        return foundation::Err<std::pair<void*, void*>>(
+        close_library(module);
+        return foundation::Err<OpenedLibrary>(
             ErrorCode::NotFound, std::string("library exports neither ") + INFERDECK_PROVIDER_ENTRY_POINT_V2 +
                                      " nor " + INFERDECK_PROVIDER_ENTRY_POINT);
     }
-    return EntryResult(std::make_pair(v2, v1));
+    return opened;
 }
 
 bool is_provider_library(const std::filesystem::path& path)
@@ -997,25 +1042,26 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(const std::fi
     {
         return foundation::Err<model::ProviderDescriptor>(ErrorCode::InvalidArgument, std::move(message));
     };
-    const foundation::Result<std::pair<void*, void*>> entry = open_library(library_path);
+    const foundation::Result<OpenedLibrary> entry = open_library(library_path);
     if (!entry)
     {
         return foundation::Err<model::ProviderDescriptor>(entry.error().code, entry.error().message);
     }
+    ModuleGuard module_guard(entry->module);
     auto library = std::make_shared<Library>();
     const char* manifest_text = nullptr;
-    if (entry->first)
+    if (entry->v2)
     {
-        const inferdeck_provider_v2* api = reinterpret_cast<inferdeck_provider_entry_v2>(entry->first)();
+        const inferdeck_provider_v2* api = reinterpret_cast<inferdeck_provider_entry_v2>(entry->v2)();
         if (!api)
         {
             return invalid("entry point returned no provider table");
         }
-        if (api->abi_version != INFERDECK_PROVIDER_ABI_VERSION_2 || api->struct_size < sizeof(inferdeck_provider_v2))
+        if (api->abi_version != INFERDECK_PROVIDER_ABI_VERSION_2 || api->struct_size < INFERDECK_PROVIDER_V2_MIN_SIZE)
         {
             return invalid("provider table is ABI version " + std::to_string(api->abi_version) + " with size " +
                            std::to_string(api->struct_size) + "; this gateway needs version 2 and size >= " +
-                           std::to_string(sizeof(inferdeck_provider_v2)));
+                           std::to_string(INFERDECK_PROVIDER_V2_MIN_SIZE));
         }
         if (!api->manifest_json || !api->create || !api->destroy || !api->load || !api->unload || !api->invoke)
         {
@@ -1025,12 +1071,14 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(const std::fi
         {
             return invalid("acquire_slot, release_slot, and query must be provided together");
         }
-        library->v2 = api;
+        std::memcpy(&library->table, api, std::min<size_t>(api->struct_size, sizeof(inferdeck_provider_v2)));
+        library->table.struct_size = static_cast<uint32_t>(std::min<size_t>(api->struct_size, sizeof(inferdeck_provider_v2)));
+        library->v2 = &library->table;
         manifest_text = api->manifest_json;
     }
     else
     {
-        const inferdeck_provider* api = reinterpret_cast<inferdeck_provider_entry>(entry->second)();
+        const inferdeck_provider* api = reinterpret_cast<inferdeck_provider_entry>(entry->v1)();
         if (!api)
         {
             return invalid("entry point returned no provider table");
@@ -1097,7 +1145,14 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(const std::fi
         }
         descriptor.contract.vision = manifest.value("vision", false);
         descriptor.contract.reasoning = manifest.value("reasoning", false);
-        descriptor.contract.speculative = manifest.value("speculative", false);
+        const std::vector<std::string> speculative_types =
+            manifest.value("speculative_types", std::vector<std::string>{});
+        descriptor.contract.speculative_types.insert(speculative_types.begin(), speculative_types.end());
+        if (speculative_types.empty() && manifest.value("speculative", false))
+        {
+            descriptor.contract.speculative_types.insert("mtp");
+        }
+        descriptor.contract.speculative = !descriptor.contract.speculative_types.empty();
         descriptor.version = manifest.value("version", "");
         for (const std::string& option : manifest.value("unsupported_options", std::vector<std::string>{}))
         {
@@ -1109,6 +1164,7 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(const std::fi
         return invalid(std::string("manifest has a value of the wrong type: ") + error.what());
     }
     library->runtime = descriptor.contract.name;
+    module_guard.release();
     std::error_code error;
     descriptor.origin = std::filesystem::absolute(library_path, error).string();
     {
