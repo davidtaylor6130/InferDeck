@@ -1,3 +1,9 @@
+void run_image_request(const httplib::Request& req, httplib::Response& resp,
+                       const GatewayDeps& deps,
+                       const RequestObservation& observation,
+                       nlohmann::json body,
+                       std::vector<std::vector<std::byte>>* uploads);
+
 void handle_image_generations(const httplib::Request& req, httplib::Response& resp,
                               const GatewayDeps& deps) {
     const auto observation = observe_request(
@@ -6,11 +12,19 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     nlohmann::json body;
     try { body = nlohmann::json::parse(req.body); }
     catch (const std::exception& error) { write_error(resp, 400, "invalid_json", error.what()); return; }
+    run_image_request(req, resp, deps, observation, std::move(body), nullptr);
+}
+
+void run_image_request(const httplib::Request& req, httplib::Response& resp,
+                       const GatewayDeps& deps,
+                       const RequestObservation& observation,
+                       nlohmann::json body,
+                       std::vector<std::vector<std::byte>>* uploads) {
     const bool derivative =
         deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative;
     const bool inferdeck_route =
-        derivative || req.path.starts_with("/api/inferdeck/v1/media/") ||
-        req.path == "/v1/images/edits";
+        derivative || uploads != nullptr ||
+        req.path.starts_with("/api/inferdeck/v1/media/");
     if (!derivative) {
         static constexpr std::array<std::string_view, 14> supported_fields{
             "model", "prompt", "background", "moderation", "n",
@@ -167,7 +181,9 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
     request.seed = body.value("seed", std::int64_t{-1});
     request.steps = body.value("steps", 0);
     request.guidance_scale = body.value("guidance_scale", -1.0f);
-    if (body.contains("reference_images") && !body["reference_images"].is_null()) {
+    if (uploads != nullptr) {
+        request.reference_images = std::move(*uploads);
+    } else if (body.contains("reference_images") && !body["reference_images"].is_null()) {
         const auto& references = body["reference_images"];
         if (!inferdeck_route || !references.is_array() || references.size() > 4) {
             write_error(resp, 400, "invalid_image_request",
@@ -295,78 +311,112 @@ void handle_image_generations(const httplib::Request& req, httplib::Response& re
 
 void handle_image_edits(const httplib::Request& req, httplib::Response& resp,
                         const GatewayDeps& deps) {
+    const auto observation = observe_request(
+        req, resp, deps, "image_generation", false);
     if (!req.is_multipart_form_data()) {
         write_error(resp, 400, "invalid_image_request",
                     "multipart/form-data body is required");
         return;
     }
+    constexpr std::size_t max_upload_bytes = 16U * 1024U * 1024U;
+    constexpr std::size_t max_image_bytes = 12U * 1024U * 1024U;
+    std::size_t total = 0;
+    for (const auto& [_, field] : req.form.fields) total += field.content.size();
+    for (const auto& [_, file] : req.form.files) total += file.content.size();
+    if (total > max_upload_bytes) {
+        write_error(resp, 413, "request_too_large",
+                    "multipart body exceeds 16 MiB");
+        return;
+    }
+    const auto bad = [&resp](std::string_view message, const std::string& param) {
+        write_error(resp, 400, "invalid_image_request", std::string(message), param);
+    };
+    const auto number = [](const std::string& text, auto& out) {
+        const char* last = text.data() + text.size();
+        const auto [end, error] = std::from_chars(text.data(), last, out);
+        return !text.empty() && error == std::errc{} && end == last;
+    };
     nlohmann::json body = nlohmann::json::object();
     for (const auto& [name, field] : req.form.fields) {
         if (req.form.get_field_count(name) != 1) {
-            write_error(resp, 400, "invalid_image_request",
-                        name + " must be supplied exactly once", name);
+            bad(name + " must be supplied exactly once", name);
+            return;
+        }
+        const std::string& text = field.content;
+        if (name == "image" || name == "image[]") {
+            bad(name + " must be a file upload", name);
             return;
         }
         if (name == "mask") {
             write_error(resp, 400, "unsupported_capability",
-                        "mask is not supported by the native image runtime",
-                        name);
+                        "mask is not supported by the native image runtime", name);
             return;
         }
-        if (name == "n") {
-            char* end = nullptr;
-            const long count = std::strtol(field.content.c_str(), &end, 10);
-            if (field.content.empty() || *end != '\0') {
-                write_error(resp, 400, "invalid_image_request",
-                            "n must be an integer", name);
+        if (name == "input_fidelity") {
+            if (text == "high") {
+                write_error(resp, 400, "unsupported_capability",
+                            "input_fidelity high is not supported by the native image runtime",
+                            name);
                 return;
             }
-            body[name] = count;
+            if (!text.empty() && text != "low") {
+                bad("input_fidelity must be low or high", name);
+                return;
+            }
+            continue;
+        }
+        if (name == "n" || name == "output_compression" || name == "partial_images" ||
+            name == "steps") {
+            int value = 0;
+            if (!number(text, value)) { bad(name + " must be an integer", name); return; }
+            body[name] = value;
+        } else if (name == "seed") {
+            std::int64_t value = 0;
+            if (!number(text, value)) { bad(name + " must be an integer", name); return; }
+            body[name] = value;
+        } else if (name == "guidance_scale") {
+            float value = 0.0f;
+            if (!number(text, value)) { bad(name + " must be a number", name); return; }
+            body[name] = value;
         } else if (name == "stream") {
-            if (field.content != "true" && field.content != "false") {
-                write_error(resp, 400, "invalid_image_request",
-                            "stream must be a boolean", name);
-                return;
-            }
-            body[name] = field.content == "true";
+            if (text != "true" && text != "false") { bad("stream must be a boolean", name); return; }
+            body[name] = text == "true";
         } else {
-            body[name] = field.content;
+            body[name] = text;
         }
     }
-    nlohmann::json references = nlohmann::json::array();
+    std::vector<std::vector<std::byte>> uploads;
     for (const auto& [name, file] : req.form.files) {
+        if (name == "mask") {
+            write_error(resp, 400, "unsupported_capability",
+                        "mask is not supported by the native image runtime", name);
+            return;
+        }
         if (name != "image" && name != "image[]") {
             write_error(resp, 400, "unsupported_parameter",
                         "unsupported Images parameter: " + name, name);
             return;
         }
-        if (file.content_type != "image/png" &&
-            file.content_type != "image/jpeg" &&
-            file.content_type != "image/bmp") {
-            write_error(resp, 400, "invalid_image_request",
-                        "image must be PNG, JPEG, or BMP", name);
+        if (file.content.empty() || file.content.size() > max_image_bytes) {
+            bad("image must be between 1 byte and 12 MiB", name);
             return;
         }
-        if (file.content.empty() || file.content.size() > 12U * 1024U * 1024U) {
-            write_error(resp, 400, "invalid_image_request",
-                        "image must be between 1 byte and 12 MiB", name);
+        const auto* first = reinterpret_cast<const std::byte*>(file.content.data());
+        std::vector<std::byte> bytes(first, first + file.content.size());
+        const auto probe = model::probe_image(bytes);
+        if (!probe) {
+            bad("image must be a PNG, JPEG, or BMP file", name);
             return;
         }
-        const auto* first =
-            reinterpret_cast<const std::byte*>(file.content.data());
-        references.push_back(
-            "data:" + file.content_type + ";base64," +
-            base64(std::vector<std::byte>(first, first + file.content.size())));
+        if (!model::reference_image_within_budget(*probe)) {
+            bad("image exceeds 8192 pixels per side or 16 megapixels", name);
+            return;
+        }
+        uploads.push_back(std::move(bytes));
     }
-    if (references.empty() || references.size() > 4) {
-        write_error(resp, 400, "invalid_image_request",
-                    "between 1 and 4 image files are required", "image");
+    if (uploads.empty() || uploads.size() > 4) {
+        bad("between 1 and 4 image files are required", "image");
         return;
     }
-    body["reference_images"] = std::move(references);
-    httplib::Request edit = req;
-    edit.body = body.dump();
-    edit.headers.erase("Content-Type");
-    edit.set_header("Content-Type", "application/json");
-    handle_image_generations(edit, resp, deps);
+    run_image_request(req, resp, deps, observation, std::move(body), &uploads);
 }
