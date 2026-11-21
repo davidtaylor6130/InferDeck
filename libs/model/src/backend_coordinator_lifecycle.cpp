@@ -144,6 +144,7 @@ foundation::Result<void> BackendCoordinator::load_with_lock_deadline(
         if (is_primary_model(instance->info())) {
             current_loaded_ = name;
         }
+        context_borrowers_.erase(name);
         if (instance->estimate_vram_mb(instance->n_slots()) > 0) {
             invalidate_vram_observation_locked();
             ++resource_generation_;
@@ -245,6 +246,11 @@ foundation::Result<void> BackendCoordinator::unload_with_control(
         }
         if (r) active_requests_by_model_.erase(name);
         draining_models_.erase(name);
+        if (r) {
+            context_borrowers_.erase(name);
+            for (auto& [_, borrowers] : context_borrowers_) borrowers.erase(name);
+            std::erase_if(context_borrowers_, [](const auto& entry) { return entry.second.empty(); });
+        }
         if (r && released_vram > 0) {
             invalidate_vram_observation_locked();
             ++resource_generation_;

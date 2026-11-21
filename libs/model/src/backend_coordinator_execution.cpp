@@ -58,12 +58,14 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
             "context restore for " + name + " waits for active co-resident models");
     }
     IModel* model = nullptr;
+    int capacity_before = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = instances_.find(name);
         if (it == instances_.end() || !it->second || !it->second->is_loaded())
             return foundation::Err<void>(foundation::ErrorCode::NotFound,
                                          "model not loaded: " + name);
+        capacity_before = it->second->context_pool_capacity();
         if (resizing_models_.contains(name))
             return foundation::Err<void>(foundation::ErrorCode::ResourceBusy,
                                          "request capacity is already being prepared: " + name);
@@ -87,6 +89,10 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
     {
         std::lock_guard<std::mutex> lock(mutex_);
         resizing_models_.erase(name);
+        if (result && model->context_pool_capacity() != capacity_before) {
+            context_borrowers_.erase(name);
+            invalidate_vram_observation_locked();
+        }
         if (result) {
             const auto hold = continuation_holds_.find(name);
             const bool preserve_continuation = hold != continuation_holds_.end() &&

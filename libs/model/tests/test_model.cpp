@@ -11,6 +11,7 @@
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -3071,11 +3072,120 @@ TEST_CASE("BackendCoordinator: co-resident borrower yields when the lender needs
             CHECK_FALSE(coordinator.is_loaded(compact.name));
         }
     }
+    SECTION("a busy lender keeps its borrower until it is idle") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        const auto slot = coordinator.acquire_slot(large.name);
+        REQUIRE(slot);
+        const auto deferred = coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 6000, 1, 6000, 1}, control());
+        REQUIRE_FALSE(deferred);
+        CHECK(deferred.error().code == ErrorCode::ResourceBusy);
+        CHECK(coordinator.is_loaded(compact.name));
+        CHECK(lender_calls("ensure_capacity") == 0);
+        REQUIRE(coordinator.release_slot(large.name, *slot));
+    }
+    SECTION("a non-evictable borrower fails the restore before touching the lender") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        auto* borrower = dynamic_cast<IModelMock*>(const_cast<IBackend*>(coordinator.get_backend(compact.name)));
+        REQUIRE(borrower);
+        borrower->model_info.eviction_eligible = false;
+        const auto blocked = coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 6000, 1, 6000, 1}, control());
+        REQUIRE_FALSE(blocked);
+        CHECK(blocked.error().code == ErrorCode::OutOfMemory);
+        CHECK(coordinator.is_loaded(compact.name));
+        CHECK(lender_calls("ensure_capacity") == 0);
+    }
+    SECTION("a cancelled restore keeps the borrower") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        const LifecycleControl cancelled{
+            LifecycleControl::clock::now() + std::chrono::seconds{5}, [] { return true; }};
+        const auto result = coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 6000, 1, 6000, 1}, cancelled);
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == ErrorCode::Cancelled);
+        CHECK(coordinator.is_loaded(compact.name));
+    }
+    SECTION("a reloaded lender forgets borrowers from its previous residency") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        REQUIRE(coordinator.unload(large.name));
+        REQUIRE(coordinator.load(large.name));
+        REQUIRE(coordinator.prepare_request_capacity(
+            large.name, RequestDemand{0, 0, 9000, 1, 9000, 1}, control()));
+        CHECK(coordinator.is_loaded(compact.name));
+    }
     SECTION("a model that cannot shrink is still evicted") {
         lender->reclaimable_mb.store(0);
         REQUIRE(coordinator.swap_to(compact.name));
         CHECK_FALSE(coordinator.is_loaded(large.name));
         CHECK(coordinator.is_loaded(compact.name));
+    }
+}
+
+TEST_CASE("BackendCoordinator: restore evicts all borrowers or none",
+          "[model][coordinator][context-reclaim]") {
+    ModelRegistry reg;
+    std::unordered_map<std::string, IModelMock*> mocks;
+    reg.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        if (info.name.starts_with("lender")) {
+            backend->reclaimable_mb.store(1000);
+            backend->pool_capacity.store(4000);
+        }
+        mocks[info.name] = backend.get();
+        return backend;
+    });
+    const auto add = [&](const std::string& name, int vram) {
+        auto info = make_info(name);
+        info.vram_required_mb = vram;
+        reg.register_model(info);
+    };
+    add("lender-a", 5000);
+    add("lender-b", 5000);
+    add("first", 6000);
+    add("second", 1000);
+    add("shared", 7000);
+    BackendCoordinator coordinator(reg);
+    coordinator.set_vram_budget(15000, 0);
+    const auto control = [] {
+        return LifecycleControl{LifecycleControl::clock::now() + std::chrono::seconds{5}, {}};
+    };
+    const RequestDemand restore{0, 0, 6000, 1, 6000, 1};
+    REQUIRE(coordinator.load("lender-a"));
+    REQUIRE(coordinator.load("lender-b"));
+
+    SECTION("one busy borrower defers the restore without partial eviction") {
+        mocks["lender-b"]->reclaimable_mb.store(0);
+        REQUIRE(coordinator.swap_to("first"));
+        mocks["lender-a"]->reclaimable_mb.store(1000);
+        REQUIRE(coordinator.swap_to("second"));
+        REQUIRE(coordinator.is_loaded("first"));
+        REQUIRE(coordinator.is_loaded("second"));
+        const auto slot = coordinator.acquire_slot("second");
+        REQUIRE(slot);
+        const auto deferred = coordinator.prepare_request_capacity("lender-a", restore, control());
+        REQUIRE_FALSE(deferred);
+        CHECK(deferred.error().code == ErrorCode::ResourceBusy);
+        CHECK(coordinator.is_loaded("first"));
+        CHECK(coordinator.is_loaded("second"));
+        REQUIRE(coordinator.release_slot("second", *slot));
+        REQUIRE(coordinator.prepare_request_capacity("lender-a", restore, control()));
+        CHECK_FALSE(coordinator.is_loaded("first"));
+        CHECK_FALSE(coordinator.is_loaded("second"));
+    }
+    SECTION("a borrower shared by two lenders is forgotten by both once it unloads") {
+        REQUIRE(coordinator.swap_to("shared"));
+        REQUIRE(coordinator.is_loaded("lender-a"));
+        REQUIRE(coordinator.is_loaded("lender-b"));
+        REQUIRE(coordinator.prepare_request_capacity("lender-a", restore, control()));
+        CHECK_FALSE(coordinator.is_loaded("shared"));
+        REQUIRE(coordinator.load("shared"));
+        REQUIRE(coordinator.prepare_request_capacity("lender-b", restore, control()));
+        CHECK(coordinator.is_loaded("shared"));
     }
 }
 

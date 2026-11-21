@@ -8,6 +8,7 @@
 #include <thread>
 #include <utility>
 #include <unordered_set>
+#include <vector>
 
 namespace inferdeck::model {
 
@@ -493,34 +494,43 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
 
 foundation::Result<bool> BackendCoordinator::release_context_borrowers(
     const std::string& lender, const LifecycleControl& control) {
-    while (true) {
-        std::string candidate;
-        bool busy = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            const auto borrowers = context_borrowers_.find(lender);
-            if (borrowers == context_borrowers_.end()) return false;
-            for (auto it = borrowers->second.begin(); it != borrowers->second.end();) {
-                const auto instance = instances_.find(*it);
-                if (instance == instances_.end() || !instance->second ||
-                    !instance->second->is_loaded()) {
-                    it = borrowers->second.erase(it);
-                    continue;
-                }
-                const auto active = active_requests_by_model_.find(*it);
-                const auto& info = instance->second->info();
-                const bool idle = !draining_models_.contains(*it) &&
-                    !resizing_models_.contains(*it) &&
-                    (active == active_requests_by_model_.end() || active->second == 0);
-                if (info.eviction_eligible && info.residency != ResidencyPolicy::Always) {
-                    if (!idle) busy = true;
-                    else if (candidate.empty()) candidate = *it;
-                }
-                ++it;
+    std::vector<std::string> evictions;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto borrowers = context_borrowers_.find(lender);
+        if (borrowers == context_borrowers_.end()) return false;
+        const auto lender_active = active_requests_by_model_.find(lender);
+        if (lender_active != active_requests_by_model_.end() && lender_active->second > 0) return true;
+        for (auto it = borrowers->second.begin(); it != borrowers->second.end();) {
+            const auto instance = instances_.find(*it);
+            if (instance == instances_.end() || !instance->second ||
+                !instance->second->is_loaded()) {
+                it = borrowers->second.erase(it);
+                continue;
             }
-            if (borrowers->second.empty()) context_borrowers_.erase(borrowers);
+            const auto& info = instance->second->info();
+            if (!info.eviction_eligible || info.residency == ResidencyPolicy::Always) {
+                last_resource_decision_ = "context restore for " + lender +
+                    " blocked by non-evictable " + *it;
+                return foundation::Err<bool>(foundation::ErrorCode::OutOfMemory,
+                    "context restore for " + lender + " is blocked by resident model " + *it);
+            }
+            const auto active = active_requests_by_model_.find(*it);
+            if (draining_models_.contains(*it) || resizing_models_.contains(*it) ||
+                (active != active_requests_by_model_.end() && active->second > 0)) return true;
+            evictions.push_back(*it);
+            ++it;
         }
-        if (candidate.empty()) return busy;
+        if (evictions.empty()) {
+            context_borrowers_.erase(borrowers);
+            return false;
+        }
+    }
+    for (const auto& candidate : evictions) {
+        if (control.is_cancelled()) {
+            return foundation::Err<bool>(foundation::ErrorCode::Cancelled,
+                                         "context restore cancelled: " + lender);
+        }
         auto unloaded = unload_with_control(candidate, control);
         if (!unloaded) {
             if (unloaded.error().code == foundation::ErrorCode::Cancelled)
@@ -530,6 +540,7 @@ foundation::Result<bool> BackendCoordinator::release_context_borrowers(
         std::lock_guard<std::mutex> lock(mutex_);
         last_resource_decision_ = "evicted idle " + candidate + " to restore context for " + lender;
     }
+    return false;
 }
 
 foundation::Result<void> BackendCoordinator::require_priority_session_allows(

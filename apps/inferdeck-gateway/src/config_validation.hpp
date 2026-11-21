@@ -663,6 +663,10 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     }
                     std::unordered_set<std::string> fallbacks{target};
                     for (const auto& fallback : alias["fallbacks"]) {
+                        if (!fallback.IsScalar()) {
+                            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                "model alias fallbacks must be model IDs: " + name);
+                        }
                         const auto value = fallback.as<std::string>();
                         if (!names.contains(value) || !fallbacks.insert(value).second) {
                             return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,

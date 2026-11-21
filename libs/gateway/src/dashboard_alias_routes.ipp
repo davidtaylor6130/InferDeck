@@ -48,7 +48,15 @@
                 if (alias.name == name) previous = alias;
             }
             if (body.contains("fallbacks")) {
-                requested.fallbacks = body["fallbacks"].get<std::vector<std::string>>();
+                const auto& fallbacks = body["fallbacks"];
+                if (!fallbacks.is_array() ||
+                    !std::all_of(fallbacks.begin(), fallbacks.end(),
+                                 [](const auto& value) { return value.is_string(); })) {
+                    write_error(resp, 400, "invalid_model_alias",
+                                "fallbacks must be an array of model IDs");
+                    return;
+                }
+                requested.fallbacks = fallbacks.get<std::vector<std::string>>();
             } else if (previous) {
                 requested.fallbacks = previous->fallbacks;
             }

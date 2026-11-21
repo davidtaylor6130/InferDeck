@@ -126,6 +126,16 @@ satisfies the alias's `required_context_size` and `required_capabilities`.
 A model named by an alias fallback cannot be unregistered. Aliases without
 `fallbacks` behave as before.
 
+The choice is made once, when the request is resolved. If the chosen model is
+unloaded before the request is admitted, `auto_swap` loads that model again;
+the request does not switch candidates. Fallback compatibility is checked when
+the alias is created or retargeted, not on every request.
+
+A restore is refused while the lender has active requests or any borrower is
+active, draining or resizing; the request waits and retries without evicting
+anything. A borrower that cannot be evicted makes the restore fail with an
+out-of-memory error, so the lender keeps its reduced pool and its cache.
+
 ## Files and selection
 
 - The stable base is the requested `gateway.yml`.

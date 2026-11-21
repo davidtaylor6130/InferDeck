@@ -757,6 +757,7 @@ model_aliases:
     CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [small]\n"));
     CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [large, large]\n"));
     CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [absent]\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [{name: large}]\n"));
 }
 
 TEST_CASE("Active configuration is preferred and invalid profiles fall back safely",

@@ -55,7 +55,8 @@
         const std::string requested_model = body.value("model", current.value_or(""));
         const auto resolved = requested_model.empty()
             ? foundation::Ok(std::string{})
-            : deps.gw.coordinator.registry().resolve(requested_model);
+            : deps.gw.coordinator.registry().resolve(requested_model,
+                  [&deps](const std::string& name) { return deps.gw.coordinator.is_ready(name); });
         if (!resolved) {
             write_error(resp, 404, "model_not_found", resolved.error().message);
             return;
