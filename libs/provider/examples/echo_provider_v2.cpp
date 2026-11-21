@@ -67,7 +67,7 @@ public:
     int estimate_vram_mb(int slots) const override { return info_.vram_required_mb + 10 * slots; }
     int additional_vram_reserve_mb() const override { return 7; }
     bool live_vram_accounting_complete() const override { return true; }
-    bool compute_degraded() const override { return true; }
+    bool compute_degraded() const override { return info_.artifacts.contains("degraded"); }
     int reclaimable_idle_context_mb() const override { return 40; }
 
     foundation::Result<void> resize_slots(int slots) override

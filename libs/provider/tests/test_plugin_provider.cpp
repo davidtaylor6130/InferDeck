@@ -107,7 +107,7 @@ TEST_CASE("A v2 SDK provider is indistinguishable from a built-in backend", "[pr
     provider::set_plugin_host_settings(R"({"n_batch":256})");
     REQUIRE(descriptor->initialize({echo_model("echo")}));
 
-    auto backend = descriptor->factory(echo_model("echo"));
+    auto backend = descriptor->factory(echo_model("echo", {{"degraded", "1"}}));
     REQUIRE(backend);
     REQUIRE_FALSE(backend->acquire_slot());
     CHECK_FALSE(backend->is_loaded());
