@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <set>
 #include <stop_token>
 #include <thread>
 #include <utility>
@@ -67,7 +68,6 @@ int32_t reply_result(const inferdeck_call_v2* call, const foundation::Result<T>&
     return reply(call, encode(*result, blobs), blobs);
 }
 
-/// <summary>Runs <paramref name="body"/>, turning any exception into an INTERNAL reply.</summary>
 template <typename Body>
 int32_t shielded(const inferdeck_call_v2* call, Body body)
 {
@@ -94,7 +94,8 @@ bool call_cancelled(const inferdeck_call_v2* call)
 model::LifecycleControl control_of(const inferdeck_call_v2* call)
 {
     model::LifecycleControl control;
-    const int64_t remaining = call->remaining_ms(call->context);
+    const int64_t remaining = INFERDECK_STRUCT_HAS(call, inferdeck_call_v2, remaining_ms) && call->remaining_ms
+        ? call->remaining_ms(call->context) : -1;
     if (remaining >= 0)
     {
         control.deadline = Clock::now() + std::chrono::milliseconds(remaining);
@@ -108,7 +109,6 @@ int32_t status_of(const foundation::Result<void>& result, const inferdeck_call_v
     return result ? INFERDECK_OK : reply_error(call, result);
 }
 
-/// <summary>Serialises emits from the backend's threads and the progress watcher.</summary>
 class Emitter
 {
 public:
@@ -329,7 +329,7 @@ int32_t sdk_init(const inferdeck_host_v2* host, const inferdeck_call_v2* call)
             std::lock_guard lock(g_gateway_mutex);
             g_gateway = parsed->value("gateway", json::object());
         }
-        if (host->log)
+        if (INFERDECK_STRUCT_HAS(host, inferdeck_host_v2, log) && host->log)
         {
             foundation::Logger::instance().set_forwarder(
                 [log = host->log, context = host->context](foundation::LogLevel level, std::string_view event,
@@ -535,22 +535,31 @@ std::string contract_manifest(const std::string& runtime, const std::string& ver
     return json{{"runtime", runtime}, {"version", version}, {"modalities", std::move(modalities)},
                 {"model_source", sources[static_cast<int>(contract->artifact_policy)]},
                 {"vision", contract->vision}, {"reasoning", contract->reasoning},
-                {"speculative", contract->speculative}}.dump();
+                {"speculative", contract->speculative},
+                {"speculative_types", std::set<std::string>(contract->speculative_types.begin(),
+                                                            contract->speculative_types.end())}}.dump();
 }
 
 const inferdeck_provider_v2* provider_table(Definition (*define)())
 {
-    static Definition definition = define();
-    static const inferdeck_provider_v2 table = []
+    try
     {
-        g_definition = &definition;
-        return inferdeck_provider_v2{
-            sizeof(inferdeck_provider_v2), INFERDECK_PROVIDER_ABI_VERSION_2, definition.manifest_json.c_str(),
-            sdk_init, sdk_shutdown, sdk_create, sdk_destroy, sdk_load, sdk_unload, sdk_query,
-            sdk_acquire_slot, sdk_release_slot, sdk_request_cancel, sdk_reset_all_slots, sdk_resize_slots,
-            sdk_reclaim_idle_context, sdk_invoke, sdk_provider_invoke};
-    }();
-    return &table;
+        static Definition definition = define();
+        static const inferdeck_provider_v2 table = []
+        {
+            g_definition = &definition;
+            return inferdeck_provider_v2{
+                sizeof(inferdeck_provider_v2), INFERDECK_PROVIDER_ABI_VERSION_2, definition.manifest_json.c_str(),
+                sdk_init, sdk_shutdown, sdk_create, sdk_destroy, sdk_load, sdk_unload, sdk_query,
+                sdk_acquire_slot, sdk_release_slot, sdk_request_cancel, sdk_reset_all_slots, sdk_resize_slots,
+                sdk_reclaim_idle_context, sdk_invoke, sdk_provider_invoke};
+        }();
+        return &table;
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
 }
 
 }

@@ -14,6 +14,7 @@
 
 #include "config_schema.hpp"
 #include "foundation/result.hpp"
+#include "model/model_info.hpp"
 #include "model/model_registry.hpp"
 #include "model/runtime_contract.hpp"
 
@@ -190,6 +191,30 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 return foundation::Err<void>(
                     foundation::ErrorCode::InvalidArgument,
                     "gateway.default_model_preload_delay_ms must be between 0 and 3600000");
+            }
+            if (gateway["transcription_upload_timeout_ms"] &&
+                (gateway["transcription_upload_timeout_ms"].as<int>() < 30000 ||
+                 gateway["transcription_upload_timeout_ms"].as<int>() > 3600000)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.transcription_upload_timeout_ms must be between 30000 and 3600000");
+            }
+            if (gateway["transcription_decoded_budget_mb"] &&
+                (gateway["transcription_decoded_budget_mb"].as<int>() < 64 ||
+                 gateway["transcription_decoded_budget_mb"].as<int>() > 65536)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.transcription_decoded_budget_mb must be between 64 and 65536");
+            }
+            if (gateway["transcription_max_body_mb"] &&
+                (gateway["transcription_max_body_mb"].as<int>() < 1 ||
+                 gateway["transcription_max_body_mb"].as<int>() > 4096)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.transcription_max_body_mb must be between 1 and 4096");
+            }
+            if (gateway["speech_admission_timeout_ms"] &&
+                (gateway["speech_admission_timeout_ms"].as<int>() < 1000 ||
+                 gateway["speech_admission_timeout_ms"].as<int>() > 600000)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.speech_admission_timeout_ms must be between 1000 and 600000");
             }
             if (gateway["background_idle_after_seconds"] &&
                 (gateway["background_idle_after_seconds"].as<int>() < 60 ||
@@ -413,7 +438,8 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                         ? speculative["type"].as<std::string>() : "none";
                     const int draft_margin = speculative_type == "none" ? 0
                         : (speculative["draft_tokens"] ? speculative["draft_tokens"].as<int>()
-                                                       : (speculative_type == "mtp" ? 2 : 7));
+                                                       : (speculative_type == "mtp" ? model::k_default_mtp_draft_tokens
+                                                                                   : model::k_default_dflash_draft_tokens));
                     if (pool_size < 0 || (pool_size > 0 &&
                         (!unified || static_cast<std::int64_t>(pool_size) <
                             static_cast<std::int64_t>(std::max(512, context_size)) + draft_margin))) {
@@ -565,16 +591,10 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     const std::string type = speculative["type"]
                         ? speculative["type"].as<std::string>() : "none";
                     const bool dflash = type == "dflash" || type == "dflash2";
-                    if (type != "none" && type != "mtp" && !dflash) {
+                    if (type != "none" && !runtime_contract->speculative_types.contains(type)) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
-                            "unsupported speculative type for model: " + name);
-                    }
-                    if ((type != "none" && !runtime_contract->speculative) ||
-                        (dflash && runtime != "llama_cpp")) {
-                        return foundation::Err<void>(
-                            foundation::ErrorCode::InvalidArgument,
-                            "speculative decoding requires a runtime with speculative support: " + name);
+                            "runtime does not declare speculative type " + type + ": " + name);
                     }
                     const std::string draft_model = speculative["draft_model"]
                         ? speculative["draft_model"].as<std::string>() : "";
@@ -590,7 +610,7 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                     }
                     const int max_draft_tokens = dflash ? 16 : 4;
                     const int draft_tokens = speculative["draft_tokens"]
-                        ? speculative["draft_tokens"].as<int>() : (dflash ? 3 : 2);
+                        ? speculative["draft_tokens"].as<int>() : (dflash ? model::k_default_dflash_draft_tokens : model::k_default_mtp_draft_tokens);
                     if (draft_tokens < 1 || draft_tokens > max_draft_tokens) {
                         return foundation::Err<void>(
                             foundation::ErrorCode::InvalidArgument,
