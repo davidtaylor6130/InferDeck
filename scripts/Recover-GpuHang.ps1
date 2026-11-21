@@ -37,7 +37,7 @@ if (Test-Path $marker) {
     $parts = @((Get-Content $marker -ErrorAction SilentlyContinue | Select-Object -First 1) -split '\|')
     $started = [datetime]::MinValue
     $attempts = 0
-    if ($parts.Count -ge 2 -and [datetime]::TryParse($parts[0], [ref]$started)) { $attempts = [int]$parts[1] } else { $started = [datetime]::MinValue }
+    if (-not ($parts.Count -ge 2 -and [datetime]::TryParse($parts[0], [ref]$started) -and [int]::TryParse($parts[1], [ref]$attempts))) { $started = [datetime]::MinValue; $attempts = 0 }
     $pending = Get-CimInstance Win32_Service -Filter "Name='$Service'"
     if (-not $pending -or $pending.StartMode -eq 'Disabled') {
         Write-Log "recovery marker removed: $Service is missing or disabled"
