@@ -250,6 +250,8 @@ private:
         bool force_idle_reclaim = false);
     foundation::Result<void> require_priority_session_allows(
         const std::string& name);
+    foundation::Result<bool> release_context_borrowers(
+        const std::string& lender, const LifecycleControl& control);
     int estimated_vram_locked() const;
     int available_vram_locked() const;
     bool live_vram_observation_fresh_locked() const;
@@ -270,6 +272,7 @@ private:
     std::int64_t next_lease_id_{1};
     std::unordered_set<std::string> draining_models_;
     std::unordered_set<std::string> resizing_models_;
+    std::unordered_map<std::string, std::unordered_set<std::string>> context_borrowers_;
     int vram_budget_mb_{0};
     int vram_safety_margin_mb_{1024};
     int observed_vram_used_mb_{0};

@@ -101,7 +101,7 @@ Both target and MTP memory are included. The backend sequence limit and batch si
 bound the search. Admission uses the fitted capacity and each request's actual
 prompt/output reservation, rather than the model's configured concurrency limit.
 A short request can therefore run alongside more peers than full-length requests.
-The ceiling is fitted when loading; active contexts are not rebuilt to grow it.
+The ceiling is fitted when loading; active contexts are not rebuilt to grow it. A fixed-slot automatic pool that lent context to a co-resident model is rebuilt to its full fit once that model is evicted; see the co-residency section of `configuration-schema.md`.
 Dashboard model status exposes `concurrency_auto` and `context_pool_capacity`, with
 `n_slots` reporting the fitted capacity while resident. Recurrent/MTP state still
 has a per-sequence cost. This is not shared KV between different models.

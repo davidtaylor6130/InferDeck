@@ -46,6 +46,8 @@ public:
     std::atomic<bool> reclaim_in_progress{false};
     std::atomic<bool> live_vram_accounting{true};
     std::atomic<int> max_slots{2};
+    std::atomic<int> pool_capacity{0};
+    std::function<Result<void>(const RequestDemand&)> capacity_handler{};
     std::vector<int> busy_slots;
     std::vector<std::pair<int, InferenceRequest>> predictions;
     std::atomic<int> next_slot_to_assign{0};
@@ -112,6 +114,12 @@ public:
     }
     int additional_vram_reserve_mb() const override {
         return additional_vram_mb.load();
+    }
+    int context_pool_capacity() const override { return pool_capacity.load(); }
+    Result<void> ensure_request_capacity(const RequestDemand& demand,
+                                         const LifecycleControl&) override {
+        record("ensure_capacity", std::to_string(std::max(demand.required_context, demand.aggregate_context)));
+        return capacity_handler ? capacity_handler(demand) : Ok();
     }
     bool live_vram_accounting_complete() const override {
         return live_vram_accounting.load();
@@ -2937,6 +2945,93 @@ TEST_CASE("BackendCoordinator: reclaims idle context without unloading weights",
         const auto slot = coordinator.acquire_slot(a.name, options);
         REQUIRE(slot);
         REQUIRE(coordinator.release_slot(a.name, *slot));
+    }
+}
+
+TEST_CASE("BackendCoordinator: co-resident borrower yields when the lender needs its context back",
+          "[model][coordinator][context-reclaim]") {
+    ModelRegistry reg;
+    IModelMock* lender = nullptr;
+    BackendCoordinator* coordinator_ptr = nullptr;
+    reg.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->vram_mb.store(info.vram_required_mb);
+        if (info.name == "large") {
+            lender = backend.get();
+            backend->reclaimable_mb.store(1000);
+            backend->pool_capacity.store(8000);
+        }
+        return backend;
+    });
+    auto large = make_info("large");
+    auto compact = make_info("small");
+    large.vram_required_mb = compact.vram_required_mb = 5000;
+    reg.register_model(large);
+    reg.register_model(compact);
+    BackendCoordinator coordinator(reg);
+    coordinator_ptr = &coordinator;
+    coordinator.set_vram_budget(9000, 0);
+    REQUIRE(coordinator.swap_to(large.name));
+    REQUIRE(lender);
+    lender->capacity_handler = [&](const RequestDemand& demand) -> Result<void> {
+        if (std::max(demand.required_context, demand.aggregate_context) <= lender->pool_capacity.load())
+            return Ok();
+        if (coordinator_ptr->is_loaded("small"))
+            return Err<void>(ErrorCode::OutOfMemory, "context growth below demand");
+        lender->vram_mb.fetch_add(1000);
+        lender->pool_capacity.store(8000);
+        return Ok();
+    };
+    const auto control = [] {
+        return LifecycleControl{LifecycleControl::clock::now() + std::chrono::seconds{5}, {}};
+    };
+    const auto lender_calls = [&](const std::string& method) {
+        int count = 0;
+        for (const CallRecord& call : lender->calls) count += call.method == method;
+        return count;
+    };
+
+    SECTION("an evicting model is not unloaded when its context can shrink") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        CHECK(coordinator.is_loaded(large.name));
+        CHECK(coordinator.is_loaded(compact.name));
+        CHECK(lender_calls("reclaim_context") == 1);
+        CHECK(lender_calls("unload") == 0);
+
+        SECTION("demand within the reduced pool keeps the borrower resident") {
+            REQUIRE(coordinator.prepare_request_capacity(
+                large.name, RequestDemand{0, 0, 3000, 1, 3000, 1}, control()));
+            CHECK(coordinator.is_loaded(compact.name));
+        }
+        SECTION("demand beyond the reduced pool evicts the idle borrower and restores the lender") {
+            REQUIRE(coordinator.prepare_request_capacity(
+                large.name, RequestDemand{0, 0, 6000, 1, 6000, 1}, control()));
+            CHECK_FALSE(coordinator.is_loaded(compact.name));
+            CHECK(coordinator.is_ready(large.name));
+            CHECK(lender->pool_capacity.load() == 8000);
+            CHECK(lender_calls("unload") == 0);
+            CHECK(coordinator.last_resource_decision().find("restore context") != std::string::npos);
+        }
+        SECTION("an active borrower defers the restore instead of failing it") {
+            const auto slot = coordinator.acquire_slot(compact.name);
+            REQUIRE(slot);
+            const auto deferred = coordinator.prepare_request_capacity(
+                large.name, RequestDemand{0, 0, 6000, 1, 6000, 1}, control());
+            REQUIRE_FALSE(deferred);
+            CHECK(deferred.error().code == ErrorCode::ResourceBusy);
+            CHECK(coordinator.is_loaded(compact.name));
+            REQUIRE(coordinator.release_slot(compact.name, *slot));
+            REQUIRE(coordinator.prepare_request_capacity(
+                large.name, RequestDemand{0, 0, 6000, 1, 6000, 1}, control()));
+            CHECK_FALSE(coordinator.is_loaded(compact.name));
+        }
+    }
+    SECTION("a model that cannot shrink is still evicted") {
+        lender->reclaimable_mb.store(0);
+        REQUIRE(coordinator.swap_to(compact.name));
+        CHECK_FALSE(coordinator.is_loaded(large.name));
+        CHECK(coordinator.is_loaded(compact.name));
     }
 }
 

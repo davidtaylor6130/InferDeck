@@ -40,6 +40,23 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
                                          "timeout waiting for a model swap to finish: " + name);
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
+    bool lending = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = instances_.find(name);
+        lending = it != instances_.end() && it->second && it->second->is_loaded() &&
+            context_borrowers_.contains(name) &&
+            (std::max(demand.required_context, demand.aggregate_context) >
+                 it->second->context_pool_capacity() ||
+             std::max(demand.required_sequences, demand.aggregate_sequences) >
+                 it->second->n_slots());
+    }
+    if (lending) {
+        auto released = release_context_borrowers(name, control);
+        if (!released) return foundation::Err<void>(released.error().code, released.error().message);
+        if (*released) return foundation::Err<void>(foundation::ErrorCode::ResourceBusy,
+            "context restore for " + name + " waits for active co-resident models");
+    }
     IModel* model = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);

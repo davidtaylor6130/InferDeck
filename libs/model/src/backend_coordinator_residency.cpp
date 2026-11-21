@@ -340,6 +340,7 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
             std::unique_lock<std::mutex> lock(mutex_);
             if (reclaimed && *reclaimed) {
                 last_resource_decision_ = "reclaimed idle context from " + candidate + " for " + name;
+                context_borrowers_[candidate].insert(name);
                 invalidate_vram_observation_locked();
                 ++resource_generation_;
                 if (had_observation) {
@@ -488,6 +489,47 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
     return foundation::Err<void>(foundation::ErrorCode::OutOfMemory,
         "insufficient VRAM for " + name + ": required_mb=" + std::to_string(required) +
         " available_mb=" + std::to_string(available));
+}
+
+foundation::Result<bool> BackendCoordinator::release_context_borrowers(
+    const std::string& lender, const LifecycleControl& control) {
+    while (true) {
+        std::string candidate;
+        bool busy = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto borrowers = context_borrowers_.find(lender);
+            if (borrowers == context_borrowers_.end()) return false;
+            for (auto it = borrowers->second.begin(); it != borrowers->second.end();) {
+                const auto instance = instances_.find(*it);
+                if (instance == instances_.end() || !instance->second ||
+                    !instance->second->is_loaded()) {
+                    it = borrowers->second.erase(it);
+                    continue;
+                }
+                const auto active = active_requests_by_model_.find(*it);
+                const auto& info = instance->second->info();
+                const bool idle = !draining_models_.contains(*it) &&
+                    !resizing_models_.contains(*it) &&
+                    (active == active_requests_by_model_.end() || active->second == 0);
+                if (info.eviction_eligible && info.residency != ResidencyPolicy::Always) {
+                    if (!idle) busy = true;
+                    else if (candidate.empty()) candidate = *it;
+                }
+                ++it;
+            }
+            if (borrowers->second.empty()) context_borrowers_.erase(borrowers);
+        }
+        if (candidate.empty()) return busy;
+        auto unloaded = unload_with_control(candidate, control);
+        if (!unloaded) {
+            if (unloaded.error().code == foundation::ErrorCode::Cancelled)
+                return foundation::Err<bool>(unloaded.error().code, unloaded.error().message);
+            return true;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_resource_decision_ = "evicted idle " + candidate + " to restore context for " + lender;
+    }
 }
 
 foundation::Result<void> BackendCoordinator::require_priority_session_allows(

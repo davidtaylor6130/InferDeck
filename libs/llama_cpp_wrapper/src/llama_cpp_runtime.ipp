@@ -583,7 +583,10 @@ Result<void> LlamaCppModel::ensure_request_capacity(
       requested_sequences <= current_sequences) {
     return Result<void>{};
   }
-  if (!info_.concurrency_auto || !info_.context_pool_auto || !cfg_.kv_unified) {
+  const bool restorable = !info_.concurrency_auto && info_.context_pool_auto &&
+      cfg_.kv_unified && reclaimed_context_vram_mb_.load() > 0 &&
+      requested_sequences <= current_sequences;
+  if (!restorable && (!info_.concurrency_auto || !info_.context_pool_auto || !cfg_.kv_unified)) {
     if (own_capacity > current_capacity ||
         demand.required_sequences > current_sequences) {
       return Result<void>(std::unexpect, make_error(
@@ -639,7 +642,8 @@ Result<void> LlamaCppModel::ensure_request_capacity(
   const int growth_target = requested_capacity > current_capacity
       ? std::max(align_up(requested_capacity), align_up(geometric))
       : current_capacity;
-  const int target_capacity = std::min(maximum_capacity, growth_target);
+  const int target_capacity = restorable ? maximum_capacity
+                                         : std::min(maximum_capacity, growth_target);
 
   if (control.is_cancelled() || control.is_expired()) {
     return Result<void>(std::unexpect, make_error(
