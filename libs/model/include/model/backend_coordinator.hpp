@@ -208,6 +208,7 @@ private:
         std::optional<RequestDemand> demand;
         int max_aggregate_context{0};
         int max_aggregate_sequences{0};
+        bool background{false};
     };
 
     struct ActiveLease {

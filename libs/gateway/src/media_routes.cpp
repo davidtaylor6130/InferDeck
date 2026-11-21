@@ -547,6 +547,7 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
                 RoutePrincipal::OpenAIDataPlane);
     options.timeout = queue_timeout;
     options.background = background;
+    if (background) options.priority -= 1;
     options.cancelled = cancelled;
     options.prepare = [&deps, model_name, deadline, cancelled, stage] {
         stage->store("model_load");

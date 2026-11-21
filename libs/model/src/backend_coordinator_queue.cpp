@@ -72,7 +72,7 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
                         clock::now(), deadline, opts.cancelled,
                         opts.reservation_key, false, false,
                         std::nullopt, false, false, false,
-                        std::nullopt});
+                        std::nullopt, 0, 0, opts.background});
     while (true) {
         const auto now = clock::now();
         if ((opts.cancelled && opts.cancelled()) || shutting_down_.load()) {
@@ -589,7 +589,7 @@ bool BackendCoordinator::request_waits_for_priority_media_locked(
     }
     const bool media_reserved = priority_media_active_locked() ||
         std::any_of(waiters_.begin(), waiters_.end(), [this](const SlotWaiter& waiter) {
-            return model_is_priority_media_locked(waiter.model);
+            return !waiter.background && model_is_priority_media_locked(waiter.model);
         });
     if (!media_reserved) return false;
     return primary;

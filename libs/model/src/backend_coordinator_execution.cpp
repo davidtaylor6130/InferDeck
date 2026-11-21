@@ -324,7 +324,16 @@ foundation::Result<void> BackendCoordinator::validate_speech_request(
         }
     }
     if (pinned) {
-        auto validated = pinned->validate_speech_request(request);
+        foundation::Result<void> validated = foundation::Ok();
+        try {
+            validated = pinned->validate_speech_request(request);
+        } catch (const std::exception& error) {
+            validated = foundation::Err<void>(foundation::ErrorCode::Internal,
+                                              std::string("speech validation failed: ") + error.what());
+        } catch (...) {
+            validated = foundation::Err<void>(foundation::ErrorCode::Internal,
+                                              "speech validation failed");
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto pin = validation_pins_.find(name);

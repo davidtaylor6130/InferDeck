@@ -240,7 +240,7 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
             const bool later_chunk = chunks_started++ > 0;
             auto slot = acquire_media_slot(
                 req, deps, runtime_model, job,
-                later_chunk ? std::chrono::milliseconds{std::chrono::hours{24}} : admission_timeout,
+                later_chunk ? std::chrono::milliseconds{std::chrono::minutes{10}} : admission_timeout,
                 "stt", later_chunk);
             if (!slot) {
                 admission_failed = true;
