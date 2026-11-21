@@ -39,6 +39,7 @@ public:
     std::function<void()> load_gate{};
     std::atomic<bool> loaded{false};
     std::atomic<bool> healthy{true};
+    std::atomic<bool> degraded{false};
     std::atomic<int> vram_mb{4096};
     std::atomic<int> additional_vram_mb{0};
     std::atomic<int> reclaimable_mb{0};
@@ -97,6 +98,7 @@ public:
     }
 
     bool is_loaded() const override { return loaded.load(); }
+    bool compute_degraded() const override { return degraded.load(); }
     bool execution_healthy() const override {
         if (reclaim_in_progress.load()) ++guarded_query_count;
         return healthy.load();
@@ -4221,6 +4223,28 @@ TEST_CASE("BackendCoordinator: a queued background media waiter does not stall p
         if (slot) REQUIRE(coordinator.release_slot("chat", *slot).has_value());
     }
     REQUIRE(coordinator.release_slot("voice", *running).has_value());
+}
+
+TEST_CASE("coordinator lists degraded models only while loaded", "[coordinator][health]")
+{
+    ModelRegistry registry;
+    registry.set_factory([](const ModelInfo& info) -> std::unique_ptr<IModel>
+    {
+        auto backend = std::make_unique<IModelMock>(info);
+        backend->max_slots.store(info.n_slots);
+        backend->busy_slots.assign(info.n_slots, 0);
+        return backend;
+    });
+    registry.register_model(make_info("gpu"));
+    BackendCoordinator coordinator(registry);
+    CHECK(coordinator.degraded_models().empty());
+    REQUIRE(coordinator.load("gpu"));
+    CHECK(coordinator.degraded_models().empty());
+    as_mock(const_cast<IModel*>(coordinator.get_model("gpu")))->degraded.store(true);
+    CHECK(coordinator.degraded_models() == std::vector<std::string>{"gpu"});
+    CHECK(coordinator.unhealthy_models().empty());
+    REQUIRE(coordinator.unload("gpu"));
+    CHECK(coordinator.degraded_models().empty());
 }
 
 TEST_CASE("coordinator reports an unhealthy model and recovers it on the next load", "[coordinator][health]")

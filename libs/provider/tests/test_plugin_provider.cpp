@@ -122,6 +122,7 @@ TEST_CASE("A v2 SDK provider is indistinguishable from a built-in backend", "[pr
     CHECK(backend->can_resize_slots());
     CHECK_FALSE(backend->can_reclaim_idle_context());
     CHECK(backend->reclaimable_idle_context_mb() == 40);
+    CHECK(backend->compute_degraded());
     REQUIRE(backend->resize_slots(3));
     CHECK(backend->n_slots() == 3);
 
@@ -374,5 +375,6 @@ TEST_CASE("A v2 table of the frozen minimum size loads and its absent members ar
     auto backend = descriptor->factory(echo_model("echo_min"));
     REQUIRE(backend);
     CHECK(backend->load());
+    CHECK_FALSE(backend->compute_degraded());
     CHECK(backend->unload());
 }

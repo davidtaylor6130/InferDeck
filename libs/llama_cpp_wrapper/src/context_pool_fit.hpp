@@ -14,6 +14,8 @@ namespace inferdeck::llama_wrapper {
     return compute != model::ModelCompute::Cpu && gpu_device_count == 0;
 }
 
+[[nodiscard]] std::size_t gpu_device_count(const llama_model_params& params);
+
 [[nodiscard]] foundation::Result<std::size_t> context_pool_device_memory_bytes(
     const llama_context* target_context,
     const llama_context* draft_context);

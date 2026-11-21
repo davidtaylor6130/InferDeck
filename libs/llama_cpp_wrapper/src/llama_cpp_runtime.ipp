@@ -289,11 +289,7 @@ Result<void> LlamaCppModel::load(
   }
   log_memory_snapshot("llama_model_loaded_memory_after", info_.name);
   {
-    std::size_t gpu_devices = 0;
-    for (std::size_t i = 0; i < ggml_backend_dev_count(); ++i) {
-      const auto type = ggml_backend_dev_type(ggml_backend_dev_get(i));
-      if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) ++gpu_devices;
-    }
+    const std::size_t gpu_devices = gpu_device_count(mparams);
     const bool degraded = gpu_compute_unavailable(info_.compute, gpu_devices);
     compute_degraded_.store(degraded);
     if (degraded) LOG_WARN("llama_gpu_unavailable_cpu_fallback", "model={} compute={}", info_.name, to_string(info_.compute));

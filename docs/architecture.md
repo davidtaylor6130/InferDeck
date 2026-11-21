@@ -172,7 +172,7 @@ dashboard image/music generation, media job cancellation and output retrieval,
 metrics, history, configuration, model aliases, and the model store. Dashboard
 live state uses one SSE connection; there is no WebSocket layer.
 
-`GET /api/inferdeck/v1/health` reports `ok: false`, `status: "degraded"` and `reason: "gpu_unavailable"` (with `degraded_models`) when a GPU-configured llama.cpp model loaded but no GPU backend device exists, so it silently runs on CPU. The load is not failed; the gateway logs WARN `llama_gpu_unavailable_cpu_fallback`. Providers expose this through `INFERDECK_QUERY_COMPUTE_DEGRADED`; older providers are never degraded.
+`GET /api/inferdeck/v1/health` reports `status: "degraded"`, `compute_degraded: true`, `reason: "gpu_unavailable"` and `degraded_models` when a GPU-configured llama.cpp model loaded but no GPU backend device exists, so it silently runs on CPU. `ok` stays true for this case so deploy scripts keep working; `ok: false` is reserved for unhealthy models (`reason: "execution_unhealthy"`) and the GPU-lost backoff (`reason: "gpu_lost_backoff"`, highest precedence). The load is not failed; the gateway logs WARN `llama_gpu_unavailable_cpu_fallback`. Providers expose this through `INFERDECK_QUERY_COMPUTE_DEGRADED`; older providers are never degraded.
 
 Responses is stateless. Storage/background/conversation parameters are rejected rather than silently retained.
 

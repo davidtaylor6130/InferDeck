@@ -45,20 +45,11 @@ void configure_gpu_lost_backoff(inferdeck::gateway::GatewayDeps& deps) {
 }
 
 nlohmann::json build_health_json(const model::BackendCoordinator& coordinator, bool db_healthy) {
-    const auto unhealthy = coordinator.unhealthy_models();
-    const auto degraded = coordinator.degraded_models();
-    const bool backoff = gpu_backoff_active(coordinator);
-    const bool ok = unhealthy.empty() && !backoff && degraded.empty();
-    nlohmann::json body = {{"ok", ok},
-                           {"status", ok ? "ok" : "degraded"},
-                           {"unhealthy_models", unhealthy},
-                           {"degraded_models", degraded},
-                           {"db_healthy", db_healthy},
-                           {"version", inferdeck::app::build_version},
-                           {"build_revision", inferdeck::app::build_revision},
-                           {"build_dirty", inferdeck::app::build_dirty}};
-    if (!degraded.empty()) body["reason"] = "gpu_unavailable";
-    if (backoff) body["reason"] = "gpu_lost_backoff";
+    auto body = inferdeck::gateway::health_body(coordinator.unhealthy_models(), coordinator.degraded_models(),
+                                                gpu_backoff_active(coordinator), db_healthy);
+    body["version"] = inferdeck::app::build_version;
+    body["build_revision"] = inferdeck::app::build_revision;
+    body["build_dirty"] = inferdeck::app::build_dirty;
     return body;
 }
 

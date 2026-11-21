@@ -4,6 +4,7 @@
 #include "foundation/result.hpp"
 #include "gateway/auth.hpp"
 #include "gateway/cors.hpp"
+#include "gateway/health_json.hpp"
 #include "gateway/openai_routes.hpp"
 #include "gateway/media_routes.hpp"
 #include "gateway/openai_adapter.hpp"
@@ -5205,4 +5206,24 @@ TEST_CASE("gpu_backoff_until needs two recent restarts and ignores bad stamps", 
     CHECK_FALSE(gpu_backoff_until({now - 5000, now - 4000}, now));
     CHECK_FALSE(gpu_backoff_until({now - 60, now + 5000}, now));
     CHECK(gpu_backoff_until({now - 500, now - 60, now + 5000}, now) == now - 60 + 1800);
+}
+
+TEST_CASE("health body keeps ok true for CPU fallback and ranks reasons", "[health]") {
+  using inferdeck::gateway::health_body;
+  auto healthy = health_body({}, {}, false, true);
+  CHECK(healthy["ok"] == true);
+  CHECK(healthy["status"] == "ok");
+  CHECK_FALSE(healthy.contains("reason"));
+  auto degraded = health_body({}, {"m"}, false, true);
+  CHECK(degraded["ok"] == true);
+  CHECK(degraded["status"] == "degraded");
+  CHECK(degraded["reason"] == "gpu_unavailable");
+  CHECK(degraded["compute_degraded"] == true);
+  CHECK(degraded["degraded_models"] == nlohmann::json::array({"m"}));
+  auto unhealthy = health_body({"u"}, {"m"}, false, true);
+  CHECK(unhealthy["ok"] == false);
+  CHECK(unhealthy["reason"] == "execution_unhealthy");
+  auto backoff = health_body({"u"}, {"m"}, true, true);
+  CHECK(backoff["ok"] == false);
+  CHECK(backoff["reason"] == "gpu_lost_backoff");
 }

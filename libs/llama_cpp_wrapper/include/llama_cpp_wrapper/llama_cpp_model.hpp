@@ -91,7 +91,7 @@ public:
   inferdeck::foundation::Result<void> unload() override;
   bool is_loaded() const noexcept override { return loaded_.load(); }
   bool execution_healthy() const override;
-  bool compute_degraded() const override { return compute_degraded_.load(); }
+  bool compute_degraded() const override { return loaded_.load() && compute_degraded_.load(); }
   void request_cancel() override { cancel_all_.store(true); }
 
   int vram_usage_mb() const noexcept override;

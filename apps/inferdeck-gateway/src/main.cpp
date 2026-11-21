@@ -90,6 +90,7 @@ constexpr int runtime_reload_result = 75;
 #include "provider_runtime.ipp"
 #include "media_control_routes.ipp"
 #include "decision_routes.ipp"
+#include "gateway/health_json.hpp"
 #include "default_model_runtime.ipp"
 int run_gateway(const fs::path& config_path) {
     using namespace inferdeck;
