@@ -52,20 +52,21 @@ if (-not $svc -or $svc.Status -ne 'Running') {
 }
 
 Write-Log "$($hangs.Count) GPU watchdog reports in $WindowMinutes min; stopping $Service and restarting the display adapter"
-Set-Content $last (Get-Date -Format s)
 $servicePid = [int](Get-CimInstance Win32_Service -Filter "Name='$Service'").ProcessId
-Stop-Service $Service -Force -ErrorAction SilentlyContinue
 $application = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$Service\Parameters" -ErrorAction SilentlyContinue).Application
-if ($servicePid -gt 0 -and $application) {
-    foreach ($child in Get-CimInstance Win32_Process -Filter "ParentProcessId=$servicePid" | Where-Object { $_.ExecutablePath -eq $application }) {
-        Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-}
+$children = @(if ($servicePid -gt 0 -and $application) {
+    Get-CimInstance Win32_Process -Filter "ParentProcessId=$servicePid" | Where-Object { $_.ExecutablePath -eq $application }
+})
+sc.exe stop $Service | Out-Null
+$deadline = (Get-Date).AddSeconds(90)
+while ((Get-Service $Service -ErrorAction SilentlyContinue).Status -ne 'Stopped' -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
+foreach ($child in $children) { Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue }
 if ($servicePid -gt 0) { Stop-Process -Id $servicePid -Force -ErrorAction SilentlyContinue }
 foreach ($gpu in Get-PnpDevice -Class Display -PresentOnly | Where-Object { $_.InstanceId -like 'PCI\*' }) {
     pnputil /restart-device "$($gpu.InstanceId)" | Out-Null
     Write-Log "restarted $($gpu.FriendlyName) exit=$LASTEXITCODE"
 }
+Set-Content $last (Get-Date -Format s)
 Start-Sleep 20
 Start-Service $Service -ErrorAction SilentlyContinue
 Write-Log "$Service started"

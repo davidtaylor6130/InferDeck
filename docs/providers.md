@@ -293,7 +293,8 @@ unloads, and loads again.
 
 ```bash
 $BUILD/bin/Release/inferdeck-provider-check <library> [--model <path>] [--artifact key=value]... \
-    [--modality <name>]... [--skip-invoke] [--no-load] [--context <tokens>] \n    [--speculative mtp|dflash|dflash2] [--draft-model <path>] [--draft-tokens <n>]
+    [--modality <name>]... [--skip-invoke] [--no-load] [--context <tokens>] \
+    [--speculative mtp|dflash|dflash2] [--draft-model <path>] [--draft-tokens <n>]
 ```
 
 | Option | Meaning |
