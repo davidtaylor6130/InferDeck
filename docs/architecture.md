@@ -64,7 +64,7 @@ Resident models with independent admission pools may execute at the same time.
 
 Successful STT reserves the configured default conversation model for the same client through the STT-to-chat hand-off. The matching chat runs at media priority, and TTS releases the reservation. `gateway.voice_session_grace_ms` bounds abandoned sessions; clients behind a shared address can send `X-InferDeck-Voice-Session` to provide a distinct key.
 
-Long recordings: `POST /v1/audio/transcriptions` accepts up to `gateway.transcription_max_body_mb` (default 200 MB) and 4 hours of audio. The request stays synchronous. The gateway decodes the file, then transcribes it in 5-minute chunks split at the quietest point, passing the tail of the previous chunk as the initial prompt, and returns the merged transcript. The model slot is released and re-acquired between chunks so other requests are served fairly. A client must therefore allow a read timeout proportional to the audio length; a 1-hour recording can take many minutes on CPU. `gateway.transcription_upload_timeout_ms` (default 600000) bounds only the upload of an authorized `/v1/audio/transcriptions` request; all other requests keep the 30 s read deadline. `gateway.transcription_decoded_budget_mb` (default 1024) bounds decoded audio held in memory; excess requests get `503` with `Retry-After`. `gateway.speech_admission_timeout_ms` (default 30000) bounds STT and TTS slot and decode waits; loading a non-resident speech model has its own 5-minute budget. A short STT request can still time out behind a running chunk of a long one: later chunks wait at most 10 minutes and queue one priority level below foreground requests, so a waiting foreground request goes next, but a running chunk is not preempted. There is no asynchronous job mode.
+Long recordings: `POST /v1/audio/transcriptions` accepts up to `gateway.transcription_max_body_mb` (default 200 MB) and 4 hours of audio. The request stays synchronous. The gateway decodes the file, then transcribes it in 1-minute chunks split at the quietest point (Parakeet drops speech after a minute or more of silence inside one long chunk), passing the tail of the previous chunk as the initial prompt, and returns the merged transcript. The model slot is released and re-acquired between chunks so other requests are served fairly. A client must therefore allow a read timeout proportional to the audio length; a 1-hour recording can take many minutes on CPU. `gateway.transcription_upload_timeout_ms` (default 600000) bounds only the upload of an authorized `/v1/audio/transcriptions` request; all other requests keep the 30 s read deadline. `gateway.transcription_decoded_budget_mb` (default 1024) bounds decoded audio held in memory; excess requests get `503` with `Retry-After`. `gateway.speech_admission_timeout_ms` (default 30000) bounds STT and TTS slot and decode waits; loading a non-resident speech model has its own 5-minute budget. A short STT request can still time out behind a running chunk of a long one: later chunks wait at most 10 minutes and queue one priority level below foreground requests, so a waiting foreground request goes next, but a running chunk is not preempted. There is no asynchronous job mode.
 
 Priority is preemptive at queue and swap boundaries. A native backend load that has already begun remains non-preemptive because model libraries do not expose a safe generic cancellation point; CPU voice can still run, and the reserved conversation model is selected at the next safe swap boundary.
 
@@ -79,6 +79,22 @@ of declared availability and observed pressure with the incomplete runtime's
 full declared footprint reserved.
 `gateway.vram_budget_mb` caps hardware detection and
 `gateway.vram_safety_margin_mb` defaults to 2048 MB (room for the Windows desktop and login screen) and may be set to 0. It reserves GPU headroom only; host/system memory reserve is separate.
+With fresh telemetry, `other_process_used = max(0, observed_used -
+own_resident)`, where `own_resident` is the sum of InferDeck's resident
+estimates (a complete-accounting runtime's estimate minus its pending
+reserve; an incomplete-accounting runtime's full estimate). The margin covers
+other-process usage rather than adding to it: live availability is
+`min(budget, total) - observed_used - max(0, margin - other_process_used) -
+pending reserves`, so the effective desktop reserve is
+`max(margin, other_process_used)`. Incomplete-accounting runtimes still
+reserve their full declared estimate on top of observed usage, and the result
+is capped by declared availability. With a 32476 MB budget, a 2048 MB margin,
+and 750 MB of desktop usage, 30428 MB remains available. An overestimated
+resident (observed below its estimate) yields zero other-process usage and
+keeps the full margin. Trade-off: growth of an underestimated resident beyond
+its estimate is indistinguishable from other processes and is counted as
+other-process usage, so it can absorb the margin; the observed usage itself is
+still subtracted in full.
 
 Lazy native runtimes reserve their declared peak beyond memory already retained
 by the runtime. This prevents an unloaded phase from being double-spent while
@@ -103,7 +119,7 @@ Both target and MTP memory are included. The backend sequence limit and batch si
 bound the search. Admission uses the fitted capacity and each request's actual
 prompt/output reservation, rather than the model's configured concurrency limit.
 A short request can therefore run alongside more peers than full-length requests.
-The ceiling is fitted when loading; active contexts are not rebuilt to grow it.
+The ceiling is fitted when loading; active contexts are not rebuilt to grow it. A fixed-slot automatic pool that lent context to a co-resident model is rebuilt to its full fit once that model is evicted; see the co-residency section of `configuration-schema.md`.
 Dashboard model status exposes `concurrency_auto` and `context_pool_capacity`, with
 `n_slots` reporting the fitted capacity while resident. Recurrent/MTP state still
 has a per-sequence cost. This is not shared KV between different models.
@@ -156,6 +172,8 @@ dashboard image/music generation, media job cancellation and output retrieval,
 metrics, history, configuration, model aliases, and the model store. Dashboard
 live state uses one SSE connection; there is no WebSocket layer.
 
+`GET /api/inferdeck/v1/health` reports `status: "degraded"`, `compute_degraded: true`, `reason: "gpu_unavailable"` and `degraded_models` when a GPU-configured llama.cpp model loaded but no GPU backend device exists, so it silently runs on CPU. `ok` stays true for this case so deploy scripts keep working; `ok: false` is reserved for unhealthy models (`reason: "execution_unhealthy"`) and the GPU-lost backoff (`reason: "gpu_lost_backoff"`, highest precedence). The load is not failed; the gateway logs WARN `llama_gpu_unavailable_cpu_fallback`. Providers expose this through `INFERDECK_QUERY_COMPUTE_DEGRADED`; older providers are never degraded.
+
 Responses is stateless. Storage/background/conversation parameters are rejected rather than silently retained.
 
 ## Model store
@@ -176,7 +194,9 @@ Packaged pricing may define `legacy_cached_prompt_ratio` and `legacy_cached_prom
 
 Stable aliases are stored in the root `model_aliases` sequence and managed through `/api/inferdeck/v1/model-aliases`. An alias points directly to a concrete registry model and captures its minimum context and required capabilities as a compatibility contract. Retargeting is rejected when the new concrete model cannot satisfy that contract. Discovery and request metrics preserve both the requested alias and resolved concrete model.
 
-`GET /api/inferdeck/v1/models` describes every model and alias. Each entry carries a `limits` object in tokens: `context_tokens` is the per-request window shared by prompt and output, `max_input_tokens` and `max_output_tokens` are hard ceilings (a request's real output ceiling is the context left after its prompt), and `default_output_tokens` is the limit applied when a request omits one, or `null` when generation may fill the remaining context. An alias entry keeps its stable `id`, reports the current concrete model in `resolved_model`, and copies that model's `limits`, capabilities, and `has_vision`, so the values change as soon as the alias is retargeted. `alias_contract` holds the alias's own minimum (`required_context_tokens`, `required_capabilities`), which can be lower than the target's limits. `GET /v1/models` stays limited to the four OpenAI fields.
+`GET /api/inferdeck/v1/models` describes every model and alias. Each entry carries a `limits` object in tokens: `context_tokens` is the per-request window shared by prompt and output, `max_input_tokens` and `max_output_tokens` are hard ceilings (a request's real output ceiling is the context left after its prompt), and `default_output_tokens` is the limit applied when a request omits one, or `null` when generation may fill the remaining context. An alias entry keeps its stable `id`, reports the current concrete model in `resolved_model`, and copies that model's `limits`, capabilities, and `has_vision`, so the values change as soon as the alias is retargeted. `alias_contract` holds the alias's own minimum (`required_context_tokens`, `required_capabilities`), which can be lower than the target's limits. When an alias has `fallbacks`, `resolved_model` is the candidate a request would use now, and `limits`, `capabilities` and `has_vision` are the values every candidate guarantees: the smallest context and the shared capabilities. A client limit set from them holds whichever candidate serves the request.
+
+`GET /v1/models` stays limited to the four OpenAI fields (`id`, `object`, `created`, `owned_by`) under the strict OpenAI namespace and never reveals residency; clients that need targets and limits read `GET /api/inferdeck/v1/models`, which is what the OpenCode exporter consumes.
 
 Each model can enable `optimization.schedule` with `window_start` and `window_end` in `HH:MM`. The default window is 03:00–04:00 in the gateway host's local timezone. A scheduled benchmark starts at most once per local calendar day and only while the request queue is idle, no swap is active, and GPU utilization is at most 20 percent. The dashboard exposes the server timezone plus next and last run status.
 

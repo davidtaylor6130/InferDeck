@@ -1,7 +1,9 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "foundation/result.hpp"
@@ -17,6 +19,11 @@ foundation::Result<model::ProviderDescriptor> load_plugin_provider(
     const std::filesystem::path& library);
 
 void set_plugin_host_settings(const std::string& gateway_json);
+
+bool is_fatal_device_error(std::string_view message);
+
+using FatalDeviceHandler = std::function<void(const std::string& runtime, const std::string& message)>;
+void set_fatal_device_handler(FatalDeviceHandler handler);
 
 /// <summary>Outcome of scanning a provider directory.</summary>
 struct PluginLoadReport

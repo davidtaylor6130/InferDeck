@@ -574,6 +574,11 @@ model_registry:
         "gateway:\n  background_idle_after_seconds: 86401\n"));
     CHECK(validate_config_text(
         "gateway:\n  background_idle_after_seconds: 900\n"));
+    CHECK(validate_config_text("gateway:\n  swap_hold_ms: 0\n"));
+    CHECK(validate_config_text("gateway:\n  swap_hold_ms: 20000\n  swap_quantum_ms: 180000\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  swap_hold_ms: -1\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  swap_hold_ms: 200000\n"));
+    CHECK_FALSE(validate_config_text("gateway:\n  swap_quantum_ms: 300001\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\n"));
     CHECK(validate_config_text("server:\n  host: 0.0.0.0\nauth:\n  required: true\n  token: secret\n"));
     CHECK_FALSE(validate_config_text("control:\n  allow_remote: true\n"));
@@ -743,6 +748,22 @@ model_aliases:
     target: text-only
     required_capabilities: [vision]
 )"));
+    const std::string tiers = R"(
+model_registry:
+  - name: small
+    gguf_path: small.gguf
+  - name: large
+    gguf_path: large.gguf
+model_aliases:
+  - name: everyday
+    target: small
+)";
+    CHECK(validate_config_text(tiers + "    fallbacks: [large]\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: large\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [small]\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [large, large]\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [absent]\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [{name: large}]\n"));
 }
 
 TEST_CASE("Active configuration is preferred and invalid profiles fall back safely",
@@ -1004,4 +1025,16 @@ model_registry:
     std::error_code error;
     std::filesystem::remove(path, error);
     std::filesystem::remove(draft, error);
+}
+
+TEST_CASE("Preload delay accepts 0 to 3600000 milliseconds", "[config][preload]") {
+    const auto build = [](const char* value) {
+        return validate_config_text(std::string("schema_version: 1\ngateway:\n  default_model_preload_delay_ms: ") +
+                                    value + "\n");
+    };
+    CHECK(build("0"));
+    CHECK(build("60000"));
+    CHECK(build("3600000"));
+    CHECK_FALSE(build("-1"));
+    CHECK_FALSE(build("3600001"));
 }

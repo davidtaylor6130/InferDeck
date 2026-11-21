@@ -80,6 +80,7 @@ struct ModelAlias {
     std::string target{};
     int required_context_size{0};
     std::vector<std::string> required_capabilities{};
+    std::vector<std::string> fallbacks{};
 };
 
 struct ModelInfo {

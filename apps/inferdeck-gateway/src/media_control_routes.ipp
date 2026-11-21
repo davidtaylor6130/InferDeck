@@ -22,6 +22,12 @@ void register_media_control_routes(
                                 httplib::Response& resp) {
         handle_image_generations(req, resp, *deps_ptr);
     }));
+    const auto edits = wrap([deps_ptr](const httplib::Request& req,
+                                       httplib::Response& resp) {
+        handle_image_edits(req, resp, *deps_ptr);
+    });
+    server.Post("^/v1/images/edits$", edits);
+    server.Post(control_api_pattern("/media/images/edits"), edits);
     server.Post(control_api_pattern("/media/audio/generations"),
                 wrap([deps_ptr](const httplib::Request& req,
                                 httplib::Response& resp) {

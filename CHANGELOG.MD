@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+---
+
+## [1.2.0] - 2026-11-21
+
 ### Added
 - Provider plugins: runtimes can be added or swapped by dropping a shared
   library into `providers/`. The C ABI and every payload are documented in
@@ -19,6 +23,15 @@
 - The build fails at configure time when stable-diffusion.cpp and InferDeck
   disagree on `GGML_MAX_NAME`.
 - stable-diffusion.cpp warnings and errors now reach the gateway log.
+- DFlash/DFlash2 speculative decoding in the llama_cpp runtime; `draft_tokens` defaults to 3.
+- Batched speculative drafts share a per-step token budget across concurrent requests.
+- Provider ABI v2 with a shared codec and C++ SDK; every built-in runtime ships as a provider DLL.
+- Multipart `POST /v1/images/edits` for Qwen-Image-2.1 reference-image editing (#189).
+- Swap hysteresis (`gateway.swap_hold_ms`, `gateway.swap_quantum_ms`, default 15 s / 180 s) (#196).
+- Resident-first alias fallbacks, lender context restore after co-resident use, and guaranteed alias limits in discovery.
+- Long-audio speech-to-text in 1-minute chunks with a configurable 200 MB upload limit, a separate upload read deadline and a 4 hour cap.
+- `gateway.default_model_preload_delay_ms` to delay the boot preload of the default model.
+- GPU hang recovery task script and 50 MB NSSM service log rotation.
 
 ### Changed
 - stable-diffusion.cpp is pinned to `master-924-f8890b9` and shares llama.cpp's
@@ -26,6 +39,16 @@
 - Built-in runtimes register through one provider descriptor list instead of
   being wired individually in the gateway entry point.
 - The MCP OpenCode config tool reads context limits from discovery `limits`.
+- llama.cpp `73a43d1f6` to `d92ea9bb1`; stable-diffusion.cpp to `01c463a`; acestep.cpp to `973517b`.
+- Default GPU VRAM reserve is 2048 MB.
+- Configuration errors are reported at startup; invalid chat input returns 400.
+
+### Fixed
+- GPU device loss marks the model unhealthy and restarts the gateway; `/health` reports `degraded`; repeated restarts back off GPU auto-loads.
+- Each swap has its own cancellation token.
+- Only WARN/ERROR llama.cpp native logs are forwarded to the service log.
+- The coordinator waits for released GPU memory before the next load; a hung Radiance Python call exits cleanly.
+- Long speech-to-text no longer stalls other requests.
 
 ### Removed
 - The standalone OpenCode config exporter and its dedicated CI test. OpenCode

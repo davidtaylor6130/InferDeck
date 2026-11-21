@@ -186,6 +186,7 @@ LlamaCppModel::~LlamaCppModel() {
   }
   vocab_ = nullptr;
   loaded_.store(false);
+  compute_degraded_.store(false);
   sequence_capacity_.store(0);
   sequence_capacity_limit_.store(0);
   pool_capacity_.store(0);
@@ -287,6 +288,12 @@ Result<void> LlamaCppModel::load(
                    "llama_model_load_from_file returned null for " + resolved_gguf_path_.string()));
   }
   log_memory_snapshot("llama_model_loaded_memory_after", info_.name);
+  {
+    const std::size_t gpu_devices = gpu_device_count(mparams);
+    const bool degraded = gpu_compute_unavailable(info_.compute, gpu_devices);
+    compute_degraded_.store(degraded);
+    if (degraded) LOG_WARN("llama_gpu_unavailable_cpu_fallback", "model={} compute={}", info_.name, to_string(info_.compute));
+  }
   vocab_ = llama_model_get_vocab(model_);
   if (vocab_ == nullptr) {
     release_draft_model_locked();
@@ -657,7 +664,10 @@ Result<void> LlamaCppModel::ensure_request_capacity(
       requested_sequences <= current_sequences) {
     return Result<void>{};
   }
-  if (!info_.concurrency_auto || !info_.context_pool_auto || !cfg_.kv_unified) {
+  const bool restorable = info_.context_pool_auto && cfg_.kv_unified &&
+      reclaimed_context_vram_mb_.load() > 0 &&
+      (info_.concurrency_auto || requested_sequences <= current_sequences);
+  if (!restorable && (!info_.concurrency_auto || !info_.context_pool_auto || !cfg_.kv_unified)) {
     if (own_capacity > current_capacity ||
         demand.required_sequences > current_sequences) {
       return Result<void>(std::unexpect, make_error(
@@ -713,7 +723,8 @@ Result<void> LlamaCppModel::ensure_request_capacity(
   const int growth_target = requested_capacity > current_capacity
       ? std::max(align_up(requested_capacity), align_up(geometric))
       : current_capacity;
-  const int target_capacity = std::min(maximum_capacity, growth_target);
+  const int target_capacity = restorable ? maximum_capacity
+                                         : std::min(maximum_capacity, growth_target);
 
   if (control.is_cancelled() || control.is_expired()) {
     return Result<void>(std::unexpect, make_error(
@@ -722,6 +733,8 @@ Result<void> LlamaCppModel::ensure_request_capacity(
   }
 
   const llama_model_params model_parameters = model_params();
+  const Result<std::size_t> memory_before =
+      context_pool_device_memory_bytes(shared_ctx_, draft_ctx_);
 
   if (scheduler_) {
     scheduler_->stop();
@@ -837,7 +850,18 @@ Result<void> LlamaCppModel::ensure_request_capacity(
             std::to_string(requested_capacity) + ")"));
   }
 
-  reclaimed_context_vram_mb_.store(0);
+  const Result<std::size_t> memory_after =
+      context_pool_device_memory_bytes(shared_ctx_, draft_ctx_);
+  if (pool_capacity_.load() >= maximum_capacity || !memory_before || !memory_after) {
+    reclaimed_context_vram_mb_.store(0);
+  } else {
+    constexpr std::size_t mib = 1024ULL * 1024ULL;
+    const std::size_t regained_bytes =
+        *memory_after > *memory_before ? *memory_after - *memory_before : 0;
+    const int regained_mb = static_cast<int>(std::min<std::size_t>(
+        regained_bytes / mib, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    reclaimed_context_vram_mb_.store(std::max(0, reclaimed_context_vram_mb_.load() - regained_mb));
+  }
   LOG_INFO("context_pool_grown", "model={} old_capacity={} new_capacity={} required_context={} cache_reset=true",
            info_.name, current_capacity, pool_capacity_.load(),
            demand.required_context);
@@ -875,6 +899,7 @@ Result<void> LlamaCppModel::unload() {
   }
   vocab_ = nullptr;
   loaded_.store(false);
+  compute_degraded_.store(false);
   sequence_capacity_.store(0);
   sequence_capacity_limit_.store(0);
   pool_capacity_.store(0);
@@ -891,6 +916,23 @@ bool LlamaCppModel::can_resize_slots() const noexcept {
   if (info_.concurrency_auto) return false;
   return info_.vram_fixed_mb > 0 && info_.vram_per_slot_mb > 0 &&
          info_.n_slots > info_.min_slots;
+}
+
+int LlamaCppModel::reclaimable_idle_context_mb() const {
+  std::lock_guard lk(mtx_);
+  if (!loaded_.load() || shared_ctx_ == nullptr) return 0;
+  const int minimum_ctx = info_.concurrency_auto
+      ? std::max(512, std::min(std::max(512, info_.context_size),
+                               std::max(512, cfg_.n_batch)))
+      : std::max(512, info_.context_size);
+  const std::int64_t minimum =
+      static_cast<std::int64_t>(minimum_ctx) + speculative_draft_tokens();
+  const std::int64_t capacity = static_cast<std::int64_t>(llama_n_ctx(shared_ctx_));
+  if (capacity <= minimum) return 0;
+  const Result<std::size_t> kv = context_pool_kv_bytes(shared_ctx_);
+  if (!kv) return 0;
+  return conservative_reclaimable_context_mb(
+      *kv, capacity, minimum, cfg_.vram_safety_margin_mb);
 }
 
 bool LlamaCppModel::can_reclaim_idle_context() const {

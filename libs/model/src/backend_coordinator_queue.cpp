@@ -132,10 +132,22 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             waiter->retry_after_generation.reset();
             waiter->preparing = true;
             waiter->resource_blocked = true;
+            std::int64_t queued_context = 0;
+            std::int64_t queued_sequences = 0;
+            if (reduced_lenders_.contains(name)) {
+                for (const auto& other : waiters_) {
+                    if (other.id == waiter_id || other.model != name || !other.demand ||
+                        !(other.capacity_prepared || other.preparing)) continue;
+                    queued_context += other.demand->required_context;
+                    queued_sequences += other.demand->required_sequences;
+                }
+            }
             const auto aggregate_context = static_cast<std::int64_t>(
-                active_context_reservation_by_model_[name]) + waiter->demand->required_context;
+                active_context_reservation_by_model_[name]) + waiter->demand->required_context +
+                queued_context;
             const auto aggregate_sequences = static_cast<std::int64_t>(
-                active_sequence_reservation_by_model_[name]) + waiter->demand->required_sequences;
+                active_sequence_reservation_by_model_[name]) + waiter->demand->required_sequences +
+                queued_sequences;
             if (aggregate_context > std::numeric_limits<int>::max() ||
                 aggregate_sequences > std::numeric_limits<int>::max()) {
                 erase_waiter_locked(waiter_id);
@@ -182,6 +194,10 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
             continue;
         }
         if (!resident || !it->second->execution_healthy()) {
+            if (waiter != waiters_.end() && swap_deferred_locked(*waiter, now)) {
+                last_resource_decision_ = "swap to " + name +
+                    " deferred while a recently used model stays resident";
+            }
             if (opts.prepare && waiter_is_next_locked(waiter_id, now)) {
                 auto load_waiter = std::find_if(waiters_.begin(), waiters_.end(),
                     [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
@@ -295,6 +311,7 @@ foundation::Result<void> BackendCoordinator::release_slot(
         const int context_reservation = lease->second.context_reservation;
         const int sequence_reservation = lease->second.sequence_reservation;
         active_leases_.erase(lease);
+        model_use_[name].last_used = clock::now();
         if (active_requests_ > 0) --active_requests_;
         auto& model_context = active_context_reservation_by_model_[name];
         model_context = std::max(0, model_context - context_reservation);
@@ -328,6 +345,16 @@ foundation::Result<void> BackendCoordinator::release_slot(
 void BackendCoordinator::set_max_queue_size(std::size_t size) {
     std::lock_guard<std::mutex> lock(mutex_);
     max_queue_size_ = std::max<std::size_t>(1, size);
+}
+
+void BackendCoordinator::set_swap_hysteresis(std::chrono::milliseconds hold,
+                                             std::chrono::milliseconds quantum) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        swap_hold_ = std::max(std::chrono::milliseconds::zero(), hold);
+        swap_quantum_ = std::max(swap_hold_, quantum);
+    }
+    cv_.notify_all();
 }
 
 std::size_t BackendCoordinator::queued_request_count() const {
@@ -610,6 +637,7 @@ bool BackendCoordinator::waiter_is_actionable_locked(
     if (backend == instances_.end() || !backend->second ||
         !backend->second->is_loaded() || !backend->second->execution_healthy()) {
         if (model_is_independent_sidecar_locked(waiter.model)) return true;
+        if (swap_deferred_locked(waiter, clock::now())) return false;
         const bool another_prepare = std::any_of(
             waiters_.begin(), waiters_.end(), [this, &waiter](const SlotWaiter& other) {
                 return other.id != waiter.id &&
@@ -626,6 +654,37 @@ bool BackendCoordinator::waiter_is_actionable_locked(
 
 bool BackendCoordinator::waiter_is_resource_barrier_locked(const SlotWaiter& waiter) const {
     return waiter.resource_blocked && !model_is_independent_sidecar_locked(waiter.model);
+}
+
+bool BackendCoordinator::swap_deferred_locked(const SlotWaiter& waiter, time_point now) const
+{
+    if (swap_hold_ <= std::chrono::milliseconds::zero() ||
+        model_is_priority_media_locked(waiter.model)) return false;
+    const auto own = instances_.find(waiter.model);
+    if (own != instances_.end() && own->second && own->second->is_loaded()) return false;
+    const auto info = registry_.get_info_result(waiter.model);
+    if (!info || (vram_budget_mb_ > 0 && available_vram_locked() >= info->vram_required_mb)) return false;
+    std::int64_t reclaimable_mb = 0;
+    for (const auto& [name, backend] : instances_) {
+        const auto active = active_requests_by_model_.find(name);
+        if (name != waiter.model && !resizing_models_.contains(name) &&
+            (active == active_requests_by_model_.end() || active->second == 0) &&
+            backend && backend->is_loaded() && backend->execution_healthy() &&
+            backend->can_reclaim_idle_context()) reclaimable_mb += backend->reclaimable_idle_context_mb();
+    }
+    if (vram_budget_mb_ > 0 && reclaimable_mb > 0 && reclaimable_mb >= info->vram_required_mb - available_vram_locked()) return false;
+    for (const auto& [name, backend] : instances_) {
+        if (!backend || !backend->is_loaded() || !backend->info().eviction_eligible ||
+            backend->info().residency == ResidencyPolicy::Always ||
+            is_independent_sidecar(backend->info())) continue;
+        const auto use = model_use_.find(name);
+        if (use == model_use_.end() || waiter.priority > use->second.priority ||
+            now - std::max(waiter.enqueued, use->second.loaded) >= swap_quantum_) continue;
+        const auto active = active_requests_by_model_.find(name);
+        if ((active != active_requests_by_model_.end() && active->second > 0) ||
+            now - use->second.last_used < swap_hold_) return true;
+    }
+    return false;
 }
 
 bool BackendCoordinator::continuation_hold_valid_locked(
@@ -741,6 +800,9 @@ foundation::Result<int> BackendCoordinator::issue_lease_locked(
     active_leases_.emplace(lease_id, ActiveLease{name, backend_slot, reservation,
         sequence_reservation, reservation_key, std::clamp(priority, -100, 100), continuation, background});
     if (background) ++background_requests_by_model_[name];
+    auto& use = model_use_[name];
+    use.last_used = clock::now();
+    use.priority = std::clamp(priority, -100, 100);
     active_context_reservation_by_model_[name] += reservation;
     active_sequence_reservation_by_model_[name] += sequence_reservation;
     ++active_requests_;

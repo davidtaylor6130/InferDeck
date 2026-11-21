@@ -16,6 +16,7 @@
 #include "llama_cpp_wrapper/llama_chat_adapter.hpp"
 #include "llama_cpp_wrapper/streaming_tool_call_state.hpp"
 #include "../src/sampling_windows.hpp"
+#include "../src/context_pool_fit.hpp"
 #include "foundation/logging.hpp"
 #include "model/imodel.hpp"
 #include "llama.h"
@@ -2060,4 +2061,22 @@ TEST_CASE("Automatic sequence fitting exceeds configured slots and preserves out
   CHECK(model.n_free_slots() == model.n_slots());
   REQUIRE(model.unload());
   LlamaCppModel::shutdown_backend();
+}
+
+TEST_CASE("Reclaimable idle context estimate is conservative", "[llama][context-reclaim]") {
+  using inferdeck::llama_wrapper::conservative_reclaimable_context_mb;
+  constexpr std::size_t gib = 1024ULL * 1024ULL * 1024ULL;
+  CHECK(conservative_reclaimable_context_mb(4 * gib, 8192, 8192, 0) == 0);
+  CHECK(conservative_reclaimable_context_mb(4 * gib, 4096, 8192, 0) == 0);
+  CHECK(conservative_reclaimable_context_mb(4 * gib, 8192, 2048, 0) == 3072 * 9 / 10);
+  CHECK(conservative_reclaimable_context_mb(4 * gib, 8192, 2048, 1024) == 2048 * 9 / 10);
+  CHECK(conservative_reclaimable_context_mb(gib, 8192, 2048, 1024) == 0);
+}
+
+TEST_CASE("GPU compute without a GPU device is degraded", "[llama][health]") {
+  using inferdeck::llama_wrapper::gpu_compute_unavailable;
+  using inferdeck::model::ModelCompute;
+  CHECK(gpu_compute_unavailable(ModelCompute::VulkanGpu, 0));
+  CHECK_FALSE(gpu_compute_unavailable(ModelCompute::VulkanGpu, 1));
+  CHECK_FALSE(gpu_compute_unavailable(ModelCompute::Cpu, 0));
 }

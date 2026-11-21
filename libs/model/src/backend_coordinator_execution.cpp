@@ -30,6 +30,12 @@ foundation::Result<RequestDemand> BackendCoordinator::estimate_request_demand(
 foundation::Result<void> BackendCoordinator::prepare_request_capacity(
     const std::string& name, const RequestDemand& demand,
     const LifecycleControl& control) {
+    return prepare_request_capacity(name, demand, control, true);
+}
+
+foundation::Result<void> BackendCoordinator::prepare_request_capacity(
+    const std::string& name, const RequestDemand& demand,
+    const LifecycleControl& control, bool evict_borrowers) {
     std::unique_lock<std::recursive_mutex> lifecycle_lock(swap_mutex_, std::defer_lock);
     while (!lifecycle_lock.try_lock()) {
         if (control.is_cancelled() || shutting_down_.load())
@@ -40,13 +46,47 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
                                          "timeout waiting for a model swap to finish: " + name);
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
+    bool lending = false;
+    bool restoring = false;
+    int pool_capacity = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = instances_.find(name);
+        const bool loaded = it != instances_.end() && it->second && it->second->is_loaded();
+        pool_capacity = loaded ? it->second->context_pool_capacity() : 0;
+        const bool exceeds = loaded &&
+            (std::max(demand.required_context, demand.aggregate_context) > pool_capacity ||
+             std::max(demand.required_sequences, demand.aggregate_sequences) >
+                 it->second->n_slots());
+        const bool reduced = loaded && reduced_lenders_.contains(name);
+        if (reduced && exceeds) restore_wanted_.insert(name);
+        const auto active = active_requests_by_model_.find(name);
+        const bool idle = active == active_requests_by_model_.end() || active->second == 0;
+        lending = exceeds && context_borrowers_.contains(name);
+        restoring = reduced && idle && restore_wanted_.contains(name);
+    }
+    if (lending || (restoring && evict_borrowers)) {
+        auto released = release_context_borrowers(name, control, !lending);
+        if (!released) {
+            if (lending) return foundation::Err<void>(released.error().code, released.error().message);
+            restoring = false;
+        } else if (*released) {
+            if (lending) return foundation::Err<void>(foundation::ErrorCode::ResourceBusy,
+                "context restore for " + name + " waits for active co-resident models");
+            restoring = false;
+        }
+    }
+    RequestDemand effective = demand;
+    if (restoring) effective.aggregate_context = std::max(effective.aggregate_context, pool_capacity + 1);
     IModel* model = nullptr;
+    int capacity_before = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = instances_.find(name);
         if (it == instances_.end() || !it->second || !it->second->is_loaded())
             return foundation::Err<void>(foundation::ErrorCode::NotFound,
                                          "model not loaded: " + name);
+        capacity_before = it->second->context_pool_capacity();
         if (resizing_models_.contains(name))
             return foundation::Err<void>(foundation::ErrorCode::ResourceBusy,
                                          "request capacity is already being prepared: " + name);
@@ -57,7 +97,14 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
     }
     foundation::Result<void> result;
     try {
-        result = model->ensure_request_capacity(demand, control);
+        result = model->ensure_request_capacity(effective, control);
+        if (!result && restoring && !lending) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                restore_wanted_.erase(name);
+            }
+            result = model->ensure_request_capacity(demand, control);
+        }
     } catch (const std::exception& error) {
         result = foundation::Err<void>(foundation::ErrorCode::Internal,
             std::string("request capacity preparation threw: ") + error.what());
@@ -70,6 +117,15 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
     {
         std::lock_guard<std::mutex> lock(mutex_);
         resizing_models_.erase(name);
+        const int capacity_after = model->context_pool_capacity();
+        if (result && capacity_after != capacity_before) {
+            if (lending || (restoring && evict_borrowers)) context_borrowers_.erase(name);
+            if ((lending || restoring) && !context_borrowers_.contains(name))
+                reduced_lenders_.erase(name);
+            restore_wanted_.erase(name);
+            invalidate_vram_observation_locked();
+        }
+        if (restoring) restore_wanted_.erase(name);
         if (result) {
             const auto hold = continuation_holds_.find(name);
             const bool preserve_continuation = hold != continuation_holds_.end() &&
@@ -392,7 +448,7 @@ void BackendCoordinator::drain_active(std::chrono::milliseconds timeout) {
 
 void BackendCoordinator::request_shutdown() {
     shutting_down_.store(true);
-    swap_cancel_.store(true);
+    request_swap_cancel();
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& [name, backend] : instances_) {
         if (backend) backend->request_cancel();
