@@ -31,7 +31,6 @@ struct GatewayDeps {
     bool auto_swap{true};
     std::string default_model{};
     int voice_session_grace_ms{15000};
-    int speech_admission_timeout_ms{30000};
     observability::Metrics* metrics{nullptr};
     observability::StatsDb* stats_db{nullptr};
     foundation::EventBus* events{nullptr};
@@ -43,6 +42,9 @@ struct GatewayDeps {
     int background_idle_after_seconds{900};
     bool public_data_plane_access{false};
     std::map<std::string, std::string> media_default_models;
+    int speech_admission_timeout_ms{30000};
+    std::size_t transcription_max_body_bytes{200ULL << 20};
+    std::size_t transcription_decoded_budget_bytes{1024ULL << 20};
 };
 
 inline std::string media_default_model(const GatewayDeps& deps,

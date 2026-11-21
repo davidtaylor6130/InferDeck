@@ -54,6 +54,7 @@
 #include "gateway/request_security.hpp"
 #include "gateway/route_manifest.hpp"
 #include "gateway/routes.hpp"
+#include "speech_wiring.hpp"
 #include "gateway/shutdown_state.hpp"
 #include "gateway/swap_tracker.hpp"
 #include "httplib.h"
@@ -187,7 +188,8 @@ int run_gateway(const fs::path& config_path) {
                      cfg.voice_session_grace_ms, &metrics, &stats_db,
                      &events, &swap_tracker, &maintenance_resource};
     deps.media_default_models = cfg.media_default_models;
-    deps.api_keys = api_keys; deps.speech_admission_timeout_ms = cfg.speech_admission_timeout_ms; audio_body_limit = static_cast<std::size_t>(cfg.transcription_max_body_mb) << 20;
+    deps.api_keys = api_keys;
+    apply_speech_deps(deps, cfg);
     deps.background_idle_after_seconds = cfg.background_idle_after_seconds;
     deps.public_data_plane_access = !cfg.auth_required;
     auto derivative_deps = deps;
@@ -280,7 +282,7 @@ int run_gateway(const fs::path& config_path) {
     server.set_read_timeout(server_read_timeout);
     server.set_write_timeout(server_write_timeout);
     server.set_keep_alive_timeout(server_keep_alive_timeout.count());
-    server.set_payload_max_length(server_body_limit());
+    server.set_payload_max_length(std::max(json_body_limit, deps.transcription_max_body_bytes));
     server.new_task_queue = [] {
         return new httplib::ThreadPool(std::max(32u, std::thread::hardware_concurrency() * 2u));
     };
@@ -303,25 +305,6 @@ int run_gateway(const fs::path& config_path) {
             if (req.has_header(header)) return true;
         }
         return false;
-    };
-    const auto write_validation_error = [](httplib::Response& resp,
-                                           RequestValidationStatus validation) {
-        if (validation == RequestValidationStatus::BodyNotAllowed) {
-            write_error(resp, 400, "body_not_allowed",
-                        "request body is not allowed for this endpoint");
-        } else if (validation == RequestValidationStatus::PayloadTooLarge) {
-            write_error(resp, 413, "request_too_large",
-                        "request body exceeds the endpoint limit");
-        } else if (validation == RequestValidationStatus::UnsupportedMediaType) {
-            write_error(resp, 415, "unsupported_media_type",
-                        "request Content-Type is not supported by this endpoint");
-        } else if (validation == RequestValidationStatus::InvalidContentLength) {
-            write_error(resp, 400, "invalid_content_length",
-                        "request Content-Length is invalid");
-        } else if (validation == RequestValidationStatus::UnsupportedTransferEncoding) {
-            write_error(resp, 411, "content_length_required",
-                        "request Transfer-Encoding is not supported for this endpoint");
-        }
     };
 
     server.set_expect_100_continue_handler(
@@ -419,12 +402,14 @@ int run_gateway(const fs::path& config_path) {
             }
         }
         const auto policy = request_policy(
-            req.method, req.path, principal == RoutePrincipal::ControlWrite);
+            req.method, req.path, principal == RoutePrincipal::ControlWrite,
+            deps.transcription_max_body_bytes);
         const auto validation = validate_request_headers(req, policy);
         if (validation != RequestValidationStatus::Allowed) {
             write_validation_error(resp, validation);
             return httplib::Server::HandlerResponse::Handled;
         }
+        DeadlineServer::extend_upload_deadline(req);
         return httplib::Server::HandlerResponse::Unhandled;
     });
     server.set_logger([](const httplib::Request& req,
@@ -442,7 +427,8 @@ int run_gateway(const fs::path& config_path) {
             const auto principal = classify_route(req.method, req.path);
             const auto validation = validate_request(
                 req, request_policy(req.method, req.path,
-                                    principal == RoutePrincipal::ControlWrite));
+                                    principal == RoutePrincipal::ControlWrite,
+                                    deps.transcription_max_body_bytes));
             if (validation != RequestValidationStatus::Allowed) {
                 write_validation_error(resp, validation);
                 return;

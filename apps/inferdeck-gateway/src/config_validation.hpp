@@ -190,6 +190,12 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                              "gateway.transcription_upload_timeout_ms must be between 30000 and 3600000");
             }
+            if (gateway["transcription_decoded_budget_mb"] &&
+                (gateway["transcription_decoded_budget_mb"].as<int>() < 64 ||
+                 gateway["transcription_decoded_budget_mb"].as<int>() > 65536)) {
+                return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                             "gateway.transcription_decoded_budget_mb must be between 64 and 65536");
+            }
             if (gateway["transcription_max_body_mb"] &&
                 (gateway["transcription_max_body_mb"].as<int>() < 1 ||
                  gateway["transcription_max_body_mb"].as<int>() > 4096)) {

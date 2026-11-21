@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <charconv>
 #include <cmath>
 #include <filesystem>
@@ -71,7 +72,7 @@ struct CallbackState {
     const std::function<bool(int)>* progress{};
     std::atomic<bool> cancelled{false};
     std::atomic<int> percent{0};
-    std::chrono::steady_clock::time_point polled{};
+    std::atomic<std::int64_t> polled_ms{0};
 };
 
 void on_progress(whisper_context*, whisper_state*, int progress, void* data) {
@@ -88,10 +89,10 @@ void on_progress(whisper_context*, whisper_state*, int progress, void* data) {
 bool should_abort(void* data) {
     auto* state = static_cast<CallbackState*>(data);
     if (state->cancelled.load()) return true;
-    const auto now = std::chrono::steady_clock::now();
-    if (state->progress && *state->progress &&
-        now - state->polled >= std::chrono::milliseconds{200}) {
-        state->polled = now;
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (state->progress && *state->progress && now - state->polled_ms.load() >= 200) {
+        state->polled_ms.store(now);
         try {
             if (!(*state->progress)(state->percent.load())) state->cancelled.store(true);
         } catch (...) {

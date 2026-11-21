@@ -399,17 +399,18 @@ std::uint64_t BackendCoordinator::reserve_priority_session(
         std::lock_guard<std::mutex> lock(mutex_);
         const auto now = clock::now();
         std::erase_if(priority_sessions_, [now](const auto& entry) {
-            return entry.second.active_holds == 0 && entry.second.deadline <= now;
+            return !entry.second.live(now);
         });
         const auto live = priority_sessions_.find(key);
-        if (live != priority_sessions_.end() && live->second.model == model) {
+        if (live != priority_sessions_.end() && live->second.model == model &&
+            live->second.live(now)) {
             ++live->second.refs;
             live->second.deadline = std::max(live->second.deadline, now + duration);
             token = live->second.token;
         } else {
             token = next_priority_session_token_++;
             priority_sessions_[key] = PrioritySession{
-                model, now + duration, token, 0, 1};
+                model, now + duration, token, 0, 1, false};
         }
     }
     cv_.notify_all();
@@ -427,6 +428,7 @@ bool BackendCoordinator::refresh_priority_session(
             session->second.token == token) {
             session->second.deadline = clock::now() + duration;
             if (session->second.refs > 0) --session->second.refs;
+            session->second.kept = true;
             refreshed = true;
         }
     }
@@ -440,8 +442,7 @@ std::optional<std::uint64_t> BackendCoordinator::hold_priority_session(
     const auto session = priority_sessions_.find(key);
     if (session == priority_sessions_.end() ||
         session->second.model != model ||
-        (session->second.active_holds == 0 &&
-         session->second.deadline <= clock::now())) {
+        !session->second.live(clock::now())) {
         return std::nullopt;
     }
     ++session->second.active_holds;
@@ -466,16 +467,16 @@ void BackendCoordinator::complete_priority_session_hold(
 }
 
 void BackendCoordinator::release_priority_session(
-    const std::string& key, std::uint64_t token) {
+    const std::string& key, std::uint64_t token, bool end_turn) {
     bool released = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto session = priority_sessions_.find(key);
         if (session != priority_sessions_.end() &&
             session->second.token == token) {
-            if (session->second.refs > 1) {
-                --session->second.refs;
-            } else {
+            if (session->second.refs > 0) --session->second.refs;
+            if (session->second.refs == 0 && session->second.active_holds == 0 &&
+                (!session->second.kept || end_turn)) {
                 priority_sessions_.erase(session);
             }
             released = true;
@@ -490,8 +491,7 @@ bool BackendCoordinator::priority_session_matches(
     const auto session = priority_sessions_.find(key);
     return session != priority_sessions_.end() &&
         session->second.model == model &&
-        (session->second.active_holds > 0 ||
-         session->second.deadline > clock::now());
+        session->second.live(clock::now());
 }
 
 bool BackendCoordinator::priority_media_active_locked() const {
@@ -573,7 +573,7 @@ bool BackendCoordinator::request_waits_for_priority_media_locked(
         bool matching_session = false;
         const auto now = clock::now();
         for (const auto& [key, session] : priority_sessions_) {
-            if (session.active_holds == 0 && session.deadline <= now) continue;
+            if (!session.live(now)) continue;
             any_session = true;
             if (key == reservation_key && session.model == name) {
                 matching_session = true;

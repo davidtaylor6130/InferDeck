@@ -61,6 +61,7 @@ gateway:
   voice_session_grace_ms: 15000
   speech_admission_timeout_ms: 30000
   transcription_max_body_mb: 200
+  transcription_decoded_budget_mb: 1024
   transcription_upload_timeout_ms: 600000
   background_idle_after_seconds: 900
 

@@ -125,7 +125,8 @@ public:
     void complete_priority_session_hold(const std::string& key,
                                         std::uint64_t token,
                                         std::chrono::milliseconds duration);
-    void release_priority_session(const std::string& key, std::uint64_t token);
+    void release_priority_session(const std::string& key, std::uint64_t token,
+                                  bool end_turn = false);
     [[nodiscard]] bool priority_session_matches(
         const std::string& key, const std::string& model) const;
 
@@ -287,6 +288,10 @@ private:
         std::uint64_t token{0};
         std::size_t active_holds{0};
         std::size_t refs{1};
+        bool kept{false};
+        bool live(time_point now) const {
+            return active_holds > 0 || refs > 0 || deadline > now;
+        }
     };
     std::unordered_map<std::string, PrioritySession> priority_sessions_;
     std::uint64_t next_priority_session_token_{1};

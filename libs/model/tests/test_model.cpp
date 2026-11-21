@@ -3585,3 +3585,39 @@ TEST_CASE("BackendCoordinator: concurrent voice reservations release independent
     coordinator.refresh_priority_session("client", failing, grace);
     CHECK(coordinator.priority_session_matches("client", "chat"));
 }
+
+TEST_CASE("BackendCoordinator: a kept voice session survives other requests' releases",
+          "[model][coordinator][voice]") {
+    ModelRegistry reg;
+    BackendCoordinator coordinator(reg);
+    const auto grace = std::chrono::milliseconds{60000};
+    const auto kept = coordinator.reserve_priority_session("client", "chat", grace);
+    REQUIRE(coordinator.refresh_priority_session("client", kept, grace));
+    const auto other = coordinator.reserve_priority_session("client", "chat", grace);
+    coordinator.release_priority_session("client", other);
+    CHECK(coordinator.priority_session_matches("client", "chat"));
+
+    const auto a = coordinator.reserve_priority_session("peer", "chat", grace);
+    const auto b = coordinator.reserve_priority_session("peer", "chat", grace);
+    REQUIRE(coordinator.refresh_priority_session("peer", b, grace));
+    coordinator.release_priority_session("peer", a);
+    CHECK(coordinator.priority_session_matches("peer", "chat"));
+    const auto turn = coordinator.reserve_priority_session("peer", "chat", grace);
+    coordinator.release_priority_session("peer", turn, true);
+    CHECK_FALSE(coordinator.priority_session_matches("peer", "chat"));
+}
+
+TEST_CASE("BackendCoordinator: in-flight voice reservation stays live past its deadline",
+          "[model][coordinator][voice]") {
+    ModelRegistry reg;
+    BackendCoordinator coordinator(reg);
+    const auto token = coordinator.reserve_priority_session("client", "chat", std::chrono::milliseconds{1});
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    CHECK(coordinator.priority_session_matches("client", "chat"));
+    const auto second = coordinator.reserve_priority_session("client", "chat", std::chrono::milliseconds{1});
+    CHECK(second == token);
+    coordinator.release_priority_session("client", second);
+    CHECK(coordinator.priority_session_matches("client", "chat"));
+    coordinator.release_priority_session("client", token);
+    CHECK_FALSE(coordinator.priority_session_matches("client", "chat"));
+}

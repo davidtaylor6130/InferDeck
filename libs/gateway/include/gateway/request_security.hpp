@@ -14,8 +14,7 @@ namespace inferdeck::gateway {
 
 inline constexpr std::size_t json_body_limit = 16ULL * 1024ULL * 1024ULL;
 inline constexpr std::size_t control_body_limit = 2ULL * 1024ULL * 1024ULL;
-inline std::size_t audio_body_limit = 200ULL * 1024ULL * 1024ULL;
-inline std::size_t server_body_limit() { return std::max(audio_body_limit, json_body_limit); }
+inline constexpr std::size_t default_audio_body_limit = 200ULL * 1024ULL * 1024ULL;
 inline constexpr auto server_read_timeout = std::chrono::seconds{30};
 inline constexpr auto server_request_read_deadline = std::chrono::seconds{30};
 inline constexpr auto server_write_timeout = std::chrono::seconds{30};
@@ -45,12 +44,13 @@ struct RequestPolicy {
 
 inline RequestPolicy request_policy(std::string_view method,
                                     std::string_view path,
-                                    bool control_write = false) {
+                                    bool control_write = false,
+                                    std::size_t audio_limit = default_audio_body_limit) {
     if (method == "GET" || method == "HEAD" || method == "OPTIONS") {
         return {};
     }
     if (path == "/v1/audio/transcriptions") {
-        return {audio_body_limit, ContentPolicy::Multipart, false, true};
+        return {audio_limit, ContentPolicy::Multipart, false, true};
     }
     if (path == "/api/inferdeck/v1/video/generations") {
         return {json_body_limit, ContentPolicy::Json, false};

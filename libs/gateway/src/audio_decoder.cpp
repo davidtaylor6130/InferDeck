@@ -33,26 +33,30 @@ foundation::Result<model::TranscriptionRequest> decode_compressed_audio(
             "audio must be RIFF/WAVE, MP3, or FLAC");
     }
 
-    ma_uint64 frame_count = 0;
-    const auto length_result =
-        ma_decoder_get_length_in_pcm_frames(&decoder, &frame_count);
-    if (length_result != MA_SUCCESS || frame_count == 0 ||
-        frame_count > max_frames ||
-        frame_count > (std::numeric_limits<std::size_t>::max)()) {
-        ma_decoder_uninit(&decoder);
+    model::TranscriptionRequest request;
+    request.sample_rate = static_cast<int>(sample_rate);
+    constexpr ma_uint64 block_frames = 1ULL << 16;
+    ma_uint64 frames_read = 0;
+    bool read_failed = false;
+    while (frames_read < max_frames) {
+        const auto old_size = request.pcm.size();
+        request.pcm.resize(old_size + block_frames);
+        ma_uint64 got = 0;
+        const auto read_result = ma_decoder_read_pcm_frames(
+            &decoder, request.pcm.data() + old_size, block_frames, &got);
+        request.pcm.resize(old_size + static_cast<std::size_t>(got));
+        frames_read += got;
+        if (read_result != MA_SUCCESS && read_result != MA_AT_END) read_failed = true;
+        if (got < block_frames || read_failed) break;
+    }
+    const bool too_long = frames_read >= max_frames;
+    ma_decoder_uninit(&decoder);
+    if (too_long) {
         return foundation::Err<model::TranscriptionRequest>(
             foundation::ErrorCode::InvalidArgument,
             "audio duration is invalid or exceeds 4 hours");
     }
-
-    model::TranscriptionRequest request;
-    request.sample_rate = static_cast<int>(sample_rate);
-    request.pcm.resize(static_cast<std::size_t>(frame_count));
-    ma_uint64 frames_read = 0;
-    const auto read_result = ma_decoder_read_pcm_frames(
-        &decoder, request.pcm.data(), frame_count, &frames_read);
-    ma_decoder_uninit(&decoder);
-    if (read_result != MA_SUCCESS || frames_read == 0) {
+    if (read_failed || frames_read == 0) {
         return foundation::Err<model::TranscriptionRequest>(
             foundation::ErrorCode::InvalidArgument,
             "compressed audio could not be decoded");

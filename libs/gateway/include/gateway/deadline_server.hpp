@@ -10,9 +10,8 @@
 
 namespace inferdeck::gateway {
 
-inline bool is_transcription_upload_prefix(std::string_view data) {
-    constexpr std::string_view target = "POST /v1/audio/transcriptions";
-    return data.size() >= target.size() && data.substr(0, target.size()) == target;
+inline bool is_transcription_upload(std::string_view method, std::string_view path) {
+    return method == "POST" && path == "/v1/audio/transcriptions";
 }
 
 class UploadDeadlineStream final : public httplib::Stream {
@@ -21,29 +20,18 @@ public:
                          std::chrono::milliseconds short_deadline)
         : inner_(std::move(inner)), short_deadline_(short_deadline) {}
 
+    void allow_long_deadline() { long_deadline_ = true; }
+
     bool is_readable() const override { return inner_->is_readable(); }
     bool wait_readable() const override { return inner_->wait_readable(); }
     bool wait_writable() const override { return inner_->wait_writable(); }
     bool is_peer_alive() const override { return inner_->is_peer_alive(); }
     ssize_t read(char* ptr, size_t size) override {
-        if (!upload_ && !sniffed_ && inner_->duration() > short_deadline_.count()) {
+        if (!long_deadline_ && inner_->duration() > short_deadline_.count()) {
             error_ = httplib::Error::Timeout;
             return -1;
         }
         const ssize_t count = inner_->read(ptr, size);
-        if (count > 0 && !sniffed_) {
-            head_.append(ptr, static_cast<size_t>(count));
-            constexpr size_t needed = sizeof("POST /v1/audio/transcriptions") - 1;
-            if (head_.size() >= needed || head_.find('\n') != std::string::npos) {
-                sniffed_ = true;
-                upload_ = is_transcription_upload_prefix(head_);
-                head_.clear();
-            }
-        }
-        if (count > 0 && sniffed_ && !upload_ && inner_->duration() > short_deadline_.count()) {
-            error_ = httplib::Error::Timeout;
-            return -1;
-        }
         if (count < 0) error_ = inner_->get_error();
         return count;
     }
@@ -61,10 +49,10 @@ public:
 private:
     std::unique_ptr<httplib::Stream> inner_;
     std::chrono::milliseconds short_deadline_;
-    std::string head_;
-    bool sniffed_{false};
-    bool upload_{false};
+    bool long_deadline_{false};
 };
+
+inline thread_local UploadDeadlineStream* current_upload_stream = nullptr;
 
 class DeadlineServer final : public httplib::Server {
 public:
@@ -72,6 +60,12 @@ public:
                             std::chrono::milliseconds upload_read_deadline = std::chrono::milliseconds{0})
         : request_read_deadline_(request_read_deadline),
           upload_read_deadline_(std::max(request_read_deadline, upload_read_deadline)) {}
+
+    static void extend_upload_deadline(const httplib::Request& request) {
+        if (current_upload_stream && is_transcription_upload(request.method, request.path)) {
+            current_upload_stream->allow_long_deadline();
+        }
+    }
 
 protected:
     bool process_and_close_socket(socket_t socket) override {
@@ -93,7 +87,8 @@ protected:
                         static_cast<time_t>(upload_read_deadline_.count()),
                         std::chrono::steady_clock::now()),
                     request_read_deadline_);
-                return process_request(
+                current_upload_stream = &stream;
+                const bool handled = process_request(
                     stream, remote_address, remote_port, local_address, local_port,
                     close_connection, connection_closed,
                     [](httplib::Request& request) {
@@ -102,6 +97,8 @@ protected:
                             request.set_header("Content-Length", "0");
                         }
                     }, &websocket_upgraded);
+                current_upload_stream = nullptr;
+                return handled;
             });
         drain_and_close(socket);
         return result;

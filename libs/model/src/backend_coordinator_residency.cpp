@@ -497,7 +497,7 @@ foundation::Result<void> BackendCoordinator::require_priority_session_allows(
         std::lock_guard<std::mutex> lock(mutex_);
         const auto now = clock::now();
         for (const auto& [_, session] : priority_sessions_) {
-            if (session.active_holds == 0 && session.deadline <= now) continue;
+            if (!session.live(now)) continue;
             if (session.model != name) {
                 blocked = true;
                 break;

@@ -126,6 +126,7 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
         if (g["max_queue_size"]) cfg.max_queue_size = g["max_queue_size"].as<int>();
         if (g["voice_session_grace_ms"]) cfg.voice_session_grace_ms = g["voice_session_grace_ms"].as<int>();
         if (g["transcription_upload_timeout_ms"]) cfg.transcription_upload_timeout_ms = g["transcription_upload_timeout_ms"].as<int>();
+        if (g["transcription_decoded_budget_mb"]) cfg.transcription_decoded_budget_mb = g["transcription_decoded_budget_mb"].as<int>();
         if (g["transcription_max_body_mb"]) cfg.transcription_max_body_mb = g["transcription_max_body_mb"].as<int>();
         if (g["speech_admission_timeout_ms"]) cfg.speech_admission_timeout_ms = g["speech_admission_timeout_ms"].as<int>();
         if (g["background_idle_after_seconds"]) {
