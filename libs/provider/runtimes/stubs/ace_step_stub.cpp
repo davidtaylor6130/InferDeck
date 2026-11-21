@@ -1,4 +1,3 @@
-// Test double for the ACE-Step pipeline: one second of silent stereo audio.
 #include "model-store.h"
 #include "pipeline-synth.h"
 #include "request.h"

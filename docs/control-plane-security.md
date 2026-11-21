@@ -25,7 +25,7 @@ An unknown peer, DNS-rebinding host, or proxy-indicated request is not trusted.
 
 Dashboard remember-login sessions expire after 30 days. Logout invalidates the session, and control-token rotation invalidates prior sessions and tokens.
 
-The gateway VRAM safety reserve defaults to 1024 MB, accepts 0, and applies to GPU headroom only; host memory reserve is separate.
+The gateway VRAM safety reserve defaults to 2048 MB, accepts 0, and applies to GPU headroom only; host memory reserve is separate.
 
 The OpenAI bearer token does not grant control authority. An operator can opt in
 to sharing that token with `control.allow_data_plane_token: true`, but the remote

@@ -40,7 +40,7 @@ describe('VRAM reserve settings', () => {
     expect(html).toContain('VRAM reserve');
     expect(html).toContain('Safety margin (MiB)');
     expect(html).toContain('min="0"');
-    expect(html).toContain('value="1024"');
+    expect(html).toContain('value="2048"');
     expect(html).toContain('Set 0 for no additional reserve');
     expect(html).toContain('configuration reload');
   });
@@ -62,7 +62,7 @@ describe('VRAM reserve settings', () => {
       gateway: { port: number; vram_safety_margin_mb: number };
       model_registry: Array<{ name: string; context_size: number }>;
     };
-    expect(readVramReserve('gateway:\n  port: 11434\n')).toBe(1024);
+    expect(readVramReserve('gateway:\n  port: 11434\n')).toBe(2048);
     expect(readVramReserve(updated)).toBe(0);
     expect(parsed.auth.token).toBe('__INFERDECK_SECRET__');
     expect(parsed.gateway).toEqual({ port: 11434, vram_safety_margin_mb: 0 });

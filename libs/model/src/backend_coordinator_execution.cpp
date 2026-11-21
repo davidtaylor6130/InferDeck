@@ -354,6 +354,43 @@ foundation::Result<AudioResult> BackendCoordinator::synthesize(
 
 foundation::Result<void> BackendCoordinator::validate_speech_request(
     const std::string& name, const SpeechRequest& request) {
+    ISpeechBackend* pinned = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = instances_.find(name);
+        if (it != instances_.end() && it->second) {
+            if (draining_models_.contains(name)) {
+                return foundation::Err<void>(foundation::ErrorCode::Unavailable,
+                                             "model is draining: " + name);
+            }
+            pinned = dynamic_cast<ISpeechBackend*>(it->second.get());
+            if (!pinned || !it->second->info().supports("audio_speech")) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "backend does not support speech synthesis: " + name);
+            }
+            ++validation_pins_[name];
+        }
+    }
+    if (pinned) {
+        foundation::Result<void> validated = foundation::Ok();
+        try {
+            validated = pinned->validate_speech_request(request);
+        } catch (const std::exception& error) {
+            validated = foundation::Err<void>(foundation::ErrorCode::Internal,
+                                              std::string("speech validation failed: ") + error.what());
+        } catch (...) {
+            validated = foundation::Err<void>(foundation::ErrorCode::Internal,
+                                              "speech validation failed");
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto pin = validation_pins_.find(name);
+            if (pin != validation_pins_.end() && pin->second > 0) --pin->second;
+        }
+        cv_.notify_all();
+        return validated;
+    }
     auto created = registry_.create_result(name);
     if (!created) {
         return foundation::Err<void>(created.error().code,

@@ -13,7 +13,6 @@ std::string path_to_utf8(const std::filesystem::path& path) {
     return std::string(reinterpret_cast<const char*>(value.data()), value.size());
 }
 
-/// <summary>Quantizes through the installed llama_cpp provider DLL; the gateway links no llama.cpp.</summary>
 class ProviderModelQuantizer final : public IModelQuantizer {
 public:
     foundation::Result<void> quantize(

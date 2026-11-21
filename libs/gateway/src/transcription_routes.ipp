@@ -17,9 +17,11 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         return;
     }
     const auto& file = req.form.files.find("file")->second;
-    if (file.content.empty() || file.content.size() > 25 * 1024 * 1024) {
+    if (file.content.empty() || file.content.size() > deps.transcription_max_body_bytes) {
         write_error(resp, 400, "invalid_audio",
-                    "audio must be between 1 byte and 25 MB", "file");
+                    "audio must be between 1 byte and " +
+                        std::to_string(deps.transcription_max_body_bytes >> 20) + " MB",
+                    "file");
         return;
     }
     if (req.form.get_file_count("file") != 1 ||
@@ -170,7 +172,8 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
     if (deps.compatibility_profile == CompatibilityProfile::OpenAIDerivative) {
         resp.set_header("X-InferDeck-Job-Id", std::to_string(job->id));
     }
-    auto decode_permit = acquire_decode_permit(req, job);
+    const std::chrono::milliseconds admission_timeout{deps.speech_admission_timeout_ms};
+    auto decode_permit = acquire_decode_permit(req, job, admission_timeout);
     if (!decode_permit) {
         const int status = status_for(decode_permit.error().code);
         const int internal_status = internal_status_for(decode_permit.error().code);
@@ -181,21 +184,26 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         finish_job(job, internal_status == 499 ? "cancelled" : "failed");
         return;
     }
-    auto slot = acquire_media_slot(req, deps, runtime_model, job);
-    if (!slot) {
-        const int status = status_for(slot.error().code);
-        const int internal_status = internal_status_for(slot.error().code);
-        write_error(resp, status, "transcription_admission_failed",
-                    slot.error().message);
-        record_media(deps, model_name, 0, internal_status, -1,
-                     0.0, 0, observation);
-        finish_job(job, internal_status == 499 ? "cancelled" : "failed");
-        return;
-    }
-    SlotGuard guard{&deps.coordinator, runtime_model, *slot};
     auto decoded = decode_audio(file.content);
     decode_permit->release();
-    if (!decoded) { write_error(resp, 400, "invalid_audio", decoded.error().message); record_media(deps, model_name, 0, 400, *slot, 0.0, 0, observation); finish_job(job, "failed"); return; }
+    if (!decoded) {
+        foundation::LOG_WARN("transcription_decode_failed", "model={} bytes={} reason={}",
+                             model_name, file.content.size(), decoded.error().message);
+        write_error(resp, 400, "invalid_audio", decoded.error().message);
+        record_media(deps, model_name, 0, 400, -1, 0.0, 0, observation);
+        finish_job(job, "failed");
+        return;
+    }
+    DecodedBudget decoded_budget(decoded->pcm.size() * sizeof(float),
+                                 deps.transcription_decoded_budget_bytes);
+    if (!decoded_budget.admitted()) {
+        resp.set_header("Retry-After", "5");
+        write_error(resp, 503, "transcription_busy",
+                    "too much decoded audio is pending; retry shortly");
+        record_media(deps, model_name, 0, 503, -1, 0.0, 0, observation);
+        finish_job(job, "failed");
+        return;
+    }
     decoded->language = std::move(parameters->language);
     decoded->prompt = std::move(parameters->prompt);
     decoded->temperature = parameters->temperature;
@@ -214,22 +222,42 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         write_error(resp, 422, "no_speech_detected",
                     "No audible speech detected. Check microphone input and try again.",
                     "file");
-        record_media(deps, model_name, 0, 422, *slot,
+        record_media(deps, model_name, 0, 422, -1,
                      input_audio_seconds, 0, observation);
         finish_job(job, "failed");
         return;
     }
-    auto result = deps.coordinator.transcribe(runtime_model, *slot, *decoded,
-        [&req, &deps, &model_name, job](int progress) {
-            if (update_job(job, progress) && deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "audio_transcription"}, {"progress", progress}}.dump());
-            return !req.is_connection_closed() && !job->cancelled->load();
+    const std::function<bool(int)> report = [&req, &deps, &model_name, job](int progress) {
+        if (update_job(job, progress) && deps.events) deps.events->publish("progress", nlohmann::json{{"id", job->id}, {"model", model_name}, {"modality", "audio_transcription"}, {"progress", progress}}.dump());
+        return !req.is_connection_closed() && !job->cancelled->load();
+    };
+    int last_slot = -1;
+    int chunks_started = 0;
+    bool admission_failed = false;
+    auto result = transcribe_in_chunks(*decoded, 300, report,
+        [&](const model::TranscriptionRequest& chunk, const std::function<bool(int)>& chunk_progress)
+            -> foundation::Result<model::TranscriptionResult> {
+            const bool later_chunk = chunks_started++ > 0;
+            auto slot = acquire_media_slot(
+                req, deps, runtime_model, job,
+                later_chunk ? std::chrono::milliseconds{std::chrono::minutes{10}} : admission_timeout,
+                "stt", later_chunk);
+            if (!slot) {
+                admission_failed = true;
+                return foundation::Err<model::TranscriptionResult>(slot.error().code, slot.error().message);
+            }
+            last_slot = *slot;
+            SlotGuard guard{&deps.coordinator, runtime_model, *slot};
+            return deps.coordinator.transcribe(runtime_model, *slot, chunk, chunk_progress);
         });
     if (!result) {
         const bool cancelled = job->cancelled->load() ||
             result.error().code == foundation::ErrorCode::Cancelled;
         const int status = cancelled ? 408 : status_for(result.error().code);
-        write_error(resp, status, "transcription_failed", result.error().message);
-        record_media(deps, model_name, 0, cancelled ? 499 : status, *slot,
+        write_error(resp, status,
+                    admission_failed ? "transcription_admission_failed" : "transcription_failed",
+                    result.error().message);
+        record_media(deps, model_name, 0, cancelled ? 499 : status, last_slot,
                      input_audio_seconds, 0, observation);
         finish_job(job, cancelled ? "cancelled" : "failed");
         return;
@@ -242,7 +270,7 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
         write_error(resp, 422, "no_speech_detected",
                     "No intelligible speech detected. Check microphone input and try again.",
                     "file");
-        record_media(deps, model_name, result->inference_ms, 422, *slot,
+        record_media(deps, model_name, result->inference_ms, 422, last_slot,
                      input_audio_seconds, 0, observation);
         finish_job(job, "failed");
         return;
@@ -261,7 +289,7 @@ void handle_audio_transcriptions(const httplib::Request& req, httplib::Response&
     } else {
         write_json(resp, 200, {{"text", result->text}});
     }
-    record_media(deps, model_name, result->inference_ms, 200, *slot,
+    record_media(deps, model_name, result->inference_ms, 200, last_slot,
                  input_audio_seconds, 0, observation);
     finish_job(job, "completed");
     voice_session.refresh_and_keep();

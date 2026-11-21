@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <charconv>
 #include <cmath>
 #include <filesystem>
@@ -70,11 +71,14 @@ std::vector<float> resample(const std::vector<float>& input, int input_rate) {
 struct CallbackState {
     const std::function<bool(int)>* progress{};
     std::atomic<bool> cancelled{false};
+    std::atomic<int> percent{0};
+    std::atomic<std::int64_t> polled_ms{0};
 };
 
 void on_progress(whisper_context*, whisper_state*, int progress, void* data) {
     auto* state = static_cast<CallbackState*>(data);
     if (!state->progress || !*state->progress) return;
+    state->percent.store(progress);
     try {
         if (!(*state->progress)(progress)) state->cancelled.store(true);
     } catch (...) {
@@ -83,7 +87,19 @@ void on_progress(whisper_context*, whisper_state*, int progress, void* data) {
 }
 
 bool should_abort(void* data) {
-    return static_cast<CallbackState*>(data)->cancelled.load();
+    auto* state = static_cast<CallbackState*>(data);
+    if (state->cancelled.load()) return true;
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (state->progress && *state->progress && now - state->polled_ms.load() >= 200) {
+        state->polled_ms.store(now);
+        try {
+            if (!(*state->progress)(state->percent.load())) state->cancelled.store(true);
+        } catch (...) {
+            state->cancelled.store(true);
+        }
+    }
+    return state->cancelled.load();
 }
 
 class WhisperBackend final : public model::FixedBackend, public model::ITranscriptionBackend {

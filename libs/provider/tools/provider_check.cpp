@@ -44,7 +44,6 @@ std::string error_of(const foundation::Result<T>& result)
     return result ? std::string{} : result.error().message;
 }
 
-/// <summary>When a media call reported progress, a false from the progress callback must cancel it.</summary>
 template <typename Run>
 void check_progress_stop(const std::string& modality, bool progressed, Run run)
 {

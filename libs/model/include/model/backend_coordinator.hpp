@@ -16,6 +16,7 @@
 
 #include "foundation/result.hpp"
 #include "model/imodel.hpp"
+#include "model/model_info.hpp"
 #include "model/model_registry.hpp"
 
 namespace inferdeck::model {
@@ -24,6 +25,7 @@ struct AcquireSlotOptions {
     std::chrono::milliseconds timeout{30000};
     bool block{true};
     int priority{0};
+    bool background{false};
     std::function<bool()> cancelled{};
     std::string reservation_key{};
     std::function<foundation::Result<void>()> prepare{};
@@ -97,7 +99,7 @@ public:
     [[nodiscard]] std::vector<std::string> get_loaded_models() const;
     [[nodiscard]] std::vector<ResidencyInfo> residency() const;
     [[nodiscard]] int get_vram_usage() const;
-    void set_vram_budget(int total_mb, int safety_margin_mb = 2048);
+    void set_vram_budget(int total_mb, int safety_margin_mb = k_default_vram_safety_margin_mb);
     void update_vram_observation(int used_mb, int total_mb);
     [[nodiscard]] int vram_budget_mb() const;
     [[nodiscard]] int vram_available_mb() const;
@@ -125,7 +127,8 @@ public:
     void complete_priority_session_hold(const std::string& key,
                                         std::uint64_t token,
                                         std::chrono::milliseconds duration);
-    void release_priority_session(const std::string& key, std::uint64_t token);
+    void release_priority_session(const std::string& key, std::uint64_t token,
+                                  bool end_turn = false);
     [[nodiscard]] bool priority_session_matches(
         const std::string& key, const std::string& model) const;
 
@@ -206,6 +209,7 @@ private:
         std::optional<RequestDemand> demand;
         int max_aggregate_context{0};
         int max_aggregate_sequences{0};
+        bool background{false};
     };
 
     struct ActiveLease {
@@ -216,6 +220,7 @@ private:
         std::string reservation_key;
         int priority{0};
         bool continuation{false};
+        bool background{false};
     };
 
     struct ContinuationHold {
@@ -238,7 +243,7 @@ private:
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
     foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot, const RequestDemand* demand = nullptr,
-        const std::string& reservation_key = {}, int priority = 0);
+        const std::string& reservation_key = {}, int priority = 0, bool background = false);
     foundation::Result<int> backend_slot_for_lease_locked(
         const std::string& name, int lease_id) const;
     foundation::Result<void> unload_with_control(
@@ -265,6 +270,8 @@ private:
     std::optional<std::string> current_loaded_;
     int active_requests_{0};
     std::unordered_map<std::string, int> active_requests_by_model_;
+    std::unordered_map<std::string, int> background_requests_by_model_;
+    std::unordered_map<std::string, int> validation_pins_;
     std::unordered_map<int, ActiveLease> active_leases_;
     std::unordered_map<std::string, ContinuationHold> continuation_holds_;
     std::unordered_map<std::string, int> active_context_reservation_by_model_;
@@ -276,7 +283,7 @@ private:
     std::unordered_set<std::string> reduced_lenders_;
     std::unordered_set<std::string> restore_wanted_;
     int vram_budget_mb_{0};
-    int vram_safety_margin_mb_{1024};
+    int vram_safety_margin_mb_{k_default_vram_safety_margin_mb};
     int observed_vram_used_mb_{0};
     int observed_vram_total_mb_{0};
     time_point observed_vram_at_{};
@@ -291,6 +298,14 @@ private:
         time_point deadline{};
         std::uint64_t token{0};
         std::size_t active_holds{0};
+        std::size_t refs{1};
+        bool kept{false};
+        bool live(time_point now) const {
+            return active_holds > 0 || deadline > now;
+        }
+        bool retained(time_point now) const {
+            return refs > 0 || live(now);
+        }
     };
     std::unordered_map<std::string, PrioritySession> priority_sessions_;
     std::uint64_t next_priority_session_token_{1};

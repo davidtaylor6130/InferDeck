@@ -4893,3 +4893,123 @@ TEST_CASE("predict_stream honors the cancel flag and returns promptly", "[routes
     REQUIRE(done.load());
     REQUIRE(coordinator.release_slot("a", *slot));
 }
+
+#include "../src/transcription_chunking.hpp"
+
+TEST_CASE("long transcription is chunked in order with offsets and cancellation",
+          "[gateway][transcription]") {
+    using namespace inferdeck;
+    model::TranscriptionRequest request;
+    request.sample_rate = 100;
+    request.pcm.assign(100 * 700, 0.5f);
+    request.prompt = "base";
+    request.language = "auto";
+    std::vector<std::size_t> sizes;
+    std::vector<std::string> prompts;
+    std::vector<std::string> languages;
+    int calls = 0;
+    auto run = [&](const model::TranscriptionRequest& chunk, const std::function<bool(int)>& progress) {
+        sizes.push_back(chunk.pcm.size());
+        prompts.push_back(chunk.prompt);
+        languages.push_back(chunk.language);
+        progress(100);
+        model::TranscriptionResult part;
+        part.text = "part" + std::to_string(calls);
+        part.language = "en";
+        part.segments.push_back({0, 0.0f, 1.0f, part.text, {}, 0.0f, 0.0f});
+        ++calls;
+        return foundation::Ok(std::move(part));
+    };
+    auto merged = gateway::transcribe_in_chunks(request, 300, nullptr, run);
+    REQUIRE(merged.has_value());
+    CHECK(calls == 3);
+    CHECK(merged->text == "part0 part1 part2");
+    REQUIRE(merged->segments.size() == 3);
+    CHECK(merged->segments[2].id == 2);
+    CHECK(merged->segments[1].start_seconds > 250.0f);
+    CHECK(merged->segments[2].start_seconds > merged->segments[1].start_seconds);
+    CHECK(merged->duration_seconds == 700.0f);
+    std::size_t total = 0;
+    for (auto size : sizes) { CHECK(size <= 100 * 310); total += size; }
+    CHECK(total == request.pcm.size());
+    CHECK(prompts[0] == "base");
+    CHECK(prompts[1] == "base part0");
+    CHECK(languages[0] == "auto");
+    CHECK(languages[1] == "en");
+
+    calls = 0;
+    auto cancelled = gateway::transcribe_in_chunks(request, 300,
+        [&](int) { return calls < 1; }, run);
+    REQUIRE_FALSE(cancelled.has_value());
+    CHECK(cancelled.error().code == foundation::ErrorCode::Cancelled);
+    CHECK(calls == 1);
+}
+
+TEST_CASE("chunking splits at the quietest window and skips silent chunks",
+          "[gateway][transcription]") {
+    using namespace inferdeck;
+    model::TranscriptionRequest request;
+    request.sample_rate = 100;
+    request.pcm.assign(100 * 400, 0.5f);
+    for (std::size_t i = 100 * 295; i < 100 * 297; ++i) request.pcm[i] = 0.0f;
+    std::vector<std::size_t> sizes;
+    auto run = [&](const model::TranscriptionRequest& chunk, const std::function<bool(int)>&) {
+        sizes.push_back(chunk.pcm.size());
+        model::TranscriptionResult part;
+        part.text = "x";
+        return foundation::Ok(std::move(part));
+    };
+    REQUIRE(gateway::transcribe_in_chunks(request, 300, nullptr, run).has_value());
+    REQUIRE(sizes.size() == 2);
+    CHECK(sizes[0] >= 100 * 294);
+    CHECK(sizes[0] <= 100 * 298);
+
+    model::TranscriptionRequest silent_tail;
+    silent_tail.sample_rate = 100;
+    silent_tail.pcm.assign(100 * 700, 0.0f);
+    std::fill(silent_tail.pcm.begin(), silent_tail.pcm.begin() + 100 * 100, 0.5f);
+    sizes.clear();
+    REQUIRE(gateway::transcribe_in_chunks(silent_tail, 300, nullptr, run).has_value());
+    CHECK(sizes.size() == 1);
+}
+
+TEST_CASE("decoded audio budget admits one oversized job and bounds the rest",
+          "[gateway][transcription]") {
+    CHECK(inferdeck::gateway::transcription_budget_admits(0, 500, 100));
+    CHECK_FALSE(inferdeck::gateway::transcription_budget_admits(60, 50, 100));
+    CHECK(inferdeck::gateway::transcription_budget_admits(40, 50, 100));
+}
+
+TEST_CASE("Routes: POST /v1/audio/transcriptions accepts audio above 25 MB in chunks",
+          "[routes][transcriptions]") {
+    TestServer ts;
+    auto info = make_info("whisper-model");
+    info.runtime = "whisper_cpp";
+    info.modality = "audio_transcription";
+    info.capabilities = {"audio_transcription"};
+    ts.registry.register_model(info);
+    REQUIRE(ts.coordinator.load("whisper-model"));
+    REQUIRE(ts.start());
+    constexpr std::size_t data_bytes = 30ULL * 1024ULL * 1024ULL;
+    std::string wav = test_wav().substr(0, 44);
+    wav.resize(44 + data_bytes);
+    for (std::size_t i = 44; i + 1 < wav.size(); i += 2) {
+        wav[i] = 0;
+        wav[i + 1] = 4;
+    }
+    for (int byte = 0; byte < 4; ++byte) {
+        wav[4 + byte] = static_cast<char>(((wav.size() - 8) >> (8 * byte)) & 0xff);
+        wav[40 + byte] = static_cast<char>((data_bytes >> (8 * byte)) & 0xff);
+    }
+    httplib::Client client("127.0.0.1", ts.port);
+    client.set_read_timeout(120, 0);
+    auto response = client.Post("/v1/audio/transcriptions", httplib::UploadFormDataItems{
+        {"file", wav, "long.wav", "audio/wav"},
+        {"model", "whisper-model", "", ""},
+        {"language", "en", "", ""},
+    });
+    REQUIRE(response);
+    CHECK(response->status == 200);
+    CHECK(nlohmann::json::parse(response->body)["text"].get<std::string>().starts_with("test transcript"));
+    ts.stop();
+}
