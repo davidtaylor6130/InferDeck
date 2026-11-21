@@ -27,17 +27,30 @@ if ($Install) {
     return
 }
 
-$since = (Get-Date).AddMinutes(-$WindowMinutes)
 New-Item $StateDir -ItemType Directory -Force | Out-Null
+$log = Join-Path $StateDir 'recovery.log'
+$last = Join-Path $StateDir 'last-recovery.txt'
+$marker = Join-Path $StateDir 'recovery-in-progress.txt'
+function Write-Log([string]$Message) { Add-Content $log "$(Get-Date -Format s) $Message" }
+
+if (Test-Path $marker) {
+    $pending = Get-CimInstance Win32_Service -Filter "Name='$Service'"
+    if ($pending -and $pending.StartMode -ne 'Disabled' -and $pending.State -eq 'Stopped') {
+        Start-Service $Service -ErrorAction SilentlyContinue
+        Write-Log "interrupted recovery found; started $Service, state=$((Get-Service $Service).Status)"
+        Remove-Item $marker -Force -ErrorAction SilentlyContinue
+    } elseif ($pending -and $pending.State -eq 'Running') {
+        Remove-Item $marker -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$since = (Get-Date).AddMinutes(-$WindowMinutes)
 $processed = Join-Path $StateDir 'processed-dumps.txt'
 $seen = @(if (Test-Path $processed) { Get-Content $processed })
 $hangs = @(Get-ChildItem (Join-Path $env:SystemRoot 'LiveKernelReports\WATCHDOG') -Filter *.dmp -File -ErrorAction SilentlyContinue |
     Where-Object { $_.LastWriteTime -gt $since -and $seen -notcontains $_.Name })
 if ($hangs.Count -lt $Threshold) { return }
 
-$log = Join-Path $StateDir 'recovery.log'
-$last = Join-Path $StateDir 'last-recovery.txt'
-function Write-Log([string]$Message) { Add-Content $log "$(Get-Date -Format s) $Message" }
 Add-Content $processed $hangs.Name
 
 $recent = (Test-Path $last) -and ((Get-Date) - (Get-Item $last).LastWriteTime).TotalMinutes -lt $CooldownMinutes
@@ -52,16 +65,23 @@ if (-not $svc -or $svc.Status -ne 'Running') {
 }
 
 Write-Log "$($hangs.Count) GPU watchdog reports in $WindowMinutes min; stopping $Service and restarting the display adapter"
-$servicePid = [int](Get-CimInstance Win32_Service -Filter "Name='$Service'").ProcessId
+$serviceInfo = Get-CimInstance Win32_Service -Filter "Name='$Service'"
+$servicePid = [int]$serviceInfo.ProcessId
+$serviceExe = if ($serviceInfo.PathName -match '^\s*"([^"]+)"') { $Matches[1] } else { ($serviceInfo.PathName.Trim() -split '\s+')[0] }
 $application = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$Service\Parameters" -ErrorAction SilentlyContinue).Application
 $children = @(if ($servicePid -gt 0 -and $application) {
     Get-CimInstance Win32_Process -Filter "ParentProcessId=$servicePid" | Where-Object { $_.ExecutablePath -eq $application }
 })
+Set-Content $marker (Get-Date -Format s)
 sc.exe stop $Service | Out-Null
 $deadline = (Get-Date).AddSeconds(90)
 while ((Get-Service $Service -ErrorAction SilentlyContinue).Status -ne 'Stopped' -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
-foreach ($child in $children) { Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue }
-if ($servicePid -gt 0) { Stop-Process -Id $servicePid -Force -ErrorAction SilentlyContinue }
+function Stop-IfPathMatches([int]$ProcessId, [string]$Path) {
+    $current = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    if ($current -and $current.ExecutablePath -eq $Path) { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue }
+}
+foreach ($child in $children) { Stop-IfPathMatches $child.ProcessId $application }
+if ($servicePid -gt 0) { Stop-IfPathMatches $servicePid $serviceExe }
 foreach ($gpu in Get-PnpDevice -Class Display -PresentOnly | Where-Object { $_.InstanceId -like 'PCI\*' }) {
     pnputil /restart-device "$($gpu.InstanceId)" | Out-Null
     Write-Log "restarted $($gpu.FriendlyName) exit=$LASTEXITCODE"
@@ -69,4 +89,6 @@ foreach ($gpu in Get-PnpDevice -Class Display -PresentOnly | Where-Object { $_.I
 Set-Content $last (Get-Date -Format s)
 Start-Sleep 20
 Start-Service $Service -ErrorAction SilentlyContinue
-Write-Log "$Service started"
+$state = (Get-Service $Service -ErrorAction SilentlyContinue).Status
+Write-Log "$Service state after start: $state"
+if ($state -eq 'Running') { Remove-Item $marker -Force -ErrorAction SilentlyContinue }
