@@ -12,6 +12,12 @@ $ErrorActionPreference = 'Stop'
 if ($Install) {
     $script = Join-Path $StateDir 'Recover-GpuHang.ps1'
     New-Item $StateDir -ItemType Directory -Force | Out-Null
+    icacls $StateDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed on $StateDir" }
+    $owner = (Get-Acl $StateDir).Owner
+    if ($owner -notin @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
+        throw "$StateDir is owned by $owner; refusing to install a SYSTEM task script from it"
+    }
     Copy-Item $PSCommandPath $script -Force
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -Service $Service"
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)
@@ -22,30 +28,38 @@ if ($Install) {
 }
 
 $since = (Get-Date).AddMinutes(-$WindowMinutes)
+New-Item $StateDir -ItemType Directory -Force | Out-Null
+$processed = Join-Path $StateDir 'processed-dumps.txt'
+$seen = @(if (Test-Path $processed) { Get-Content $processed })
 $hangs = @(Get-ChildItem (Join-Path $env:SystemRoot 'LiveKernelReports\WATCHDOG') -Filter *.dmp -File -ErrorAction SilentlyContinue |
-    Where-Object LastWriteTime -gt $since)
+    Where-Object { $_.LastWriteTime -gt $since -and $seen -notcontains $_.Name })
 if ($hangs.Count -lt $Threshold) { return }
 
-New-Item $StateDir -ItemType Directory -Force | Out-Null
 $log = Join-Path $StateDir 'recovery.log'
 $last = Join-Path $StateDir 'last-recovery.txt'
-$recent = (Test-Path $last) -and ((Get-Date) - (Get-Item $last).LastWriteTime).TotalMinutes -lt $CooldownMinutes
 function Write-Log([string]$Message) { Add-Content $log "$(Get-Date -Format s) $Message" }
+Add-Content $processed $hangs.Name
+
+$recent = (Test-Path $last) -and ((Get-Date) - (Get-Item $last).LastWriteTime).TotalMinutes -lt $CooldownMinutes
+if ($recent) {
+    Write-Log "$($hangs.Count) GPU watchdog reports but a recovery ran within $CooldownMinutes min; taking no action"
+    return
+}
+$svc = Get-Service $Service -ErrorAction SilentlyContinue
+if (-not $svc -or $svc.Status -ne 'Running') {
+    Write-Log "$($hangs.Count) GPU watchdog reports but $Service is not running; taking no action"
+    return
+}
 
 Write-Log "$($hangs.Count) GPU watchdog reports in $WindowMinutes min; stopping $Service and restarting the display adapter"
+Set-Content $last (Get-Date -Format s)
+$servicePid = [int](Get-CimInstance Win32_Service -Filter "Name='$Service'").ProcessId
 Stop-Service $Service -Force -ErrorAction SilentlyContinue
-Get-Process inferdeck-gateway -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+if ($servicePid -gt 0) { Stop-Process -Id $servicePid -Force -ErrorAction SilentlyContinue }
 foreach ($gpu in Get-PnpDevice -Class Display -PresentOnly | Where-Object { $_.InstanceId -like 'PCI\*' }) {
     pnputil /restart-device "$($gpu.InstanceId)" | Out-Null
     Write-Log "restarted $($gpu.FriendlyName) exit=$LASTEXITCODE"
 }
-Get-ChildItem (Join-Path $env:SystemRoot 'LiveKernelReports\WATCHDOG') -Filter *.dmp -File -ErrorAction SilentlyContinue |
-    Where-Object LastWriteTime -gt $since | Remove-Item -Force -ErrorAction SilentlyContinue
-Set-Content $last (Get-Date -Format s)
-if ($recent) {
-    Write-Log "second recovery within $CooldownMinutes min; leaving $Service stopped"
-} else {
-    Start-Sleep 20
-    Start-Service $Service -ErrorAction SilentlyContinue
-    Write-Log "$Service started"
-}
+Start-Sleep 20
+Start-Service $Service -ErrorAction SilentlyContinue
+Write-Log "$Service started"

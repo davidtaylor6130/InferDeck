@@ -9,6 +9,26 @@ std::string config_revision(const std::string& text) {
     return output.str();
 }
 
+void prune_rotated_service_logs(const fs::path& directory, std::size_t keep) {
+    std::error_code error;
+    for (const std::string prefix : {"service-out-", "service-err-"}) {
+        std::vector<std::pair<fs::file_time_type, fs::path>> rotated;
+        fs::directory_iterator entry(directory, error);
+        for (; !error && entry != fs::directory_iterator(); entry.increment(error)) {
+            const std::string name = entry->path().filename().string();
+            std::error_code file_error;
+            if (name.starts_with(prefix) && name.ends_with(".log") && entry->is_regular_file(file_error)) {
+                rotated.emplace_back(entry->last_write_time(file_error), entry->path());
+            }
+        }
+        error.clear();
+        std::sort(rotated.begin(), rotated.end(), std::greater<>());
+        for (std::size_t index = keep; index < rotated.size(); ++index) {
+            fs::remove(rotated[index].second, error);
+        }
+    }
+}
+
 FILE* open_crash_log() noexcept {
     FILE* file = nullptr;
 #ifdef _WIN32

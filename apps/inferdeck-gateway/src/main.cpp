@@ -11,6 +11,7 @@
 #include <ctime>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <future>
 #include <iomanip>
@@ -102,6 +103,7 @@ int run_gateway(const fs::path& config_path) {
     lc.level = parse_log_level(cfg.log_level);
     if (!cfg.log_file.empty()) lc.log_file = cfg.log_file;
     foundation::Logger::instance().initialize(lc);
+    prune_rotated_service_logs("logs", 10);
 
     LOG_INFO("startup", "inferdeck-gateway {} revision={} dirty={} starting",
              inferdeck::app::build_version, inferdeck::app::build_revision,
