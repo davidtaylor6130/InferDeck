@@ -40,13 +40,32 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
                                          "timeout waiting for a model swap to finish: " + name);
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
+    bool lending = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = instances_.find(name);
+        lending = it != instances_.end() && it->second && it->second->is_loaded() &&
+            context_borrowers_.contains(name) &&
+            (std::max(demand.required_context, demand.aggregate_context) >
+                 it->second->context_pool_capacity() ||
+             std::max(demand.required_sequences, demand.aggregate_sequences) >
+                 it->second->n_slots());
+    }
+    if (lending) {
+        auto released = release_context_borrowers(name, control);
+        if (!released) return foundation::Err<void>(released.error().code, released.error().message);
+        if (*released) return foundation::Err<void>(foundation::ErrorCode::ResourceBusy,
+            "context restore for " + name + " waits for active co-resident models");
+    }
     IModel* model = nullptr;
+    int capacity_before = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = instances_.find(name);
         if (it == instances_.end() || !it->second || !it->second->is_loaded())
             return foundation::Err<void>(foundation::ErrorCode::NotFound,
                                          "model not loaded: " + name);
+        capacity_before = it->second->context_pool_capacity();
         if (resizing_models_.contains(name))
             return foundation::Err<void>(foundation::ErrorCode::ResourceBusy,
                                          "request capacity is already being prepared: " + name);
@@ -70,6 +89,11 @@ foundation::Result<void> BackendCoordinator::prepare_request_capacity(
     {
         std::lock_guard<std::mutex> lock(mutex_);
         resizing_models_.erase(name);
+        const int capacity_after = model->context_pool_capacity();
+        if (result && capacity_after != capacity_before) {
+            if (lending) context_borrowers_.erase(name);
+            invalidate_vram_observation_locked();
+        }
         if (result) {
             const auto hold = continuation_holds_.find(name);
             const bool preserve_continuation = hold != continuation_holds_.end() &&

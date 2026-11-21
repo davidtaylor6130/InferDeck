@@ -312,6 +312,11 @@ inline GatewayConfig load_config(const std::filesystem::path& path) {
                     alias.required_capabilities.push_back(capability.as<std::string>());
                 }
             }
+            if (entry["fallbacks"] && entry["fallbacks"].IsSequence()) {
+                for (const auto& fallback : entry["fallbacks"]) {
+                    alias.fallbacks.push_back(fallback.as<std::string>());
+                }
+            }
             cfg.model_aliases.push_back(std::move(alias));
         }
     }

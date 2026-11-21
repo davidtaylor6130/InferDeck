@@ -747,6 +747,22 @@ model_aliases:
     target: text-only
     required_capabilities: [vision]
 )"));
+    const std::string tiers = R"(
+model_registry:
+  - name: small
+    gguf_path: small.gguf
+  - name: large
+    gguf_path: large.gguf
+model_aliases:
+  - name: everyday
+    target: small
+)";
+    CHECK(validate_config_text(tiers + "    fallbacks: [large]\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: large\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [small]\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [large, large]\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [absent]\n"));
+    CHECK_FALSE(validate_config_text(tiers + "    fallbacks: [{name: large}]\n"));
 }
 
 TEST_CASE("Active configuration is preferred and invalid profiles fall back safely",
