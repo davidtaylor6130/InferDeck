@@ -77,8 +77,12 @@ speculative:
   speculating requests the step's draft tokens are split evenly under
   `max_batch_draft_tokens` (a single request keeps its full `draft_tokens`), and
   a request whose recent acceptance falls below 30% decodes plainly for 32 steps
-  before probing again. The default `max_active_requests` stays 1; raise it to
-  the slot count to speculate under concurrency.
+  before probing again. The budget limits the tokens the target verifies, not
+  drafter compute: MTP and DFlash still draft `draft_tokens` and the draft is
+  truncated afterwards. A budget below `max_active_requests` is accepted but
+  logged, because some requests then draft nothing on a given step. The default
+  `max_active_requests` stays 1; raise it to the slot count to speculate under
+  concurrency.
 - With `context_pool_auto`, the drafter's file size is reserved from the fitted
   pool; its KV cache is covered by the allocation retry.
 

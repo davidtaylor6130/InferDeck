@@ -510,6 +510,14 @@ Result<void> LlamaCppModel::init_shared_context_locked(
              params.draft.p_min,
              cfg_.mtp_max_active_requests,
              static_cast<int>(draft_seq_rm_type));
+    if (cfg_.mtp_max_active_requests > 1 &&
+        cfg_.max_batch_draft_tokens < cfg_.mtp_max_active_requests) {
+      LOG_WARN("llama_speculative_budget_below_window",
+               "model={} max_batch_draft_tokens={} max_active_requests={}",
+               info_.name,
+               cfg_.max_batch_draft_tokens,
+               cfg_.mtp_max_active_requests);
+    }
   }
 
   slots_.clear();

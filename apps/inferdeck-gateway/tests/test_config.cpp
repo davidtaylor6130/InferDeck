@@ -804,6 +804,7 @@ TEST_CASE("Shared context capacity validates request and draft headroom", "[conf
     CHECK_FALSE(validate_config_text(prefix + "    context_pool_size: -1\n"));
     CHECK_FALSE(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 32768\n    speculative:\n      type: mtp\n      draft_tokens: 2\n"));
     CHECK(validate_config_text(prefix + "    kv_unified: true\n    context_pool_size: 32770\n    speculative:\n      type: mtp\n      draft_tokens: 2\n"));
+    CHECK(validate_config_text(prefix + "    n_slots: 4\n    speculative:\n      type: mtp\n      max_active_requests: 4\n      max_batch_draft_tokens: 4\n"));
 }
 
 TEST_CASE("Automatic shared pools require unified storage and no fixed size", "[config][pool]") {

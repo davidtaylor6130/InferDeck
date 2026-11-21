@@ -434,26 +434,44 @@ TEST_CASE("Batched speculation splits the per-step draft budget across sequences
           "[llama][scheduler][mtp]") {
   using inferdeck::llama_wrapper::detail::batch_draft_allotment;
 
-  CHECK(batch_draft_allotment(0, 1, 7, 2) == 7);
-  CHECK(batch_draft_allotment(0, 2, 3, 8) == 3);
-  CHECK(batch_draft_allotment(1, 2, 3, 8) == 3);
+  CHECK(batch_draft_allotment(0, 1, 7, 2, 0) == 2);
+  CHECK(batch_draft_allotment(0, 1, 3, 8, 0) == 3);
+  CHECK(batch_draft_allotment(0, 2, 3, 8, 0) == 3);
+  CHECK(batch_draft_allotment(1, 2, 3, 8, 0) == 3);
   int total = 0;
   for (int index = 0; index < 4; ++index) {
-    CHECK(batch_draft_allotment(index, 4, 3, 8) == 2);
-    total += batch_draft_allotment(index, 4, 3, 8);
+    CHECK(batch_draft_allotment(index, 4, 3, 8, 0) == 2);
+    total += batch_draft_allotment(index, 4, 3, 8, 0);
   }
   CHECK(total == 8);
   total = 0;
-  for (int index = 0; index < 3; ++index) total += batch_draft_allotment(index, 3, 7, 8);
+  for (int index = 0; index < 3; ++index) total += batch_draft_allotment(index, 3, 7, 8, 0);
   CHECK(total == 8);
-  CHECK(batch_draft_allotment(0, 3, 7, 8) == 3);
-  CHECK(batch_draft_allotment(2, 3, 7, 8) == 2);
-  CHECK(batch_draft_allotment(0, 4, 3, 2) == 1);
-  CHECK(batch_draft_allotment(1, 4, 3, 2) == 1);
-  CHECK(batch_draft_allotment(2, 4, 3, 2) == 0);
-  CHECK(batch_draft_allotment(3, 4, 3, 2) == 0);
-  CHECK(batch_draft_allotment(4, 4, 3, 8) == 0);
-  CHECK(batch_draft_allotment(0, 4, 0, 8) == 0);
+  CHECK(batch_draft_allotment(0, 3, 7, 8, 0) == 3);
+  CHECK(batch_draft_allotment(2, 3, 7, 8, 0) == 2);
+  CHECK(batch_draft_allotment(0, 4, 3, 2, 0) == 1);
+  CHECK(batch_draft_allotment(1, 4, 3, 2, 0) == 1);
+  CHECK(batch_draft_allotment(2, 4, 3, 2, 0) == 0);
+  CHECK(batch_draft_allotment(3, 4, 3, 2, 0) == 0);
+  CHECK(batch_draft_allotment(4, 4, 3, 8, 0) == 0);
+  CHECK(batch_draft_allotment(0, 4, 0, 8, 0) == 0);
+}
+
+TEST_CASE("Batched speculation rotates a scarce draft budget across sequences",
+          "[llama][scheduler][mtp]") {
+  using inferdeck::llama_wrapper::detail::batch_draft_allotment;
+
+  std::vector<int> drafted(4, 0);
+  for (std::size_t turn = 0; turn < 4; ++turn) {
+    int step_total = 0;
+    for (int index = 0; index < 4; ++index) {
+      const int allotment = batch_draft_allotment(index, 4, 3, 2, turn);
+      drafted[static_cast<std::size_t>(index)] += allotment;
+      step_total += allotment;
+    }
+    CHECK(step_total == 2);
+  }
+  for (const int tokens : drafted) CHECK(tokens == 2);
 }
 
 TEST_CASE("Batched speculation backs off a sequence with low acceptance",
@@ -461,12 +479,12 @@ TEST_CASE("Batched speculation backs off a sequence with low acceptance",
   using namespace inferdeck::llama_wrapper::detail;
 
   SpeculationGate gate;
-  CHECK(speculation_gate_allows(gate));
+  CHECK(speculation_gate_step(gate));
   speculation_gate_record(gate, 0, 0);
   CHECK(gate.acceptance == 1.0f);
   for (int step = 0; step < 20; ++step) speculation_gate_record(gate, 2, 2);
   CHECK(gate.cooldown == 0);
-  CHECK(speculation_gate_allows(gate));
+  CHECK(speculation_gate_step(gate));
 
   int rejected_steps = 0;
   while (gate.cooldown == 0 && rejected_steps < 100) {
@@ -475,11 +493,13 @@ TEST_CASE("Batched speculation backs off a sequence with low acceptance",
   }
   CHECK(rejected_steps == 5);
   CHECK(gate.cooldown == speculation_gate_cooldown_steps);
+  speculation_gate_record(gate, 0, 0);
+  CHECK(gate.cooldown == speculation_gate_cooldown_steps);
   for (int step = 0; step < speculation_gate_cooldown_steps; ++step) {
-    CHECK_FALSE(speculation_gate_allows(gate));
+    CHECK_FALSE(speculation_gate_step(gate));
   }
   CHECK(gate.acceptance == speculation_gate_probe_acceptance);
-  CHECK(speculation_gate_allows(gate));
+  CHECK(speculation_gate_step(gate));
   speculation_gate_record(gate, 3, 3);
   CHECK(gate.cooldown == 0);
   CHECK(gate.acceptance > speculation_gate_probe_acceptance);

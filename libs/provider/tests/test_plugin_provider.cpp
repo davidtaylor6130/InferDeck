@@ -254,6 +254,16 @@ TEST_CASE("The codec round-trips model settings and requests", "[provider][codec
     CHECK(decoded->speculative_type == "dflash2");
     CHECK(decoded->draft_model_path == "E:/models/draft.gguf");
     CHECK(decoded->mtp_draft_tokens == 7);
+    CHECK(decoded->max_batch_draft_tokens == 8);
+    auto legacy = provider::codec::encode(info);
+    legacy.erase("max_batch_draft_tokens");
+    const auto legacy_decoded = provider::codec::decode_model_info(legacy);
+    REQUIRE(legacy_decoded);
+    CHECK(legacy_decoded->max_batch_draft_tokens == 8);
+    info.max_batch_draft_tokens = 5;
+    const auto custom = provider::codec::decode_model_info(provider::codec::encode(info));
+    REQUIRE(custom);
+    CHECK(custom->max_batch_draft_tokens == 5);
     CHECK(decoded->sampling.dry_multiplier == 0.5f);
     CHECK(decoded->compute == model::ModelCompute::Cpu);
     CHECK(decoded->artifacts.at("key") == "value");

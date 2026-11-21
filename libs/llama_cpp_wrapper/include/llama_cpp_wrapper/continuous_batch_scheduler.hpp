@@ -98,11 +98,12 @@ constexpr bool adaptive_mtp_request_eligible(
 }
 
 constexpr int batch_draft_allotment(
-    int index, int candidates, int per_seq_max, int budget) noexcept {
-    if (candidates <= 1) return per_seq_max;
+    int index, int candidates, int per_seq_max, int budget, std::size_t turn) noexcept {
     if (index < 0 || index >= candidates || per_seq_max <= 0 || budget <= 0) return 0;
+    const int rotated = static_cast<int>(
+        (static_cast<std::size_t>(index) + turn) % static_cast<std::size_t>(candidates));
     return std::min(per_seq_max,
-                    budget / candidates + (index < budget % candidates ? 1 : 0));
+                    budget / candidates + (rotated < budget % candidates ? 1 : 0));
 }
 
 struct SpeculationGate {
@@ -114,7 +115,7 @@ constexpr float speculation_gate_min_acceptance = 0.3f;
 constexpr float speculation_gate_probe_acceptance = 0.5f;
 constexpr int speculation_gate_cooldown_steps = 32;
 
-constexpr bool speculation_gate_allows(SpeculationGate& gate) noexcept {
+constexpr bool speculation_gate_step(SpeculationGate& gate) noexcept {
     if (gate.cooldown <= 0) return true;
     if (--gate.cooldown == 0) gate.acceptance = speculation_gate_probe_acceptance;
     return false;

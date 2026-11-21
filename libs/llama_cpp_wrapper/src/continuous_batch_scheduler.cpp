@@ -674,25 +674,25 @@ void ContinuousBatchScheduler::run_loop() {
                 }
             }
             const bool batched = candidates.size() > 1;
-            if (batched) {
-                candidates.erase(
-                    std::remove_if(candidates.begin(), candidates.end(),
-                        [](SlotTask* task) {
-                            return !detail::speculation_gate_allows(task->spec_gate);
-                        }),
-                    candidates.end());
+            std::vector<SlotTask*> allowed;
+            for (auto* t : candidates) {
+                if (!batched) {
+                    t->spec_gate = {};
+                    allowed.push_back(t);
+                } else if (detail::speculation_gate_step(t->spec_gate)) {
+                    allowed.push_back(t);
+                }
             }
-            const int candidate_count = static_cast<int>(candidates.size());
+            const int candidate_count = static_cast<int>(allowed.size());
             for (int index = 0; index < candidate_count; ++index) {
-                auto* t = candidates[static_cast<std::size_t>(index)];
+                auto* t = allowed[static_cast<std::size_t>(index)];
                 const int allotment = batched
                     ? detail::batch_draft_allotment(
-                          static_cast<int>(
-                              (static_cast<std::size_t>(index) + batch_turn) %
-                              static_cast<std::size_t>(candidate_count)),
+                          index,
                           candidate_count,
                           draft_margin_,
-                          max_batch_draft_tokens_)
+                          max_batch_draft_tokens_,
+                          batch_turn)
                     : -1;
                 if (allotment == 0) continue;
                 t->spec_batched = batched;
