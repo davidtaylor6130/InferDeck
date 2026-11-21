@@ -138,6 +138,16 @@ between its requests, and the waiting request gives up after the model's
 `request_queue_timeout_seconds`. A borrower that cannot be evicted makes the restore fail with an
 out-of-memory error, so the lender keeps its reduced pool and its cache.
 
+Once a lender's combined demand has exceeded its reduced pool, or one of its
+borrowers has unloaded, the lender is marked for restore. The next time it is
+idle when a request is admitted, the coordinator evicts its idle borrowers and
+rebuilds the pool at full size, even if that request alone would fit. Unloading
+a borrower through the API regrows an idle lender immediately. While a lender's
+pool is reduced, admission counts the demand of requests already being admitted
+alongside the active reservations, so simultaneous arrivals see their combined
+demand. A restore that cannot fit falls back to the reduced pool and is not
+retried until the lender's demand exceeds it again.
+
 ## Files and selection
 
 - The stable base is the requested `gateway.yml`.

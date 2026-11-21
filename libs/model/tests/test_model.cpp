@@ -3096,6 +3096,40 @@ TEST_CASE("BackendCoordinator: co-resident borrower yields when the lender needs
         CHECK_FALSE(coordinator.is_loaded(compact.name));
         CHECK(lender->pool_capacity.load() == 6001);
     }
+    SECTION("unloading the borrower regrows an idle lender without reloading weights") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        REQUIRE(coordinator.unload(compact.name));
+        CHECK(lender->pool_capacity.load() == 8000);
+        CHECK(lender_calls("ensure_capacity") == 1);
+        CHECK(lender_calls("unload") == 0);
+        CHECK(coordinator.is_ready(large.name));
+    }
+    SECTION("overlapping demand restores the lender at the next idle gap") {
+        REQUIRE(coordinator.swap_to(compact.name));
+        lender->pool_capacity.store(4000);
+        AcquireSlotOptions options;
+        options.timeout = std::chrono::seconds{5};
+        options.demand = [] { return Ok(RequestDemand{0, 0, 3000, 1, 0, 0}); };
+        options.prepare_capacity = [&](const RequestDemand& demand, const LifecycleControl& lifecycle) {
+            return coordinator.prepare_request_capacity(large.name, demand, lifecycle);
+        };
+        const auto first = coordinator.acquire_slot(large.name, options);
+        REQUIRE(first);
+        auto second = std::async(std::launch::async, [&] {
+            return coordinator.acquire_slot(large.name, options);
+        });
+        CHECK(second.wait_for(std::chrono::milliseconds{300}) == std::future_status::timeout);
+        CHECK(coordinator.is_loaded(compact.name));
+        CHECK(lender->pool_capacity.load() == 4000);
+        REQUIRE(coordinator.release_slot(large.name, *first));
+        const auto admitted = second.get();
+        REQUIRE(admitted);
+        CHECK_FALSE(coordinator.is_loaded(compact.name));
+        CHECK(lender->pool_capacity.load() == 8000);
+        CHECK(lender_calls("unload") == 0);
+        REQUIRE(coordinator.release_slot(large.name, *admitted));
+    }
     SECTION("a busy lender keeps its borrower until it is idle") {
         REQUIRE(coordinator.swap_to(compact.name));
         lender->pool_capacity.store(4000);

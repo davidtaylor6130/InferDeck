@@ -273,6 +273,8 @@ private:
     std::unordered_set<std::string> draining_models_;
     std::unordered_set<std::string> resizing_models_;
     std::unordered_map<std::string, std::unordered_set<std::string>> context_borrowers_;
+    std::unordered_set<std::string> reduced_lenders_;
+    std::unordered_set<std::string> restore_wanted_;
     int vram_budget_mb_{0};
     int vram_safety_margin_mb_{1024};
     int observed_vram_used_mb_{0};
