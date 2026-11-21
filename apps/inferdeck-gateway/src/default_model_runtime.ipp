@@ -19,7 +19,9 @@ std::vector<long long> read_gpu_lost_stamps() {
 
 void record_gpu_lost_restart() {
     auto stamps = read_gpu_lost_stamps();
-    stamps.push_back(unix_seconds());
+    const auto now = unix_seconds();
+    std::erase_if(stamps, [now](long long stamp) { return stamp > now + 5; });
+    stamps.push_back(now);
     if (stamps.size() > 10) stamps.erase(stamps.begin(), stamps.end() - 10);
     std::ofstream out(gpu_lost_stamp_path(), std::ios::trunc);
     for (const auto stamp : stamps) out << stamp << std::endl;
@@ -32,7 +34,10 @@ bool gpu_backoff_active(const model::BackendCoordinator& coordinator) {
 }
 
 void configure_gpu_lost_backoff(inferdeck::gateway::GatewayDeps& deps) {
-    if (const auto until = inferdeck::gateway::gpu_backoff_until(read_gpu_lost_stamps(), unix_seconds())) {
+    static bool first_boot = true;
+    if (const auto until = std::exchange(first_boot, false)
+            ? inferdeck::gateway::gpu_backoff_until(read_gpu_lost_stamps(), unix_seconds())
+            : std::nullopt) {
         g_gpu_backoff_until.store(*until);
         foundation::LOG_WARN("gpu_lost_backoff", "until_unix={}", *until);
     }
