@@ -8,6 +8,7 @@
 #include <thread>
 #include <utility>
 #include <unordered_set>
+#include <vector>
 
 namespace inferdeck::model {
 
@@ -87,6 +88,16 @@ std::vector<std::string> BackendCoordinator::unhealthy_models() const {
     std::vector<std::string> names;
     for (const auto& [name, backend] : instances_) {
         if (backend && backend->is_loaded() && !resizing_models_.contains(name) && !backend->execution_healthy()) names.push_back(name);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::vector<std::string> BackendCoordinator::degraded_models() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> names;
+    for (const auto& [name, backend] : instances_) {
+        if (backend && backend->is_loaded() && backend->compute_degraded()) names.push_back(name);
     }
     std::sort(names.begin(), names.end());
     return names;
@@ -213,17 +224,23 @@ int BackendCoordinator::available_vram_locked() const {
         const int capacity =
             std::min(vram_budget_mb_, observed_vram_total_mb_);
         std::int64_t reserved = 0;
+        std::int64_t resident = 0;
         for (const auto& [_, backend] : instances_) {
-            if (!backend || !backend->is_loaded() ||
-                backend->estimate_vram_mb(backend->n_slots()) <= 0) continue;
-            reserved += backend->live_vram_accounting_complete()
-                ? std::max(0, backend->additional_vram_reserve_mb())
-                : std::max(0, backend->estimate_vram_mb(backend->n_slots()));
+            const int estimate = backend && backend->is_loaded()
+                ? backend->estimate_vram_mb(backend->n_slots()) : 0;
+            if (estimate <= 0) continue;
+            const int pending = std::max(0, backend->additional_vram_reserve_mb());
+            const bool complete = backend->live_vram_accounting_complete();
+            reserved += complete ? pending : estimate;
+            resident += complete ? std::max(0, estimate - pending) : estimate;
         }
+        const std::int64_t observed = observed_vram_used_mb_;
+        const std::int64_t other_processes =
+            std::max<std::int64_t>(0, observed - resident);
+        const std::int64_t desktop_reserve = std::max<std::int64_t>(
+            0, static_cast<std::int64_t>(vram_safety_margin_mb_) - other_processes);
         const std::int64_t available =
-            static_cast<std::int64_t>(capacity) -
-            static_cast<std::int64_t>(vram_safety_margin_mb_) -
-            static_cast<std::int64_t>(observed_vram_used_mb_) - reserved;
+            static_cast<std::int64_t>(capacity) - observed - desktop_reserve - reserved;
         const int observed_available = static_cast<int>(
             std::clamp<std::int64_t>(
                 available, 0, std::numeric_limits<int>::max()));
@@ -351,6 +368,8 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
             std::unique_lock<std::mutex> lock(mutex_);
             if (reclaimed && *reclaimed) {
                 last_resource_decision_ = "reclaimed idle context from " + candidate + " for " + name;
+                context_borrowers_[candidate].insert(name);
+                reduced_lenders_.insert(candidate);
                 invalidate_vram_observation_locked();
                 ++resource_generation_;
                 if (had_observation) {
@@ -499,6 +518,71 @@ foundation::Result<void> BackendCoordinator::prepare_capacity_for(
     return foundation::Err<void>(foundation::ErrorCode::OutOfMemory,
         "insufficient VRAM for " + name + ": required_mb=" + std::to_string(required) +
         " available_mb=" + std::to_string(available));
+}
+
+foundation::Result<bool> BackendCoordinator::release_context_borrowers(
+    const std::string& lender, const LifecycleControl& control, bool respect_hold) {
+    std::vector<std::string> evictions;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto borrowers = context_borrowers_.find(lender);
+        if (borrowers == context_borrowers_.end()) return false;
+        const auto lender_active = active_requests_by_model_.find(lender);
+        if (lender_active != active_requests_by_model_.end() && lender_active->second > 0) return true;
+        for (auto it = borrowers->second.begin(); it != borrowers->second.end();) {
+            const auto instance = instances_.find(*it);
+            if (instance == instances_.end() || !instance->second ||
+                !instance->second->is_loaded()) {
+                it = borrowers->second.erase(it);
+                continue;
+            }
+            const auto& info = instance->second->info();
+            if (!info.eviction_eligible || info.residency == ResidencyPolicy::Always) {
+                last_resource_decision_ = "context restore for " + lender +
+                    " blocked by non-evictable " + *it;
+                return foundation::Err<bool>(foundation::ErrorCode::OutOfMemory,
+                    "context restore for " + lender + " is blocked by resident model " + *it);
+            }
+            const auto active = active_requests_by_model_.find(*it);
+            if (draining_models_.contains(*it) || resizing_models_.contains(*it) ||
+                (active != active_requests_by_model_.end() && active->second > 0)) return true;
+            const auto use = model_use_.find(*it);
+            if (respect_hold && swap_hold_ > std::chrono::milliseconds::zero() &&
+                use != model_use_.end() &&
+                clock::now() - std::max(use->second.loaded, use->second.last_used) < swap_hold_) {
+                return true;
+            }
+            evictions.push_back(*it);
+            ++it;
+        }
+        if (evictions.empty()) {
+            context_borrowers_.erase(borrowers);
+            return false;
+        }
+    }
+    for (const auto& candidate : evictions) {
+        if (control.is_cancelled()) {
+            return foundation::Err<bool>(foundation::ErrorCode::Cancelled,
+                                         "context restore cancelled: " + lender);
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto active = active_requests_by_model_.find(candidate);
+            if ((active != active_requests_by_model_.end() && active->second > 0) ||
+                draining_models_.contains(candidate) || resizing_models_.contains(candidate)) {
+                return true;
+            }
+        }
+        auto unloaded = unload_with_control(candidate, control);
+        if (!unloaded) {
+            if (unloaded.error().code == foundation::ErrorCode::Cancelled)
+                return foundation::Err<bool>(unloaded.error().code, unloaded.error().message);
+            return true;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_resource_decision_ = "evicted idle " + candidate + " to restore context for " + lender;
+    }
+    return false;
 }
 
 foundation::Result<void> BackendCoordinator::require_priority_session_allows(

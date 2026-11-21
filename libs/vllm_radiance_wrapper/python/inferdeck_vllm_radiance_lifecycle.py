@@ -2,6 +2,7 @@
 
 import gc
 import sys
+import traceback
 import weakref
 import types
 from typing import Any
@@ -155,6 +156,31 @@ def finalize_engine_caches(engine: Any) -> bool:
     active = finalizer.alive
     finalizer()
     return active
+
+
+def release_exception_frames(error: BaseException | None) -> int:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if error.__traceback__ is not None:
+            traceback.clear_frames(error.__traceback__)
+        error = error.__cause__ or error.__context__
+    return len(seen)
+
+
+def release_kernel_scratch() -> int:
+    module = sys.modules.get("radiance_mxfp4")
+    scratch = getattr(module, "_decode_scratch", None)
+    ready = getattr(module, "_decode_scratch_ready", None)
+    if not isinstance(scratch, list) or not isinstance(ready, list):
+        return 0
+    released = sum(int(tensor.numel()) * int(tensor.element_size()) for tensor in scratch if tensor is not None)
+    extension = getattr(module, "_ext", None)
+    if released and extension is not None:
+        extension.set_decode_scratch(0, 0, 0)
+    scratch[:] = [None] * len(scratch)
+    ready[0] = False
+    return released
 
 
 def release_model_compilation_hooks(engine: Any) -> int:

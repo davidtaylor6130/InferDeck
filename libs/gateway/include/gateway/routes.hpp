@@ -42,10 +42,10 @@ struct GatewayDeps {
     int background_idle_after_seconds{900};
     bool public_data_plane_access{false};
     std::map<std::string, std::string> media_default_models;
-    std::function<bool()> auto_load_blocked{};
     int speech_admission_timeout_ms{30000};
     std::size_t transcription_max_body_bytes{200ULL << 20};
     std::size_t transcription_decoded_budget_bytes{1024ULL << 20};
+    std::function<bool()> auto_load_blocked{};
 };
 
 inline std::string media_default_model(const GatewayDeps& deps,

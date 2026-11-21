@@ -107,7 +107,7 @@ TEST_CASE("A v2 SDK provider is indistinguishable from a built-in backend", "[pr
     provider::set_plugin_host_settings(R"({"n_batch":256})");
     REQUIRE(descriptor->initialize({echo_model("echo")}));
 
-    auto backend = descriptor->factory(echo_model("echo"));
+    auto backend = descriptor->factory(echo_model("echo", {{"degraded", "1"}}));
     REQUIRE(backend);
     REQUIRE_FALSE(backend->acquire_slot());
     CHECK_FALSE(backend->is_loaded());
@@ -121,6 +121,8 @@ TEST_CASE("A v2 SDK provider is indistinguishable from a built-in backend", "[pr
     CHECK(backend->min_slots() == 1);
     CHECK(backend->can_resize_slots());
     CHECK_FALSE(backend->can_reclaim_idle_context());
+    CHECK(backend->reclaimable_idle_context_mb() == 40);
+    CHECK(backend->compute_degraded());
     REQUIRE(backend->resize_slots(3));
     CHECK(backend->n_slots() == 3);
 
@@ -255,6 +257,16 @@ TEST_CASE("The codec round-trips model settings and requests", "[provider][codec
     CHECK(decoded->speculative_type == "dflash2");
     CHECK(decoded->draft_model_path == "E:/models/draft.gguf");
     CHECK(decoded->mtp_draft_tokens == 7);
+    CHECK(decoded->max_batch_draft_tokens == 8);
+    auto legacy = provider::codec::encode(info);
+    legacy.erase("max_batch_draft_tokens");
+    const auto legacy_decoded = provider::codec::decode_model_info(legacy);
+    REQUIRE(legacy_decoded);
+    CHECK(legacy_decoded->max_batch_draft_tokens == 8);
+    info.max_batch_draft_tokens = 5;
+    const auto custom = provider::codec::decode_model_info(provider::codec::encode(info));
+    REQUIRE(custom);
+    CHECK(custom->max_batch_draft_tokens == 5);
     CHECK(decoded->sampling.dry_multiplier == 0.5f);
     CHECK(decoded->compute == model::ModelCompute::Cpu);
     CHECK(decoded->artifacts.at("key") == "value");
@@ -363,5 +375,6 @@ TEST_CASE("A v2 table of the frozen minimum size loads and its absent members ar
     auto backend = descriptor->factory(echo_model("echo_min"));
     REQUIRE(backend);
     CHECK(backend->load());
+    CHECK_FALSE(backend->compute_degraded());
     CHECK(backend->unload());
 }

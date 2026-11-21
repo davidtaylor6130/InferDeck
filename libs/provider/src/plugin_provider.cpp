@@ -1,6 +1,7 @@
 #include "provider/plugin_provider.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -365,6 +366,12 @@ public:
 
     int min_slots() const override { return static_cast<int>(query(INFERDECK_QUERY_MIN_SLOTS, 0, n_slots())); }
     bool can_resize_slots() const override { return query(INFERDECK_QUERY_CAN_RESIZE_SLOTS, 0, 0) != 0; }
+    bool compute_degraded() const override { return query(INFERDECK_QUERY_COMPUTE_DEGRADED, 0, 0) != 0; }
+    int reclaimable_idle_context_mb() const override
+    {
+        return static_cast<int>(std::clamp<int64_t>(
+            query(INFERDECK_QUERY_RECLAIMABLE_IDLE_CONTEXT_MB, 0, 0), 0, std::numeric_limits<int>::max()));
+    }
     bool can_reclaim_idle_context() const override
     {
         return query(INFERDECK_QUERY_CAN_RECLAIM_IDLE_CONTEXT, 0, 0) != 0;

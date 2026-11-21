@@ -90,6 +90,7 @@ constexpr int runtime_reload_result = 75;
 #include "provider_runtime.ipp"
 #include "media_control_routes.ipp"
 #include "decision_routes.ipp"
+#include "gateway/health_json.hpp"
 #include "default_model_runtime.ipp"
 int run_gateway(const fs::path& config_path) {
     using namespace inferdeck;
@@ -136,10 +137,7 @@ int run_gateway(const fs::path& config_path) {
 
     model::BackendCoordinator coordinator(registry);
     g_coordinator.store(&coordinator);
-    coordinator.set_max_queue_size(static_cast<std::size_t>(std::max(1, cfg.max_queue_size)));
-    if (cfg.vram_budget_mb > 0) {
-        coordinator.set_vram_budget(cfg.vram_budget_mb, cfg.vram_safety_margin_mb);
-    }
+    configure_coordinator(coordinator, cfg);
     std::atomic<ComputeResource> maintenance_resource{ComputeResource::None};
     ModelStore model_store(cfg.model_store_root, cfg.model_store_archive_root,
                            cfg.model_store_hf_token, coordinator, {}, {},

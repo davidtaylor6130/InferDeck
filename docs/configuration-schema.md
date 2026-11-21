@@ -46,6 +46,14 @@ select their configured default when its runtime is available. These settings
 do not download models or add runtime support. Without a media default, image
 and video retain the existing `default_model` fallback; music requires `model`.
 
+## Image models
+
+Image models use the `stable_diffusion_cpp` runtime and register at startup, so
+add an entry only once its weights exist. The Qwen-Image-2.1 entry, artifact
+keys and weights are in [qwen-image-2.1.md](qwen-image-2.1.md#configuration).
+Its weights are licensed for non-commercial research or evaluation use only; see
+[the license section](qwen-image-2.1.md#license).
+
 ## Speculative decoding
 
 A `llama_cpp` text model may set `speculative`:
@@ -57,6 +65,7 @@ speculative:
   draft_tokens: 3          # mtp: 1-4 (default 2); dflash/dflash2: 1-16 (default 3; above 4 is slower on Vulkan, see below)
   p_min: 0.0               # 0-1; DFlash2 truncates the draft at a lower selector probability
   max_active_requests: 1   # speculation runs only while this many requests or fewer are runnable
+  max_batch_draft_tokens: 8  # 1-64; total draft tokens verified per step when 2+ requests speculate
 ```
 
 - `mtp` drafts from the target GGUF's own MTP head; `draft_model` is rejected.
@@ -71,6 +80,17 @@ speculative:
   runnable requests the model decodes without drafting, and a request that lost
   its draft cache resynchronises before drafting again. Image requests always
   bypass speculation.
+- Within the window every speculating request drafts in one shared drafter
+  decode and all drafts are verified in one target decode. With two or more
+  speculating requests the step's draft tokens are split evenly under
+  `max_batch_draft_tokens` (a single request keeps its full `draft_tokens`), and
+  a request whose recent acceptance falls below 30% decodes plainly for 32 steps
+  before probing again. The budget limits the tokens the target verifies, not
+  drafter compute: MTP and DFlash still draft `draft_tokens` and the draft is
+  truncated afterwards. A budget below `max_active_requests` is accepted but
+  logged, because some requests then draft nothing on a given step. The default
+  `max_active_requests` stays 1; raise it to the slot count to speculate under
+  concurrency.
 - The drafter loads once with the target model and is kept for the model's load
   lifetime; a drafter that fails to load fails the model load with a clear error
   and is never retried at a smaller context. Set `vram_required_mb` to cover the
@@ -91,6 +111,79 @@ slot, 48K context, greedy, 512 output tokens:
 On this GPU a target verification batch of five or more tokens costs about
 twice a four-token batch, so `draft_tokens: 3` is fastest here even though the
 drafter's upstream recommendation is 7. Measure before raising it.
+
+## Co-residency and alias fallbacks
+
+When a request needs a model that does not fit beside the resident ones, the
+coordinator frees memory in this order: idle context reclamation, calibrated
+slot reduction, then eviction. Context reclamation applies to a resident
+llama.cpp model with `kv_unified: true`, `context_pool_auto: true` and
+`context_pool_size: 0`. It rebuilds that model's KV pool smaller without
+unloading its weights, down to one request's `context_size`, so the incoming
+model can load beside it. `n_slots` is unchanged; the slots share the smaller
+pool and wait for each other when their combined demand exceeds it. The rebuild
+clears that model's prompt cache. It only runs while the model is idle.
+
+The model that gave up context is the lender; the model admitted into that space
+is its borrower. When a request for the lender needs more context than its
+reduced pool holds, the coordinator evicts its idle borrowers and rebuilds the
+pool at full size, again without reloading weights. If a borrower is still
+running, the lender's request waits and retries when that work ends. A model
+marked `residency: always` or `eviction_eligible: false` is never evicted for a
+restore. Models without `context_pool_auto` keep the previous behaviour and are
+evicted when the incoming model does not fit.
+
+`model_aliases[].fallbacks` is an optional ordered list of concrete models:
+
+```yaml
+model_aliases:
+  - name: everyday
+    target: qwen3.5-4b
+    fallbacks: [qwen3.8-27b]
+    required_context_size: 16384
+```
+
+A request for the alias uses `target` when it is resident and ready. Otherwise
+it uses the first listed fallback that is resident and ready. If none is, it
+loads `target`. Every fallback must be a distinct registered model that
+satisfies the alias's `required_context_size` and `required_capabilities`.
+A model named by an alias fallback cannot be unregistered. Aliases without
+`fallbacks` behave as before.
+
+The choice is made once, when the request is resolved. If the chosen model is
+unloaded before the request is admitted, `auto_swap` loads that model again;
+the request does not switch candidates. Fallback compatibility is checked when
+the alias is created or retargeted, not on every request.
+
+A restore is refused while the lender has active requests or any borrower is
+active, draining or resizing; the request waits and retries without evicting
+anything. A lender with continuous traffic therefore restores only in a gap
+between its requests, and the waiting request gives up after the model's
+`request_queue_timeout_seconds`. A borrower that cannot be evicted makes the restore fail with an
+out-of-memory error, so the lender keeps its reduced pool and its cache.
+
+Once a lender's combined demand has exceeded its reduced pool, or one of its
+borrowers has unloaded, the lender is marked for restore. The next time it is
+idle when a request is admitted, the coordinator evicts its idle borrowers and
+rebuilds the pool at the largest size that fits, even if that request alone
+would fit. A borrower loaded or used within `gateway.swap_hold_ms` is not
+evicted for this opportunistic restore. A restore forced by demand that does
+not fit ignores the hold and evicts idle borrowers at once. A lender that was
+just restored can be shrunk again by the next co-resident load without
+waiting for the hold, so frequent alternation between a lender's full demand
+and a small model still rebuilds the lender's pool each time. Unloading a borrower through the API regrows each idle
+lender that lost it, without evicting that lender's other borrowers; a failure
+is logged as `context_restore_failed`. While a lender's pool is reduced,
+admission counts the demand of requests already being admitted alongside the
+active reservations, so simultaneous arrivals see their combined demand. A
+restore that cannot fit falls back to the reduced pool and is not retried until
+the lender's demand exceeds it again.
+
+Only a request whose combined demand exceeds the reduced pool waits for a
+restore. A request that fits runs at once, even when a restore is pending and a
+borrower is busy, held or cannot be evicted. Both fixed-slot and
+`concurrency_auto` lenders restore to the full fitted pool. A
+`concurrency_auto` lender regains additional sequences on demand afterwards.
 
 ## Files and selection
 
@@ -134,6 +227,16 @@ managed client can acquire the global background lease. It accepts 60 to 86400
 seconds and defaults to 900. Lease records use the managed-key database and
 survive gateway restarts. See
 [Background availability and leases](background-leases.md).
+
+`gateway.swap_hold_ms` (default 15000) and `gateway.swap_quantum_ms` (default
+180000) stop agentic clients from swapping large models on every turn. If a
+queued request needs a model that would evict one used within the hold, it
+waits until that model goes idle. A loaded model keeps this protection for at
+least the quantum after it loads, so each swap buys one quantum of work before
+the next. Higher-priority requests and voice media skip the wait. Set
+`swap_hold_ms: 0` to disable it. Both values must satisfy
+`0 <= hold <= quantum <= 300000`. The setting only applies when `auto_swap` is
+enabled.
 
 `gateway.default_model_preload_delay_ms` delays the startup load of
 `default_model` so the GPU is not allocated while Windows is still bringing up

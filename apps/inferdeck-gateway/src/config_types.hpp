@@ -50,6 +50,8 @@ struct GatewayConfig {
     int transcription_max_body_mb{200};
     int transcription_decoded_budget_mb{1024};
     int transcription_upload_timeout_ms{600000};
+    int swap_hold_ms{15000};
+    int swap_quantum_ms{180000};
     int background_idle_after_seconds{900};
     int default_model_preload_delay_ms{0};
     model::SamplingConfig sampling{};

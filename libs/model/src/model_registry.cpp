@@ -65,7 +65,8 @@ void ModelRegistry::register_model(ModelInfo info) {
 void ModelRegistry::unregister_model(const std::string& name) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& [alias_name, alias] : aliases_) {
-        if (alias.target == name) {
+        if (alias.target == name ||
+            std::find(alias.fallbacks.begin(), alias.fallbacks.end(), name) != alias.fallbacks.end()) {
             throw std::invalid_argument("model is targeted by alias: " + alias_name);
         }
     }
@@ -151,14 +152,28 @@ foundation::Result<ModelAlias> ModelRegistry::set_alias(ModelAlias alias) {
         alias.required_capabilities = existing->second.required_capabilities;
     }
     std::vector<std::string> mismatches;
-    if (target->second.context_size < alias.required_context_size) {
-        mismatches.push_back("context_size requires at least " +
-                             std::to_string(alias.required_context_size));
-    }
-    for (const auto& capability : alias.required_capabilities) {
-        if (!target->second.supports(capability)) {
-            mismatches.push_back("missing capability " + capability);
+    const auto check = [&](const ModelInfo& candidate, const std::string& prefix) {
+        if (candidate.context_size < alias.required_context_size) {
+            mismatches.push_back(prefix + "context_size requires at least " +
+                                 std::to_string(alias.required_context_size));
         }
+        for (const auto& capability : alias.required_capabilities) {
+            if (!candidate.supports(capability)) {
+                mismatches.push_back(prefix + "missing capability " + capability);
+            }
+        }
+    };
+    check(target->second, "");
+    for (std::size_t i = 0; i < alias.fallbacks.size(); ++i) {
+        const auto& fallback = alias.fallbacks[i];
+        const auto entry = entries_.find(fallback);
+        if (fallback == alias.target || entry == entries_.end() ||
+            std::find(alias.fallbacks.begin(), alias.fallbacks.begin() + i, fallback) !=
+                alias.fallbacks.begin() + i) {
+            return foundation::Err<ModelAlias>(foundation::ErrorCode::InvalidArgument,
+                "alias fallback must be a distinct registered concrete model: " + fallback);
+        }
+        check(entry->second, "fallback " + fallback + " ");
     }
     if (!mismatches.empty()) {
         std::string message = "incompatible alias target: ";
@@ -182,15 +197,29 @@ foundation::Result<void> ModelRegistry::remove_alias(const std::string& name) {
     return foundation::Ok();
 }
 
-foundation::Result<std::string> ModelRegistry::resolve(const std::string& name) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (entries_.contains(name)) return foundation::Ok(name);
-    const auto alias = aliases_.find(name);
-    if (alias != aliases_.end() && entries_.contains(alias->second.target)) {
-        return foundation::Ok(alias->second.target);
+foundation::Result<std::string> ModelRegistry::resolve(
+    const std::string& name,
+    const std::function<bool(const std::string&)>& prefer) const {
+    std::vector<std::string> candidates;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (entries_.contains(name)) return foundation::Ok(name);
+        const auto alias = aliases_.find(name);
+        if (alias == aliases_.end() || !entries_.contains(alias->second.target)) {
+            return foundation::Err<std::string>(foundation::ErrorCode::NotFound,
+                                                "model not registered: " + name);
+        }
+        candidates.push_back(alias->second.target);
+        for (const auto& fallback : alias->second.fallbacks) {
+            if (entries_.contains(fallback)) candidates.push_back(fallback);
+        }
     }
-    return foundation::Err<std::string>(foundation::ErrorCode::NotFound,
-                                        "model not registered: " + name);
+    if (prefer && candidates.size() > 1) {
+        for (const auto& candidate : candidates) {
+            if (prefer(candidate)) return foundation::Ok(candidate);
+        }
+    }
+    return foundation::Ok(candidates.front());
 }
 
 std::vector<ModelAlias> ModelRegistry::aliases() const {

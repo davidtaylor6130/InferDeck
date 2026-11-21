@@ -66,6 +66,7 @@ public:
     }
     virtual bool is_loaded() const = 0;
     virtual bool execution_healthy() const { return true; }
+    virtual bool compute_degraded() const { return false; }
     virtual int vram_usage_mb() const = 0;
     virtual int n_slots() const = 0;
     virtual int n_free_slots() const = 0;
@@ -73,6 +74,7 @@ public:
     virtual int min_slots() const { return n_slots(); }
     virtual bool can_resize_slots() const { return false; }
     virtual bool can_reclaim_idle_context() const { return false; }
+    virtual int reclaimable_idle_context_mb() const { return 0; }
     virtual foundation::Result<bool> reclaim_idle_context(
         int additional_reserve_mb, const LifecycleControl& control) {
         (void)additional_reserve_mb;

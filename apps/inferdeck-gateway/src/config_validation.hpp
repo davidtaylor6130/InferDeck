@@ -185,13 +185,6 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                              "gateway.voice_session_grace_ms must be between 1000 and 120000");
             }
-            if (gateway["default_model_preload_delay_ms"] &&
-                (gateway["default_model_preload_delay_ms"].as<int>() < 0 ||
-                 gateway["default_model_preload_delay_ms"].as<int>() > 3600000)) {
-                return foundation::Err<void>(
-                    foundation::ErrorCode::InvalidArgument,
-                    "gateway.default_model_preload_delay_ms must be between 0 and 3600000");
-            }
             if (gateway["transcription_upload_timeout_ms"] &&
                 (gateway["transcription_upload_timeout_ms"].as<int>() < 30000 ||
                  gateway["transcription_upload_timeout_ms"].as<int>() > 3600000)) {
@@ -216,12 +209,26 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                              "gateway.speech_admission_timeout_ms must be between 1000 and 600000");
             }
+            if (gateway["default_model_preload_delay_ms"] &&
+                (gateway["default_model_preload_delay_ms"].as<int>() < 0 ||
+                 gateway["default_model_preload_delay_ms"].as<int>() > 3600000)) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "gateway.default_model_preload_delay_ms must be between 0 and 3600000");
+            }
             if (gateway["background_idle_after_seconds"] &&
                 (gateway["background_idle_after_seconds"].as<int>() < 60 ||
                  gateway["background_idle_after_seconds"].as<int>() > 86400)) {
                 return foundation::Err<void>(
                     foundation::ErrorCode::InvalidArgument,
                     "gateway.background_idle_after_seconds must be between 60 and 86400");
+            }
+            const int swap_hold = gateway["swap_hold_ms"] ? gateway["swap_hold_ms"].as<int>() : 15000;
+            const int swap_quantum = gateway["swap_quantum_ms"] ? gateway["swap_quantum_ms"].as<int>() : 180000;
+            if (swap_hold < 0 || swap_quantum < swap_hold || swap_quantum > 300000) {
+                return foundation::Err<void>(
+                    foundation::ErrorCode::InvalidArgument,
+                    "gateway.swap_hold_ms and gateway.swap_quantum_ms must satisfy 0 <= hold <= quantum <= 300000");
             }
             if (gateway["n_batch"] && gateway["n_ubatch"] &&
                 gateway["n_ubatch"].as<int>() > gateway["n_batch"].as<int>()) {
@@ -631,6 +638,13 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                             foundation::ErrorCode::InvalidArgument,
                             "speculative max_active_requests exceeds slot bounds: " + name);
                     }
+                    const int max_batch_draft = speculative["max_batch_draft_tokens"]
+                        ? speculative["max_batch_draft_tokens"].as<int>() : 8;
+                    if (max_batch_draft < 1 || max_batch_draft > 64) {
+                        return foundation::Err<void>(
+                            foundation::ErrorCode::InvalidArgument,
+                            "speculative max_batch_draft_tokens must be between 1 and 64: " + name);
+                    }
                 }
                 auto sampling = validate_sampling_node(
                     entry["sampling"], "model_registry." + name + ".sampling");
@@ -682,6 +696,24 @@ inline foundation::Result<void> validate_config_node(const YAML::Node& root) {
                 if (!names.contains(target)) {
                     return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
                                                  "model alias target must be concrete: " + name);
+                }
+                if (alias["fallbacks"]) {
+                    if (!alias["fallbacks"].IsSequence()) {
+                        return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                                     "model alias fallbacks must be a sequence: " + name);
+                    }
+                    std::unordered_set<std::string> fallbacks{target};
+                    for (const auto& fallback : alias["fallbacks"]) {
+                        if (!fallback.IsScalar()) {
+                            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                "model alias fallbacks must be model IDs: " + name);
+                        }
+                        const auto value = fallback.as<std::string>();
+                        if (!names.contains(value) || !fallbacks.insert(value).second) {
+                            return foundation::Err<void>(foundation::ErrorCode::InvalidArgument,
+                                "model alias fallbacks must be distinct concrete models: " + name);
+                        }
+                    }
                 }
                 const int required_context = alias["required_context_size"]
                     ? alias["required_context_size"].as<int>() : 0;

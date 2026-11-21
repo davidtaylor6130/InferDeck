@@ -213,7 +213,8 @@ void record_request(const GatewayDeps& deps,
 
 foundation::Result<ResolvedModelName> resolve_model_name(
     const GatewayDeps& deps, const std::string& requested) {
-    auto resolved = deps.coordinator.registry().resolve(requested);
+    auto resolved = deps.coordinator.registry().resolve(
+        requested, [&deps](const std::string& name) { return deps.coordinator.is_ready(name); });
     if (!resolved) {
         return foundation::Err<ResolvedModelName>(resolved.error().code,
                                                   resolved.error().message);

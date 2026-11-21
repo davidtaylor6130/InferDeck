@@ -199,6 +199,38 @@ nlohmann::json model_limits_json(const model::ModelInfo& info) {
     };
 }
 
+nlohmann::json alias_discovery_json(model::BackendCoordinator& coordinator,
+                                    const model::ModelAlias& alias) {
+    auto& registry = coordinator.registry();
+    const auto resolved = registry.resolve(
+        alias.name, [&coordinator](const std::string& name) { return coordinator.is_ready(name); });
+    std::optional<model::ModelInfo> limiting;
+    std::vector<std::string> capabilities;
+    bool has_vision = true;
+    std::vector<std::string> candidates{alias.target};
+    candidates.insert(candidates.end(), alias.fallbacks.begin(), alias.fallbacks.end());
+    for (const auto& name : candidates) {
+        const auto info = registry.get_info_result(name);
+        if (!info) continue;
+        if (!limiting) {
+            capabilities = info->capabilities;
+        } else {
+            std::erase_if(capabilities, [&](const std::string& capability) {
+                return !info->supports(capability);
+            });
+        }
+        if (!limiting || info->context_size < limiting->context_size) limiting = *info;
+        has_vision = has_vision && info->has_vision;
+    }
+    return {
+        {"resolved_model", resolved ? *resolved : alias.target},
+        {"limits", limiting ? model_limits_json(*limiting) : nlohmann::json::object()},
+        {"context_size", limiting ? limiting->context_size : 0},
+        {"capabilities", capabilities},
+        {"has_vision", limiting && has_vision},
+    };
+}
+
 nlohmann::json optional_price_json(const std::optional<double>& price) {
     return price ? nlohmann::json(*price) : nlohmann::json(nullptr);
 }
@@ -289,9 +321,10 @@ nlohmann::json build_dashboard_models(
         auto entry = dashboard_model_entry(
             alias.name, *info, find_resident(alias.target),
             coordinator.registry().has_factory(info->runtime));
+        entry.update(alias_discovery_json(coordinator, alias));
         entry["alias"] = true;
         entry["alias_target"] = alias.target;
-        entry["resolved_model"] = alias.target;
+        entry["alias_fallbacks"] = alias.fallbacks;
         entry["required_context_size"] = alias.required_context_size;
         entry["required_capabilities"] = alias.required_capabilities;
         entry["alias_contract"] = {

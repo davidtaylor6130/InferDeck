@@ -77,6 +77,47 @@ class EngineFinalizerTests(unittest.TestCase):
         self.assertTrue(LIFECYCLE.finalize_engine_caches(engine))
         self.assertTrue(unrelated_finalizer.alive)
 
+    def test_kernel_scratch_is_released_and_rearmed(self):
+        class Tensor:
+            def __init__(self, count, size):
+                self.count, self.size = count, size
+            def numel(self):
+                return self.count
+            def element_size(self):
+                return self.size
+        calls = []
+        module = types.ModuleType("radiance_mxfp4")
+        module._decode_scratch = [Tensor(8, 4), Tensor(2, 4)]
+        module._decode_scratch_ready = [True]
+        module._ext = types.SimpleNamespace(set_decode_scratch=lambda *args: calls.append(args))
+        with patch.dict(sys.modules, {"radiance_mxfp4": module}):
+            self.assertEqual(LIFECYCLE.release_kernel_scratch(), 40)
+            self.assertEqual(module._decode_scratch, [None, None])
+            self.assertFalse(module._decode_scratch_ready[0])
+            self.assertEqual(calls, [(0, 0, 0)])
+            self.assertEqual(LIFECYCLE.release_kernel_scratch(), 0)
+            self.assertEqual(len(calls), 1)
+        self.assertEqual(LIFECYCLE.release_kernel_scratch(), 0)
+
+    def test_failed_load_frames_release_partial_model(self):
+        def load():
+            partial = Model()
+            load.ref = weakref.ref(partial)
+            raise OSError("paging file too small")
+        def wrapped():
+            try:
+                load()
+            except OSError as error:
+                raise RuntimeError("load failed") from error
+        try:
+            wrapped()
+        except RuntimeError as error:
+            self.assertIsNotNone(load.ref())
+            self.assertEqual(LIFECYCLE.release_exception_frames(error), 2)
+            gc.collect()
+            self.assertIsNone(load.ref())
+        self.assertEqual(LIFECYCLE.release_exception_frames(None), 0)
+
     def test_engine_without_finalizer_is_a_noop(self):
         self.assertFalse(LIFECYCLE.finalize_engine_caches(Engine()))
 
