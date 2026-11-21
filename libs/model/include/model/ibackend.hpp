@@ -73,6 +73,7 @@ public:
     virtual int min_slots() const { return n_slots(); }
     virtual bool can_resize_slots() const { return false; }
     virtual bool can_reclaim_idle_context() const { return false; }
+    virtual int reclaimable_idle_context_mb() const { return 0; }
     virtual foundation::Result<bool> reclaim_idle_context(
         int additional_reserve_mb, const LifecycleControl& control) {
         (void)additional_reserve_mb;

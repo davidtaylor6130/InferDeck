@@ -101,6 +101,7 @@ public:
   int min_slots() const noexcept override { return info_.concurrency_auto ? 1 : info_.min_slots; }
   bool can_resize_slots() const noexcept override;
   bool can_reclaim_idle_context() const override;
+  int reclaimable_idle_context_mb() const override;
   inferdeck::foundation::Result<bool> reclaim_idle_context(
       int additional_reserve_mb,
       const inferdeck::model::LifecycleControl& control) override;

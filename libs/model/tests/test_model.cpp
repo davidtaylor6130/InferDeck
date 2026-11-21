@@ -105,6 +105,7 @@ public:
     bool can_reclaim_idle_context() const override {
         return reclaimable_mb.load() > 0;
     }
+    int reclaimable_idle_context_mb() const override { return reclaimable_mb.load(); }
     Result<bool> reclaim_idle_context(int reserve_mb, const LifecycleControl& control) override {
         if (control.is_cancelled()) return Err<bool>(ErrorCode::Cancelled, "cancelled");
         record("reclaim_context", std::to_string(reserve_mb));
@@ -2287,6 +2288,9 @@ TEST_CASE("BackendCoordinator: insufficient idle context reclaim does not evict 
     CHECK_FALSE(b_slot);
     CHECK(coordinator.is_loaded("a"));
     CHECK_FALSE(coordinator.is_loaded("b"));
+    CHECK(warm->reclaimable_mb.load() == 1000);
+    CHECK(warm->n_slots() == 1);
+    CHECK(warm->vram_mb.load() == 5000);
 }
 
 TEST_CASE("BackendCoordinator: one cold prepare completes before another can swap",

@@ -201,14 +201,9 @@ foundation::Result<int> BackendCoordinator::acquire_slot(
                     load_waiter->resource_blocked = true;
                     load_waiter->prepared = false;
                     const auto generation_before = resource_generation_;
-                    const bool reclaim_bypassed =
-                        !swap_deferred_locked(*load_waiter, now) &&
-                        swap_deferred_locked(*load_waiter, now, false);
-                    if (reclaim_bypassed) reclaim_bypassed_models_.insert(name);
                     lock.unlock();
                     auto prepared = opts.prepare();
                     lock.lock();
-                    if (reclaim_bypassed) reclaim_bypassed_models_.erase(name);
                     load_waiter = std::find_if(waiters_.begin(), waiters_.end(),
                         [waiter_id](const SlotWaiter& item) { return item.id == waiter_id; });
                     if (load_waiter != waiters_.end()) load_waiter->preparing = false;
@@ -649,8 +644,7 @@ bool BackendCoordinator::waiter_is_resource_barrier_locked(const SlotWaiter& wai
     return waiter.resource_blocked && !model_is_independent_sidecar_locked(waiter.model);
 }
 
-bool BackendCoordinator::swap_deferred_locked(const SlotWaiter& waiter, time_point now,
-    bool reclaim_bypasses) const
+bool BackendCoordinator::swap_deferred_locked(const SlotWaiter& waiter, time_point now) const
 {
     if (swap_hold_ <= std::chrono::milliseconds::zero() ||
         model_is_priority_media_locked(waiter.model)) return false;
@@ -658,13 +652,15 @@ bool BackendCoordinator::swap_deferred_locked(const SlotWaiter& waiter, time_poi
     if (own != instances_.end() && own->second && own->second->is_loaded()) return false;
     const auto info = registry_.get_info_result(waiter.model);
     if (!info || (vram_budget_mb_ > 0 && available_vram_locked() >= info->vram_required_mb)) return false;
-    if (reclaim_bypasses) for (const auto& [name, backend] : instances_) {
+    std::int64_t reclaimable_mb = 0;
+    for (const auto& [name, backend] : instances_) {
         const auto active = active_requests_by_model_.find(name);
         if (name != waiter.model && !resizing_models_.contains(name) &&
             (active == active_requests_by_model_.end() || active->second == 0) &&
             backend && backend->is_loaded() && backend->execution_healthy() &&
-            backend->can_reclaim_idle_context()) return false;
+            backend->can_reclaim_idle_context()) reclaimable_mb += backend->reclaimable_idle_context_mb();
     }
+    if (reclaimable_mb > 0 && reclaimable_mb >= info->vram_required_mb - available_vram_locked()) return false;
     for (const auto& [name, backend] : instances_) {
         if (!backend || !backend->is_loaded() || !backend->info().eviction_eligible ||
             backend->info().residency == ResidencyPolicy::Always ||

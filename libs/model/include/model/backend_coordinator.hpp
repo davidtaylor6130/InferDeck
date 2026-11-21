@@ -243,8 +243,7 @@ private:
         const std::string& name, const std::string& reservation_key) const;
     bool waiter_is_actionable_locked(const SlotWaiter& waiter) const;
     bool waiter_is_resource_barrier_locked(const SlotWaiter& waiter) const;
-    bool swap_deferred_locked(const SlotWaiter& waiter, time_point now,
-        bool reclaim_bypasses = true) const;
+    bool swap_deferred_locked(const SlotWaiter& waiter, time_point now) const;
     bool waiter_is_next_locked(std::uint64_t id, time_point now) const;
     void erase_waiter_locked(std::uint64_t id);
     foundation::Result<int> issue_lease_locked(const std::string& name, int backend_slot, const RequestDemand* demand = nullptr,
@@ -284,7 +283,6 @@ private:
     std::int64_t next_lease_id_{1};
     std::unordered_set<std::string> draining_models_;
     std::unordered_set<std::string> resizing_models_;
-    std::unordered_set<std::string> reclaim_bypassed_models_;
     std::unordered_map<std::string, std::unordered_set<std::string>> context_borrowers_;
     int vram_budget_mb_{0};
     int vram_safety_margin_mb_{1024};

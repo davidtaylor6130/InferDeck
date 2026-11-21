@@ -831,6 +831,25 @@ bool LlamaCppModel::can_resize_slots() const noexcept {
          info_.n_slots > info_.min_slots;
 }
 
+int LlamaCppModel::reclaimable_idle_context_mb() const {
+  std::lock_guard lk(mtx_);
+  if (!loaded_.load() || shared_ctx_ == nullptr) return 0;
+  const int minimum_ctx = info_.concurrency_auto
+      ? std::max(512, std::min(std::max(512, info_.context_size),
+                               std::max(512, cfg_.n_batch)))
+      : std::max(512, info_.context_size);
+  const std::int64_t minimum =
+      static_cast<std::int64_t>(minimum_ctx) + speculative_draft_tokens();
+  const std::int64_t capacity = static_cast<std::int64_t>(llama_n_ctx(shared_ctx_));
+  if (capacity <= minimum) return 0;
+  const Result<std::size_t> memory =
+      context_pool_device_memory_bytes(shared_ctx_, draft_ctx_);
+  if (!memory) return 0;
+  const std::int64_t mb = static_cast<std::int64_t>(*memory / (1024ULL * 1024ULL));
+  return static_cast<int>(std::min<std::int64_t>(
+      mb * (capacity - minimum) / capacity, std::numeric_limits<int>::max()));
+}
+
 bool LlamaCppModel::can_reclaim_idle_context() const {
   std::lock_guard lk(mtx_);
   if (!loaded_.load() || !info_.context_pool_auto || !cfg_.kv_unified ||
