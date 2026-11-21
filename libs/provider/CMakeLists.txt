@@ -75,6 +75,16 @@ set_target_properties(inferdeck-provider-echo-v1 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/provider-examples"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/provider-examples")
 
+add_library(inferdeck-provider-echo-min MODULE examples/echo_provider_min.cpp)
+target_include_directories(inferdeck-provider-echo-min PRIVATE include)
+target_compile_features(inferdeck-provider-echo-min PRIVATE cxx_std_20)
+set_target_properties(inferdeck-provider-echo-min PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "echo_min.provider"
+    CXX_VISIBILITY_PRESET hidden
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/provider-examples"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/provider-examples")
+
 # Validates a provider library before it is installed. See docs/providers.md.
 add_executable(inferdeck-provider-check tools/provider_check.cpp)
 target_link_libraries(inferdeck-provider-check PRIVATE provider model foundation)
@@ -91,8 +101,9 @@ if(INFERDECK_BUILD_TESTS)
     target_compile_features(provider_tests PRIVATE cxx_std_23)
     target_compile_definitions(provider_tests PRIVATE
         INFERDECK_ECHO_PROVIDER="$<TARGET_FILE:inferdeck-provider-echo>"
-        INFERDECK_ECHO_V1_PROVIDER="$<TARGET_FILE:inferdeck-provider-echo-v1>")
-    add_dependencies(provider_tests inferdeck-provider-echo inferdeck-provider-echo-v1)
+        INFERDECK_ECHO_V1_PROVIDER="$<TARGET_FILE:inferdeck-provider-echo-v1>"
+        INFERDECK_ECHO_MIN_PROVIDER="$<TARGET_FILE:inferdeck-provider-echo-min>")
+    add_dependencies(provider_tests inferdeck-provider-echo inferdeck-provider-echo-v1 inferdeck-provider-echo-min)
     if(MSVC)
         target_compile_options(provider_tests PRIVATE /W4 /utf-8 /FS)
     endif()

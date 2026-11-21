@@ -4,6 +4,7 @@
 
 #include "gateway/auth.hpp"
 #include "audio_decoder.hpp"
+#include "transcription_chunking.hpp"
 #include "foundation/json_utils.hpp"
 #include "foundation/logging.hpp"
 #include "model/image_probe.hpp"
@@ -328,14 +329,37 @@ public:
 
 private:
     friend foundation::Result<DecodePermit> acquire_decode_permit(
-        const httplib::Request&, const std::shared_ptr<MediaJob>&);
+        const httplib::Request&, const std::shared_ptr<MediaJob>&,
+        std::chrono::milliseconds);
     bool held_{true};
 };
 
+std::atomic<std::size_t> decoded_bytes_in_flight{0};
+
+class DecodedBudget {
+public:
+    DecodedBudget(std::size_t bytes, std::size_t limit) : bytes_(bytes) {
+        const auto previous = decoded_bytes_in_flight.fetch_add(bytes);
+        if (!transcription_budget_admits(previous, bytes, limit)) {
+            decoded_bytes_in_flight.fetch_sub(bytes);
+            bytes_ = 0;
+            admitted_ = false;
+        }
+    }
+    DecodedBudget(const DecodedBudget&) = delete;
+    DecodedBudget& operator=(const DecodedBudget&) = delete;
+    ~DecodedBudget() { decoded_bytes_in_flight.fetch_sub(bytes_); }
+    bool admitted() const { return admitted_; }
+
+private:
+    std::size_t bytes_;
+    bool admitted_{true};
+};
+
 foundation::Result<DecodePermit> acquire_decode_permit(
-    const httplib::Request& req, const std::shared_ptr<MediaJob>& job) {
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::seconds{30};
+    const httplib::Request& req, const std::shared_ptr<MediaJob>& job,
+    std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::unique_lock lock(decode_mutex);
     while (decode_busy) {
         if (req.is_connection_closed() || job->cancelled->load()) {
@@ -344,6 +368,9 @@ foundation::Result<DecodePermit> acquire_decode_permit(
                 "request cancelled while waiting for audio decoding");
         }
         if (std::chrono::steady_clock::now() >= deadline) {
+            foundation::LOG_WARN("media_admission_failed",
+                                 "modality=stt stage=decode_permit waited_ms={}",
+                                 timeout.count());
             return foundation::Err<DecodePermit>(
                 foundation::ErrorCode::Timeout,
                 "timeout waiting for audio decoding");
@@ -424,8 +451,9 @@ public:
     VoiceSessionGuard(const VoiceSessionGuard&) = delete;
     VoiceSessionGuard& operator=(const VoiceSessionGuard&) = delete;
     ~VoiceSessionGuard() {
-        if (coordinator_) coordinator_->release_priority_session(key_, token_);
+        if (coordinator_) coordinator_->release_priority_session(key_, token_, ends_turn_);
     }
+    void ends_turn() { ends_turn_ = true; }
     void keep() { coordinator_ = nullptr; }
     void refresh_and_keep() {
         if (coordinator_) {
@@ -441,6 +469,7 @@ private:
     std::string key_;
     std::chrono::milliseconds duration_{};
     std::uint64_t token_{0};
+    bool ends_turn_{false};
 };
 
 struct SpeechStreamState {
@@ -491,7 +520,7 @@ struct SpeechStreamState {
         if (coordinator) {
             (void)coordinator->release_slot(model, slot);
             if (!session_key.empty() && session_token != 0) {
-                coordinator->release_priority_session(session_key, session_token);
+                coordinator->release_priority_session(session_key, session_token, true);
             }
         }
     }
@@ -500,9 +529,15 @@ struct SpeechStreamState {
 foundation::Result<int> acquire_media_slot(const httplib::Request& req,
                                             const GatewayDeps& deps,
                                             const std::string& model_name,
-                                            const std::shared_ptr<MediaJob>& job) {
-    constexpr auto video_load_timeout = std::chrono::minutes{5};
-    const auto deadline = std::chrono::steady_clock::now() + video_load_timeout;
+                                            const std::shared_ptr<MediaJob>& job,
+                                            std::chrono::milliseconds timeout = std::chrono::minutes{5},
+                                            const char* label = "",
+                                            bool background = false) {
+    constexpr auto load_budget = std::chrono::minutes{5};
+    const bool resident = deps.coordinator.is_loaded(model_name);
+    const auto queue_timeout = resident ? timeout : std::max<std::chrono::milliseconds>(timeout, load_budget);
+    const auto deadline = std::chrono::steady_clock::now() + queue_timeout;
+    const auto stage = std::make_shared<std::atomic<const char*>>(resident ? "slot_queue" : "model_load");
     const std::function<bool()> cancelled = [&req, job] {
         return req.is_connection_closed() || job->cancelled->load();
     };
@@ -512,15 +547,28 @@ foundation::Result<int> acquire_media_slot(const httplib::Request& req,
         deps.public_data_plane_access &&
             classify_route(req.method, req.path) ==
                 RoutePrincipal::OpenAIDataPlane);
-    options.timeout = video_load_timeout;
+    options.timeout = queue_timeout;
+    options.background = background;
+    if (background) options.priority -= 1;
     options.cancelled = cancelled;
-    options.prepare = [&deps, model_name, deadline, cancelled] {
+    options.prepare = [&deps, model_name, deadline, cancelled, stage] {
+        stage->store("model_load");
         auto loaded = ensure_model_loaded(
             deps, model_name, deadline, cancelled);
+        stage->store("slot_queue");
         if (loaded.ok) return foundation::Ok();
         return foundation::Err<void>(loaded.error_code, loaded.message);
     };
-    return deps.coordinator.acquire_slot(model_name, options);
+    auto slot = deps.coordinator.acquire_slot(model_name, options);
+    if (!slot && *label) {
+        foundation::LOG_WARN("media_admission_failed",
+                             "modality={} model={} stage={} waited_ms={} error={}",
+                             label, model_name, stage->load(),
+                             std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 queue_timeout - (deadline - std::chrono::steady_clock::now())).count(),
+                             slot.error().message);
+    }
+    return slot;
 }
 
 int status_for(foundation::ErrorCode code) {
@@ -633,9 +681,9 @@ foundation::Result<model::TranscriptionRequest> decode_wav(
                                                              "WAVE data is not aligned to complete sample frames");
     }
     const std::size_t frames = sample_bytes / frame_size;
-    if (frames == 0 || frames > static_cast<std::size_t>(sample_rate) * 60ULL * 30ULL) {
+    if (frames == 0 || frames > static_cast<std::size_t>(sample_rate) * 60ULL * 240ULL) {
         return foundation::Err<model::TranscriptionRequest>(foundation::ErrorCode::InvalidArgument,
-                                                             "audio duration is invalid or exceeds 30 minutes");
+                                                             "audio duration is invalid or exceeds 4 hours");
     }
     model::TranscriptionRequest request;
     request.sample_rate = static_cast<int>(sample_rate);

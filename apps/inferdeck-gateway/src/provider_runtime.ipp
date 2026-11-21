@@ -1,12 +1,6 @@
 /// <summary>Provider status served by GET /api/inferdeck/v1/providers; rebuilt on every gateway start.</summary>
 nlohmann::json g_provider_report = nlohmann::json::object();
 
-/// <summary>
-/// Installs the provider DLLs loaded at process start. The gateway links no
-/// runtime: every runtime, for every modality, is a *.provider.dll (see
-/// docs/providers.md). Standard runtimes without a DLL are reported as
-/// "not_installed". Called once per gateway start.
-/// </summary>
 void install_gateway_providers(const inferdeck::gateway::GatewayConfig& cfg,
                                model::ModelRegistry& registry)
 {

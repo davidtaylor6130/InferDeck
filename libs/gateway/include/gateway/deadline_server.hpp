@@ -2,14 +2,82 @@
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <chrono>
+#include <memory>
+#include <string>
+#include <string_view>
 
 namespace inferdeck::gateway {
 
+inline bool is_transcription_upload(std::string_view method, std::string_view path) {
+    return method == "POST" && path == "/v1/audio/transcriptions";
+}
+
+class UploadDeadlineStream final : public httplib::Stream {
+public:
+    UploadDeadlineStream(std::unique_ptr<httplib::Stream> inner,
+                         std::chrono::milliseconds short_deadline,
+                         std::chrono::milliseconds read_timeout)
+        : inner_(std::move(inner)), short_deadline_(short_deadline), read_timeout_(read_timeout) {}
+
+    void allow_long_deadline() { long_deadline_ = true; }
+
+    bool is_readable() const override { return inner_->is_readable(); }
+    bool wait_readable() const override { return inner_->wait_readable(); }
+    bool wait_writable() const override { return inner_->wait_writable(); }
+    bool is_peer_alive() const override { return inner_->is_peer_alive(); }
+    ssize_t read(char* ptr, size_t size) override {
+        if (!long_deadline_) {
+            const auto left = short_deadline_.count() - inner_->duration();
+            if (left <= 0) {
+                error_ = httplib::Error::Timeout;
+                return -1;
+            }
+            set_inner_timeout(std::min<time_t>(left, read_timeout_.count()));
+        } else if (!restored_) {
+            set_inner_timeout(read_timeout_.count());
+            restored_ = true;
+        }
+        const ssize_t count = inner_->read(ptr, size);
+        if (count < 0) error_ = inner_->get_error();
+        return count;
+    }
+    ssize_t write(const char* ptr, size_t size) override { return inner_->write(ptr, size); }
+    void get_remote_ip_and_port(std::string& ip, int& port) const override {
+        inner_->get_remote_ip_and_port(ip, port);
+    }
+    void get_local_ip_and_port(std::string& ip, int& port) const override {
+        inner_->get_local_ip_and_port(ip, port);
+    }
+    socket_t socket() const override { return inner_->socket(); }
+    time_t duration() const override { return inner_->duration(); }
+    void set_read_timeout(time_t sec, time_t usec = 0) override { inner_->set_read_timeout(sec, usec); }
+
+private:
+    void set_inner_timeout(time_t ms) { inner_->set_read_timeout(ms / 1000, (ms % 1000) * 1000); }
+
+    std::unique_ptr<httplib::Stream> inner_;
+    std::chrono::milliseconds short_deadline_;
+    std::chrono::milliseconds read_timeout_;
+    bool restored_{false};
+    bool long_deadline_{false};
+};
+
+inline thread_local UploadDeadlineStream* current_upload_stream = nullptr;
+
 class DeadlineServer final : public httplib::Server {
 public:
-    explicit DeadlineServer(std::chrono::milliseconds request_read_deadline)
-        : request_read_deadline_(request_read_deadline) {}
+    explicit DeadlineServer(std::chrono::milliseconds request_read_deadline,
+                            std::chrono::milliseconds upload_read_deadline = std::chrono::milliseconds{0})
+        : request_read_deadline_(request_read_deadline),
+          upload_read_deadline_(std::max(request_read_deadline, upload_read_deadline)) {}
+
+    static void extend_upload_deadline(const httplib::Request& request) {
+        if (current_upload_stream && is_transcription_upload(request.method, request.path)) {
+            current_upload_stream->allow_long_deadline();
+        }
+    }
 
 protected:
     bool process_and_close_socket(socket_t socket) override {
@@ -24,12 +92,17 @@ protected:
         const auto result = httplib::detail::process_server_socket_core(
             svr_sock_, socket, keep_alive_max_count_, keep_alive_timeout_sec_,
             [&](bool close_connection, bool& connection_closed) {
-                httplib::detail::SocketStream stream(
-                    socket, read_timeout_sec_, read_timeout_usec_,
-                    write_timeout_sec_, write_timeout_usec_,
-                    static_cast<time_t>(request_read_deadline_.count()),
-                    std::chrono::steady_clock::now());
-                return process_request(
+                UploadDeadlineStream stream(
+                    std::make_unique<httplib::detail::SocketStream>(
+                        socket, read_timeout_sec_, read_timeout_usec_,
+                        write_timeout_sec_, write_timeout_usec_,
+                        static_cast<time_t>(upload_read_deadline_.count()),
+                        std::chrono::steady_clock::now()),
+                    request_read_deadline_,
+                    std::chrono::milliseconds{
+                        read_timeout_sec_ * 1000 + read_timeout_usec_ / 1000});
+                current_upload_stream = &stream;
+                const bool handled = process_request(
                     stream, remote_address, remote_port, local_address, local_port,
                     close_connection, connection_closed,
                     [](httplib::Request& request) {
@@ -38,6 +111,8 @@ protected:
                             request.set_header("Content-Length", "0");
                         }
                     }, &websocket_upgraded);
+                current_upload_stream = nullptr;
+                return handled;
             });
         drain_and_close(socket);
         return result;
@@ -70,6 +145,7 @@ private:
     }
 
     std::chrono::milliseconds request_read_deadline_;
+    std::chrono::milliseconds upload_read_deadline_;
 };
 
 }
