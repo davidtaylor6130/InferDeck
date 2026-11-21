@@ -167,8 +167,11 @@ borrowers has unloaded, the lender is marked for restore. The next time it is
 idle when a request is admitted, the coordinator evicts its idle borrowers and
 rebuilds the pool at the largest size that fits, even if that request alone
 would fit. A borrower loaded or used within `gateway.swap_hold_ms` is not
-evicted for this opportunistic restore; a restore forced by demand that does
-not fit ignores the hold. Unloading a borrower through the API regrows each idle
+evicted for this opportunistic restore. A restore forced by demand that does
+not fit ignores the hold and evicts idle borrowers at once. A lender that was
+just restored can be shrunk again by the next co-resident load without
+waiting for the hold, so frequent alternation between a lender's full demand
+and a small model still rebuilds the lender's pool each time. Unloading a borrower through the API regrows each idle
 lender that lost it, without evicting that lender's other borrowers; a failure
 is logged as `context_restore_failed`. While a lender's pool is reduced,
 admission counts the demand of requests already being admitted alongside the

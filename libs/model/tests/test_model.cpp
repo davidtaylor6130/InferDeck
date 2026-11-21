@@ -3567,6 +3567,71 @@ TEST_CASE("BackendCoordinator: co-resident borrower yields when the lender needs
     }
 }
 
+TEST_CASE("BackendCoordinator: a lender regrows partially, then fully, as borrowers leave",
+          "[model][coordinator][context-reclaim]") {
+    for (const bool automatic : {false, true}) {
+        CAPTURE(automatic);
+        ModelRegistry reg;
+        IModelMock* lender = nullptr;
+        BackendCoordinator* coordinator_ptr = nullptr;
+        reg.set_factory([&](const ModelInfo& info) -> std::unique_ptr<IBackend> {
+            auto backend = std::make_unique<IModelMock>(info);
+            backend->vram_mb.store(info.vram_required_mb);
+            if (info.name == "lender") {
+                lender = backend.get();
+                backend->reclaimable_mb.store(1000);
+                backend->pool_capacity.store(8000);
+            }
+            return backend;
+        });
+        auto lender_info = make_info("lender");
+        lender_info.vram_required_mb = 6000;
+        lender_info.concurrency_auto = automatic;
+        lender_info.context_pool_auto = automatic;
+        auto first = make_info("first");
+        first.vram_required_mb = 6000;
+        auto second = make_info("second");
+        second.vram_required_mb = 1000;
+        reg.register_model(lender_info);
+        reg.register_model(first);
+        reg.register_model(second);
+        BackendCoordinator coordinator(reg);
+        coordinator_ptr = &coordinator;
+        coordinator.set_vram_budget(11000, 0);
+        REQUIRE(coordinator.load("lender"));
+        REQUIRE(coordinator.swap_to("first"));
+        lender->reclaimable_mb.store(1000);
+        REQUIRE(coordinator.swap_to("second"));
+        REQUIRE(coordinator.is_loaded("lender"));
+        REQUIRE(coordinator.is_loaded("first"));
+        REQUIRE(coordinator.is_loaded("second"));
+        lender->pool_capacity.store(4000);
+        lender->capacity_handler = [&](const RequestDemand& demand) -> Result<void> {
+            if (std::max(demand.required_context, demand.aggregate_context) <= lender->pool_capacity.load())
+                return Ok();
+            const int resident = static_cast<int>(coordinator_ptr->is_loaded("first")) +
+                static_cast<int>(coordinator_ptr->is_loaded("second"));
+            if (resident == 2) return Err<void>(ErrorCode::OutOfMemory, "context growth below demand");
+            lender->pool_capacity.store(resident == 1 ? 6000 : 8000);
+            return Ok();
+        };
+        const auto control = [] {
+            return LifecycleControl{LifecycleControl::clock::now() + std::chrono::seconds{5}, {}};
+        };
+
+        REQUIRE(coordinator.unload("second"));
+        CHECK(lender->pool_capacity.load() == 6000);
+        CHECK(coordinator.is_loaded("first"));
+        REQUIRE(coordinator.prepare_request_capacity(
+            "lender", RequestDemand{0, 0, 7000, 1, 7000, 1}, control()));
+        CHECK_FALSE(coordinator.is_loaded("first"));
+        CHECK(lender->pool_capacity.load() == 8000);
+        int unloads = 0;
+        for (const CallRecord& call : lender->calls) unloads += call.method == "unload";
+        CHECK(unloads == 0);
+    }
+}
+
 TEST_CASE("BackendCoordinator: restore evicts all borrowers or none",
           "[model][coordinator][context-reclaim]") {
     ModelRegistry reg;
