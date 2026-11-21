@@ -1,4 +1,3 @@
-// Test double for the whisper.cpp C API: one two-token segment, "en".
 #include <whisper.h>
 
 namespace {

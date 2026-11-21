@@ -1,7 +1,3 @@
-// The llama.cpp runtime (text + embeddings, vision, reasoning, MTP) as a v2
-// provider DLL. Built only where ggml is static, so the DLL carries a private
-// llama.cpp/ggml that upgrades independently of the gateway's. See
-// docs/providers.md, "Upgrading a runtime as a DLL".
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -18,7 +14,6 @@ namespace {
 using inferdeck::llama_wrapper::LlamaCppConfig;
 using nlohmann::json;
 
-/// <summary>Mirrors the gateway's make_llama_config: model settings first, then gateway defaults.</summary>
 LlamaCppConfig config_for(const inferdeck::model::ModelInfo& info, const json& gateway)
 {
     LlamaCppConfig config;
@@ -82,7 +77,6 @@ const char* device_type_name(enum ggml_backend_dev_type type)
     }
 }
 
-/// <summary>"quantize" {source, destination, quantization, threads} and "devices" {}.</summary>
 inferdeck::foundation::Result<json> operation(const std::string& name, const json& request)
 {
     using inferdeck::foundation::ErrorCode;

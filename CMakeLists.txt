@@ -3,6 +3,7 @@ file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" INFERDECK_VERSION LIMIT_COUNT
 if(NOT INFERDECK_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
     message(FATAL_ERROR "VERSION must contain one semantic version")
 endif()
+list(APPEND VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vcpkg-triplets")
 project(InferDeck VERSION ${INFERDECK_VERSION} LANGUAGES C CXX)
 add_compile_definitions(INFERDECK_VERSION="${PROJECT_VERSION}")
 

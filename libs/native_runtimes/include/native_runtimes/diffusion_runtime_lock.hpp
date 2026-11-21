@@ -21,12 +21,6 @@
 namespace inferdeck::native_runtimes {
 
 #ifdef _WIN32
-/// <summary>
-/// One lock per process shared by every copy of this code: stable-diffusion.cpp
-/// and LTX ship as separate provider DLLs, each with its own statics, but must
-/// still take turns on the GPU. A named kernel mutex keyed by process id is
-/// the same object in every module.
-/// </summary>
 class DiffusionRuntimeMutex {
 public:
     DiffusionRuntimeMutex()

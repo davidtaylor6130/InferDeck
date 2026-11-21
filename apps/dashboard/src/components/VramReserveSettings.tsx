@@ -8,7 +8,7 @@ import {
 } from '../api';
 import { Button, GroupHeader, GroupList } from './ui';
 
-const DEFAULT_RESERVE_MIB = 1024;
+const DEFAULT_RESERVE_MIB = 2048;
 const MAX_CONFIG_INTEGER = 2_147_483_647;
 
 export function readVramReserve(yaml: string): number {

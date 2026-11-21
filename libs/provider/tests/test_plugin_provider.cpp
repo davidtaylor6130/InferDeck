@@ -315,3 +315,15 @@ TEST_CASE("Provider errors and bad libraries are reported, not thrown", "[provid
     CHECK(model::runtime_contracts().find("echo") != nullptr);
     CHECK(provider::load_plugin_providers(directory / "missing").providers.empty());
 }
+
+TEST_CASE("A v2 table of the frozen minimum size loads and its absent members are ignored", "[provider][plugin][v2]") {
+    const auto descriptor = provider::load_plugin_provider(INFERDECK_ECHO_MIN_PROVIDER);
+    REQUIRE(descriptor);
+    CHECK(descriptor->contract.name == "echo_min");
+    CHECK_FALSE(descriptor->operation);
+    CHECK_FALSE(descriptor->initialize);
+    auto backend = descriptor->factory(echo_model("echo_min"));
+    REQUIRE(backend);
+    CHECK(backend->load());
+    CHECK(backend->unload());
+}

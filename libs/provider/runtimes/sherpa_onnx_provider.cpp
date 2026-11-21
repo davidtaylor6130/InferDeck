@@ -1,5 +1,3 @@
-// sherpa-onnx speech (TTS) and transcription (STT) as one v2 provider DLL.
-// The model's modality picks the backend, as the built-in did.
 #include <algorithm>
 
 #include "model/ibackend.hpp"

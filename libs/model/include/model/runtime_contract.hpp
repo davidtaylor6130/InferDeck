@@ -25,6 +25,7 @@ struct RuntimeContract {
     bool vision{false};
     bool reasoning{false};
     bool speculative{false};
+    std::unordered_set<std::string> speculative_types;
 };
 
 class RuntimeContractRegistry {
@@ -166,6 +167,7 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         true,
         true,
         true,
+        {"mtp", "dflash", "dflash2"},
     });
     registry.register_runtime(RuntimeContract{
         "vllm_radiance",
@@ -174,6 +176,7 @@ inline RuntimeContractRegistry standard_runtime_contracts() {
         true,
         true,
         true,
+        {"mtp"},
     });
     registry.register_runtime(RuntimeContract{
         "jev_style",
