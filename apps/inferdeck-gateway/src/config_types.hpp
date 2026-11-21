@@ -43,7 +43,7 @@ struct GatewayConfig {
     bool swa_full{false};
     bool truncate_prompt{true};
     int vram_budget_mb{0};
-    int vram_safety_margin_mb{2048};
+    int vram_safety_margin_mb{model::k_default_vram_safety_margin_mb};
     int max_queue_size{128};
     int voice_session_grace_ms{15000};
     int speech_admission_timeout_ms{30000};
