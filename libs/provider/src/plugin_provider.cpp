@@ -349,6 +349,10 @@ public:
 
     int min_slots() const override { return static_cast<int>(query(INFERDECK_QUERY_MIN_SLOTS, 0, n_slots())); }
     bool can_resize_slots() const override { return query(INFERDECK_QUERY_CAN_RESIZE_SLOTS, 0, 0) != 0; }
+    int reclaimable_idle_context_mb() const override
+    {
+        return static_cast<int>(std::max<int64_t>(0, query(INFERDECK_QUERY_RECLAIMABLE_IDLE_CONTEXT_MB, 0, 0)));
+    }
     bool can_reclaim_idle_context() const override
     {
         return query(INFERDECK_QUERY_CAN_RECLAIM_IDLE_CONTEXT, 0, 0) != 0;

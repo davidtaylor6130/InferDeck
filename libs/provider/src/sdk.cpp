@@ -420,6 +420,7 @@ int64_t sdk_query(void* instance, int32_t query, int64_t arg)
         case INFERDECK_QUERY_ESTIMATE_VRAM_MB: return target.estimate_vram_mb(static_cast<int>(arg));
         case INFERDECK_QUERY_ADDITIONAL_VRAM_RESERVE_MB: return target.additional_vram_reserve_mb();
         case INFERDECK_QUERY_LIVE_VRAM_ACCOUNTING_COMPLETE: return target.live_vram_accounting_complete() ? 1 : 0;
+        case INFERDECK_QUERY_RECLAIMABLE_IDLE_CONTEXT_MB: return target.reclaimable_idle_context_mb();
         default: return INFERDECK_QUERY_DEFAULT;
         }
     }

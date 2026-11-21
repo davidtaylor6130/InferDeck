@@ -121,6 +121,7 @@ TEST_CASE("A v2 SDK provider is indistinguishable from a built-in backend", "[pr
     CHECK(backend->min_slots() == 1);
     CHECK(backend->can_resize_slots());
     CHECK_FALSE(backend->can_reclaim_idle_context());
+    CHECK(backend->reclaimable_idle_context_mb() == 40);
     REQUIRE(backend->resize_slots(3));
     CHECK(backend->n_slots() == 3);
 
