@@ -19,11 +19,10 @@ architecture; builds with ggml-org/llama.cpp#32694 but without #32704 load the
 model and print gibberish, because the loop passes run the NVFP4 experts
 without their scales.
 
-InferDeck pins `0ea4ffd00`: `b12614` plus ggml-org/llama.cpp#32735, an
-approved one-line Vulkan fix that lets `SCALE` take a strided view. Without it
-the SiTU activation of every MoE layer runs on the CPU, and the R9700 decodes
-at 18 tokens/s instead of 60. Move the pin to the upstream merge once #32735
-lands.
+InferDeck pins upstream master `8a97fa98a` (2026-11-22), the merge of
+ggml-org/llama.cpp#32735, a one-line Vulkan fix that lets `SCALE` take a
+strided view. Without it the SiTU activation of every MoE layer runs on the
+CPU, and the R9700 decodes at 18 tokens/s instead of 60.
 
 ## Weights
 

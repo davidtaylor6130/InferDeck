@@ -7,10 +7,9 @@
   text, vision, tool calls and reasoning effort. See `docs/inkling-2-mini.md`.
 
 ### Changed
-- llama.cpp `d92ea9bb1` to `0ea4ffd00` (`b12614` plus the approved Vulkan
+- llama.cpp `d92ea9bb1` to `8a97fa98a`, the upstream merge of the Vulkan
   SCALE fix ggml-org/llama.cpp#32735, which roughly triples Inkling 2 Mini
-  decode on Vulkan). The pin is the head of an unmerged upstream pull request;
-  re-pin to the upstream merge before merging to `main`.
+  decode on Vulkan.
 - A reasoning config may list `none` as an effort tier when `none_disables` is
   true. The `none` request then reaches the chat template as
   `reasoning_effort: "none"` instead of dropping the variable, for templates
