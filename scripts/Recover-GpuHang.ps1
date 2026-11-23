@@ -21,7 +21,7 @@ if ($Install) {
     Copy-Item $PSCommandPath $script -Force
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -Service $Service"
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1)
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName 'InferDeck GPU Hang Recovery' -Action $action -Trigger $trigger -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
     Write-Host "Installed scheduled task 'InferDeck GPU Hang Recovery' running $script every minute."
     return
@@ -87,6 +87,7 @@ $application = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$Servi
 $children = @(if ($servicePid -gt 0 -and $application) {
     Get-CimInstance Win32_Process -Filter "ParentProcessId=$servicePid" | Where-Object { $_.ExecutablePath -eq $application }
 })
+Set-Content $last (Get-Date -Format s)
 Set-Content $marker "$(Get-Date -Format s)|0"
 sc.exe stop $Service | Out-Null
 $deadline = (Get-Date).AddSeconds(90)
@@ -98,10 +99,15 @@ function Stop-IfPathMatches([int]$ProcessId, [string]$Path) {
 foreach ($child in $children) { Stop-IfPathMatches $child.ProcessId $application }
 if ($servicePid -gt 0) { Stop-IfPathMatches $servicePid $serviceExe }
 foreach ($gpu in Get-PnpDevice -Class Display -PresentOnly | Where-Object { $_.InstanceId -like 'PCI\*' }) {
-    pnputil /restart-device "$($gpu.InstanceId)" | Out-Null
-    Write-Log "restarted $($gpu.FriendlyName) exit=$LASTEXITCODE"
+    $restart = Start-Process pnputil -ArgumentList '/restart-device', "`"$($gpu.InstanceId)`"" -PassThru -NoNewWindow
+    $null = $restart.Handle
+    if (-not $restart.WaitForExit(120000)) {
+        Stop-Process -Id $restart.Id -Force -ErrorAction SilentlyContinue
+        Write-Log "restart of $($gpu.FriendlyName) timed out after 120 s"
+    } else {
+        Write-Log "restarted $($gpu.FriendlyName) exit=$($restart.ExitCode)"
+    }
 }
-Set-Content $last (Get-Date -Format s)
 Start-Sleep 20
 Start-Service $Service -ErrorAction SilentlyContinue
 $state = (Get-Service $Service -ErrorAction SilentlyContinue).Status
