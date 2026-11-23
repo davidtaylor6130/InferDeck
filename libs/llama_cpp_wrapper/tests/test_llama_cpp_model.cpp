@@ -93,12 +93,29 @@ TEST_CASE("LlamaCppModel: reasoning effort reaches chat template inputs",
 
   common_chat_templates_inputs disabled_inputs;
   disabled_inputs.enable_thinking = true;
+  disabled_inputs.chat_template_kwargs["reasoning_effort"] = "\"low\"";
   effort = apply_reasoning_effort(
       disabled_inputs, std::string{"none"}, info);
   REQUIRE(effort);
   CHECK(*effort == "none");
   CHECK_FALSE(disabled_inputs.enable_thinking);
   CHECK_FALSE(disabled_inputs.chat_template_kwargs.contains("reasoning_effort"));
+
+  info.reasoning.efforts.push_back("none");
+  common_chat_templates_inputs template_none_inputs;
+  effort = apply_reasoning_effort(
+      template_none_inputs, std::string{"none"}, info);
+  REQUIRE(effort);
+  CHECK(*effort == "none");
+  CHECK_FALSE(template_none_inputs.enable_thinking);
+  CHECK(template_none_inputs.chat_template_kwargs.at("reasoning_effort") == "\"none\"");
+
+  info.reasoning.aliases = {{"max", "xhigh"}};
+  common_chat_templates_inputs max_inputs;
+  effort = apply_reasoning_effort(max_inputs, std::string{"max"}, info);
+  REQUIRE(effort);
+  CHECK(*effort == "xhigh");
+  CHECK(max_inputs.chat_template_kwargs.at("reasoning_effort") == "\"xhigh\"");
 }
 
 TEST_CASE("LlamaCppModel: unsupported reasoning effort is rejected",

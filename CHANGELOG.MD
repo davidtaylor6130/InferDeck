@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+- Inkling 2 Mini (`inkling2_loop`) support through the `llama_cpp` runtime:
+  text, vision, tool calls and reasoning effort. See `docs/inkling-2-mini.md`.
+
+### Changed
+- llama.cpp `d92ea9bb1` to `8a97fa98a`, the upstream merge of the Vulkan
+  SCALE fix ggml-org/llama.cpp#32735, which roughly triples Inkling 2 Mini
+  decode on Vulkan.
+- A reasoning config may list `none` as an effort tier when `none_disables` is
+  true. The `none` request then reaches the chat template as
+  `reasoning_effort: "none"` instead of dropping the variable, for templates
+  such as Inkling 2 that map it to an effort level.
+
 ---
 
 ## [1.2.0] - 2026-11-21
