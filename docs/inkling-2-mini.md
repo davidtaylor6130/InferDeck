@@ -98,6 +98,7 @@ mainline llama.cpp.
   those 8 keep the full context. q8_0 costs about 17 KB per token and q4_0 about 9 KB.
   Four 131,072-token slots measured 29.6 GB of VRAM after load with q8_0, and
   25.7 GB after load (25.8 GB peak under load) with q4_0. KV type changes speed by under 5%.
+- **Measurement provenance:** the tuning, validation and comparison numbers were taken on the #32735 PR head `0ea4ffd00`. After the re-pin to its merge commit `8a97fa98a`, a smoke test reproduced llama-bench pp2048 1,171.6 and tg128 60.6 tokens/s (against 1,174 and 60.4), along with coherent output, split reasoning and a correct tool call.
 - **1,048,576 tokens** does not fit in 32 GB with this pin.
 - **Speculative decoding** is not available. The official MTP head is only in
   the safetensors release, and the DSpark drafter needs the unmerged
@@ -138,7 +139,7 @@ but on this runtime it is about half Flint's speed and a third of its prefill:
 the loop passes run 48 layer passes per token, global attention carries the
 bias tensor described above, and there is no speculative decoding yet.
 
-llama-bench, same pin, 4 K prompt, flash attention on: `n_ubatch` 512 gives
+llama-bench, 4 K prompt, flash attention on: `n_ubatch` 512 gives
 1,298 prefill tokens/s, 1,024 gives 1,215, 2,048 gives 1,077 and 4,096 gives
 879. Decode is 60 tokens/s at an empty context and 47 at 32K. q8_0, q4_0 and
 f16 KV are within 5% of each other.
